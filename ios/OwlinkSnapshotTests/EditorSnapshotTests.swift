@@ -94,6 +94,111 @@ final class EditorSnapshotTests: XCTestCase {
 
     // MARK: Behaviour
 
+    func testRailOwlIsAboveNavigationSiblingsForHitTesting() async throws {
+        let doc = try await open(try sample("sample.swift"))
+        let (_, editor) = show(doc, size: Self.iPhone, dark: false)
+        let nav = try XCTUnwrap(editor.navigationController)
+        let cover = UIView(frame: nav.view.bounds)
+        nav.view.addSubview(cover)
+        let frame = CGRect(x: 300, y: 400, width: OwlSprite.size, height: OwlSprite.size)
+        editor.owlSprite.isHidden = false
+        editor.setOwlFrame(frame, inRail: true)
+        let point = editor.view.convert(CGPoint(x: frame.midX, y: frame.midY), to: nav.view)
+        XCTAssertTrue(nav.view.hitTest(point, with: nil)?.isDescendant(of: editor.owlSprite) == true)
+        editor.willMove(toParent: nil)
+        XCTAssertTrue(editor.owlSprite.superview === editor.view)
+        cover.removeFromSuperview()
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
+    func testLineNumbersFollowSettingAndEditorInsets() async throws {
+        let previous = AppSettings.defaults.object(forKey: AppSettings.Key.lineNumbers)
+        defer {
+            if let previous { AppSettings.defaults.set(previous, forKey: AppSettings.Key.lineNumbers) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers) }
+            AppSettings.post()
+        }
+        AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers)
+        let doc = try await open(try sample("sample.swift"))
+        let (window, editor) = show(doc, size: Self.iPhone, dark: false)
+        func gutter(in view: UIView) -> LineNumberGutter? {
+            if let g = view as? LineNumberGutter { return g }
+            return view.subviews.lazy.compactMap { gutter(in: $0) }.first
+        }
+        let numbers = try XCTUnwrap(gutter(in: editor.view))
+        window.layoutIfNeeded()
+        XCTAssertFalse(numbers.isHidden)
+        let withNumbers = editor.textView.textContainerInset.left
+        XCTAssertFalse(numbers.rows.isEmpty)
+        XCTAssertGreaterThan(LineNumberGutter.width(lineCount: 10_000, font: numbers.font),
+                             LineNumberGutter.width(lineCount: 999, font: numbers.font))
+        AppSettings.lineNumbers = false
+        window.layoutIfNeeded()
+        XCTAssertTrue(numbers.isHidden)
+        XCTAssertLessThan(editor.textView.textContainerInset.left, withNumbers)
+        AppSettings.lineNumbers = true
+        window.layoutIfNeeded()
+        XCTAssertFalse(numbers.isHidden)
+        XCTAssertEqual(editor.textView.textContainerInset.left, withNumbers, accuracy: 0.5)
+        AppSettings.lineNumbers = false
+        editor.revealLine(2)
+        XCTAssertFalse(numbers.isHidden)
+        XCTAssertEqual(numbers.highlight, 2)
+        AppSettings.post()
+        window.layoutIfNeeded()
+        XCTAssertFalse(numbers.isHidden, "unrelated settings must not clear the jump override")
+        AppSettings.lineNumbers = true
+        AppSettings.lineNumbers = false
+        window.layoutIfNeeded()
+        XCTAssertTrue(numbers.isHidden)
+        AppSettings.lineNumbers = true
+        window.layoutIfNeeded()
+        XCTAssertNil(numbers.highlight)
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
+    func testLineNumbersScrollAndWrap() async throws {
+        let previous = AppSettings.defaults.object(forKey: AppSettings.Key.lineNumbers)
+        defer {
+            if let previous { AppSettings.defaults.set(previous, forKey: AppSettings.Key.lineNumbers) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers) }
+            AppSettings.post()
+        }
+        AppSettings.lineNumbers = true
+        let doc = try await open(try sample("sample.swift"))
+        let longLine = String(repeating: "wrapped words ", count: 10)
+        doc.text = Array(repeating: longLine, count: 2000).joined(separator: "\n")
+        let (window, editor) = show(doc, size: Self.iPhone, dark: false)
+        func gutter(in view: UIView) -> LineNumberGutter? {
+            if let g = view as? LineNumberGutter { return g }
+            return view.subviews.lazy.compactMap { gutter(in: $0) }.first
+        }
+        let numbers = try XCTUnwrap(gutter(in: editor.view))
+        let textView = editor.textView
+        let index = editor.lineIndex
+        editor.revealLine(1500)
+        window.layoutIfNeeded()
+        await spin(0.1)
+        window.layoutIfNeeded()
+        XCTAssertGreaterThan(textView.contentOffset.y, 1000)
+        XCTAssertGreaterThan(numbers.rows.count, 1)
+        for row in numbers.rows {
+            XCTAssertGreaterThanOrEqual(row.midY, 0)
+            XCTAssertLessThanOrEqual(row.midY, numbers.bounds.height)
+            let position = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: index.starts[row.line - 1]))
+            XCTAssertEqual(row.midY, textView.caretRect(for: position).midY - textView.bounds.minY, accuracy: 1)
+        }
+        for (first, next) in zip(numbers.rows, numbers.rows.dropFirst()) {
+            XCTAssertEqual(next.line, first.line + 1)
+            XCTAssertGreaterThan(next.midY, first.midY)
+        }
+        let first = try XCTUnwrap(numbers.rows.first)
+        let nextStart = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: index.starts[first.line]))
+        XCTAssertGreaterThan(textView.caretRect(for: nextStart).midY - textView.bounds.minY - first.midY,
+                             textView.font?.lineHeight ?? 0, "the logical line must wrap")
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
     func testOpenTypeSaveReadBack() async throws {
         let url = try sample("sample.swift")
         let doc = try await open(url)

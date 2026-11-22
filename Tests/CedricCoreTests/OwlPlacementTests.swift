@@ -75,4 +75,65 @@ import Testing
         #expect(b.tailOnTop && b.tailAtLeft)
         #expect(b.frame.maxY < tl.maxY && b.frame.minX >= editor.minX && b.frame.minY >= editor.minY)
     }
+
+    @Test func railSlotIsAtSafeBottomAndClearOfControls() throws {
+        let screen = CGRect(x: 0, y: 0, width: 466, height: 678)
+        let safe = CGRect(x: 0, y: 0, width: 382, height: 644)
+        let bar = CGRect(x: 0, y: 24, width: 466, height: 58)
+        let size = CGSize(width: 64, height: 64)
+        let slot = try #require(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 644, statusBarShown: true, size: size))
+        #expect(slot == CGRect(x: 385.5, y: 576, width: 64, height: 64))
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 500, statusBarShown: true, size: size) == nil)
+        let symmetricNotch = CGRect(x: 84, y: 0, width: 298, height: 644)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: symmetricNotch, navigationBar: bar, statusTop: 644, statusBarShown: true, size: size) == nil)
+        let portraitSafe = CGRect(x: 0, y: 24, width: 466, height: 620)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: portraitSafe, navigationBar: bar, statusTop: 644, statusBarShown: true, size: size) == nil)
+        let verticalBar = CGRect(x: 411, y: 0, width: 55, height: 678)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: verticalBar, statusTop: 644, statusBarShown: true, size: size) == nil)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 531, statusBarShown: true, size: size) == nil)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 532, statusBarShown: true, size: size) != nil)
+        let wide = CGRect(x: 0, y: 0, width: 1024, height: 720)
+        let wideSafe = CGRect(x: 0, y: 0, width: 940, height: 686)
+        let wideBar = CGRect(x: 0, y: 24, width: 1024, height: 58)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: wide, safe: wideSafe, navigationBar: wideBar,
+                                              statusTop: 686, statusBarShown: true, size: size) == CGRect(x: 943.5, y: 618, width: 64, height: 64))
+        let shifted = screen.offsetBy(dx: 20, dy: 30)
+        let shiftedSlot = OwlPlacement.RailOwlSlot.frame(screen: shifted, safe: safe.offsetBy(dx: 20, dy: 30),
+                                                         navigationBar: bar.offsetBy(dx: 20, dy: 30), statusTop: 674, statusBarShown: true, size: size)
+        #expect(shiftedSlot == slot.offsetBy(dx: 20, dy: 30))
+        let pane = CGRect(x: 4, y: 86, width: 374, height: 554)
+        let bubble = OwlPlacement.bubbleYDown(owl: slot, size: CGSize(width: 240, height: 90), in: pane, avoid: nil)
+        #expect(bubble.frame.maxX <= pane.maxX && bubble.frame.minY < slot.minY)
+        #expect(!bubble.tailOnTop && !bubble.tailAtLeft)
+    }
+
+    @Test func railInsetThresholds() {
+        let screen = CGRect(x: 0, y: 0, width: 466, height: 678)
+        let bar = CGRect(x: 0, y: 24, width: 466, height: 58)
+        let size = CGSize(width: 64, height: 64)
+        func slot(leading: CGFloat, trailing: CGFloat) -> CGRect? {
+            let safe = CGRect(x: leading, y: 0, width: screen.width - leading - trailing, height: 644)
+            return OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar,
+                                                  statusTop: 644, statusBarShown: true, size: size)
+        }
+        #expect(slot(leading: 0, trailing: 59) == nil)
+        #expect(slot(leading: 0, trailing: 60) != nil)
+        #expect(slot(leading: 31, trailing: 60) == nil)
+        #expect(slot(leading: 30, trailing: 60) != nil)
+    }
+
+    @Test func railSlotFitsShortLandscapeWithoutClock() throws {
+        let screen = CGRect(x: 0, y: 0, width: 678, height: 466)
+        let safe = CGRect(x: 0, y: 0, width: 594, height: 432)
+        let bar = CGRect(x: 0, y: 0, width: 678, height: 58)
+        let size = CGSize(width: 64, height: 64)
+        let slot = try #require(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar,
+                                                               statusTop: 432, statusBarShown: false, size: size))
+        #expect(slot == CGRect(x: 597.5, y: 364, width: 64, height: 64))
+        #expect(slot.minY >= 314 && slot.maxY <= 428)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar,
+                                              statusTop: 432, statusBarShown: true, size: size) == nil)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar,
+                                              statusTop: 381, statusBarShown: false, size: size) == nil)
+    }
 }

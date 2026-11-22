@@ -13,8 +13,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let copies = SaveSafetyStores.copies
         DispatchQueue.global(qos: .utility).async { copies.prune() }
         if ProcessInfo.processInfo.arguments.contains("-OwlinkResetSettings") {
-            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.owlHints, AppSettings.Key.theme,
-                      AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly] {
+            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.owlHints, AppSettings.Key.theme,
+                      AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly,
+                      AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement] {
                 UserDefaults.standard.removeObject(forKey: k)
             }
         }

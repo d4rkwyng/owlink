@@ -2,8 +2,7 @@ import UIKit
 
 /// Line numbers for the visible lines of the editor. Drawn beside the text,
 /// not inside the text view, so they stay put while the text scrolls.
-/// The editor turns this on for a tab when a jump needs the numbers; it
-/// does not change the saved setting.
+/// A jump can also turn it on for one tab without changing the setting.
 final class LineNumberGutter: UIView {
     struct Row {
         var line: Int

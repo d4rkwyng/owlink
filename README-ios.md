@@ -23,7 +23,8 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   providers (a document browser in each window). The encoding and line
   ending are detected and written back unchanged (the core's `TextCodec`).
 - Syntax colouring (the core's highlighter), the seven themes including
-  Dracula, font size, wrap.
+  Dracula, font size, wrap, and **Show Line Numbers** (on by default).
+  Jumps show numbers for the open file even when the setting is off.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
 - Data safety: "Edited" under the title while there are unsaved changes
   (UIDocument's `hasUnsavedChanges`); Undo and Redo in the bar; Revert to
@@ -62,7 +63,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   pulse say one arrived; no pulse with Reduce Motion), or for Ask Cedric
   when there is none; drag him to another edge or corner (he snaps, and
   the place is kept); double-tap puts him back; long-press for his menu.
-  He fades while the caret is near him.
+  He fades while the caret is near him. In a landscape phone's vertical
+  navigation rail he uses its bottom when there is room; a saved custom
+  position stays in the editor.
 - Ask Cedric is a sheet on a phone and a panel beside the text on a wide
   screen (iPad, an unfolded iPhone Duo).
 
@@ -242,9 +245,11 @@ the first two there (`-only-testing:OwlinkCoreTests -only-testing:OwlinkAITests`
 (open a sample, the owl's hint and Fix it, type, save and read the file
 back, the language menu, find, the Markdown preview, Ask Cedric with
 whatever engine is ready, the themes) and writes PNGs and
-`selfcheck.txt` (PASS/FAIL lines) to `<dir>`, then quits. Where the
-simulator can't draw, run it as a Mac Catalyst build, which uses the same
-UIKit code (a local-only project variant; never commit it):
+`selfcheck.txt` (PASS/FAIL lines) to `<dir>`, then quits. For simulator
+screenshots, debug builds also accept `-OwlinkOrientation landscape` or
+`-OwlinkOrientation portrait`. Where the simulator can't draw, run the
+self-check as a Mac Catalyst build, which uses the same UIKit code (a
+local-only project variant; never commit it):
 
 ```sh
 OWLINK_CATALYST=1 python3 ios/Scripts/gen-xcodeproj.py
