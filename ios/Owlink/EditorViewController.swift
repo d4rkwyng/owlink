@@ -76,6 +76,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let pasteboard = UIPasteboard.general
         return (pasteboard.urls ?? [], pasteboard.string)
     }
+    /// This text view's groupsByEvent, to put back on the next main-queue
+    /// turn after applyTextEdit closed an open typing group (per editor:
+    /// each has its own undo manager).
+    var pendingGroupsByEvent: Bool?
     private var cachedMarkdownIndentation: (generation: Int, value: Indentation)?
     private var loading = false
     private(set) var palette = EditorPalettes.light

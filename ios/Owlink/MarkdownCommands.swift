@@ -34,11 +34,11 @@ extension EditorViewController {
         // would otherwise end the group closed here); one restore is pending
         // at a time, keeping the original value even for two edits a turn.
         if let undo, undo.groupingLevel > 0 {
-            if Self.pendingGroupsByEvent == nil {
-                Self.pendingGroupsByEvent = undo.groupsByEvent
-                DispatchQueue.main.async {
-                    if let restore = Self.pendingGroupsByEvent { undo.groupsByEvent = restore }
-                    Self.pendingGroupsByEvent = nil
+            if pendingGroupsByEvent == nil {
+                pendingGroupsByEvent = undo.groupsByEvent
+                DispatchQueue.main.async { [weak self, undo] in
+                    if let restore = self?.pendingGroupsByEvent { undo.groupsByEvent = restore }
+                    self?.pendingGroupsByEvent = nil
                 }
             }
             undo.groupsByEvent = false
@@ -53,9 +53,6 @@ extension EditorViewController {
         contextBar?.refreshStates()
         return true
     }
-
-    /// groupsByEvent to put back after applyTextEdit closed a typing group.
-    static var pendingGroupsByEvent: Bool?
 
     func isInMarkdownFence(at offset: Int, in text: NSString) -> Bool {
         markdownFenceIndex.isInFence(text, index: lineIndex, line: lineIndex.line(containing: offset))

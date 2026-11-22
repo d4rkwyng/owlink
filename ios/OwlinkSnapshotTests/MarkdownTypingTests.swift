@@ -82,7 +82,7 @@ final class MarkdownTypingTests: XCTestCase {
         XCTAssertEqual(editor.textView.text, "- itemabc\n- ")
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
         XCTAssertEqual(undo.groupsByEvent, wasGrouping)
-        XCTAssertNil(EditorViewController.pendingGroupsByEvent)
+        XCTAssertNil(editor.pendingGroupsByEvent)
         undo.undo()
         XCTAssertEqual(editor.textView.text, "- itemabc")
         undo.undo()
