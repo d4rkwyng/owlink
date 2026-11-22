@@ -26,6 +26,8 @@ import CedricCore
 /// Focus Preview and the detached preview all come through `show`.
 final class PreviewController: UIViewController, WKNavigationDelegate, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
     private(set) var web: WKWebView!
+    private(set) var csv: CSVPreviewController?
+    private var showingCSV = false
     private let queue = DispatchQueue(label: "owlink.preview", qos: .userInitiated)
     private var generation = 0
     static let csp = "default-src 'none'; img-src data: \(PreviewFolder.scheme):; media-src data: \(PreviewFolder.scheme):; style-src 'unsafe-inline'; font-src data:; script-src 'none'; connect-src 'none'"
@@ -139,6 +141,10 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     }
 
     func show(markdown: String, palette: EditorPalette) {
+        loadViewIfNeeded()
+        showingCSV = false
+        csv?.view.isHidden = true
+        web.isHidden = false
         generation += 1
         let gen = generation
         web.backgroundColor = UIColor(hex: palette.background)
@@ -150,6 +156,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             vaultKey = key
             vault = folder.map { WikiVault(documentFolder: $0, openedRoot: opened) }
         }
+
         let vault = self.vault
         files.folder = folder
         files.openedRoot = opened
@@ -199,18 +206,55 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
     }
 
+    func showCSV(text: String, fileName: String, large: Bool, sourceGeneration: Int,
+                 onSelectField: @escaping (Int, Int) -> Void) {
+        loadViewIfNeeded()
+        generation += 1
+        showingCSV = true
+        web.isHidden = true
+        let grid: CSVPreviewController
+        if let csv {
+            grid = csv
+        } else {
+            grid = CSVPreviewController()
+            addChild(grid)
+            grid.view.frame = view.bounds
+            grid.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.insertSubview(grid.view, belowSubview: header)
+            grid.didMove(toParent: self)
+            csv = grid
+        }
+        grid.view.isHidden = false
+        grid.onSelectField = onSelectField
+        grid.render(text: text, fileName: fileName, large: large, sourceGeneration: sourceGeneration)
+    }
+
+    var activeScrollView: UIScrollView { showingCSV ? (csv?.table ?? web.scrollView) : web.scrollView }
+
     // MARK: Scroll
 
     /// Where the page is scrolled, 0 (top) to 1 (bottom); setting it before
     /// the page has loaded applies it once it has.
     var scrollFraction: Double {
         get {
+            if showingCSV {
+                let s = activeScrollView
+                return ScrollSync.fraction(offset: s.contentOffset.y, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
+                                           insetTop: s.adjustedContentInset.top, insetBottom: s.adjustedContentInset.bottom)
+            }
             if let p = pendingFraction { return p }
             let s = web.scrollView
             return ScrollSync.fraction(offset: s.contentOffset.y, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
                                        insetTop: s.adjustedContentInset.top, insetBottom: s.adjustedContentInset.bottom)
         }
         set {
+            if showingCSV {
+                let s = activeScrollView
+                let y = ScrollSync.offset(fraction: newValue, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
+                                          insetTop: s.adjustedContentInset.top, insetBottom: s.adjustedContentInset.bottom)
+                s.setContentOffset(CGPoint(x: s.contentOffset.x, y: y), animated: false)
+                return
+            }
             pendingFraction = newValue
             if loaded { applyPendingFraction() }
         }

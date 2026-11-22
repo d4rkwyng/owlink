@@ -66,7 +66,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         ])
         builder.insertChild(tools, atEndOfMenu: .edit)
 
-        let preview = UIKeyCommand(title: String(localized: "Markdown Preview"), action: #selector(EditorViewController.togglePreview),
+        let preview = UIKeyCommand(title: String(localized: "Preview"), action: #selector(EditorViewController.togglePreview),
                                    input: "p", modifierFlags: [.command, .shift])
         let focus = UIKeyCommand(title: String(localized: "Focus Preview"), action: #selector(EditorViewController.toggleFocusPreview),
                                  input: "p", modifierFlags: [.command, .alternate])

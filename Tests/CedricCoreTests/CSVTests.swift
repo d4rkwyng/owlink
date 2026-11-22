@@ -76,6 +76,16 @@ import Testing
         #expect(CSV.sortedOrder(r, column: 1, ascending: true) == [4, 3, 2, 1])
     }
 
+    @Test func sortedTSVRowsRetainFieldOffsets() {
+        let text = "name\tvalue\n\"😀\nitem\"\t10\nother\t2\n" as NSString
+        let dialect = CSV.dialect(for: text, fileName: "data.tsv")
+        let table = CSV.parse(text, dialect: dialect)
+        let order = CSV.sortedOrder(table.rows, column: 1, ascending: true)
+        #expect(order == [2, 1])
+        #expect(CSV.fieldOffset(in: text, rowStart: table.rowStarts[order[1]], column: 0, dialect: dialect)
+                == text.range(of: "😀").location)
+    }
+
     @Test func languageAndPreview() {
         #expect(LanguageDetector.language(forFileName: "data.csv") == .csv)
         #expect(LanguageDetector.language(forFileName: "data.TSV") == .csv)

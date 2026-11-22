@@ -606,7 +606,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         var items = [find]
         updateUndoItems()
         if SavePolicy.showsSaveButton(saveAutomatically: AppSettings.saveAutomatically) { items.insert(saveItem, at: 0) }
-        if document.language.language == .markdown {
+        if hasEditorPreview {
             let p = UIBarButtonItem(image: UIImage(systemName: previewOn ? "eye.fill" : "eye"), primaryAction: UIAction { [weak self] _ in
                 self?.togglePreview()
             })
@@ -721,7 +721,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportPDF.attributes = .disabled
         }
         var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, readable, ask, check]
-        if document.language.language == .markdown {
+        if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
             }
@@ -1513,7 +1513,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func setLanguage(_ l: Language) {
-        if l != .markdown, previewOn { togglePreview() }
+        if l != document.language.language, previewOn {
+            if focusOn { exitFocusPreview() }
+            if previewOn { togglePreview() }
+        }
         document.language.choose(l)
         colorizer.setLanguage(l)
         applySettings()
@@ -2561,14 +2564,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Preview
 
+    private var hasEditorPreview: Bool {
+        document.language.language == .markdown || document.language.language == .csv
+    }
+
     @objc func togglePreview() {
-        guard document.language.language == .markdown else { return }
+        guard hasEditorPreview else { return }
         // ⇧⌘P in Focus Preview: back to the text.
         if focusOn { exitFocusPreview(); return }
         previewOn.toggle()
         if previewOn { makePreview() }
-        layoutPreview()
         refreshPreview()
+        layoutPreview()
         updateBarButtons()
         contextBar?.refreshStates()
     }
@@ -2709,7 +2716,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// One tap: the preview alone (turned on if it was off), on any screen.
     @objc func toggleFocusPreview() {
-        guard document.language.language == .markdown else { return }
+        guard hasEditorPreview else { return }
         if focusOn { exitFocusPreview(); return }
         // The preview alone: a docked Ask Cedric panel closes.
         closeAskPanel()
@@ -2720,8 +2727,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         closeHint()
         setFocusChrome(true)
         updatePreviewHeader()
-        layoutPreview()
         refreshPreview()
+        layoutPreview()
         updateBarButtons()
         updateOwlBadge()
         UIAccessibility.post(notification: .screenChanged, argument: String(localized: "Focus Preview. Edit returns to the text."))
@@ -2872,7 +2879,20 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         guard previewOn, let p = preview else { return }
         p.documentURL = document.fileURL
-        p.show(markdown: textView.text, palette: palette)
+        if document.language.language == .csv {
+            p.showCSV(text: textView.text, fileName: document.fileURL.lastPathComponent,
+                      large: LargeDocument.reason(for: lineIndex) != nil, sourceGeneration: generation) { [weak self] offset, sourceGeneration in
+                guard let self, self.generation == sourceGeneration else { return }
+                if self.focusOn { self.exitFocusPreview() }
+                if self.textView.isHidden { self.togglePreview() }
+                let selection = NSRange(location: min(offset, self.textView.textStorage.length), length: 0)
+                self.textView.selectedRange = selection
+                self.revealRange(selection)
+                if self.textView.isEditable { self.textView.becomeFirstResponder() }
+            }
+        } else {
+            p.show(markdown: textView.text, palette: palette)
+        }
     }
 
     /// Opens a note a preview link names: this document closes the usual
@@ -3371,7 +3391,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)
         }
         if action == #selector(togglePreview) || action == #selector(toggleFocusPreview) {
-            return document.language.language == .markdown
+            return hasEditorPreview
         }
         if action == #selector(openPreviewInNewWindow) {
             return document.language.language == .markdown && DetachedPreviews.available
@@ -3845,7 +3865,7 @@ extension EditorViewController {
     /// (otherwise it is a scroll), and alongside the page's own gestures.
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
         guard let swipe = g as? UISwipeGestureRecognizer, swipe.direction == .down else { return true }
-        guard focusOn, let s = preview?.web.scrollView else { return false }
+        guard focusOn, let s = preview?.activeScrollView else { return false }
         return s.contentOffset.y <= -s.adjustedContentInset.top + 1
     }
 
