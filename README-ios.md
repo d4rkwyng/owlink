@@ -20,7 +20,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
 ## What it does
 
 - Text menu and touch line commands, indentation conversion, and keep/delete lines matching.
-- Read-only CSV and TSV grid preview with sortable columns and field navigation.
+- Read-only CSV and TSV grid preview in the editor palette: pinned header, sortable columns (a third tap restores file order), VoiceOver sort state, and field navigation back into the text.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line
   ending are detected and written back unchanged (the core's `TextCodec`).

@@ -47,6 +47,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// A scroll share to apply once the page has loaded (and laid out).
     private var pendingFraction: Double?
     private var loaded = false
+    private var csvPalette = EditorPalettes.light
     private(set) var userZoom = PreviewZoom.load(AppSettings.defaults)
     private var pinchStart = 1.0
     /// Called with the new zoom (for a short "Text 120%" note).
@@ -145,6 +146,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         showingCSV = false
         csv?.view.isHidden = true
         web.isHidden = false
+        csvPalette = palette
         generation += 1
         let gen = generation
         web.backgroundColor = UIColor(hex: palette.background)
@@ -206,11 +208,13 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
     }
 
-    func showCSV(text: String, fileName: String, large: Bool, sourceGeneration: Int,
+    func showCSV(text: NSString, fileName: String, large: Bool, sourceGeneration: Int, palette: EditorPalette,
+                 scrollFraction: Double, isSourceCurrent: @escaping () -> Bool,
                  onSelectField: @escaping (Int, Int) -> Void) {
         loadViewIfNeeded()
         generation += 1
         showingCSV = true
+        csvPalette = palette
         web.isHidden = true
         let grid: CSVPreviewController
         if let csv {
@@ -218,15 +222,23 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         } else {
             grid = CSVPreviewController()
             addChild(grid)
-            grid.view.frame = view.bounds
-            grid.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            grid.view.translatesAutoresizingMaskIntoConstraints = false
             view.insertSubview(grid.view, belowSubview: header)
+            NSLayoutConstraint.activate([
+                grid.view.topAnchor.constraint(equalTo: header.bottomAnchor),
+                grid.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                grid.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                grid.view.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            ])
             grid.didMove(toParent: self)
             csv = grid
         }
         grid.view.isHidden = false
         grid.onSelectField = onSelectField
-        grid.render(text: text, fileName: fileName, large: large, sourceGeneration: sourceGeneration)
+        grid.isSourceCurrent = isSourceCurrent
+        grid.applyTheme(palette, zoom: userZoom)
+        grid.render(text: text, fileName: fileName, large: large, sourceGeneration: sourceGeneration,
+                    scrollFraction: scrollFraction)
     }
 
     var activeScrollView: UIScrollView { showingCSV ? (csv?.table ?? web.scrollView) : web.scrollView }
@@ -237,11 +249,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// the page has loaded applies it once it has.
     var scrollFraction: Double {
         get {
-            if showingCSV {
-                let s = activeScrollView
-                return ScrollSync.fraction(offset: s.contentOffset.y, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
-                                           insetTop: s.adjustedContentInset.top, insetBottom: s.adjustedContentInset.bottom)
-            }
+            if showingCSV { return csv?.scrollFraction ?? 0 }
             if let p = pendingFraction { return p }
             let s = web.scrollView
             return ScrollSync.fraction(offset: s.contentOffset.y, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
@@ -249,10 +257,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
         set {
             if showingCSV {
-                let s = activeScrollView
-                let y = ScrollSync.offset(fraction: newValue, contentHeight: s.contentSize.height, visibleHeight: s.bounds.height,
-                                          insetTop: s.adjustedContentInset.top, insetBottom: s.adjustedContentInset.bottom)
-                s.setContentOffset(CGPoint(x: s.contentOffset.x, y: y), animated: false)
+                csv?.scrollFraction = newValue
                 return
             }
             pendingFraction = newValue
@@ -296,6 +301,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         guard web.pageZoom != z else { return }
         let f = keepingPlace && loaded ? scrollFraction : nil
         web.pageZoom = z
+        if showingCSV { csv?.applyTheme(csvPalette, zoom: userZoom) }
         if let f {
             DispatchQueue.main.async { [weak self] in self?.scrollFraction = f }
         }
@@ -306,6 +312,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         guard c != userZoom else { return }
         userZoom = c
         applyZoom(keepingPlace: true)
+        if showingCSV { csv?.applyTheme(csvPalette, zoom: userZoom) }
         if save { PreviewZoom.save(c, AppSettings.defaults) }
         onZoom?(c)
     }

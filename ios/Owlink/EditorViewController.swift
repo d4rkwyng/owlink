@@ -857,7 +857,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateUnwrappedContentSize()
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
-            previewTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            let delay = document.language.language == .csv && LargeDocument.reason(for: lineIndex) != nil ? 0.8 : 0.3
+            previewTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshPreview() }
             }
         }
@@ -1513,7 +1514,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func setLanguage(_ l: Language) {
-        if l != document.language.language, previewOn {
+        let oldHasPreview = hasEditorPreview
+        let newHasPreview = l == .markdown || l == .csv
+        if l != document.language.language, previewOn, !(oldHasPreview && newHasPreview) {
             if focusOn { exitFocusPreview() }
             if previewOn { togglePreview() }
         }
@@ -1522,6 +1525,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         applySettings()
         updateStatus()
         updateBarButtons()
+        updatePreviewHeader()
+        if previewOn, hasEditorPreview {
+            // Markdown <-> CSV/TSV keeps the preview open and swaps the renderer.
+            refreshPreview()
+            layoutPreview()
+        }
         updateContextBar()
         scheduleOwl()
     }
@@ -2574,8 +2583,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if focusOn { exitFocusPreview(); return }
         previewOn.toggle()
         if previewOn { makePreview() }
-        refreshPreview()
-        layoutPreview()
+        if document.language.language == .csv {
+            refreshPreview()
+            layoutPreview()
+        } else {
+            layoutPreview()
+            refreshPreview()
+        }
         updateBarButtons()
         contextBar?.refreshStates()
     }
@@ -2727,8 +2741,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         closeHint()
         setFocusChrome(true)
         updatePreviewHeader()
-        refreshPreview()
-        layoutPreview()
+        if document.language.language == .csv {
+            refreshPreview()
+            layoutPreview()
+        } else {
+            layoutPreview()
+            refreshPreview()
+        }
         updateBarButtons()
         updateOwlBadge()
         UIAccessibility.post(notification: .screenChanged, argument: String(localized: "Focus Preview. Edit returns to the text."))
@@ -2880,8 +2899,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard previewOn, let p = preview else { return }
         p.documentURL = document.fileURL
         if document.language.language == .csv {
-            p.showCSV(text: textView.text, fileName: document.fileURL.lastPathComponent,
-                      large: LargeDocument.reason(for: lineIndex) != nil, sourceGeneration: generation) { [weak self] offset, sourceGeneration in
+            let snapshot = textView.textStorage.string as NSString
+            let oldFraction = p.scrollFraction
+            let sourceGeneration = generation
+            p.showCSV(text: snapshot, fileName: document.fileURL.lastPathComponent,
+                      large: LargeDocument.reason(for: lineIndex) != nil, sourceGeneration: sourceGeneration,
+                      palette: palette, scrollFraction: oldFraction,
+                      isSourceCurrent: { [weak self] in self?.generation == sourceGeneration }) { [weak self] offset, sourceGeneration in
                 guard let self, self.generation == sourceGeneration else { return }
                 if self.focusOn { self.exitFocusPreview() }
                 if self.textView.isHidden { self.togglePreview() }

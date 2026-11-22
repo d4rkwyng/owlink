@@ -86,6 +86,15 @@ import Testing
                 == text.range(of: "😀").location)
     }
 
+    @Test func callerCanCapWideRowsWithoutRetainingAllCells() {
+        let text = "a,b,c,d\n1,2,3,4" as NSString
+        let table = CSV.parse(text, dialect: CSV.Dialect(delimiter: 44), maxColumns: 2)
+        #expect(table.rows == [["a", "b"], ["1", "2"]])
+        #expect(table.columnCount == 2)
+        #expect(table.truncatedColumns)
+        #expect(!CSV.parse(text, dialect: CSV.Dialect(delimiter: 44)).truncatedColumns)
+    }
+
     @Test func languageAndPreview() {
         #expect(LanguageDetector.language(forFileName: "data.csv") == .csv)
         #expect(LanguageDetector.language(forFileName: "data.TSV") == .csv)

@@ -47,6 +47,8 @@ public enum CSV {
         public var columnCount = 0
         /// Stopped at `maxRows` (or the text was cut short by the caller).
         public var truncated = false
+        /// More fields existed than the caller chose to retain.
+        public var truncatedColumns = false
         public var delimiter: UInt16 = 44
         public var dialect = Dialect()
         /// The 0-based line where a quoted field opens and never closes
@@ -212,18 +214,21 @@ public enum CSV {
     /// `stopUnclosedQuoteAtLineEnd` (the preview grid): a quoted field that
     /// never closes ends at its line's end instead of swallowing the rest
     /// of the file, so the rows after it still show (the warning says where).
-    public static func parse(_ text: NSString, dialect: Dialect, maxRows: Int = .max, stopUnclosedQuoteAtLineEnd: Bool = false) -> Table {
+    public static func parse(_ text: NSString, dialect: Dialect, maxRows: Int = .max,
+                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max) -> Table {
         let n = text.length
         var buf = [UInt16](repeating: 0, count: n)
         text.getCharacters(&buf, range: NSRange(location: 0, length: n))
-        return parse(buf, dialect: dialect, maxRows: maxRows, stopUnclosedQuoteAtLineEnd: stopUnclosedQuoteAtLineEnd)
+        return parse(buf, dialect: dialect, maxRows: maxRows,
+                     stopUnclosedQuoteAtLineEnd: stopUnclosedQuoteAtLineEnd, maxColumns: maxColumns)
     }
 
     public static func parse(_ u: [UInt16], delimiter d: UInt16 = 44, maxRows: Int = .max) -> Table {
         parse(u, dialect: Dialect(delimiter: d), maxRows: maxRows)
     }
 
-    public static func parse(_ u: [UInt16], dialect: Dialect, maxRows: Int = .max, stopUnclosedQuoteAtLineEnd: Bool = false) -> Table {
+    public static func parse(_ u: [UInt16], dialect: Dialect, maxRows: Int = .max,
+                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max) -> Table {
         var t = Table()
         let d = dialect.delimiter
         t.delimiter = d
@@ -294,7 +299,11 @@ public enum CSV {
                 if kept > 0 && skipSpace || trimEnd {
                     while field.count > kept, field.last == 32 { field.removeLast() }
                 }
-                row.append(String(decoding: field, as: UTF16.self))
+                if row.count < max(1, maxColumns) {
+                    row.append(String(decoding: field, as: UTF16.self))
+                } else {
+                    t.truncatedColumns = true
+                }
                 if i >= n { break }
                 let c = u[i]
                 i += 1
