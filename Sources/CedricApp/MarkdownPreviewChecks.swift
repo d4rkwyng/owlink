@@ -503,6 +503,7 @@ extension DevChecks {
                     }
                 }
                 @MainActor func action() -> PreviewLinkAction? { tab.preview?.lastLinkAction }
+                @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
                 click("build.command") {
                     let cmd = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "build.command" }
                     if case .openInCedric = action() {
@@ -546,10 +547,21 @@ extension DevChecks {
                                                        "web view has a non-persistent store, no scripts and no document scheme")
                                                 expect(tab.preview?.csp.contains("script-src 'none'") == true,
                                                        "local preview retains its strict CSP")
+                                                expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
+                                                tab.previewBarAction(.openInBrowser)
+                                                let sheet = tab.previewPane?.window?.attachedSheet
+                                                let shown = sheet.flatMap { s in
+                                                    s.contentView.flatMap { allViews($0) }?
+                                                        .compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ") }
+                                                expect(shown?.contains("https://example.com/a?b=1") == true,
+                                                       "Open in Browser asks first, showing the whole URL", shown ?? "no sheet")
+                                                if let sheet, let cancel = allViews(sheet.contentView!).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) {
+                                                    cancel.performClick(nil)
+                                                }
                                                 tab.previewBarAction(.home)
                                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                                     MainActor.assumeIsolated {
-                                                        expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
+                                                        expect(PreviewLinkLog.opened.isEmpty, "Cancel opens nothing")
                                                         expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("launched").path),
                                                                "nothing was launched")
                                                         expect(app.tabs.count == tabsBefore, "no stray tabs", "\(app.tabs.count) vs \(tabsBefore)")
