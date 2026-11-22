@@ -12,8 +12,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.join(HERE, '..', 'Owlink.xcodeproj')
 TEAM = 'V868MD2SHX'
 BUNDLE_ID = 'app.owlink.ios'
-VERSION = '0.4.2'
-BUILD = '8'
+VERSION = '0.4.3'
+BUILD = '9'
 IOS = '17.0'
 
 def oid(name):
