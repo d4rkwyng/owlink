@@ -31,7 +31,16 @@ final class TextDocument: UIDocument {
     /// The line endings as read, while the file mixes them.
     private var lineEndingLayout: LineEndingLayout?
     /// What is on disk: as read, then as last written.
-    private(set) var onDisk: DiskState?
+    private(set) var onDisk: DiskState? {
+        didSet { onDiskUTF16Length = onDisk?.text.utf16.count }
+    }
+    private(set) var onDiskUTF16Length: Int?
+    private(set) var savesInFlight = 0
+    private(set) var diskStateStale = false
+    /// A disk comparison is safe only while the snapshot is current.
+    var cleanCheckAllowed: Bool {
+        savesInFlight == 0 && !diskStateStale && !externalChangePending && !documentState.contains(.inConflict)
+    }
     /// What the save in progress writes (becomes `onDisk` if it succeeds).
     private var writing: (state: DiskState, layout: LineEndingLayout?)?
     /// The file's bytes as read, until they are backed up before the first
@@ -113,6 +122,7 @@ final class TextDocument: UIDocument {
         onDisk = DiskState(text: decoded.text, format: .init(encoding: decoded.encoding, lineEnding: decoded.lineEnding,
                                                              mixedLineEndings: decoded.mixedLineEndings),
                            hasBOM: decoded.hasBOM)
+        diskStateStale = false
         if !language.isManual { language = .forFile(named: fileURL.lastPathComponent, content: decoded.text) }
         firstUnsavedEdit = nil
         if let onReload { DispatchQueue.main.async(execute: onReload) }
@@ -152,7 +162,8 @@ final class TextDocument: UIDocument {
     override func save(to url: URL, for saveOperation: UIDocument.SaveOperation, completionHandler: ((Bool) -> Void)? = nil) {
         // Nothing changed from what is on disk (an edit undone, a format
         // change undone): the file isn't written at all.
-        if saveOperation == .forOverwriting, url == fileURL, !DiskState.needsWrite(currentState, onDisk: onDisk) {
+        if saveOperation == .forOverwriting, url == fileURL, cleanCheckAllowed,
+           !DiskState.needsWrite(currentState, onDisk: onDisk) {
             if hasUnsavedChanges { updateChangeCount(.cleared) }
             firstUnsavedEdit = nil
             completionHandler?(true)
@@ -162,11 +173,14 @@ final class TextDocument: UIDocument {
         }
         writing = nil
         backUpBeforeFirstWrite()
+        savesInFlight += 1
         super.save(to: url, for: saveOperation) { ok in
+            self.savesInFlight = max(0, self.savesInFlight - 1)
             if ok {
-                self.firstUnsavedEdit = nil
+                if !self.hasUnsavedChanges { self.firstUnsavedEdit = nil }
                 if let w = self.writing, url == self.fileURL {
                     self.onDisk = w.state
+                    self.diskStateStale = false
                     if let layout = w.layout { self.lineEndingLayout = layout }
                 }
             }
@@ -239,9 +253,15 @@ final class TextDocument: UIDocument {
         revert(toContentsOf: fileURL, completionHandler: done)
     }
 
+    /// The snapshot may not match the file; the next save writes and clears it.
+    func markDiskStateStale() {
+        diskStateStale = true
+    }
+
     /// Keep Mine: the edits stay unsaved, and the next save replaces theirs.
     func keepMineAfterExternalChange() {
         externalChangePending = false
+        markDiskStateStale()
         updateChangeCount(.done)
     }
 

@@ -402,6 +402,8 @@ public struct FormatChange: Equatable, Sendable {
 /// written at all, so opening, reading, an edit undone, or a format
 /// change undone never touches the file's bytes.
 public struct DiskState: Equatable, Sendable {
+    public static let cleanCheckMaxUTF16Length = 4_000_000
+
     public var text: String
     public var format: FormatChange.Format
     public var hasBOM: Bool
@@ -416,7 +418,18 @@ public struct DiskState: Equatable, Sendable {
     /// read): write.
     public static func needsWrite(_ current: DiskState, onDisk: DiskState?) -> Bool {
         guard let onDisk else { return true }
-        return current != onDisk
+        return current.format != onDisk.format || current.hasBOM != onDisk.hasBOM
+            || !(current.text as NSString).isEqual(to: onDisk.text)
+    }
+
+    /// Compare an edit with disk without reading its text unless the length
+    /// and format match. The disk length is cached when the state is set.
+    public static func matchesDisk(textUTF16Length: Int, text: () -> String, format: FormatChange.Format,
+                                   hasBOM: Bool, onDisk: DiskState?, onDiskUTF16Length: Int?) -> Bool {
+        guard textUTF16Length <= cleanCheckMaxUTF16Length, let onDisk, let onDiskUTF16Length,
+              textUTF16Length == onDiskUTF16Length,
+              format == onDisk.format, hasBOM == onDisk.hasBOM else { return false }
+        return (text() as NSString).isEqual(to: onDisk.text)
     }
 
     /// The BOM to write: the file's own while it keeps its encoding (UTF-16

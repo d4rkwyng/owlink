@@ -251,6 +251,57 @@ import Testing
         #expect(DiskState.needsWrite(disk, onDisk: nil))
     }
 
+    @Test func editsMatchDiskOnlyWithTheSameTextAndFormat() {
+        let format = FormatChange.Format(encoding: .utf8, lineEnding: .lf, mixedLineEndings: true)
+        let disk = DiskState(text: "a😀", format: format, hasBOM: false)
+        let length = disk.text.utf16.count
+        #expect(DiskState.matchesDisk(textUTF16Length: length, text: { "a😀" }, format: format,
+                                      hasBOM: false, onDisk: disk, onDiskUTF16Length: length))
+        var evaluated = false
+        #expect(!DiskState.matchesDisk(textUTF16Length: length + 1, text: {
+            evaluated = true
+            return "a😀!"
+        }, format: format, hasBOM: false, onDisk: disk, onDiskUTF16Length: length))
+        #expect(!evaluated)
+        #expect(!DiskState.matchesDisk(textUTF16Length: length, text: { "b😀" }, format: format,
+                                       hasBOM: false, onDisk: disk, onDiskUTF16Length: length))
+        for different in [
+            FormatChange.Format(encoding: .utf8, lineEnding: .crlf, mixedLineEndings: true),
+            FormatChange.Format(encoding: .utf16LE, lineEnding: .lf, mixedLineEndings: true),
+            FormatChange.Format(encoding: .utf8, lineEnding: .lf, mixedLineEndings: false),
+        ] {
+            #expect(!DiskState.matchesDisk(textUTF16Length: length, text: { "a😀" }, format: different,
+                                           hasBOM: false, onDisk: disk, onDiskUTF16Length: length))
+        }
+        #expect(!DiskState.matchesDisk(textUTF16Length: length, text: { "a😀" }, format: format,
+                                       hasBOM: true, onDisk: disk, onDiskUTF16Length: length))
+        #expect(!DiskState.matchesDisk(textUTF16Length: length, text: { "a😀" }, format: format,
+                                       hasBOM: false, onDisk: nil, onDiskUTF16Length: nil))
+    }
+
+    @Test func canonicallyEqualTextStillNeedsWriting() {
+        let format = FormatChange.Format(encoding: .utf8, lineEnding: .lf)
+        for (original, edited) in [("\u{00C5}", "\u{212B}"), ("a\u{0323}\u{0307}", "a\u{0307}\u{0323}")] {
+            let disk = DiskState(text: original, format: format, hasBOM: false)
+            let current = DiskState(text: edited, format: format, hasBOM: false)
+            #expect(DiskState.needsWrite(current, onDisk: disk))
+            #expect(!DiskState.matchesDisk(textUTF16Length: edited.utf16.count, text: { edited }, format: format,
+                                           hasBOM: false, onDisk: disk, onDiskUTF16Length: original.utf16.count))
+        }
+    }
+
+    @Test func largeEditsDoNotReadTextForCleanCheck() {
+        let format = FormatChange.Format(encoding: .utf8, lineEnding: .lf)
+        let length = DiskState.cleanCheckMaxUTF16Length + 1
+        let disk = DiskState(text: "", format: format, hasBOM: false)
+        var evaluated = false
+        #expect(!DiskState.matchesDisk(textUTF16Length: length, text: {
+            evaluated = true
+            return ""
+        }, format: format, hasBOM: false, onDisk: disk, onDiskUTF16Length: length))
+        #expect(!evaluated)
+    }
+
     @Test func bomKeptOrAddedByEncoding() {
         let disk = DiskState(text: "", format: .init(encoding: .utf16BE, lineEnding: .lf), hasBOM: false)
         #expect(!DiskState.includeBOM(encoding: .utf16BE, onDisk: disk))

@@ -646,7 +646,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChange(_ textView: UITextView) {
         generation += 1
-        document.updateChangeCount(.done)
+        updateDocumentChangeCount()
         recoveryWriter.textChanged()
         updateUndoItems()
         updateStatus()
@@ -658,6 +658,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             previewTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshPreview() }
             }
+        }
+    }
+
+    private func updateDocumentChangeCount() {
+        let storage = textView.textStorage
+        let matches = document.cleanCheckAllowed && DiskState.matchesDisk(textUTF16Length: storage.length, text: { storage.string },
+                                            format: currentFormat,
+                                            hasBOM: DiskState.includeBOM(encoding: document.encoding, onDisk: document.onDisk),
+                                            onDisk: document.onDisk, onDiskUTF16Length: document.onDiskUTF16Length)
+        if matches {
+            if document.hasUnsavedChanges { document.updateChangeCount(.cleared) }
+        } else {
+            document.updateChangeCount(.done)
         }
     }
 
@@ -799,7 +812,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         document.encoding = change.to.encoding
         document.lineEnding = change.to.lineEnding
         document.mixedLineEndings = change.to.mixedLineEndings
-        document.updateChangeCount(.done)
+        updateDocumentChangeCount()
         if let um = textView.undoManager {
             um.registerUndo(withTarget: self) { $0.applyFormat(change.undo, actionName: actionName) }
             um.setActionName(actionName)
@@ -2282,9 +2295,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 switch choice {
                 case .keepThis:
                     self.toast(String(localized: "Kept this version. The other is in Restore Previous Version for 7 days."))
+                    self.document.markDiskStateStale()
                     self.endConflict()
                 case .keepBoth:
                     self.toast(String(localized: "Kept this version and saved the other as “\(savedName ?? "")”."))
+                    self.document.markDiskStateStale()
                     self.endConflict()
                 case .keepOther:
                     // The other version is the file now: read it. The text

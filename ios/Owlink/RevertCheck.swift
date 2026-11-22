@@ -123,6 +123,7 @@ enum RevertCheck {
         check(tv.text == original + "edit A\nedit B\n", "Undo after Revert brings back the saved edits")
         tv.undoManager?.redo()
         check(tv.text == original, "Redo reverts again")
+        check(!doc.hasUnsavedChanges && !editor.editedShown, "Redo back to the saved text is not Edited")
         info("after redo: unsaved \(doc.hasUnsavedChanges) edited \(editor.editedShown)")
 
         // 2. Unsaved edits only: Revert gives back exactly the file.
@@ -134,6 +135,54 @@ enum RevertCheck {
         check(tv.text == original, "Revert with unsaved edits shows the opened text")
         info("revert to text equal to disk: unsaved \(doc.hasUnsavedChanges) edited \(editor.editedShown)")
         check(!doc.hasUnsavedChanges && !editor.editedShown, "reverting to what is on disk is not Edited")
+
+        // 2a. Undo while a save is writing the edited text.
+        tv.undoManager?.removeAllActions()
+        tv.selectedRange = NSRange(location: (tv.text as NSString).length, length: 0)
+        tv.insertText("inflight X\n")
+        try? await Task.sleep(for: .milliseconds(100))
+        var editedRightAfterUndo = false
+        let inflightSaved = await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+            doc.save(to: doc.fileURL, for: .forOverwriting) { c.resume(returning: $0) }
+            tv.undoManager?.undo()
+            editedRightAfterUndo = doc.hasUnsavedChanges
+        }
+        check(editedRightAfterUndo, "undo while the save is still writing doesn't mark the text saved")
+        check(inflightSaved, "in-flight save succeeded")
+        check(disk(url).contains("inflight X"), "the in-flight save wrote the edited text")
+        check(doc.hasUnsavedChanges, "undo during a save in flight stays Edited (the file has the undone text)")
+        check(await save(doc), "save after undo during a save")
+        check(!disk(url).contains("inflight X"), "saving the undo removes the in-flight text")
+        check(!doc.hasUnsavedChanges && !editor.editedShown, "Edited clears after saving the undo")
+
+        // 2b. Canonically equal characters still have different bytes.
+        tv.selectedRange = NSRange(location: (tv.text as NSString).length, length: 0)
+        let characterOffset = tv.selectedRange.location
+        tv.insertText("\u{00C5}\n")
+        check(await save(doc), "save the first canonical character")
+        if let start = tv.position(from: tv.beginningOfDocument, offset: characterOffset),
+           let end = tv.position(from: start, offset: 1),
+           let range = tv.textRange(from: start, to: end) {
+            tv.replace(range, withText: "\u{212B}")
+            editor.textViewDidChange(tv)
+            check(doc.hasUnsavedChanges, "a canonically equal but different character is Edited")
+            check(await save(doc), "save the different canonical character")
+            let bytes = (try? Data(contentsOf: url)) ?? Data()
+            check(bytes.range(of: Data([0xE2, 0x84, 0xAB])) != nil, "disk has the UTF-8 bytes of the replacement")
+        } else {
+            check(false, "the canonical character range exists")
+        }
+
+        // 2c. Keep Mine must overwrite theirs even after an edit is undone.
+        doc.keepMineAfterExternalChange()
+        tv.undoManager?.removeAllActions()
+        tv.selectedRange = NSRange(location: (tv.text as NSString).length, length: 0)
+        tv.insertText("k\n")
+        try? await Task.sleep(for: .milliseconds(100))
+        tv.undoManager?.undo()
+        check(doc.hasUnsavedChanges, "after Keep Mine, undoing back to the old text stays Edited")
+        check(await save(doc), "save after Keep Mine")
+        check(!doc.hasUnsavedChanges && !editor.editedShown && !doc.diskStateStale, "saving after Keep Mine clears Edited")
 
         // 3. Restore Previous Version: the copy before Owlink first saved.
         tv.selectedRange = NSRange(location: (tv.text as NSString).length, length: 0)
