@@ -291,7 +291,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             row.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
             row.heightAnchor.constraint(equalToConstant: 20),
-            row.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor, constant: -2),
+            // Centred in the full coloured band so a 34 pt bar does not leave
+            // the labels sitting low; a 24 pt bar (keyboard or a small inset) is unchanged.
+            row.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
         ])
     }
 
