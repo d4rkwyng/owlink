@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @discardableResult
-    func open(_ url: URL) -> EditorWindowController? {
+    func open(_ url: URL, asText: Bool = false) -> EditorWindowController? {
         let std = url.standardizedFileURL
         // A folder (dropped on the Dock icon, `owlink dir`): the folder sidebar.
         if Self.isFolder(std) { openFolder(std); return nil }
@@ -444,20 +444,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return nil
         }
         restorePendingTab(for: std)
-        // A PDF (by its first bytes, or its name) opens in a viewer tab.
-        switch DocumentKind.detect(url: std) {
-        case .pdf: openPDF(std); return nil
-        // An image (by its signature, or its name) in an image tab; SVG stays text.
-        case .image: openImage(std); return nil
-        // Word, Excel, PowerPoint, Pages, Numbers, Keynote, RTFD: Quick Look.
-        case .office: openOffice(std); return nil
-        // A binary (DER) certificate or PKCS#7 bundle: a read-only certificate tab.
-        case .certificate: openCertificate(std); return nil
-        case .text: break
-        }
         if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
             existing.window?.makeKeyAndOrderFront(nil)
             return existing
+        }
+        // A PDF (by its first bytes, or its name) opens in a viewer tab.
+        if !asText {
+            switch DocumentKind.detect(url: std) {
+            case .pdf: openPDF(std); return nil
+            // An image (by its signature, or its name) in an image tab; SVG stays text.
+            case .image: openImage(std); return nil
+            // Word, Excel, PowerPoint, Pages, Numbers, Keynote, RTFD: Quick Look.
+            case .office: openOffice(std); return nil
+            // A binary (DER) certificate or PKCS#7 bundle: a read-only certificate tab.
+            case .certificate: openCertificate(std); return nil
+            case .text: break
+            }
         }
         do {
             let (d, mod) = try EditorDocument.read(std)
@@ -591,7 +593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               previewShown: dockedPreview ? true : nil,
                                               previewWidth: dockedPreview ? t.dockedPreviewWidth : nil,
                                               folds: t.sessionFolds, split: t.sessionSplit, writing: t.sessionWriting,
-                                              wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil))
+                                              wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil,
+                                              explicitText: d.fileURL.map { DocumentKind.hasPDFExtension($0.path) } == true ? true : nil))
                 if t.window === NSApp.keyWindow || t.window?.tabGroup?.selectedWindow === t.window { selected = sessionTabs.count - 1 }
             }
             if !sessionTabs.isEmpty {
@@ -711,7 +714,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @discardableResult
     private func restoreTab(_ st: SessionTab, into place: (host: NSWindow, index: Int)?) -> NSWindowController? {
         // A PDF tab (or, from before PDF tabs, a .pdf file opened as text with nothing unsaved).
-        if st.pdf != nil || !st.hasBuffer && st.path.map(DocumentKind.hasPDFExtension) == true {
+        if st.pdf != nil || st.explicitText != true && !st.hasBuffer && st.path.map(DocumentKind.hasPDFExtension) == true {
             return restorePDFTab(st, into: place)
         }
         if st.image != nil || st.office != nil || st.certificate != nil { return restoreViewerTab(st, into: place) }
@@ -867,6 +870,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func toggleGrammar(_ sender: Any?) { Settings.shared.checkGrammar.toggle() }
     @objc func toggleOwl(_ sender: Any?) { Settings.shared.showOwl.toggle() }
     @objc func askCedricMenu(_ sender: Any?) { currentTab?.openAskCedric() }
+    @objc func explainSelectionMenu(_ sender: Any?) { currentTab?.inlineAssist(.explain) }
+    @objc func rewriteSelectionMenu(_ sender: Any?) { currentTab?.inlineAssist(.rewrite) }
     @objc func checkGrammarWithAIMenu(_ sender: Any?) { currentTab?.checkGrammarWithAI() }
     @objc func scriptSafetyMenu(_ sender: Any?) { currentTab?.checkScriptSafety() }
     @objc func pickOwlHintSource(_ sender: NSMenuItem) {
@@ -917,6 +922,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleContextBarMenu(_:)):
             setShowHide(item, shown: s.showContextBar, show: String(localized: "Show Context Bar"), hide: String(localized: "Hide Context Bar"))
         case #selector(askCedricMenu(_:)): return s.owlChat && tab?.canAskCedric == true
+        case #selector(explainSelectionMenu(_:)): return tab?.canInlineAssist(.explain) == true
+        case #selector(rewriteSelectionMenu(_:)): return tab?.canInlineAssist(.rewrite) == true
         case #selector(checkGrammarWithAIMenu(_:)): return s.owlChat && tab?.canCheckGrammarWithAI == true
         case #selector(scriptSafetyMenu(_:)): return tab?.canCheckScriptSafety == true
         case #selector(pickOwlHintSource(_:)):

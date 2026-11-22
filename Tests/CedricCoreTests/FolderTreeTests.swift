@@ -20,28 +20,80 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
 }
 
 @Suite struct FolderTreeTests {
+    @Test func explorerCreateAndRenameNeverOverwrite() throws {
+        let root = try makeTree(["existing.txt"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let created = try FolderActions.create(in: root, name: "new.txt", directory: false)
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: "existing.txt", directory: false) }
+        #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: "existing.txt", directory: true) }
+        #expect(throws: (any Error).self) { try FolderActions.rename(created, name: "existing.txt") }
+        #expect(try String(contentsOf: root.appendingPathComponent("existing.txt"), encoding: .utf8) == "existing.txt")
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        let folder = try FolderActions.create(in: root, name: "folder", directory: true)
+        #expect(try FolderActions.rename(folder, name: "renamed").lastPathComponent == "renamed")
+        for invalid in ["", ".", "..", "a/b", "a\0b"] {
+            #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: invalid, directory: false) }
+        }
+    }
+
+    @Test func explorerMovesOnlyTheRenamedPathAndDescendants() {
+        let old = URL(fileURLWithPath: "/p/dir")
+        let new = URL(fileURLWithPath: "/p/new")
+        #expect(FolderActions.movedURL(old, from: old, to: new, directory: false) == new)
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir/a.txt"), from: old, to: new, directory: true)?.path == "/p/new/a.txt")
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir/a.txt"), from: old, to: new, directory: false) == nil)
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir2/a.txt"), from: old, to: new, directory: true) == nil)
+    }
+
+    @Test func renameSelectionExcludesOnlyTheLastFileExtension() {
+        func length(_ name: String, _ directory: Bool = false) -> Int {
+            FolderActions.renameSelection(name: name, isDirectory: directory).length
+        }
+        #expect(length("file.txt") == 4)
+        #expect(length("file.tar.gz") == 8)
+        #expect(length("folder.txt", true) == 10)
+        #expect(length("file") == 4)
+        #expect(length(".gitignore") == 10)
+        #expect(length(".env") == 4)
+        #expect(length(".env.local") == 4)
+        #expect(length("café.md") == 4)
+        #expect(length("") == 0)
+    }
+
+    @Test func textNamedPDFKeepsItsSessionKind() throws {
+        let tab = SessionTab(path: "/p/empty.pdf", explicitText: true)
+        let saved = try JSONEncoder().encode(tab)
+        #expect(try JSONDecoder().decode(SessionTab.self, from: saved).explicitText == true)
+        let old = try JSONEncoder().encode(SessionTab(path: "/p/old.pdf"))
+        #expect(try JSONDecoder().decode(SessionTab.self, from: old).explicitText == nil)
+    }
+
     @Test func foldersFirstThenFinderOrder() {
         let sorted = FolderTree.sorted([e("b.txt"), e("file10.txt"), e("Zed", dir: true), e("file2.txt"), e("alpha", dir: true), e("A.txt")])
         #expect(sorted.map(\.name) == ["alpha", "Zed", "A.txt", "b.txt", "file2.txt", "file10.txt"])
     }
 
     @Test func hiddenFilter() {
-        let all = [e(".git", dir: true, hidden: true), e(".DS_Store", hidden: true), e(".env", hidden: true), e("src", dir: true), e("a.txt")]
+        let all = [e(".git", dir: true, hidden: true), e(".DS_Store", hidden: true), e(".env", hidden: true), e(".other", hidden: true), e("src", dir: true), e("a.txt")]
         #expect(FolderTree.filter(all, showHidden: false).map(\.name) == ["src", "a.txt"])
         // .git and .DS_Store never show, hidden files on or off.
-        #expect(FolderTree.filter(all, showHidden: true).map(\.name) == [".env", "src", "a.txt"])
+        #expect(FolderTree.filter(all, showHidden: true).map(\.name) == [".env", ".other", "src", "a.txt"])
+        #expect(FolderTree.filter(all, showHidden: false, revealed: [".env", ".git"]).map(\.name) == [".env", "src", "a.txt"])
     }
 
     @Test func listsOneLevelFilteredAndSorted() throws {
-        let root = try makeTree([".git/HEAD", ".DS_Store", ".hidden", "src/deep/x.swift", "b.md", "a10.txt", "a9.txt"], dirs: ["Thing.app/Contents"])
+        let root = try makeTree([".git/HEAD", ".DS_Store", ".env", ".hidden", "src/deep/x.swift", "b.md", "a10.txt", "a9.txt"], dirs: ["Thing.app/Contents"])
         defer { try? FileManager.default.removeItem(at: root) }
         let list = try FolderTree.list(root)
         #expect(list.map(\.name) == ["src", "a9.txt", "a10.txt", "b.md", "Thing.app"])
         // A package is a file; nothing below the first level is listed.
         #expect(list.first { $0.name == "Thing.app" }?.isDirectory == false)
         #expect(list.first { $0.name == "src" }?.isDirectory == true)
+        let withRevealed = try FolderTree.list(root, revealed: [".env", ".git"])
+        #expect(withRevealed.map(\.name) == ["src", ".env", "a9.txt", "a10.txt", "b.md", "Thing.app"])
         let withHidden = try FolderTree.list(root, showHidden: true)
-        #expect(withHidden.map(\.name) == ["src", ".hidden", "a9.txt", "a10.txt", "b.md", "Thing.app"])
+        #expect(withHidden.map(\.name) == ["src", ".env", ".hidden", "a9.txt", "a10.txt", "b.md", "Thing.app"])
         #expect(withHidden.first { $0.name == ".hidden" }?.isHidden == true)
     }
 

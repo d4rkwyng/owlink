@@ -243,6 +243,7 @@ extension EditorWindowController {
         let was = textView
         s.focus.focused(tv === s.second.textView ? .second : .first)
         guard textView !== was else { return }
+        contextBar?.refreshInlineSelectionStates()
         // Editing and the input system go through the content storage's
         // primary layout manager: the focused pane's.
         if let tlm = tv.textLayoutManager { tv.contentStorage?.primaryTextLayoutManager = tlm }
@@ -284,6 +285,18 @@ extension EditorWindowController {
 
     /// The text view's context menu: Split Editor, and the orientation while split.
     func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+        if view.selectedRange().length > 0 {
+            if let editor = view as? EditorTextView { paneFocused(editor) }
+            menu.addItem(.separator())
+            let explain = NSMenuItem(title: String(localized: "Explain Selection"),
+                                     action: #selector(AppDelegate.explainSelectionMenu(_:)), keyEquivalent: "")
+            let rewrite = NSMenuItem(title: String(localized: "Rewrite Selection"),
+                                     action: #selector(AppDelegate.rewriteSelectionMenu(_:)), keyEquivalent: "")
+            explain.target = NSApp.delegate
+            rewrite.target = NSApp.delegate
+            menu.addItem(explain)
+            menu.addItem(rewrite)
+        }
         menu.addItem(.separator())
         let toggle = NSMenuItem(title: isSplit ? String(localized: "Close Split") : String(localized: "Split Editor"),
                                 action: #selector(toggleSplitAction(_:)), keyEquivalent: "")

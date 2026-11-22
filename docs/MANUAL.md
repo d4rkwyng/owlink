@@ -114,9 +114,19 @@ shows the file in Finder. Both are off for an untitled tab.
   and hidden files don't show; what the folder's `.gitignore` files
   ignore is shown dimmed.
 - The tree follows files created, deleted and renamed on disk.
-- Right-click: Reveal in Finder, Copy Path, Find in Folder… (Find in
-  Files on that folder), Show Hidden Files, Close Folder (or the × at
-  the top).
+- A newly created or renamed hidden file is shown so you can see it, without turning on Show Hidden Files.
+- Right-click a folder or file for New File, New Folder, Rename, Move to
+  Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
+  on that folder). New items go inside the folder, or beside the file;
+  a new file opens in a tab. Rename edits the name in the tree (the extension is left unselected) and open
+  tabs follow a renamed file or folder without losing edits. Move to Trash
+  asks first and puts the item in the Trash, not permanently deleting it.
+  An open text tab for a trashed file keeps its text unsaved and shows
+  the deleted-or-moved bar below; viewer tabs show a notice. Names already
+  in use aren't overwritten. `.git` and `.DS_Store` remain hidden and
+  cannot be created or renamed from the sidebar.
+- Show Hidden Files and Close Folder are in the same menu (or use the ×
+  at the top to close).
 - Drag the divider to resize it. The folder, the folders you expanded
   and the width come back with the session.
 
@@ -796,8 +806,8 @@ vault (the sidebar folder, else the folder holding `.obsidian/`) and open
 them in a tab, `![[image.png|300]]` shows the image, `![[note#Heading]]`
 quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 `%%comments%%` and `#tags` show as in Obsidian. Site-root images
-(`/images/logo.webp`, as Hugo or Quartz write them) load from the site's
-folder on disk (`static/`, `public/`, `content/` …), never the network. Fenced code blocks are
+(`/images/logo.webp`, as Hugo, Jekyll or Quartz write them) load from the site's
+folder on disk (`static/`, `public/`, `quartz/static/` and `content/`), never the network. Fenced code blocks are
 coloured by their language (```` ```swift ````, `py`, `js`, `bash`, …)
 both in the editor and in the preview, by Owlink's own tokenizers and
 the theme's colours (no JavaScript highlighter). **Detach Preview** (View menu, ⇧⌥⌘P,
@@ -1061,8 +1071,11 @@ type), waves once per launch, points at the lines a hint is about, nods
 when a fix is applied, thinks / searches / writes while the AI works,
 and falls asleep after 5 minutes without typing (a click wakes him).
 With Reduce Motion on (System Settings › Accessibility) he stays still:
-no gestures, a single still frame for each state. His rules need no AI and only ever look
-at the text in view (at most 8 KB):
+no gestures, a single still frame for each state. His rules need no AI.
+His rules see an 8 KB window (8,192 UTF-16 units): the whole document when
+it fits, otherwise the text in view plus about 40 lines either side. Some
+also check saved files. Checks about the whole file wait until the document
+fits in that window:
 - warnings: merge-conflict markers left in the file; something that looks
   like a secret (a private key, an AWS key, a GitHub, Slack, Stripe or
   OpenAI/Anthropic token); JSON that doesn't parse (with the line; a
@@ -1105,10 +1118,14 @@ the AI runs or a model switches the engine without a Save. The network
 address applies when you press Return or leave the field, and only once
 it is a local one. Test Connection and each built-in model's Download,
 Pause and Delete stay buttons, so nothing is downloaded or loaded until
-you click. On Intel Macs automatic AI checks are **off** by
-default so typing stays fast: click the owl and choose **Ask AI Now**,
-or turn on "Check automatically when I pause typing" in Settings ›
-Cedric.
+you click. Automatic checks (and automatic AI grammar) are **off** by
+default for LM Studio, Ollama and custom servers. The first time you
+enable them, Cedric explains that visible text goes to the named server
+on your local network, not the cloud. If they were already on for a
+server, they stay off until that notice is confirmed. The existing Intel default remains
+off for on-device engines so typing stays fast; click the owl and choose
+**Ask AI Now**, or turn on "Check automatically when I pause typing" in
+Settings › Cedric.
 A one-word AI fix in prose ("definately" → "definitely") keeps its
 **Fix it**.
 In very large documents the owl only looks when clicked.
@@ -1208,8 +1225,9 @@ Generated scripts (`configure`, `config.status`, `libtool` and other
 autoconf output) and minified code get none of these checks.
 
 Some checks are about the whole file (a key set twice, a missing `#!`
-line, XML that doesn't parse, `cd` before a delete): in a file longer
-than Cedric's 8 KB view they wait until the whole file fits.
+line, XML that doesn't parse, `cd` before a delete). Those rules do not
+run on a window of a longer file: they wait until the whole document
+fits in Cedric's 8 KB window.
 
 **Settings › Cedric › Style tips in code** (off by default) adds Cedric's style
 suggestions: a bare `except:` in Python (Fix it: `except Exception:`),
@@ -1273,6 +1291,17 @@ work offline.
 
 ### Ask Cedric
 
+**Explain Selection** (⌥⌘E) and **Rewrite Selection** (⌥⇧⌘E) are
+available in the Cedric menu, the editor's context menu, and the Markdown
+Context Bar. Select text first and turn on Ask Cedric with a local engine
+ready. Explain works with any ready engine; Rewrite requires a model that
+passes the existing tool gate (at least 80%, with unmeasured models off).
+For a server set to choose its model automatically, Rewrite becomes
+available after Ask Cedric has resolved that model and its score.
+Rewrite offers the existing Apply / Skip cards; nothing changes until
+you apply a proposal. Engines run on this Mac or a configured private
+LAN server, never in the cloud.
+
 **Ask Cedric** (Settings › Cedric › "Ask Cedric"; on by default when a local
 engine is ready: Apple Intelligence, a downloaded built-in model, or an
 LM Studio / Ollama / other-Mac server you set up and turned on; with
@@ -1282,8 +1311,15 @@ does the same, and the owl says so once, a while after a new user's
 first launch. A small panel about the current document opens (a
 floating panel you can drag anywhere; it hides when you switch tabs and
 comes back with its tab). A chip
-picks what Cedric sees (Selection, Visible text, or the Whole document
-when it fits the model); quick actions **Explain** (**What Does It
+picks what Cedric sees: Selection is the default when there is one,
+otherwise Whole document; Visible text remains a choice. If the file is
+larger than the engine's context, whole-document questions that don't request edits, **Explain**
+and **Find Problems** review consecutive overlapping parts, up to eight
+requests, and show progress. If eight parts cannot cover the file, the
+parts are centred on the caret or selection and the chip and answer say
+which lines were reviewed and that the rest was not. Other actions keep
+the single caret-centred window; Selection and Visible text are not split.
+Quick actions **Explain** (**What Does It
 Do?** for scripts), **Explain Line** (the selection or the caret's
 line), **Find Problems**, **Summarise** / **Rewrite** (prose),
 **Simplify** and **Add Comments** (code), or type a question. Answers
@@ -1381,13 +1417,15 @@ firewall / the execution policy / quarantine / TCC, running at login
 and recursive deletes of broad paths (`rm -rf ~/*`, `rm -rf "$DIR/"*`,
 `find / … -delete`, `Remove-Item -Recurse C:\`). Only the first 20,000
 lines are scanned, and a longer script says so. With Ask Cedric on, the
-model then reviews the script with those findings (passed as data, and
+model then reviews the script in up to eight overlapping parts if it does
+not fit in one request, with the relevant scan findings (passed as data, and
 told the script's text is never instructions) and ends with a verdict:
 "No obvious red flags (not a guarantee)", "Run only if you trust the
 source" or "Don't run it". Cedric never calls a script safe: the app
 rewrites any such line (also while the answer streams in), and forces "Don't run it — review the flagged
 lines" after a high-risk finding or when only part of the script was
-reviewed, whatever the model said.
+reviewed, whatever the model said. When all lines were reviewed and
+the offline scan was complete, it does not claim the review was partial.
 
 ## Help menu
 
@@ -1563,8 +1601,10 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
 (MIT, © the ggml authors), bundled as `llama.framework`. Models are not
 bundled: the ones Owlink offers to download are Qwen models by Alibaba
-Cloud, each under its own licence, shown before download. The default,
-Qwen3 4B Instruct (2507, the Q4_K_M GGUF quantised by Unsloth), is
-Apache-2.0, as are Qwen2.5-Coder 1.5B and 7B and Qwen3 4B. Qwen2.5-Coder
-3B, the default before, stays an optional download labelled
-"Non-commercial licence" (Qwen Research License).
+Cloud, each under its own licence. Download first opens a confirmation
+with the model name, licence name and full bundled licence text; no
+network fetch is made just to show it. Non-commercial terms are flagged
+clearly. The default, Qwen3 4B Instruct (2507, the Q4_K_M GGUF quantised
+by Unsloth), is Apache-2.0, as are Qwen2.5-Coder 1.5B and 7B and Qwen3
+4B. Qwen2.5-Coder 3B, the default before, stays an optional download
+labelled "Non-commercial licence" (Qwen Research License).

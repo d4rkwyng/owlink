@@ -16,6 +16,7 @@ final class OwlChatStore {
     static let shared = OwlChatStore()
     private(set) var histories: [UUID: [OwlChatEntry]] = [:]
     private var cached: (settings: LocalAISettings, engine: any OwlChatEngine)?
+    private var scoreKeyCache: (settings: LocalAISettings, key: String?)?
     /// The last engine's context budget, for the scopes offered before the
     /// engine is made; till then the smallest (Apple Intelligence's).
     private(set) var contextBudget = 5_000
@@ -57,6 +58,30 @@ final class OwlChatStore {
     func useTools(_ engine: any OwlChatEngine) -> Bool {
         if let v = DevEnvironment.values["CEDRIC_OWL_TOOLS"] { return v == "1" }
         return gate.allowsTools(engine.scoreKey)
+    }
+
+    func invalidateScoreKey() { scoreKeyCache = nil }
+
+    var previewUsesTools: Bool {
+        if let v = DevEnvironment.values["CEDRIC_OWL_TOOLS"] { return v == "1" }
+        if AskCedricEngine.fakeDelay != nil { return gate.allowsTools(FakeChatEngine(delay: 0).scoreKey) }
+        guard let settings = AskCedricEngine.settings() else { return false }
+        if let cached, cached.settings == settings { return gate.allowsTools(cached.engine.scoreKey) }
+        if scoreKeyCache?.settings != settings {
+            scoreKeyCache = (settings, OwlChatEngines.configuredScoreKey(settings: settings))
+        }
+        return scoreKeyCache?.key.map { gate.allowsTools($0) } ?? false
+    }
+
+    var inlineAllowsTools: Bool {
+        if AskCedricEngine.fakeDelay != nil { return gate.allowsTools(FakeChatEngine(delay: 0).scoreKey) }
+        guard let settings = AskCedricEngine.settings() else { return false }
+        if let cached, cached.settings == settings { return gate.allowsTools(cached.engine.scoreKey) && useTools(cached.engine) }
+        if scoreKeyCache?.settings != settings {
+            scoreKeyCache = (settings, OwlChatEngines.configuredScoreKey(settings: settings))
+        }
+        guard let key = scoreKeyCache?.key, gate.allowsTools(key) else { return false }
+        return DevEnvironment.values["CEDRIC_OWL_TOOLS"] != "0"
     }
 }
 
@@ -111,7 +136,10 @@ enum AskCedricEngine {
         return AIPrivacyWording(engine: engine, autoGrammar: autoGrammar)
     }
 
-    static func invalidate() { cache = nil }
+    static func invalidate() {
+        cache = nil
+        OwlChatStore.shared.invalidateScoreKey()
+    }
 }
 
 @MainActor
@@ -133,14 +161,19 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private var task: Task<Void, Never>?
     private(set) var running = false
+    private var chunkedReviewRunning = false
+    private var footerBeforeReview: String?
+    private var reviewProgress: String?
+    private var reviewScopeLabel: String?
     /// The first card's proposal (checks).
     var pending: OwlEditProposal? { cards.first?.proposal }
     var hasProposals: Bool { !cards.isEmpty }
-    private var lastRequest: (question: String, action: OwlQuickAction?)?
+    private var lastRequest: (question: String, action: OwlQuickAction?, inline: Bool, selection: NSRange?, selectionText: String?)?
     /// Streamed text not yet shown (flushed at ~30 Hz).
     private var pendingText = ""
     private var flushTimer: Timer?
     private var streamed = ""
+    private var pendingInlineNote: String?
     private var scopes: [OwlChatScope] = []
     /// Requests asked (checks).
     private(set) var asks = 0
@@ -423,15 +456,25 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     func refresh() {
         guard let tab else { return }
         let s = snapshot()
-        // The engine's own budget: a scope offered here must fit when asked.
-        let budget = OwlChatStore.shared.contextBudget
+        let history = docID.map { OwlChatStore.shared.history($0) } ?? []
+        let tools = OwlChatStore.shared.previewUsesTools
+        let server = AskCedricEngine.fakeDelay == nil && (AskCedricEngine.settings()?.backend.usesServer ?? false)
+        let picture = OwlPicture.isPicture(fileName: s.fileName)
+            ? SVGPictureSource(text: s.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
+        let budget = OwlInlineAssist.documentBudget(engineBudget: OwlChatStore.shared.contextBudget, instructionWrapper: "",
+                                                    systemPrompt: OwlPrompts.chatSystem(toolsOn: tools, server: server),
+                                                    history: history)
         scopes = OwlChatContext.scopes(for: s, budget: budget)
         // The user's own pick stays while it's offered; else the default
-        // (the whole document when it fits), worked out again each time.
+        // is worked out again each time.
         let current = pickedScope.flatMap { scopes.contains($0) ? $0 : nil }
         scopePopup.removeAllItems()
         for sc in scopes {
-            let label = OwlChatContext.build(s, scope: sc, budget: budget)?.label ?? sc.title
+            let label = (chunkedReviewRunning && sc == .wholeDocument ? reviewScopeLabel : nil)
+                ?? OwlChatRequest.documentContext(s, scope: sc, engineBudget: OwlChatStore.shared.contextBudget,
+                                                       history: history, question: "", action: nil, tools: tools,
+                                                       server: server, prose: isProse, imageSource: picture,
+                                                       preview: true)?.label ?? sc.title
             scopePopup.addItem(withTitle: label)
             scopePopup.lastItem?.representedObject = sc.rawValue
         }
@@ -452,6 +495,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             footer.stringValue = String(localized: "On \(place) · \(LocalAIOwlBridge.shortTitle(chat.backend))")
         } else {
             footer.stringValue = String(localized: "No AI engine yet: set one up in Cedric AI Settings.")
+        }
+        if chunkedReviewRunning, let reviewProgress {
+            footerBeforeReview = footer.stringValue
+            footer.stringValue = reviewProgress
         }
         panel.title = String(localized: "Ask Cedric — \(tab.doc.displayName)")
         render()
@@ -475,7 +522,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     var selectedScope: OwlChatScope {
-        (scopePopup.selectedItem?.representedObject as? String).flatMap(OwlChatScope.init(rawValue:)) ?? .visible
+        (scopePopup.selectedItem?.representedObject as? String).flatMap(OwlChatScope.init(rawValue:)) ?? .wholeDocument
     }
 
     func selectScope(_ s: OwlChatScope) {
@@ -574,7 +621,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// Check for Risks: the offline scan first (no AI; works on any Mac),
     /// then, with Ask Cedric on and an engine ready, the model's review of
-    /// the whole script (or what's in view) with the findings attached.
+    /// the whole script (or a centred window) with the findings attached.
     /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run
     /// it" after a high finding or a partial review.
     func checkScriptSafety() {
@@ -633,20 +680,28 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// `selection` and `scope` override the document's and the chip's;
     /// `scan` is the script check's findings.
     func ask(question: String, action: OwlQuickAction?, selection: NSRange? = nil, scope forced: OwlChatScope? = nil,
-             scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true) {
+             scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true,
+             inline: Bool = false) {
         guard !running, let tab, let id = docID else { return }
         discardProposal(nil)
-        lastRequest = (question, action)
         forcedVerdict = nil
         verdictStream = nil
         safeClaimGuard = nil
         shownAnswer = ""
         streamedRenders = []
+        pendingInlineNote = nil
+        chunkedReviewRunning = false
+        footerBeforeReview = nil
+        reviewProgress = nil
+        reviewScopeLabel = nil
         var snap = snapshot()
         if let selection {
             snap = OwlDocumentSnapshot(text: snap.text, generation: snap.generation, selection: selection, visible: snap.visible,
                                        fileName: snap.fileName, language: snap.language, facts: snap.facts, grammar: snap.grammar)
         }
+        let originalSelection = inline ? snap.selection : nil
+        let originalSelectionText = originalSelection.map(snap.substring)
+        lastRequest = (question, action, inline, originalSelection, originalSelectionText)
         let scope = forced ?? selectedScope
         let prose = isProse
         var history = OwlChatStore.shared.history(id)
@@ -656,6 +711,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         OwlChatStore.shared.append(OwlChatEntry(role: .owl, text: ""), to: id)
         render()
         running = true
+        tab.contextBar?.refreshStates()
         asks += 1
         streamed = ""
         flushes = 0
@@ -667,16 +723,98 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 self.finish(nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
                 return
             }
-            let ctx = OwlChatContext.build(snap, scope: scope, budget: engine.contextBudget)
-                ?? OwlChatContext.build(snap, scope: .visible, budget: engine.contextBudget)!
             let tools = OwlChatStore.shared.useTools(engine)
-            self.lastUsedTools = tools
-            // An SVG: describe_image can render it (only if the model calls it).
+            if inline, action == .rewrite, (!tools || !OwlChatStore.shared.gate.allowsTools(engine.scoreKey)) {
+                self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
+                return
+            }
+            var requestSnapshot = snap
+            var inlineClip: OwlInlineAssist.SelectionClip?
+            // An SVG may offer describe_image even when the selected action
+            // otherwise has no tools.
             let picture = OwlPicture.isPicture(fileName: snap.fileName)
                 ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
-            let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
+            func context(for scope: OwlChatScope) -> OwlChatContext? {
+                OwlChatRequest.documentContext(snap, scope: scope, engineBudget: engine.contextBudget,
+                                               history: history, question: question, action: action,
+                                               tools: tools, server: engine.usesServer, prose: prose,
+                                               imageSource: picture, scan: scan, inline: inline)
+            }
+            // The chip can still say Selection after the user has clicked away.
+            var usedScope = scope
+            var ctx = context(for: usedScope)
+            if ctx == nil, usedScope == .selection, !snap.hasSelection, !inline {
+                usedScope = .wholeDocument
+                ctx = context(for: usedScope)
+            }
+            guard let ctx else {
+                self.finish(nil, error: String(localized: "The selected text is no longer available."))
+                return
+            }
+            if let index = self.scopes.firstIndex(of: usedScope) {
+                self.scopePopup.item(at: index)?.title = ctx.label
+                self.scopePopup.selectItem(at: index)
+            }
+            if inline, let action {
+                let budgetRequest = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
+                                                   history: history, useTools: tools, prose: prose, scan: scan,
+                                                   scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture)
+                let additions = budgetRequest.contextAdditions(engineBudget: engine.contextBudget)
+                let promptTools = !OwlTools.specs(budgetRequest.tools).isEmpty
+                let system = OwlPrompts.chatSystem(toolsOn: promptTools, server: engine.usesServer,
+                                                   digest: additions.digest != nil, checks: additions.checks != nil,
+                                                   canEdit: budgetRequest.tools.contains(.proposeEdit),
+                                                   partial: budgetRequest.contextIsPartial)
+                let wrapper = OwlInlineAssist.instruction(action: action, selection: "", prose: prose,
+                                                          toolsOn: tools, context: ctx)
+                let room = OwlInlineAssist.remainingBudget(engineBudget: engine.contextBudget,
+                                                           numberedContext: ctx.numbered, instructionWrapper: wrapper,
+                                                           systemPrompt: system, history: history,
+                                                           digestReservation: additions.digestReservation)
+                let clip = OwlInlineAssist.clip(snap.substring(snap.selection), budget: room)
+                inlineClip = clip
+                pendingInlineNote = clip.note
+                requestSnapshot = OwlDocumentSnapshot(text: snap.text, generation: snap.generation,
+                                                      selection: NSRange(location: snap.selection.location,
+                                                                         length: (clip.text as NSString).length),
+                                                      visible: snap.visible, fileName: snap.fileName, language: snap.language,
+                                                      facts: snap.facts, grammar: snap.grammar)
+                if clip.text.isEmpty {
+                    self.finish(nil, error: String(localized: "There isn’t enough room in this model’s context for the selected text."))
+                    return
+                }
+            }
+            self.lastUsedTools = tools
+            var req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: requestSnapshot,
                                      history: history, useTools: tools, prose: prose, scan: scan,
-                                     scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture)
+                                     scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture,
+                                     inlineSelection: inline ? inlineClip?.text : nil,
+                                     inlineSelectionNote: inlineClip?.note)
+            if action == .scriptSafety { req.scanFindings = self.lastScan }
+            if let plan = OwlChunkedReviewRunner.plan(req, engine: engine) {
+                guard self.running, !Task.isCancelled else { return }
+                self.chunkedReviewRunning = true
+                self.footerBeforeReview = self.footer.stringValue
+                if let index = self.scopes.firstIndex(of: usedScope), let first = plan.parts.first, let last = plan.parts.last {
+                    let label = plan.isComplete
+                        ? String(localized: "Whole document (\(plan.totalLines) lines)")
+                        : String(localized: "Lines \(first.first)–\(last.last) of \(plan.totalLines) (rest not reviewed)")
+                    self.reviewScopeLabel = label
+                    self.scopePopup.item(at: index)?.title = label
+                }
+                let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, model: engine.scoreKey,
+                                                              describeError: Self.describe) { [weak self] part, total in
+                    DispatchQueue.main.async { MainActor.assumeIsolated {
+                        guard let self, self.running, self.chunkedReviewRunning else { return }
+                        let progress = String(localized: "Reviewing part \(part) of \(total)")
+                        self.reviewProgress = progress
+                        self.footer.stringValue = progress
+                    } }
+                }
+                self.finish(result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
+                return
+            }
+            if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
             self.forcedVerdict = req.forcedVerdict
             // Any answer about a script: clamped before it shows (ScriptVerdictStream).
             self.safeClaimGuard = req.safeClaimGuard
@@ -699,7 +837,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    static func describe(_ e: Error) -> String {
+    nonisolated static func describe(_ e: Error) -> String {
         switch e {
         case LocalAIError.timedOut: return String(localized: "The model took too long to answer.")
         case LocalAIError.endpointNotLocal: return String(localized: "The AI address isn’t on this Mac or the local network.")
@@ -777,11 +915,16 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// Characters of answer shown so far (checks: streaming arrives in steps).
     var streamedCount: Int { streamed.count }
 
-    private func finish(_ outcome: OwlChatOutcome?, error: String?) {
+    private func finish(_ outcome: OwlChatOutcome?, error: String?, stopped: Bool = false, failed: Bool = false) {
         guard running else { return }
         flush()
         running = false
-        tab?.owl?.chatCue(outcome != nil ? .answered : task?.isCancelled == true ? .stopped : .failed)
+        chunkedReviewRunning = false
+        reviewProgress = nil
+        reviewScopeLabel = nil
+        if let footerBeforeReview { footer.stringValue = footerBeforeReview; self.footerBeforeReview = nil }
+        tab?.contextBar?.refreshStates()
+        tab?.owl?.chatCue(stopped || task?.isCancelled == true ? .stopped : failed || outcome == nil ? .failed : .answered)
         task = nil
         lastOutcome = outcome
         if let id = docID {
@@ -796,6 +939,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 let text = partial.isEmpty ? error : partial + " (" + error + ")"
                 OwlChatStore.shared.replaceLast(OwlChatEntry(role: .note, text: text), in: id)
             }
+            if let note = pendingInlineNote {
+                OwlChatStore.shared.append(OwlChatEntry(role: .note, text: note), to: id)
+                pendingInlineNote = nil
+            }
         }
         render()
         updateButtons()
@@ -807,6 +954,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func stop(_ sender: Any?) {
         guard running else { return }
         task?.cancel()
+        if chunkedReviewRunning { return }
         finish(nil, error: String(localized: "Stopped."))
     }
 
@@ -951,6 +1099,31 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     @objc func askAgain(_ sender: Any?) {
         guard let r = lastRequest else { return }
+        if r.inline {
+            guard let tab, let action = r.action else { NSSound.beep(); return }
+            guard let range = r.selection, let originalText = r.selectionText,
+                  let selection = OwlInlineAssist.askAgainSelection(originalRange: range, originalText: originalText,
+                                                                    currentText: tab.textView.string) else {
+                NSSound.beep()
+                if let id = docID {
+                    OwlChatStore.shared.append(OwlChatEntry(role: .note,
+                                                            text: String(localized: "The original selection is no longer in the document.")), to: id)
+                    render()
+                }
+                return
+            }
+            // Use the recovered original selection; do not require the caret to still be over it.
+            let enabled = tab.canAskCedric && running != true
+            let ready = AskCedricEngine.isAvailable
+            let allowed = action == .rewrite
+                ? OwlInlineAssist.canRewrite(askEnabled: enabled, engineReady: ready, hasSelection: true,
+                                             allowsTools: ready && OwlChatStore.shared.inlineAllowsTools)
+                : OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: ready, hasSelection: true)
+            guard allowed else { NSSound.beep(); return }
+            discardProposal(nil)
+            ask(question: r.question, action: action, selection: selection, scope: .selection, inline: true)
+            return
+        }
         discardProposal(nil)
         ask(question: r.question, action: r.action)
     }
@@ -1016,6 +1189,28 @@ extension EditorWindowController {
     func openAskCedric() {
         guard canAskCedric else { NSSound.beep(); return }
         chatPanel().show()
+    }
+
+    func canInlineAssist(_ action: OwlQuickAction) -> Bool {
+        let selected = textView.selectedRange().length > 0
+        guard selected else { return false }
+        let enabled = canAskCedric && owlChat?.running != true
+        guard enabled else { return false }
+        let ready = AskCedricEngine.isAvailable
+        if action == .rewrite {
+            return OwlInlineAssist.canRewrite(askEnabled: enabled, engineReady: ready, hasSelection: selected,
+                                              allowsTools: ready && selected && OwlChatStore.shared.inlineAllowsTools)
+        }
+        return OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: ready, hasSelection: selected)
+    }
+
+    func inlineAssist(_ action: OwlQuickAction) {
+        guard canInlineAssist(action) else { NSSound.beep(); return }
+        let selection = textView.selectedRange()
+        let panel = chatPanel()
+        panel.show()
+        panel.ask(question: action == .explain ? String(localized: "Explain Selection") : String(localized: "Rewrite Selection"),
+                  action: action, selection: selection, scope: .selection, inline: true)
     }
 
     /// Cedric › Check Script for Risks…: a script (shell, PowerShell,

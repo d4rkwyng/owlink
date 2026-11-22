@@ -36,7 +36,7 @@ public enum FolderTree {
     /// The entries of `url`, filtered and sorted. Throws if the folder
     /// can't be read. Doesn't recurse.
     /// `ignore`: marks the entries its .gitignore files ignore (`isIgnored`).
-    public static func list(_ url: URL, showHidden: Bool = false, ignore: FolderIgnore? = nil) throws -> [FolderEntry] {
+    public static func list(_ url: URL, showHidden: Bool = false, ignore: FolderIgnore? = nil, revealed: Set<String> = []) throws -> [FolderEntry] {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isHiddenKey, .isPackageKey, .isSymbolicLinkKey]
         let urls = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: [])
         var out: [FolderEntry] = []
@@ -46,7 +46,7 @@ public enum FolderTree {
             if alwaysHidden.contains(name) { continue }
             let v = try? u.resourceValues(forKeys: Set(keys))
             let hidden = v?.isHidden ?? name.hasPrefix(".")
-            if hidden && !showHidden { continue }
+            if hidden && !showHidden && !revealed.contains(name) { continue }
             let link = v?.isSymbolicLink ?? false
             var dir = (v?.isDirectory ?? false) && !(v?.isPackage ?? false)
             if link {
@@ -68,8 +68,8 @@ public enum FolderTree {
 
     /// `entries` without the always-hidden names, and without hidden ones
     /// unless `showHidden`.
-    public static func filter(_ entries: [FolderEntry], showHidden: Bool) -> [FolderEntry] {
-        entries.filter { !alwaysHidden.contains($0.name) && (showHidden || !$0.isHidden) }
+    public static func filter(_ entries: [FolderEntry], showHidden: Bool, revealed: Set<String> = []) -> [FolderEntry] {
+        entries.filter { !alwaysHidden.contains($0.name) && (showHidden || !$0.isHidden || revealed.contains($0.name)) }
     }
 
     /// Finder's order: folders first, then names compared as Finder does

@@ -380,10 +380,15 @@ extension EditorWindowController {
     @discardableResult
     func replaceAsOneStep(_ range: NSRange, with replacement: String, actionName: String?, bookmarks: Bookmarks? = nil) -> Bool {
         guard let storage = textView.textStorage else { return false }
-        // Ask first. A refusal (marked text, or the view is no longer
-        // editable) must not open a group: closing and naming it left an
-        // empty "Cedric's Edit" step when bookmarks were being tracked.
-        let accepted = textView.shouldChangeText(in: range, replacementString: replacement)
+        // A refusal (marked text, or the view is no longer editable) must
+        // not open a group: closing and naming it left an empty "Cedric's
+        // Edit" step when bookmarks were being tracked. Those are the only
+        // reasons shouldChangeText refuses, so they are asked here, and
+        // shouldChangeText itself stays inside the group, after the first
+        // bookmark record: called before the group, AppKit registers the
+        // text's undo ahead of that record and an undo then restores the
+        // bookmarks before the text moves them again (tools-check bookmarks).
+        let accepted = textView.isEditable && !textView.hasMarkedText()
         let marks: Bookmarks? = accepted
             ? (bookmarks ?? (editing.bookmarks.isEmpty ? nil
                 : editing.bookmarks.replacing(range, with: replacement, in: storage.string as NSString,
@@ -402,7 +407,7 @@ extension EditorWindowController {
         // one after, so each sets them once the text is back.
         if plan.registerBookmarkBefore { registerBookmarks(before, setNow: true) }
         var changed = false
-        if plan.replaceText {
+        if plan.replaceText, textView.shouldChangeText(in: range, replacementString: replacement) {
             storage.beginEditing()
             storage.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: baseAttributes()))
             storage.endEditing()

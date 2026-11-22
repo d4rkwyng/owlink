@@ -49,7 +49,7 @@ enum QuickLookUI {
 @MainActor
 final class OfficeTabController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, ViewerTab {
     let id: UUID
-    let fileURL: URL
+    var fileURL: URL
     let format: OfficeFormat?
     private(set) var isLoaded = false
     private(set) var preview: NSView?
@@ -259,7 +259,10 @@ final class OfficeTabController: NSWindowController, NSWindowDelegate, NSMenuIte
         window?.contentView = NSView()
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { loadIfShown() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        loadIfShown()
+        (NSApp.delegate as? AppDelegate)?.folderSidebarFollow(self)
+    }
     func windowDidBecomeMain(_ notification: Notification) { loadIfShown() }
     func windowDidChangeOcclusionState(_ notification: Notification) { loadIfShown() }
 

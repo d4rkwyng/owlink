@@ -9,6 +9,22 @@ public enum HintPrompt {
     public static let maxHints = 2
     public static let minConfidence = 0.6
     public static let maxTitle = 60
+    /// Non-whitespace characters a document must have before any engine is
+    /// asked for a hint. Below this the prompt's code fence is empty or
+    /// nearly so, and the model invents a problem (an "empty code block"
+    /// on a blank Plain Text document).
+    public static let minimumHintCharacters = 20
+
+    /// False when `text`, ignoring whitespace, is empty or shorter than
+    /// `minimumHintCharacters`.
+    public static func hasEnoughText(_ text: String) -> Bool {
+        var n = 0
+        for ch in text where !ch.isWhitespace {
+            n += 1
+            if n >= minimumHintCharacters { return true }
+        }
+        return false
+    }
 
     /// Clamps `text` to `maxBytes` of UTF-8 on a character boundary, keeping
     /// the start (the context builder puts the visible range first + margin;

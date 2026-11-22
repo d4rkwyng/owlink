@@ -168,6 +168,7 @@ final class BuiltInModelsView: NSStackView {
     let downloads: BuiltInDownloads
     private(set) var rows: [Row] = []
     private var token: UUID?
+    private(set) var licenseConfirmationAlert: NSAlert?
     /// After any state change (the sheet refreshes its model menu).
     var onChange: (() -> Void)?
 
@@ -207,11 +208,62 @@ final class BuiltInModelsView: NSStackView {
     @objc func primary(_ sender: NSButton) {
         guard let row = rows.first(where: { $0.action === sender }) else { return }
         switch downloads.state(row.model) {
-        case .notDownloaded, .paused, .failed: downloads.download(row.model)
+        case .notDownloaded, .failed: confirmDownload(row.model)
+        case .paused: downloads.download(row.model)
         case .downloading: downloads.pause(row.model)
         case .installed: downloads.delete(row.model)
         case .verifying: break
         }
+    }
+
+    private func confirmDownload(_ model: BuiltInModel) {
+        guard let confirmation = model.licenseConfirmation() else {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "Couldn’t load the model licence")
+            alert.informativeText = String(localized: "The bundled licence text is missing. No download was started.")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: String(localized: "OK"))
+            if let window { alert.beginSheetModal(for: window) } else { alert.runModal() }
+            return
+        }
+
+        let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 520, height: 280))
+        text.string = confirmation.body
+        text.isEditable = false
+        text.isSelectable = true
+        text.font = .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        text.textContainerInset = NSSize(width: 8, height: 8)
+        text.isVerticallyResizable = true
+        text.textContainer?.containerSize = NSSize(width: 520, height: CGFloat.greatestFiniteMagnitude)
+        text.textContainer?.widthTracksTextView = true
+        text.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        text.sizeToFit()
+        text.frame.size.width = 520
+        let scroll = NSScrollView(frame: text.frame)
+        scroll.frame.size.height = 280
+        scroll.documentView = text
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        let alert = NSAlert()
+        alert.messageText = confirmation.title
+        let warning = confirmation.isNonCommercial ? String(localized: "NON-COMMERCIAL licence. ") : ""
+        alert.informativeText = warning + String(localized: "Licence: \(confirmation.licenseName). Review the full licence below before downloading.")
+        alert.accessoryView = scroll
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: String(localized: "Confirm"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        licenseConfirmationAlert = alert
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            self?.licenseConfirmationAlert = nil
+            guard response == .alertFirstButtonReturn else { return }
+            switch self?.downloads.state(model) {
+            case .notDownloaded, .failed: self?.downloads.download(model)
+            default: break
+            }
+        }
+        if let window { alert.beginSheetModal(for: window, completionHandler: finish) }
+        else { finish(alert.runModal()) }
     }
 
     @objc func secondary(_ sender: NSButton) {

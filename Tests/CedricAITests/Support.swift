@@ -217,7 +217,7 @@ func eventually(_ cond: @Sendable () async -> Bool) async -> Bool {
     return await cond()
 }
 
-func context(_ text: String = "let x = 1", gen: Int = 1, doc: UUID = UUID(),
+func context(_ text: String = "let value = items.count + 1", gen: Int = 1, doc: UUID = UUID(),
              language: String = "swift", file: String? = "a.swift") -> OwlContext {
     OwlContext(fileName: file, language: language, text: text, textStart: 0,
                visibleRange: NSRange(location: 0, length: (text as NSString).length),

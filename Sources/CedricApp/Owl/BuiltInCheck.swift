@@ -10,7 +10,7 @@ import CedricAI
 ///
 ///   1. Cedric › Cedric AI Settings… (Settings › Cedric); pick "Built-in"; the catalog rows show
 ///      (snapshot 0-models).
-///   2. Click Download; progress moves (snapshot 1-downloading).
+///   2. Click Download, confirm the bundled licence; progress moves (snapshot 1-downloading).
 ///   3. Click Pause; the row says Paused, the partial file is on disk
 ///      (snapshot 2-paused).
 ///   4. Click Resume; it finishes, the SHA-256 checks, the row says
@@ -40,15 +40,22 @@ enum BuiltInCheck {
         AICheck.check(downloads.state(m) == .notDownloaded && row.action.title == "Download", "\(m.name): Download")
         OwlCheck.after(0.3) {
             OwlCheck.snapshot(panel, "\(out)/0-models.png") {
-                AICheck.press(row.action, "Download") { if case .downloading = downloads.state(m) { return true }; return false }
-                AICheck.wait("progress", timeout: 60, { (downloads.state(m).fraction ?? 0) > 0.05 }) { ok in
-                    AICheck.check(ok && row.action.title == "Pause" && !row.progress.isHidden, "downloading: \(row.status.stringValue)")
-                    OwlCheck.snapshot(panel, "\(out)/1-downloading.png") {
-                        AICheck.press(row.action, "Pause") { if case .paused = downloads.state(m) { return true }; return false }
-                        AICheck.wait("paused", timeout: 10, { if case .paused = downloads.state(m) { return true }; return false }) { ok in
-                            let part = downloads.store.partialBytes(m)
-                            AICheck.check(ok && row.action.title == "Resume" && part > 0, "paused with \(part) bytes on disk: \(row.status.stringValue)")
-                            OwlCheck.snapshot(panel, "\(out)/2-paused.png") { resume(sheet, panel, row, out: out) }
+                AICheck.press(row.action, "Download") { view.licenseConfirmationAlert != nil }
+                AICheck.wait("licence confirmation", timeout: 10, { view.licenseConfirmationAlert != nil }) { shown in
+                    AICheck.check(shown, "Download presents the bundled licence before starting")
+                    guard let alert = view.licenseConfirmationAlert, let confirm = alert.buttons.first else {
+                        AICheck.finish(); return
+                    }
+                    AICheck.press(confirm, "Confirm") { if case .downloading = downloads.state(m) { return true }; return false }
+                    AICheck.wait("progress", timeout: 60, { (downloads.state(m).fraction ?? 0) > 0.05 }) { ok in
+                        AICheck.check(ok && row.action.title == "Pause" && !row.progress.isHidden, "downloading: \(row.status.stringValue)")
+                        OwlCheck.snapshot(panel, "\(out)/1-downloading.png") {
+                            AICheck.press(row.action, "Pause") { if case .paused = downloads.state(m) { return true }; return false }
+                            AICheck.wait("paused", timeout: 10, { if case .paused = downloads.state(m) { return true }; return false }) { ok in
+                                let part = downloads.store.partialBytes(m)
+                                AICheck.check(ok && row.action.title == "Resume" && part > 0, "paused with \(part) bytes on disk: \(row.status.stringValue)")
+                                OwlCheck.snapshot(panel, "\(out)/2-paused.png") { resume(sheet, panel, row, out: out) }
+                            }
                         }
                     }
                 }
@@ -60,7 +67,11 @@ enum BuiltInCheck {
         let downloads = BuiltInDownloads.shared
         let m = row.model
         let t0 = Date()
-        AICheck.press(row.action, "Resume") { if case .downloading = downloads.state(m) { return true }; return false }
+        AICheck.press(row.action, "Resume") {
+            if case .downloading = downloads.state(m) { return true }
+            return false
+        }
+        AICheck.check(SettingsWindowController.shared?.ai?.modelsView.licenseConfirmationAlert == nil, "Resume does not prompt for the licence")
         AICheck.wait("installed", timeout: 900, { downloads.state(m) == .installed }) { ok in
             AICheck.check(ok && downloads.store.isInstalled(m), String(format: "resumed, verified and installed in %.0f s", Date().timeIntervalSince(t0)))
             AICheck.check(row.action.title == "Delete" && row.status.stringValue.contains("verified"), "row: \(row.status.stringValue)")

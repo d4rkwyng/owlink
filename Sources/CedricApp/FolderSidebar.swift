@@ -21,7 +21,9 @@ extension AppDelegate {
 
     @objc func toggleFolderSidebarMenu(_ sender: Any?) {
         if let s = FolderSidebar.shared {
-            if s.isShown { s.hide() } else if let tab = currentTab ?? tabs.last { s.show(in: tab) }
+            if s.isShown { s.hide() }
+            else if let viewer = currentViewerTab { s.show(in: viewer) }
+            else if let tab = currentTab ?? tabs.last { s.show(in: tab) }
             scheduleSessionSave()
         } else if let p = FolderSidebar.pendingFolder {
             // Saved in the session while hidden: built now, on first use.
@@ -56,7 +58,7 @@ extension AppDelegate {
         case #selector(toggleFolderSidebarMenu(_:)):
             setShowHide(item, shown: FolderSidebar.shared?.isShown == true,
                         show: String(localized: "Show Folder Sidebar"), hide: String(localized: "Hide Folder Sidebar"))
-            return (FolderSidebar.shared != nil || FolderSidebar.pendingFolder != nil) && (currentTab ?? tabs.last) != nil
+            return (FolderSidebar.shared != nil || FolderSidebar.pendingFolder != nil) && (currentViewerTab != nil || (currentTab ?? tabs.last) != nil)
         default: return nil
         }
     }
@@ -86,12 +88,16 @@ extension AppDelegate {
         FolderSidebar.shared = s
         s.pendingReveal = reveal
         s.onOpen = { [weak self] node in self?.openFromFolder(node) }
+        s.onCreateFile = { [weak self] node in self?.openFromFolder(node, asText: true) }
         s.onChange = { [weak self] in self?.scheduleSessionSave() }
         s.onClose = { [weak self] in self?.closeFolder() }
         s.onOpenEnclosing = { [weak self] file in
             guard let dir = FolderTree.enclosingFolder(of: file) else { return }
             self?.openFolder(dir, reveal: file)
         }
+        s.onRename = { [weak self] old, new, directory in self?.folderItemRenamed(old, to: new, directory: directory) }
+        s.onTrash = { [weak self] url, directory in self?.folderItemTrashed(url, directory: directory) }
+        s.onPrepareFileOperation = { [weak self] in self?.finishRestore() }
         s.onFindInFolder = { [weak self] dir in
             guard let self else { return }
             self.findInFilesMenu(nil)
@@ -109,15 +115,19 @@ extension AppDelegate {
         scheduleSessionSave()
     }
 
-    func openFromFolder(_ node: FolderNode) {
+    func openFromFolder(_ node: FolderNode, asText: Bool = false) {
         guard let s = FolderSidebar.shared else { return }
-        let tab = open(node.url)
+        let tab = open(node.url, asText: asText)
         // Keep the tree beside the file it opened (the tab may not become
         // key when the app isn't active).
         if let tab, s.isShown {
             s.show(in: tab)
             s.reveal(tab.doc.fileURL)
             tab.window?.makeFirstResponder(s.outline)
+        } else if s.isShown, let viewer = viewerTab(for: node.url) {
+            s.show(in: viewer)
+            s.reveal(viewer.fileURL)
+            viewer.window?.makeFirstResponder(s.outline)
         }
     }
 
@@ -126,6 +136,46 @@ extension AppDelegate {
         guard let s = FolderSidebar.shared, s.isShown else { return }
         s.show(in: tab)
         s.reveal(tab.doc.fileURL)
+    }
+
+    func folderSidebarFollow(_ viewer: any ViewerTab) {
+        guard let s = FolderSidebar.shared, s.isShown else { return }
+        s.show(in: viewer)
+        s.reveal(viewer.fileURL)
+    }
+
+    func folderItemRenamed(_ old: URL, to new: URL, directory: Bool) {
+        finishRestore()
+        for tab in tabs {
+            guard let url = tab.doc.fileURL,
+                  let moved = FolderActions.movedURL(url, from: old, to: new, directory: directory) else { continue }
+            tab.doc.fileURL = moved
+            if tab.doc.missingOnDisk {
+                tab.doc.missingOnDisk = false
+                tab.hideDiskBar()
+            }
+            tab.updateTitle()
+            tab.gitSaved()
+        }
+        for viewer in viewerTabs {
+            if let moved = FolderActions.movedURL(viewer.fileURL, from: old, to: new, directory: directory) {
+                viewer.followRename(moved)
+            }
+        }
+        scheduleSessionSave()
+    }
+
+    func folderItemTrashed(_ url: URL, directory: Bool) {
+        finishRestore()
+        for tab in tabs {
+            guard let file = tab.doc.fileURL,
+                  FolderActions.movedURL(file, from: url, to: url, directory: directory) != nil else { continue }
+            tab.showFileMissing()
+        }
+        for viewer in viewerTabs where FolderActions.movedURL(viewer.fileURL, from: url, to: url, directory: directory) != nil {
+            viewer.sidebarHost?.showMissing(viewer.fileURL)
+        }
+        scheduleSessionSave()
     }
 
     /// For the session: the open folder (built or only remembered).
@@ -162,6 +212,7 @@ final class FolderOutlineView: NSOutlineView {
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = self.row(at: convert(event.locationInWindow, from: nil))
         if row >= 0, !selectedRowIndexes.contains(row) { selectRowIndexes([row], byExtendingSelection: false) }
+        if row < 0 { deselectAll(nil) }
         return super.menu(for: event)
     }
 }
@@ -172,7 +223,7 @@ final class FolderOutlineView: NSOutlineView {
 /// changed and the rows are inserted/removed in place (expansion and
 /// selection kept).
 @MainActor
-final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate, NSTextFieldDelegate {
     /// The one sidebar (nil until a folder is opened).
     static var shared: FolderSidebar?
     /// A folder from the session whose sidebar was hidden: nothing built.
@@ -207,12 +258,19 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     private(set) var listings = 0
     var onListed: ((FolderNode) -> Void)?
     var onOpen: ((FolderNode) -> Void)?
+    var onCreateFile: ((FolderNode) -> Void)?
     var onChange: (() -> Void)?
     var onClose: (() -> Void)?
     var onFindInFolder: ((URL) -> Void)?
     var onOpenEnclosing: ((URL) -> Void)?
+    var onRename: ((URL, URL, Bool) -> Void)?
+    var onTrash: ((URL, Bool) -> Void)?
+    var onPrepareFileOperation: (() -> Void)?
+    private var renamingNode: FolderNode?
     /// Selected when the root is first listed (Open Enclosing Folder).
     var pendingReveal: URL?
+    /// Hidden items shown after being created or renamed here.
+    private var revealedHiddenURLs = Set<URL>()
 
     init(root url: URL, state: SessionFolder? = nil) {
         rootURL = url
@@ -333,20 +391,32 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     /// Docks the sidebar at the left of `tab` (nothing if it is there), and
     /// starts watching the folder.
     func show(in tab: EditorWindowController) {
+        show(in: tab.split)
+    }
+
+    func show(in viewer: any ViewerTab) {
+        guard let split = viewer.sidebarHost?.split else { return }
+        show(in: split)
+    }
+
+    private func show(in split: NSSplitView) {
         let wasShown = isShown
         isShown = true
-        if superview !== tab.split {
+        if superview !== split {
             tracksWidth = false
             undock()
-            tab.dockLeftPanel(self, width: width)
-            splitObserver = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: tab.split, queue: nil) {
+            split.insertArrangedSubview(self, at: 0)
+            split.adjustSubviews()
+            split.setHoldingPriority(.init(260), forSubviewAt: 0)
+            if split.bounds.width > 0 { split.setPosition(min(width, split.bounds.width * 0.5), ofDividerAt: 0) }
+            splitObserver = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: split, queue: nil) {
                 [weak self] _ in MainActor.assumeIsolated { self?.splitResized() }
             }
             // Once the split has its final size, the width the user chose.
-            DispatchQueue.main.async { [weak self, weak tab] in
-                guard let self, let tab, self.superview === tab.split else { return }
-                if abs(self.frame.width - self.width) >= 1, tab.split.bounds.width > self.width + 200 {
-                    tab.split.setPosition(self.width, ofDividerAt: 0)
+            DispatchQueue.main.async { [weak self, weak split] in
+                guard let self, let split, self.superview === split else { return }
+                if abs(self.frame.width - self.width) >= 1, split.bounds.width > self.width + 200 {
+                    split.setPosition(self.width, ofDividerAt: 0)
                 }
                 self.tracksWidth = true
             }
@@ -413,11 +483,14 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         }
         node.isLoading = true
         let url = node.url, hidden = showHidden, ignore = ignore
+        let revealed = Set(revealedHiddenURLs
+            .filter { $0.deletingLastPathComponent().standardizedFileURL == url.standardizedFileURL }
+            .map(\.lastPathComponent))
         let ref = WeakRef(self), box = MainBox(value: node)
         DispatchQueue.global(qos: .userInitiated).async {
             var entries: [FolderEntry] = []
             var failure: String?
-            do { entries = try FolderTree.list(url, showHidden: hidden, ignore: ignore) } catch { failure = error.localizedDescription }
+            do { entries = try FolderTree.list(url, showHidden: hidden, ignore: ignore, revealed: revealed) } catch { failure = error.localizedDescription }
             let result = MainBox(value: (entries, failure))
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -467,7 +540,9 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
                 }
             }
         }
-        if node === root, let u = pendingReveal {
+        if let u = pendingReveal, u.deletingLastPathComponent().standardizedFileURL == node.url.standardizedFileURL,
+           let rel = FolderTree.relativePath(of: u, in: rootURL), let found = root.descendant(rel),
+           outline.row(forItem: found) >= 0 {
             pendingReveal = nil
             reveal(u)
         }
@@ -539,7 +614,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     }
 
     var selectedNode: FolderNode? {
-        let row = outline.clickedRow >= 0 ? outline.clickedRow : outline.selectedRow
+        let row = outline.selectedRow
         return row >= 0 ? outline.item(atRow: row) as? FolderNode : nil
     }
 
@@ -583,7 +658,12 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             i.representedObject = n
             menu.addItem(i)
         }
+        add(String(localized: "New File…"), #selector(newFile(_:)))
+        add(String(localized: "New Folder…"), #selector(newFolder(_:)))
         if n != nil {
+            add(String(localized: "Rename"), #selector(renameItem(_:)))
+            add(String(localized: "Move to Trash…"), #selector(trashItem(_:)))
+            menu.addItem(.separator())
             add(String(localized: "Reveal in Finder"), #selector(revealInFinder(_:)))
             // A file below the root: its own folder as the sidebar's root.
             if let n, !n.isDirectory, n.url.deletingLastPathComponent().standardizedFileURL.path != rootURL.standardizedFileURL.path {
@@ -600,6 +680,120 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     private func target(_ sender: Any?) -> FolderNode {
         ((sender as? NSMenuItem)?.representedObject as? FolderNode) ?? selectedNode ?? root
+    }
+
+    private func showError(_ error: Error) {
+        NSAlert(error: error).runModal()
+    }
+
+    private func checkVisibleName(_ name: String) throws {
+        if FolderTree.alwaysHidden.contains(name) {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
+                          userInfo: [NSLocalizedDescriptionKey: String(localized: "“\(name)” is always hidden in the folder sidebar.")])
+        }
+    }
+
+    private func createItem(_ sender: Any?, directory: Bool) {
+        let target = target(sender)
+        let parent = target.isDirectory ? target : target.parent ?? root
+        let alert = NSAlert()
+        alert.messageText = directory ? String(localized: "New Folder") : String(localized: "New File")
+        alert.informativeText = String(localized: "Enter a name.")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        alert.accessoryView = field
+        alert.addButton(withTitle: String(localized: "Create"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try createItem(named: field.stringValue, in: parent, directory: directory)
+        } catch { showError(error) }
+    }
+
+    func createItem(named name: String, in parent: FolderNode, directory: Bool) throws {
+        try checkVisibleName(name)
+        let url = try FolderActions.create(in: parent.url, name: name, directory: directory)
+        revealAfterChange(url, in: parent)
+        if !directory {
+            let node = FolderNode(url: url, entry: FolderEntry(name: url.lastPathComponent, isDirectory: false), parent: parent)
+            onCreateFile?(node)
+        }
+    }
+
+    @objc func newFile(_ sender: Any?) { createItem(sender, directory: false) }
+    @objc func newFolder(_ sender: Any?) { createItem(sender, directory: true) }
+
+    private func revealAfterChange(_ url: URL, in parent: FolderNode) {
+        if url.lastPathComponent.hasPrefix("."), !showHidden,
+           !FolderTree.alwaysHidden.contains(url.lastPathComponent) {
+            revealedHiddenURLs.insert(url.standardizedFileURL)
+        }
+        pendingReveal = url
+        if parent !== root { outline.expandItem(parent) }
+        load(parent)
+        quickOpen?.markStale()
+    }
+
+    @objc func renameItem(_ sender: Any?) {
+        let node = target(sender)
+        guard node !== root, let row = (0..<outline.numberOfRows).first(where: { outline.item(atRow: $0) as? FolderNode === node }),
+              let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? NSTableCellView,
+              let field = cell.textField else { NSSound.beep(); return }
+        renamingNode = node
+        field.isEditable = true
+        field.isSelectable = true
+        field.selectText(nil)
+        if field.currentEditor() == nil { field.window?.makeFirstResponder(field) }
+        field.currentEditor()?.selectedRange = FolderActions.renameSelection(name: node.name, isDirectory: node.isDirectory)
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, let node = renamingNode else { return }
+        renamingNode = nil
+        field.isEditable = false
+        field.isSelectable = false
+        defer { field.stringValue = node.name }
+        if (notification.userInfo?["NSTextMovement"] as? Int) == NSCancelTextMovement { return }
+        guard let parent = node.parent else { return }
+        do {
+            try checkVisibleName(field.stringValue)
+            onPrepareFileOperation?()
+            let new = try FolderActions.rename(node.url, name: field.stringValue)
+            guard new.path != node.url.path else { return }
+            revealedHiddenURLs.remove(node.url.standardizedFileURL)
+            onRename?(node.url, new, node.isDirectory)
+            revealAfterChange(new, in: parent)
+        } catch { showError(error) }
+    }
+
+    @objc func trashItem(_ sender: Any?) {
+        let node = target(sender)
+        guard node !== root else { NSSound.beep(); return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = String(localized: "Move “\(node.name)” to Trash?")
+        alert.informativeText = String(localized: "You can put it back from the Trash.")
+        alert.addButton(withTitle: String(localized: "Move to Trash"))
+        alert.buttons[0].hasDestructiveAction = true
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        onPrepareFileOperation?()
+        let url = node.url, directory = node.isDirectory
+        let parentURL = url.deletingLastPathComponent()
+        NSWorkspace.shared.recycle([url]) { [self] moved, error in
+            MainActor.assumeIsolated {
+                guard moved[url] != nil else {
+                    self.showError(error ?? NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                                                    userInfo: [NSLocalizedDescriptionKey: String(localized: "The item could not be moved to Trash.")]))
+                    return
+                }
+                self.onTrash?(url, directory)
+                self.quickOpen?.markStale()
+                if let rel = FolderTree.relativePath(of: parentURL, in: self.rootURL),
+                   let parent = self.root.descendant(rel) { self.load(parent) }
+                if let error { self.showError(error) }
+            }
+        }
     }
 
     @objc func revealInFinder(_ sender: Any?) {
@@ -623,6 +817,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     @objc func toggleHidden(_ sender: Any?) {
         showHidden.toggle()
+        if showHidden { revealedHiddenURLs.removeAll() }
         for n in root.loadedFolders { load(n) }
         onChange?()
     }
@@ -659,6 +854,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             c.identifier = id
             let image = NSImageView()
             let text = NSTextField(labelWithString: "")
+            text.delegate = self
             text.lineBreakMode = .byTruncatingMiddle
             text.font = .systemFont(ofSize: NSFont.smallSystemFontSize + 1)
             for v in [image, text] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false; c.addSubview(v) }

@@ -36,6 +36,7 @@ public struct LocalModelHintProvider: OwlHintProvider {
 
     /// The throwing variant, for "Test" buttons and the real check.
     public func requestHints(for context: OwlContext) async throws -> [OwlHint] {
+        guard HintPrompt.hasEnoughText(context.text) else { return [] }
         let text = HintPrompt.capped(context.text)
         let messages = HintPrompt.messages(for: context, text: text, model: model, server: true)
         let sentBytes = messages.reduce(0) { $0 + $1.content.utf8.count }

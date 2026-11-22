@@ -237,9 +237,12 @@ public final class LocalAIOwlBridge {
     public var canCheckNow: Bool { scheduler != nil && !paused }
 
     /// The user asked: one request for `context` now (never for a large
-    /// document). False when nothing was started.
+    /// document, and never when the text is empty or under
+    /// `HintPrompt.minimumHintCharacters` non-whitespace characters).
+    /// False when nothing was started.
     @discardableResult
     public func checkNow(_ context: OwlContext) -> Bool {
+        guard HintPrompt.hasEnoughText(context.text) else { return false }
         guard let s = scheduler, !paused, !largeDocuments.contains(context.documentID) else { return false }
         asked.insert(context.documentID)
         Task { await s.checkNow(context) }

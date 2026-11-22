@@ -206,6 +206,10 @@ final class ContextBarView: NSView {
         tint()
     }
 
+    func refreshInlineSelectionStates() {
+        refreshStates()
+    }
+
     /// A view toggle's menu item is on when it is checked or offers "Hide".
     static func isOn(_ m: NSMenuItem) -> Bool { m.state == .on || m.title.hasPrefix(String(localized: "Hide")) }
 

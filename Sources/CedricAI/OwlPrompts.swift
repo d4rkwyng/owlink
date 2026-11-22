@@ -137,23 +137,26 @@ public enum OwlPrompts {
     /// The system prompt for a chat question.
     /// `digest`: a digest of the rest of the document follows the shown
     /// text (`OwlChatRequest.digest`, for a model without tools).
-    public static func chatSystem(toolsOn: Bool, server: Bool = false, digest: Bool = false, checks: Bool = false, canEdit: Bool = false) -> String {
+    public static func chatSystem(toolsOn: Bool, server: Bool = false, digest: Bool = false, checks: Bool = false,
+                                  canEdit: Bool = false, partial: Bool = true) -> String {
         var s = persona(server: server) + "\n\n" + chatTask + "\n\n" + untrustedDocument + " " + chatInjection
         if checks, !toolsOn {
             s += "\n\nBefore the question come the results of Owlink's offline checks of the document (line, rule, message). "
                 + "When asked about problems or errors, report those first, each with its line number, in plain words; "
                 + "then add any other real problem you can see in the shown text. If the checks found nothing, say so."
         }
-        if digest, !toolsOn {
+        if digest, !toolsOn, partial {
             s += "\n\nYou see only part of the document: the \"Shown:\" line gives the lines you see and how many it has in all. "
                 + "After the shown text come the outline of the whole document (headings with line numbers, and how many list items "
                 + "and table rows each section has) and the lines that best match the question: use them for questions about the "
                 + "whole document, and count from the outline. Never answer as if you had seen lines you haven't."
         } else if toolsOn {
-            s += "\n\nYou can call tools to read more of the document" + (canEdit ? " or to propose an edit" : "") + ". "
-                + "You usually see only part of the document: the \"Shown:\" line gives the lines you see and how many it has in all. "
-                + "Before saying something isn't in the document, call search_document (or get_lines) to look at the rest. "
-                + "Use a tool only when it helps. "
+            s += "\n\nYou can call tools to read the document" + (canEdit ? " or to propose an edit" : "") + ". "
+            if partial {
+                s += "You usually see only part of the document: the \"Shown:\" line gives the lines you see and how many it has in all. "
+                    + "Before saying something isn't in the document, call search_document (or get_lines) to look at the rest. "
+            }
+            s += "Use a tool only when it helps. "
             if canEdit {
                 s += "To change the text, call propose_edit with find (the exact text to change, copied without the \"12| \" line numbers, "
                     + "just long enough to occur once) and replace (the new text); one call per separate change, at most \(OwlTools.maxProposals). "
@@ -167,7 +170,8 @@ public enum OwlPrompts {
     /// The fixed instruction behind a quick action.
     public static func quickInstruction(_ action: OwlQuickAction, prose: Bool, toolsOn: Bool, context: OwlChatContext,
                                         scan: String? = nil) -> String {
-        let lines = "lines \(context.firstLine)-\(context.lastLine)"
+        let partial = context.truncated || context.firstLine > 1 || context.lastLine < context.totalLines
+        let lines = "lines \(context.firstLine)-\(context.lastLine)" + (partial ? " of \(context.totalLines)" : "")
         let what = prose ? "text" : "code"
         let edit = toolsOn
             ? "For each change call propose_edit with find (the exact text from \(lines), copied without the line numbers) and replace (the new text), "
@@ -233,26 +237,16 @@ public enum OwlPrompts {
                                     history: [OwlChatEntry], toolsOn: Bool, model: String, server: Bool = false,
                                     canDescribeImage: Bool = false, totalLines: Int? = nil,
                                     digest: String? = nil, checks: String? = nil, canEdit: Bool = true) -> [OwlChatMessage] {
-        var out: [OwlChatMessage] = [.system(chatSystem(toolsOn: toolsOn, server: server, digest: digest != nil, checks: checks != nil, canEdit: canEdit))]
-        // Older turns are dropped (small context): the last two questions and answers.
-        var kept: [OwlChatEntry] = []
-        var users = 0
-        for e in history.reversed() where e.role == .user || e.role == .owl {
-            if e.role == .user { users += 1; if users > 2 { break } }
-            kept.insert(e, at: 0)
-        }
-        while kept.first?.role == .owl { kept.removeFirst() }
-        for e in kept {
-            let t = String(e.text.prefix(1200))
-            out.append(e.role == .user ? .user(t) : .assistant(t))
-        }
+        let partial = context.truncated || (totalLines.map { context.firstLine > 1 || context.lastLine < $0 } ?? false)
+        var out: [OwlChatMessage] = [.system(chatSystem(toolsOn: toolsOn, server: server, digest: digest != nil,
+                                                       checks: checks != nil, canEdit: canEdit, partial: partial))]
+        out += chatHistoryMessages(history)
         var user = "Language: \(language)\n"
         if let fileName {
             user += "File: \(fileName)\n"
             if let kind = fileKind(fileName, canDescribeImage: canDescribeImage) { user += kind + "\n" }
         }
         user += "Shown: \(context.scope.rawValue), lines \(context.firstLine)-\(context.lastLine)"
-        let partial = totalLines.map { context.firstLine > 1 || context.lastLine < $0 } ?? false
         if let total = totalLines, partial { user += " of \(total)" }
         if context.truncated { user += " (trimmed; use tools or ask for less)" }
         user += "\n```\n\(context.numbered)\n```\n\n"
@@ -265,6 +259,21 @@ public enum OwlPrompts {
         if model.lowercased().contains("qwen3") { user += "\n/no_think" }
         out.append(.user(user))
         return out
+    }
+
+    /// The history exactly as `chatMessages` keeps it.
+    public static func chatHistoryMessages(_ history: [OwlChatEntry]) -> [OwlChatMessage] {
+        var kept: [OwlChatEntry] = []
+        var users = 0
+        for e in history.reversed() where e.role == .user || e.role == .owl {
+            if e.role == .user { users += 1; if users > 2 { break } }
+            kept.insert(e, at: 0)
+        }
+        while kept.first?.role == .owl { kept.removeFirst() }
+        return kept.map {
+            let text = String($0.text.prefix(1200))
+            return $0.role == .user ? .user(text) : .assistant(text)
+        }
     }
 
     /// The start of an image document's "File kind:" line (the test engine
@@ -320,7 +329,7 @@ public enum OwlPrompts {
             s += "- \(t.name.rawValue)(\(params.joined(separator: ", "))): \(t.description)\n"
         }
         s += """
-        You were shown only some lines of the document: the "Shown: … lines A-B" line says which. Rules, in order:
+        The "Shown: … lines A-B" line says which document lines you were shown. Rules, in order:
         - The question names a line number outside A-B, or asks to read lines: call get_lines for those lines.
         - It says "selected", "selection" or "my selection": call get_selection (you were not shown the selection).
         - It asks to find, search, or where or how often a word appears: call search_document with that word.\(sectionRule)

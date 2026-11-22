@@ -26,6 +26,51 @@ import CedricCore
         s = try JSONDecoder().decode(LocalAISettings.self, from: old)
         #expect(s.automaticChecks == LocalAISettings.defaultAutomaticChecks)
     }
+
+    @Test func serverDefaultsAndBackendSwitchesKeepAutomaticOff() throws {
+        for backend in LocalAISettings.Backend.allCases {
+            #expect(LocalAISettings.defaultAutomaticChecks(for: backend) == (backend.usesServer ? false : LocalAISettings.defaultAutomaticChecks))
+        }
+        var server = LocalAISettings(backend: .ollama)
+        #expect(!server.automaticChecks)
+        var saved = try #require(try JSONSerialization.jsonObject(with: JSONEncoder().encode(server)) as? [String: Any])
+        saved["automaticChecks"] = nil
+        let oldServer = try JSONDecoder().decode(LocalAISettings.self, from: JSONSerialization.data(withJSONObject: saved))
+        #expect(!oldServer.automaticChecks)
+
+        server = LocalAISettings(automaticChecks: true)
+        server.selectBackend(.lmStudio)
+        #expect(!server.automaticChecks)
+        server.selectBackend(.builtIn)
+        #expect(!server.automaticChecks)
+    }
+
+    @Test func settingsControlsDoNotCarryTheCheckedBoxOntoAServer() {
+        let onDevice = LocalAISettings(automaticChecks: true)
+        let switchToServer = LocalAISettings.ControlDraft(enabled: false, backend: .ollama, addressText: "",
+                                                          model: nil, minInterval: 90, automaticChecks: true)
+        guard case .apply(let server) = onDevice.readControls(switchToServer) else {
+            Issue.record("switching to a server should apply")
+            return
+        }
+        #expect(!server.automaticChecks)
+
+        let serverChoice = LocalAISettings(backend: .ollama)
+        let deliberateChoice = LocalAISettings.ControlDraft(enabled: false, backend: .ollama, addressText: "",
+                                                            model: nil, minInterval: 90, automaticChecks: true)
+        guard case .apply(let enabled) = serverChoice.readControls(deliberateChoice) else {
+            Issue.record("the unchanged server controls should apply")
+            return
+        }
+        #expect(enabled.automaticChecks)
+    }
+
+    @Test func firstUseNoticeRequiresAnUnacknowledgedServerWithAutomaticChecksOn() {
+        #expect(LocalAISettings.shouldShowAutomaticServerNotice(backend: .ollama, automaticChecks: true, acknowledged: false))
+        #expect(!LocalAISettings.shouldShowAutomaticServerNotice(backend: .builtIn, automaticChecks: true, acknowledged: false))
+        #expect(!LocalAISettings.shouldShowAutomaticServerNotice(backend: .custom, automaticChecks: false, acknowledged: false))
+        #expect(!LocalAISettings.shouldShowAutomaticServerNotice(backend: .lmStudio, automaticChecks: true, acknowledged: true))
+    }
 }
 
 @Suite struct ManualSchedulerTests {
@@ -72,7 +117,7 @@ import CedricCore
         try? await Task.sleep(nanoseconds: 400_000_000)
         #expect(provider.calls == 0)
         let doc = UUID()
-        #expect(bridge.checkNow(context("if i <= n {}", gen: 4, doc: doc)))
+        #expect(bridge.checkNow(context("if i <= n { print(indexValue) }", gen: 4, doc: doc)))
         #expect(await eventually { @MainActor in got.value == 1 })
         #expect(provider.calls == 1)
         // Paused (source back to Rules) or a large document: not even when asked.
@@ -95,7 +140,7 @@ import CedricCore
         s.automaticChecks = false
         await bridge.apply(s)
         let doc = UUID()
-        #expect(bridge.checkNow(context("if i <= n {}", gen: 1, doc: doc)))
+        #expect(bridge.checkNow(context("if i <= n { print(indexValue) }", gen: 1, doc: doc)))
         #expect(await eventually { @MainActor in bridge.thinking.contains(doc) })
         #expect(bridge.wantsContext(for: doc) && !bridge.wantsContext(for: UUID()))
         // The user types while it runs: the answer is for old text, so it's cancelled.
