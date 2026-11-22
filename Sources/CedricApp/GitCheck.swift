@@ -119,6 +119,7 @@ extension DevChecks {
                 expect(git?.repo?.location.workTree.path == repo.standardizedFileURL.path, "finds the repository root from src/",
                        git?.repo?.location.workTree.path ?? "-")
                 expect(label == "main", "the status bar shows the branch, no dirty dot", "'\(label)'")
+                expect(tab.statusBar.gitButton.accessibilityLabel()?.isEmpty == false, "the git button has a VoiceOver label")
                 expect(git?.changes.isEmpty == true, "no change marks for an unedited file")
                 expect(git?.relativePath == "src/notes.swift", "the path from the repository root", git?.relativePath ?? "-")
                 expect(git?.remote == GitHubRemote(host: "github.com", owner: "example", repo: "cedric-demo"), "the GitHub remote is read")
