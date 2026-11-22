@@ -2119,8 +2119,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     /// Restore Previous Version: the safety copies of this file (before
-    /// Owlink first saved it, conflict versions, text kept before a
-    /// reload), newest first, kept 7 days.
+    /// Owlink saves, conflict versions, text kept before a reload),
+    /// newest first, kept up to 7 days.
     private func previousVersionsMenu() -> UIMenuElement {
         let copies = SaveSafetyStores.copies.copies(forDocumentPath: document.recoveryPath)
         let title = String(localized: "Restore Previous Version…")

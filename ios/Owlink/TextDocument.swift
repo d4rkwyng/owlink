@@ -12,6 +12,11 @@ import CedricCore
 /// nothing (`DiskState`); a file that mixes line endings keeps each
 /// unchanged line's own; UTF-16 without a byte-order mark gets none.
 final class TextDocument: UIDocument {
+    /// Accessed only by the safety queue; each read starts a new sequence.
+    private final class ReadHistory: @unchecked Sendable {
+        var hasCopy = false
+    }
+
     enum OpenError: LocalizedError {
         case binary, undecodable, unencodable(TextEncoding)
         var errorDescription: String? {
@@ -42,11 +47,11 @@ final class TextDocument: UIDocument {
         savesInFlight == 0 && !diskStateStale && !externalChangePending && !documentState.contains(.inConflict)
     }
     /// What the save in progress writes (becomes `onDisk` if it succeeds).
-    private var writing: (state: DiskState, layout: LineEndingLayout?)?
-    /// The file's bytes as read, until they are backed up before the first
-    /// write (not kept for files over the copy store's cap).
-    private var bytesAsRead: Data?
-    private var backedUpSinceRead = false
+    private var writing: (state: DiskState, layout: LineEndingLayout?, bytes: Data?)?
+    /// The bytes as read or last written, unless over the copy store's cap.
+    private var bytesOnDisk: Data?
+    private var readHistory = ReadHistory()
+    private var autosaveInProgress = false
     var language = LanguageChoice()
     /// Allows opening a file that looks binary (asked once).
     var openBinaryAnyway = false
@@ -101,7 +106,8 @@ final class TextDocument: UIDocument {
                                           endings: endings) else {
             throw OpenError.unencodable(encoding)
         }
-        writing = (state, endings.map { LineEndingLayout(text: text, endings: $0) })
+        writing = (state, endings.map { LineEndingLayout(text: text, endings: $0) },
+                   data.count <= SafetyCopyStore.maxBytes ? data : nil)
         return data
     }
 
@@ -112,8 +118,8 @@ final class TextDocument: UIDocument {
         if decoded.looksBinary && !openBinaryAnyway { throw OpenError.binary }
         // The bytes as first opened (not on a reload after a change elsewhere).
         if openedCopy == nil { openedCopy = SaveSafetyStores.revert.keep(data, id: openedCopyID) }
-        bytesAsRead = data.count <= SafetyCopyStore.maxBytes ? data : nil
-        backedUpSinceRead = false
+        bytesOnDisk = data.count <= SafetyCopyStore.maxBytes ? data : nil
+        readHistory = ReadHistory()
         text = decoded.text
         encoding = decoded.encoding
         lineEnding = decoded.lineEnding
@@ -151,7 +157,13 @@ final class TextDocument: UIDocument {
             completionHandler?(true)
             return
         }
-        super.autosave(completionHandler: completionHandler)
+        autosaveInProgress = true
+        super.autosave { ok in
+            DispatchQueue.main.async {
+                self.autosaveInProgress = false
+                completionHandler?(ok)
+            }
+        }
     }
 
     /// The private copy of the file as opened, if one was kept.
@@ -160,6 +172,7 @@ final class TextDocument: UIDocument {
     func discardOpenedCopy() { SaveSafetyStores.revert.clear(id: openedCopyID) }
 
     override func save(to url: URL, for saveOperation: UIDocument.SaveOperation, completionHandler: ((Bool) -> Void)? = nil) {
+        let isAutosave = autosaveInProgress
         // Nothing changed from what is on disk (an edit undone, a format
         // change undone): the file isn't written at all.
         if saveOperation == .forOverwriting, url == fileURL, cleanCheckAllowed,
@@ -172,7 +185,7 @@ final class TextDocument: UIDocument {
             return
         }
         writing = nil
-        backUpBeforeFirstWrite()
+        if saveOperation == .forOverwriting, url == fileURL { backUpBeforeWrite(isAutosave: isAutosave) }
         savesInFlight += 1
         super.save(to: url, for: saveOperation) { ok in
             self.savesInFlight = max(0, self.savesInFlight - 1)
@@ -180,6 +193,7 @@ final class TextDocument: UIDocument {
                 if !self.hasUnsavedChanges { self.firstUnsavedEdit = nil }
                 if let w = self.writing, url == self.fileURL {
                     self.onDisk = w.state
+                    self.bytesOnDisk = w.bytes
                     self.diskStateStale = false
                     if let layout = w.layout { self.lineEndingLayout = layout }
                 }
@@ -194,15 +208,43 @@ final class TextDocument: UIDocument {
         }
     }
 
-    /// Before the first write after a read: the file as read goes to the
-    /// safety copies (7 days; Restore Previous Version).
-    private func backUpBeforeFirstWrite() {
-        guard BackupPolicy.shouldBackUp(needsWrite: true, backedUpSinceRead: backedUpSinceRead, haveBytes: bytesAsRead != nil),
-              let data = bytesAsRead else { return }
-        let copy = SafetyCopy(documentPath: recoveryPath, displayName: displayName, kind: .original, sourceDate: fileModificationDate)
-        if (try? SaveSafetyStores.copies.keep(data, as: copy)) != nil {
-            backedUpSinceRead = true
-            bytesAsRead = nil
+    /// Keep the last disk bytes for Restore Previous Version before writing.
+    private func backUpBeforeWrite(isAutosave: Bool) {
+        guard let data = bytesOnDisk else { return }
+        let path = recoveryPath, name = displayName, modified = fileModificationDate
+        let history = readHistory
+        SaveSafetyStores.queue.async {
+            let store = SaveSafetyStores.copies
+            let snapshot = store.all()
+            let newest = store.copies(forDocumentPath: path, in: snapshot).first { $0.kind == .original }
+            let newestBytes = newest.flatMap { $0.byteCount == data.count ? store.data(for: $0) : nil }
+            let firstSinceRead = !history.hasCopy
+            if firstSinceRead, let newest, newestBytes == data {
+                do {
+                    if newest.pinned != true { try store.pin(newest) }
+                    history.hasCopy = true
+                } catch {
+                    NSLog("Owlink couldn't pin a pre-save copy: %@", error.localizedDescription)
+                }
+                return
+            }
+            let now = Date()
+            guard SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: newestBytes, isAutosave: isAutosave,
+                                         newestSavedAt: newest?.savedAt, now: now, firstSinceRead: firstSinceRead) else { return }
+            let copy = SafetyCopy(documentPath: path, displayName: name, kind: .original, savedAt: now,
+                                  sourceDate: modified, pinned: firstSinceRead ? true : nil)
+            do {
+                let kept = try store.keep(data, as: copy)
+                history.hasCopy = true
+                let updated = (snapshot + [kept]).sorted {
+                    if $0.savedAt != $1.savedAt { return $0.savedAt > $1.savedAt }
+                    return $0.id < $1.id
+                }
+                let remaining = store.pruneSaveHistory(forDocumentPath: path, in: updated)
+                store.pruneSaveHistoryBudget(in: remaining)
+            } catch {
+                NSLog("Owlink couldn't keep a pre-save copy: %@", error.localizedDescription)
+            }
         }
     }
 
@@ -238,6 +280,7 @@ final class TextDocument: UIDocument {
             externalChangePending = false
             super.revert(toContentsOf: url, completionHandler: completionHandler)
         case .askFirst:
+            bytesOnDisk = nil
             externalChangePending = true
             completionHandler?(false)
             if let onExternalChange { DispatchQueue.main.async(execute: onExternalChange) }
@@ -256,6 +299,7 @@ final class TextDocument: UIDocument {
     /// The snapshot may not match the file; the next save writes and clears it.
     func markDiskStateStale() {
         diskStateStale = true
+        bytesOnDisk = nil
     }
 
     /// Keep Mine: the edits stay unsaved, and the next save replaces theirs.

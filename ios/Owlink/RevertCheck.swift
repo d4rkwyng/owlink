@@ -88,6 +88,7 @@ enum RevertCheck {
         let original = "line one\nline two\n"
         try? original.write(to: url, atomically: true, encoding: .utf8)
         // Copies from an earlier run of this check go.
+        SaveSafetyStores.flush()
         for c in SaveSafetyStores.copies.copies(forDocumentPath: url.standardizedFileURL.path) { SaveSafetyStores.copies.remove(c) }
         AppSettings.saveAutomatically = false
 
@@ -108,6 +109,7 @@ enum RevertCheck {
         tv.insertText("edit B\n")
         check(await save(doc), "second save")
         check(disk(url) == original + "edit A\nedit B\n", "disk has edits A and B")
+        SaveSafetyStores.flush()
         let copies = SaveSafetyStores.copies.copies(forDocumentPath: doc.recoveryPath)
         info("safety copies after two saves: \(copies.map { "\($0.kind.rawValue) \($0.byteCount)b" })")
         check(copies.count >= 1, "Restore Previous Version has at least one copy after saving")
@@ -188,9 +190,13 @@ enum RevertCheck {
         tv.selectedRange = NSRange(location: (tv.text as NSString).length, length: 0)
         tv.insertText("edit D\n")
         check(await save(doc), "save edit D")
+        SaveSafetyStores.flush()
         let copies2 = SaveSafetyStores.copies.copies(forDocumentPath: doc.recoveryPath)
         info("safety copies now: \(copies2.map { "\($0.kind.rawValue) \($0.byteCount)b \(String(data: SaveSafetyStores.copies.data(for: $0) ?? Data(), encoding: .utf8)?.debugDescription ?? "")" })")
-        if let c = copies2.first(where: { $0.kind == .original }) {
+        let pinned = copies2.first { $0.kind == .original && $0.pinned == true }
+        check(pinned.flatMap { SaveSafetyStores.copies.data(for: $0) } == Data(original.utf8),
+              "the pinned copy contains the original text")
+        if let c = copies2.first(where: { $0.kind == .original && SaveSafetyStores.copies.data(for: $0) == Data(original.utf8) }) {
             editor.restore(c)
             try? await Task.sleep(for: .milliseconds(300))
             check(tv.text == original, "Restore Previous Version (Before Owlink saved) shows the original text")
@@ -210,6 +216,7 @@ enum RevertCheck {
         let editor2 = EditorViewController(document: doc2, readModeOnOpen: true)
         await present(editor2, over: browser)
         let tv2 = editor2.textView
+        SaveSafetyStores.flush()
         let copies3 = SaveSafetyStores.copies.copies(forDocumentPath: doc2.recoveryPath)
         info("reopen: copies \(copies3.count), opened copy \(String(describing: doc2.openedCopy))")
         check(!copies3.isEmpty, "earlier versions still offered after reopening")
@@ -248,6 +255,121 @@ enum RevertCheck {
         check(tv2.text == before2, "after a reload, Revert to Opened still shows the text as opened")
         await dismiss(browser)
         await close(doc2)
+
+        // 6. Each save preserves the preceding disk state, up to the cap.
+        let historyURL = docs.appendingPathComponent("historycheck.txt")
+        try? FileManager.default.removeItem(at: historyURL)
+        try? "v0\n".write(to: historyURL, atomically: true, encoding: .utf8)
+        let store = SaveSafetyStores.copies
+        SaveSafetyStores.flush()
+        for copy in store.copies(forDocumentPath: historyURL.standardizedFileURL.path) { store.remove(copy) }
+        let historyDoc = TextDocument(fileURL: historyURL)
+        let historyOpened = await withCheckedContinuation { c in historyDoc.open { c.resume(returning: $0) } }
+        check(historyOpened, "opened the history check file")
+        guard historyOpened else { return }
+        let historyEditor = EditorViewController(document: historyDoc, readModeOnOpen: false)
+        await present(historyEditor, over: browser)
+        let historyText = historyEditor.textView
+        func originals() -> [SafetyCopy] {
+            SaveSafetyStores.flush()
+            return store.copies(forDocumentPath: historyDoc.recoveryPath).filter { $0.kind == .original }
+        }
+        func copyText(_ copy: SafetyCopy) -> String? {
+            store.data(for: copy).flatMap { String(data: $0, encoding: .utf8) }
+        }
+        func replaceHistoryText(_ text: String) {
+            guard let range = historyText.textRange(from: historyText.beginningOfDocument, to: historyText.endOfDocument) else {
+                check(false, "history text range exists")
+                return
+            }
+            historyText.replace(range, withText: text)
+            historyEditor.textViewDidChange(historyText)
+        }
+        for i in 1...3 {
+            replaceHistoryText("v\(i)\n")
+            check(await save(historyDoc), "history save v\(i)")
+        }
+        let historyCopies = originals()
+        check(historyCopies.map { copyText($0) } == ["v2\n", "v1\n", "v0\n"],
+              "previous versions are v2, v1, v0 newest first")
+        if historyCopies.count >= 2 {
+            historyEditor.restore(historyCopies[0])
+            check(historyText.text == "v2\n" && historyDoc.hasUnsavedChanges && historyEditor.editedShown,
+                  "restoring v2 is Edited")
+            historyEditor.restore(historyCopies[1])
+            check(historyText.text == "v1\n" && historyDoc.hasUnsavedChanges && historyEditor.editedShown,
+                  "restoring v1 is Edited")
+            check(await save(historyDoc), "save restored v1")
+            check(disk(historyURL) == "v1\n" && !historyDoc.hasUnsavedChanges && !historyEditor.editedShown,
+                  "saved v1 is on disk and not Edited")
+            if let same = originals().first(where: { copyText($0) == "v1\n" }) {
+                historyEditor.restore(same)
+                check(historyText.text == "v1\n" && !historyDoc.hasUnsavedChanges && !historyEditor.editedShown,
+                      "restoring the disk version is not Edited")
+            }
+            if let v3 = originals().first(where: { copyText($0) == "v3\n" }) {
+                historyText.undoManager?.removeAllActions()
+                historyEditor.restore(v3)
+                check(historyText.text == "v3\n" && historyDoc.hasUnsavedChanges && historyEditor.editedShown,
+                      "restoring v3 is Edited")
+                historyText.undoManager?.undo()
+                check(historyText.text == "v1\n" && !historyDoc.hasUnsavedChanges && !historyEditor.editedShown,
+                      "undo after restore returns to saved v1, not Edited")
+            } else {
+                check(false, "v3 was kept before saving restored v1")
+            }
+        } else {
+            check(false, "history has both versions to restore")
+        }
+        historyEditor.revertToOpened()
+        check(historyText.text == "v0\n", "history Revert to Opened still shows v0")
+        for i in 1...12 {
+            replaceHistoryText("history \(i)\n")
+            check(await save(historyDoc), "capped history save \(i)")
+        }
+        let capped = originals()
+        check(capped.count == SafetyCopyStore.saveHistoryLimit + 1, "save history is capped at 10 plus the pinned version")
+        check(capped.map { copyText($0) } == (2...11).reversed().map { "history \($0)\n" } + ["v0\n"],
+              "history keeps the newest ten and pinned version, dropping other old copies")
+        check(await save(historyDoc), "unchanged history save")
+        check(originals().map(\.id) == capped.map(\.id), "unchanged save adds no history copy")
+        await dismiss(browser)
+        await close(historyDoc)
+
+        // 7. Autosaves are thinned: within 60 s of the last copy an autosave
+        // adds none; an explicit save still does.
+        let thinURL = docs.appendingPathComponent("thincheck.txt")
+        try? FileManager.default.removeItem(at: thinURL)
+        try? "t0\n".write(to: thinURL, atomically: true, encoding: .utf8)
+        for copy in store.copies(forDocumentPath: thinURL.standardizedFileURL.path) { store.remove(copy) }
+        let thinDoc = TextDocument(fileURL: thinURL)
+        let thinOpened = await withCheckedContinuation { c in thinDoc.open { c.resume(returning: $0) } }
+        check(thinOpened, "opened the thinning check file")
+        guard thinOpened else { return }
+        AppSettings.saveAutomatically = true
+        func thinOriginals() -> [SafetyCopy] {
+            SaveSafetyStores.flush()
+            return store.copies(forDocumentPath: thinDoc.recoveryPath).filter { $0.kind == .original }
+        }
+        func autosave(_ text: String) async -> Bool {
+            thinDoc.text = text
+            thinDoc.updateChangeCount(.done)
+            return await withCheckedContinuation { c in thinDoc.autosave { c.resume(returning: $0) } }
+        }
+        check(await autosave("t1\n"), "first autosave")
+        check(disk(thinURL) == "t1\n", "first autosave wrote the file")
+        check(thinOriginals().count == 1, "first autosave after opening keeps a copy")
+        check(await autosave("t2\n"), "second autosave")
+        check(disk(thinURL) == "t2\n", "second autosave wrote the file")
+        check(thinOriginals().count == 1, "an autosave within 60 s of the last copy adds none")
+        thinDoc.text = "t3\n"
+        thinDoc.updateChangeCount(.done)
+        check(await save(thinDoc), "explicit save after autosaves")
+        let thinCopies = thinOriginals()
+        check(thinCopies.count == 2 && thinCopies.first.flatMap { store.data(for: $0) } == Data("t2\n".utf8),
+              "an explicit save keeps the autosaved version")
+        AppSettings.saveAutomatically = false
+        await close(thinDoc)
     }
 }
 #endif

@@ -9,8 +9,8 @@ import CedricCore
 /// - the bytes of each open document as opened (Revert to Opened Version):
 ///   Caches/Owlink/Opened, deleted when the document closes and at launch;
 /// - safety copies made before anything replaces a file's bytes (conflict
-///   versions, unsaved text before a reload, the original before the first
-///   save): Application Support/Owlink/Copies, kept 7 days.
+///   versions, unsaved text before a reload, save history):
+///   Application Support/Owlink/Copies, kept up to 7 days.
 enum SaveSafetyStores {
     static let recovery: RecoveryStore = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -27,9 +27,12 @@ enum SaveSafetyStores {
         return SafetyCopyStore(directory: base.appendingPathComponent("Owlink/Copies", isDirectory: true))
     }()
 
-    /// One serial queue for every recovery write and delete, so a delete
-    /// queued after a write always wins.
+    /// Serializes recovery writes and pre-save history work.
     static let queue = DispatchQueue(label: "app.owlink.recovery", qos: .utility)
+
+    #if DEBUG
+    static func flush() { queue.sync {} }
+    #endif
 }
 
 /// Safety copies of one document, made before anything replaces its text.

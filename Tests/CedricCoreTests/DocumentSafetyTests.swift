@@ -68,6 +68,157 @@ import Testing
         #expect(!fm.fileExists(atPath: store.recordURL(id: "orphan").path))
     }
 
+    @Test func saveHistoryKeepsNewestTenOnlyForTheRequestedDocumentAndKind() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        let start = Date(timeIntervalSince1970: 1_000)
+        var originals: [SafetyCopy] = []
+        for i in 0..<12 {
+            originals.append(try store.keep(Data("\(i)".utf8),
+                                            as: SafetyCopy(documentPath: "/a", displayName: "a", kind: .original,
+                                                           savedAt: start.addingTimeInterval(Double(i)))))
+        }
+        var others: [SafetyCopy] = []
+        for kind in [SafetyCopy.Kind.conflictVersion, .unsavedText, .externalVersion] {
+            others.append(try store.keep(Data("other".utf8),
+                                         as: SafetyCopy(documentPath: "/a", displayName: "a", kind: kind, savedAt: start)))
+        }
+        let otherDocument = try store.keep(Data("b".utf8),
+                                           as: SafetyCopy(documentPath: "/b", displayName: "b", kind: .original, savedAt: start))
+        store.pruneSaveHistory(forDocumentPath: "/a")
+        #expect(store.copies(forDocumentPath: "/a").filter { $0.kind == .original }.map(\.id)
+                == originals.suffix(10).reversed().map(\.id))
+        for copy in originals.prefix(2) {
+            #expect(store.data(for: copy) == nil)
+            #expect(!fm.fileExists(atPath: store.recordURL(id: copy.id).path))
+        }
+        for copy in others + [otherDocument] {
+            #expect(store.data(for: copy) != nil)
+            #expect(store.all().contains(copy))
+        }
+    }
+
+    @Test func saveHistoryBreaksDateTiesDeterministically() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        let date = Date(timeIntervalSince1970: 1_000)
+        for id in ["c", "a", "b"] {
+            try store.keep(Data(id.utf8), as: SafetyCopy(id: id, documentPath: "/a", displayName: "a",
+                                                        kind: .original, savedAt: date))
+        }
+        store.pruneSaveHistory(forDocumentPath: "/a", limit: 2)
+        #expect(store.copies(forDocumentPath: "/a").map(\.id) == ["a", "b"])
+        store.pruneSaveHistory(forDocumentPath: "/a", limit: 0)
+        #expect(store.copies(forDocumentPath: "/a").isEmpty)
+    }
+
+    @Test func saveHistoryDeduplicatesOnlyAgainstTheNewestBytes() {
+        let bytes = Data("a".utf8)
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: nil, newestKept: nil))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: nil, newestKept: bytes))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: bytes, newestKept: bytes))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: bytes, newestKept: Data("b".utf8)))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: bytes, newestKept: nil))
+    }
+
+    @Test func saveHistoryPreservesOnlyTheNewestExtraPin() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        var copies: [SafetyCopy] = []
+        for i in 0..<13 {
+            copies.append(try store.keep(Data("\(i)".utf8),
+                                         as: SafetyCopy(documentPath: "/a", displayName: "a", kind: .original,
+                                                        savedAt: Date(timeIntervalSince1970: Double(i)),
+                                                        pinned: i < 2 ? true : nil)))
+        }
+        store.pruneSaveHistory(forDocumentPath: "/a")
+        #expect(store.copies(forDocumentPath: "/a").map(\.id) == copies.suffix(10).reversed().map(\.id) + [copies[1].id])
+        #expect(store.data(for: copies[0]) == nil)
+        #expect(store.data(for: copies[1]) != nil)
+        store.pruneSaveHistory(forDocumentPath: "/a", limit: 0)
+        #expect(store.copies(forDocumentPath: "/a").map(\.id) == [copies[1].id])
+    }
+
+    @Test func olderCopyRecordsDecodeWithoutPinnedAndCanBePinned() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        let copy = try store.keep(Data("old".utf8), as: SafetyCopy(documentPath: "/a", displayName: "a", kind: .original))
+        let record = try Data(contentsOf: store.recordURL(id: copy.id))
+        let plist = try #require(PropertyListSerialization.propertyList(from: record, format: nil) as? [String: Any])
+        #expect(plist["pinned"] == nil)
+        #expect(try PropertyListDecoder().decode(SafetyCopy.self, from: record).pinned == nil)
+        try store.pin(copy)
+        let pinned = try #require(store.copies(forDocumentPath: "/a").first)
+        #expect(pinned.pinned == true)
+        #expect(pinned.savedAt == copy.savedAt)
+        #expect(store.data(for: pinned) == Data("old".utf8))
+    }
+
+    @Test func saveHistoryDoesNotAddAnExtraCopyWhenPinIsAlreadyRecent() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        var copies: [SafetyCopy] = []
+        for i in 0..<4 {
+            copies.append(try store.keep(Data("\(i)".utf8),
+                                         as: SafetyCopy(documentPath: "/a", displayName: "a", kind: .original,
+                                                        savedAt: Date(timeIntervalSince1970: Double(i)),
+                                                        pinned: i == 2 ? true : nil)))
+        }
+        store.pruneSaveHistory(forDocumentPath: "/a", limit: 2)
+        #expect(store.copies(forDocumentPath: "/a").map(\.id) == [copies[3].id, copies[2].id])
+    }
+
+    @Test func saveHistoryBudgetRemovesOldestEligibleAcrossDocuments() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = SafetyCopyStore(directory: t)
+        func keep(_ path: String, _ date: Double, pinned: Bool? = nil, kind: SafetyCopy.Kind = .original) throws -> SafetyCopy {
+            try store.keep(Data(repeating: 1, count: 4),
+                           as: SafetyCopy(documentPath: path, displayName: path, kind: kind,
+                                          savedAt: Date(timeIntervalSince1970: date), pinned: pinned))
+        }
+        let pin = try keep("/a", 1, pinned: true)
+        let aOld = try keep("/a", 2)
+        let bOld = try keep("/b", 3)
+        let aNew = try keep("/a", 4)
+        let bNew = try keep("/b", 5)
+        let other = try keep("/a", 0, kind: .externalVersion)
+        store.pruneSaveHistoryBudget(bytes: 16)
+        #expect(store.data(for: aOld) == nil)
+        #expect(store.data(for: bOld) != nil)
+        #expect(store.data(for: pin) != nil)
+        #expect(store.data(for: aNew) != nil && store.data(for: bNew) != nil)
+        #expect(store.data(for: other) != nil)
+        store.pruneSaveHistoryBudget(bytes: 0)
+        #expect(store.data(for: bOld) == nil)
+        #expect(store.data(for: pin) != nil)
+        #expect(store.data(for: aNew) != nil && store.data(for: bNew) != nil)
+        #expect(store.data(for: other) != nil)
+    }
+
+    @Test func autosaveHistoryThinsRecentDistinctSaves() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let data = Data("new".utf8), old = Data("old".utf8)
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: false,
+                                       newestSavedAt: now, now: now, firstSinceRead: false))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: true,
+                                        newestSavedAt: now.addingTimeInterval(-59), now: now, firstSinceRead: false))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: true,
+                                       newestSavedAt: now.addingTimeInterval(-60), now: now, firstSinceRead: false))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: true,
+                                       newestSavedAt: now, now: now, firstSinceRead: true))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: nil, isAutosave: true,
+                                       newestSavedAt: nil, now: now, firstSinceRead: false))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: data, isAutosave: true,
+                                        newestSavedAt: nil, now: now, firstSinceRead: true))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: nil, newestKept: nil, isAutosave: false,
+                                        newestSavedAt: nil, now: now, firstSinceRead: true))
+        #expect(!SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: true,
+                                        newestSavedAt: now.addingTimeInterval(1), now: now, firstSinceRead: false))
+        #expect(SaveHistory.shouldKeep(bytesOnDisk: data, newestKept: old, isAutosave: true,
+                                       newestSavedAt: now.addingTimeInterval(-5), now: now, firstSinceRead: false,
+                                       minAutosaveInterval: 5))
+    }
+
     // MARK: Conflicts
 
     @Test func conflictStepsCopyFirstAndFollowApplesOrder() {

@@ -100,7 +100,7 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Saving"))
                 } footer: {
-                    Text(String(localized: "Save Automatically on: changes are saved to the file as you work. Off: the file changes only when you tap Save, and closing asks first. Either way, until changes are saved, Owlink keeps a copy of the unsaved text on this device (not in backups) to offer after a crash, and deletes it when you save or close.\n\nOpen Files Read-Only: files open for reading, and you tap Edit to change them (Done goes back). Files that look binary always open read-only.\n\nBefore Owlink first saves over a file, it keeps a copy of the file as it was, on this device for 7 days: Restore Previous Version in the document’s menu."))
+                    Text(String(localized: "Save Automatically on: changes are saved to the file as you work. Off: the file changes only when you tap Save, and closing asks first. Either way, until changes are saved, Owlink keeps a copy of the unsaved text on this device (not in backups) to offer after a crash, and deletes it when you save or close.\n\nOpen Files Read-Only: files open for reading, and you tap Edit to change them (Done goes back). Files that look binary always open read-only.\n\nOwlink keeps previous versions on this device for up to 7 days: up to 10 recent copies and the version before Owlink first saved after opening or reloading. Automatic saves are copied at most once a minute, and older copies may be removed to limit storage. Restore Previous Version in the document’s menu."))
                 }
                 .onChange(of: saveAutomatically) { AppSettings.post() }
                 .onChange(of: openReadOnly) { AppSettings.post() }

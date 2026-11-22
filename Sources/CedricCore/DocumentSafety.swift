@@ -2,8 +2,8 @@ import Foundation
 
 /// Copies of a document's bytes that the iOS app keeps before anything
 /// could replace them: the versions of an iCloud conflict, the text that
-/// was unsaved when another app changed the file, and (once per session)
-/// the file as it was before Owlink first wrote it. Private to the app
+/// was unsaved when another app changed the file, and the file as it was
+/// before saves. Private to the app
 /// (0700 folder, 0600 files, kept out of backups and iCloud), each copy a
 /// pair of files: the bytes, then a small record saying what they are.
 public struct SafetyCopy: Codable, Equatable, Sendable, Identifiable {
@@ -14,7 +14,7 @@ public struct SafetyCopy: Codable, Equatable, Sendable, Identifiable {
         case unsavedText
         /// The file on disk when another app changed it (theirs).
         case externalVersion
-        /// The file before Owlink first wrote it this session.
+        /// The file before Owlink saved it.
         case original
     }
 
@@ -32,9 +32,12 @@ public struct SafetyCopy: Codable, Equatable, Sendable, Identifiable {
     /// The encoding the bytes are in, when Owlink encoded them itself.
     public var encoding: TextEncoding?
     public var byteCount: Int
+    /// The pre-save bytes from a read, protected from history eviction.
+    public var pinned: Bool?
 
     public init(id: String = UUID().uuidString, documentPath: String, displayName: String, kind: Kind, savedAt: Date = Date(),
-                sourceDate: Date? = nil, device: String? = nil, encoding: TextEncoding? = nil, byteCount: Int = 0) {
+                sourceDate: Date? = nil, device: String? = nil, encoding: TextEncoding? = nil, byteCount: Int = 0,
+                pinned: Bool? = nil) {
         self.id = id
         self.documentPath = documentPath
         self.displayName = displayName
@@ -44,6 +47,7 @@ public struct SafetyCopy: Codable, Equatable, Sendable, Identifiable {
         self.device = device
         self.encoding = encoding
         self.byteCount = byteCount
+        self.pinned = pinned
     }
 }
 
@@ -67,12 +71,26 @@ extension SafetyCopy {
     }
 }
 
-/// When the iOS app keeps the file as it is on disk before writing over
-/// it: before the first write after each read (open, or a reload), so
-/// every version Owlink replaces can be restored for 7 days.
+/// The original first-write backup policy. The iOS app now uses `SaveHistory`.
 public enum BackupPolicy {
     public static func shouldBackUp(needsWrite: Bool, backedUpSinceRead: Bool, haveBytes: Bool) -> Bool {
         needsWrite && !backedUpSinceRead && haveBytes
+    }
+}
+
+/// Whether the file's current bytes add a new save-history entry.
+public enum SaveHistory {
+    public static func shouldKeep(bytesOnDisk: Data?, newestKept: Data?) -> Bool {
+        guard let bytesOnDisk else { return false }
+        return bytesOnDisk != newestKept
+    }
+
+    public static func shouldKeep(bytesOnDisk: Data?, newestKept: Data?, isAutosave: Bool,
+                                  newestSavedAt: Date?, now: Date, firstSinceRead: Bool,
+                                  minAutosaveInterval: TimeInterval = 60) -> Bool {
+        guard shouldKeep(bytesOnDisk: bytesOnDisk, newestKept: newestKept) else { return false }
+        guard isAutosave, !firstSinceRead, let newestSavedAt else { return true }
+        return now.timeIntervalSince(newestSavedAt) >= minAutosaveInterval
     }
 }
 
@@ -81,6 +99,10 @@ public struct SafetyCopyStore: Sendable {
     public static let keepDays = 7
     /// Larger files are not copied (as `RevertStore`).
     public static let maxBytes = RevertStore.maxBytes
+    /// Maximum number of pre-save copies per document.
+    public static let saveHistoryLimit = 10
+    /// Soft budget: pinned copies and each document's newest copy are protected.
+    public static let saveHistoryByteBudget = 200 * 1024 * 1024
 
     public let directory: URL
     public let maxBytes: Int
@@ -114,20 +136,60 @@ public struct SafetyCopyStore: Sendable {
 
     public func data(for copy: SafetyCopy) -> Data? { try? Data(contentsOf: dataURL(id: copy.id)) }
 
-    /// Every readable copy (with its bytes present), newest first.
+    /// Every readable copy (with its bytes present), newest first. Ties use
+    /// id order; clock changes can also make this differ from creation order.
     public func all() -> [SafetyCopy] {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "copy" }
             .compactMap { (try? Data(contentsOf: $0)).flatMap { try? PropertyListDecoder().decode(SafetyCopy.self, from: $0) } }
             .filter { FileManager.default.fileExists(atPath: dataURL(id: $0.id).path) }
-            .sorted { $0.savedAt > $1.savedAt }
+            .sorted {
+                if $0.savedAt != $1.savedAt { return $0.savedAt > $1.savedAt }
+                return $0.id < $1.id
+            }
     }
 
-    public func copies(forDocumentPath path: String) -> [SafetyCopy] { all().filter { $0.documentPath == path } }
+    public func copies(forDocumentPath path: String, in snapshot: [SafetyCopy]? = nil) -> [SafetyCopy] {
+        (snapshot ?? all()).filter { $0.documentPath == path }
+    }
+
+    /// Pin an existing copy without changing its bytes or timestamp.
+    public func pin(_ copy: SafetyCopy) throws {
+        var pinned = copy
+        pinned.pinned = true
+        try PrivateDirectory.writePrivateFile(try PropertyListEncoder().encode(pinned), to: recordURL(id: copy.id))
+    }
 
     public func remove(_ copy: SafetyCopy) {
         try? FileManager.default.removeItem(at: recordURL(id: copy.id))
         try? FileManager.default.removeItem(at: dataURL(id: copy.id))
+    }
+
+    /// Keeps the newest copies and the newest pinned copy, removing older ones first.
+    @discardableResult
+    public func pruneSaveHistory(forDocumentPath path: String, limit: Int = SafetyCopyStore.saveHistoryLimit,
+                                 in snapshot: [SafetyCopy]? = nil) -> [SafetyCopy] {
+        let allCopies = snapshot ?? all()
+        let originals = allCopies.filter { $0.documentPath == path && $0.kind == .original }
+        let pinnedID = originals.first { $0.pinned == true }?.id
+        let removed = originals.dropFirst(max(0, limit)).filter { $0.id != pinnedID }
+        for copy in removed.reversed() { remove(copy) }
+        let removedIDs = Set(removed.map(\.id))
+        return allCopies.filter { !removedIDs.contains($0.id) }
+    }
+
+    /// Removes oldest unpinned originals while protecting each document's newest.
+    public func pruneSaveHistoryBudget(bytes: Int = SafetyCopyStore.saveHistoryByteBudget,
+                                       in snapshot: [SafetyCopy]? = nil) {
+        let originals = (snapshot ?? all()).filter { $0.kind == .original }
+        var total = originals.reduce(Int64(0)) { $0 + Int64(max(0, $1.byteCount)) }
+        var seen = Set<String>()
+        let newestIDs = Set(originals.filter { seen.insert($0.documentPath).inserted }.map(\.id))
+        for copy in originals.reversed() where total > Int64(max(0, bytes)) {
+            guard copy.pinned != true, !newestIDs.contains(copy.id) else { continue }
+            remove(copy)
+            total -= Int64(max(0, copy.byteCount))
+        }
     }
 
     /// Removes copies older than `days`, and bytes or records left without
