@@ -310,6 +310,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         title.toolTip = rootURL.path
         let close = NSButton(title: "", image: NSImage(systemSymbolName: "xmark", accessibilityDescription: String(localized: "Close Folder"))!,
                              target: self, action: #selector(closeFolder(_:)))
+        close.setAccessibilityLabel(String(localized: "Close Folder"))
         close.isBordered = false
         close.identifier = .init("folder-close")
         let actions = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -807,6 +808,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         alert.messageText = directory ? String(localized: "New Folder") : String(localized: "New File")
         alert.informativeText = String(localized: "Enter a name.")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.setAccessibilityLabel(String(localized: "Name"))
         alert.accessoryView = field
         alert.addButton(withTitle: String(localized: "Create"))
         alert.addButton(withTitle: String(localized: "Cancel"))

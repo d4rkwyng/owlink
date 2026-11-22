@@ -35,11 +35,13 @@ final class FindBar: NSView, NSSearchFieldDelegate {
         super.init(frame: frame)
         clipsToBounds = true
         findField.placeholderString = String(localized: "Find")
+        findField.setAccessibilityLabel(String(localized: "Find"))
         findField.sendsSearchStringImmediately = true
         findField.delegate = self
         findField.target = self
         findField.action = #selector(findFieldAction)
         replaceField.placeholderString = String(localized: "Replace")
+        replaceField.setAccessibilityLabel(String(localized: "Replace"))
         replaceField.delegate = self
         for b in [regexBox, caseBox, wordBox] {
             b.target = self

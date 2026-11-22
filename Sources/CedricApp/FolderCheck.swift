@@ -452,6 +452,8 @@ extension DevChecks {
                 guard let close = s.subviews.first(where: { $0.identifier?.rawValue == "folder-close" }) as? NSButton else {
                     expect(false, "the close button"); return
                 }
+                expect(close.accessibilityLabel() == String(localized: "Close Folder"), "the close button has a VoiceOver label")
+                expect(s.outline.accessibilityLabel() == String(localized: "Folder"), "the folder outline has a VoiceOver label")
                 click(close, at: NSPoint(x: close.bounds.midX, y: close.bounds.midY))
                 if FolderSidebar.shared != nil {
                     print("check: note: synthetic click on × not taken; sending its action")

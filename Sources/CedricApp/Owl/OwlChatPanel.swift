@@ -232,6 +232,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let about = NSTextField(labelWithString: String(localized: "Asking about:"))
         about.font = .systemFont(ofSize: 11)
         about.textColor = .secondaryLabelColor
+        scopePopup.setAccessibilityLabel(String(localized: "Asking about"))
         scopePopup.controlSize = .small
         scopePopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         scopePopup.target = self
@@ -298,6 +299,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         cardsScroll.isHidden = true
 
         input.placeholderString = String(localized: "Ask about this text…")
+        input.setAccessibilityLabel(String(localized: "Question for Cedric"))
         input.font = .systemFont(ofSize: 12)
         input.target = self
         input.action = #selector(send(_:))

@@ -1309,7 +1309,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         a.messageText = String(localized: "Go to Line")
         a.informativeText = String(localized: "Line (1–\(lineIndex.lineCount)), optionally followed by :column.")
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        field.placeholderString = "42 or 42:7"
+        field.placeholderString = String(localized: "42 or 42:7")
+        field.setAccessibilityLabel(String(localized: "Line number or line:column"))
         a.accessoryView = field
         a.addButton(withTitle: String(localized: "Go"))
         a.addButton(withTitle: String(localized: "Cancel"))
