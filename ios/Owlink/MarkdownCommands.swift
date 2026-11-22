@@ -111,6 +111,11 @@ extension EditorViewController {
         }
         // Insert through the storage so typographic smart quotes cannot rewrite
         // the characters, and so UITextView.replace cannot close our undo group.
+        // Scrolls from here on (the replacement, revealRange, and the reveal
+        // in textViewDidChange) lay the gutter out on the next turn.
+        let wasApplyingTextEdits = isApplyingTextEdits
+        isApplyingTextEdits = true
+        defer { isApplyingTextEdits = wasApplyingTextEdits }
         if grouping { undo?.beginUndoGrouping() }
         undo?.disableUndoRegistration()
         if changesText {

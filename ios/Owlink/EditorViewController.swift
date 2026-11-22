@@ -116,6 +116,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let dailyQueue = DispatchQueue(label: "app.owlink.dailyWords", qos: .utility)
     private var dailyTimer: Timer?
     private var gutterLayoutScheduled = false
+    /// Set while applyTextEdits replaces the text and reveals the selection:
+    /// a scroll then defers the gutter to the next turn (TextKit 2 can spin
+    /// finding the visible range mid-edit). User scrolling stays inline.
+    var isApplyingTextEdits = false
+    /// Gutter layouts run by scheduleGutterLayout (for tests).
+    private(set) var scheduledGutterLayoutCount = 0
     var dailyIdleInterval: TimeInterval = 1
     var dailyWordCountLimit = TextStats.maxCounted
     private var wordCountGeneration: Int?
@@ -955,6 +961,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.gutterLayoutScheduled = false
+                self.scheduledGutterLayoutCount += 1
                 self.layoutGutter()
             }
         }
@@ -1334,7 +1341,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 askModel?.scheduleScopeRefresh()
             }
         }
-        if scrollView === textView, showLineNumbers { layoutGutter() }
+        if scrollView === textView, showLineNumbers {
+            // An edit's own scroll waits a turn; the user's drag does not.
+            if isApplyingTextEdits { scheduleGutterLayout() } else { layoutGutter() }
+        }
         // A detached preview window follows the text's place, roughly.
         if scrollView === textView, !textView.isHidden, DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             DetachedPreviews.scroll(path: document.recoveryPath, fraction: textScrollFraction)

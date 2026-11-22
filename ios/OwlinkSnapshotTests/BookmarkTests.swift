@@ -242,16 +242,44 @@ final class BookmarkTests: XCTestCase {
         editor.layoutGutter()
         XCTAssertEqual(numbers.markedRows, [2, 4])
         caret(editor, line: 0)
+        let scheduled = editor.scheduledGutterLayoutCount
         editor.deleteLine(nil)
         XCTAssertEqual(editor.bookmarks.lines, [0, 2])
+        XCTAssertFalse(editor.isApplyingTextEdits)
         // The gutter is laid out on the next main-queue turn, not mid-edit.
+        XCTAssertEqual(editor.scheduledGutterLayoutCount, scheduled)
         let laidOut = expectation(description: "next turn")
         DispatchQueue.main.async { laidOut.fulfill() }
         wait(for: [laidOut], timeout: 2)
+        XCTAssertGreaterThan(editor.scheduledGutterLayoutCount, scheduled)
         XCTAssertEqual(numbers.bookmarked, [1, 3])
+        // Row geometry is not settled on that turn in the test host (the
+        // scheduled layout finds no visible range yet); check it separately.
         window.layoutIfNeeded()
         editor.layoutGutter()
         XCTAssertEqual(numbers.markedRows, [1, 3])
+    }
+
+    func testEditScrollDefersGutterButUserScrollDoesNot() throws {
+        AppSettings.lineNumbers = true
+        let editor = editor("a\nb\nc\nd\n")
+        let numbers = try XCTUnwrap(gutter(in: editor.view))
+        editor.bookmarks = Bookmarks([1])
+        // A user scroll lays the gutter out at once.
+        editor.scrollViewDidScroll(editor.textView)
+        XCTAssertEqual(numbers.markedRows, [2])
+        // A scroll during an edit waits for the next turn.
+        let scheduled = editor.scheduledGutterLayoutCount
+        editor.bookmarks = Bookmarks([2])
+        editor.isApplyingTextEdits = true
+        editor.scrollViewDidScroll(editor.textView)
+        editor.isApplyingTextEdits = false
+        XCTAssertEqual(editor.scheduledGutterLayoutCount, scheduled)
+        let laidOut = expectation(description: "next turn")
+        DispatchQueue.main.async { laidOut.fulfill() }
+        wait(for: [laidOut], timeout: 2)
+        XCTAssertEqual(editor.scheduledGutterLayoutCount, scheduled + 1)
+        XCTAssertEqual(numbers.markedRows, [3])
     }
 
     func testBookmarksShowGutterWithNumbersOff() throws {
