@@ -21,6 +21,10 @@ enum AppSettings {
         static let styleCheckExceptions = "styleCheckExceptions"
         static let readableWidthDefault = "readableWidthDefault"
         static let readableColumns = "readableColumns"
+        /// Same keys as Settings › Writing on the Mac.
+        static let useProseFont = "useProseFont"
+        static let proseFontName = "proseFontName"
+        static let proseFontSize = "proseFontSize"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
         static let theme = EditorTheme.defaultsKey
@@ -119,6 +123,31 @@ enum AppSettings {
         set { defaults.set(ReadableWidth.clamp(newValue), forKey: Key.readableColumns); post() }
     }
 
+    /// Settings › Writing › Use a prose font for Markdown and plain text.
+    static var useProseFont: Bool {
+        get { defaults.bool(forKey: Key.useProseFont) }
+        set { defaults.set(newValue, forKey: Key.useProseFont); post() }
+    }
+
+    /// A PostScript face, ProseFont.systemSerif (New York), or nil for SF Pro.
+    static var proseFontName: String? {
+        get { defaults.string(forKey: Key.proseFontName) }
+        set {
+            if let newValue { defaults.set(newValue, forKey: Key.proseFontName) }
+            else { defaults.removeObject(forKey: Key.proseFontName) }
+            post()
+        }
+    }
+
+    /// The prose face's size at 100% editor zoom.
+    static var proseFontSize: Double {
+        get {
+            let size = defaults.double(forKey: Key.proseFontSize)
+            return size > 0 ? ProseFont.clamp(size) : ProseFont.defaultSize
+        }
+        set { defaults.set(ProseFont.clamp(newValue), forKey: Key.proseFontSize); post() }
+    }
+
     /// "very, kind of ,, actually" → ["very", "kind of", "actually"].
     static func phrases(_ s: String) -> [String] {
         var out: [String] = []
@@ -159,6 +188,46 @@ enum AppSettings {
     /// 15 pt unless the person chose a size.
     static func font(for traits: UITraitCollection) -> UIFont {
         UIFont.monospacedSystemFont(ofSize: CGFloat(chosenFontSize ?? defaultFontSize(for: traits)), weight: .regular)
+    }
+
+    private static var cachedProseFont: (name: String?, size: CGFloat, font: UIFont)?
+
+    static func proseFont(for traits: UITraitCollection) -> UIFont {
+        let editorDefault = defaultFontSize(for: traits)
+        let size = CGFloat(ProseFont.size(
+            prose: proseFontSize,
+            editor: chosenFontSize ?? editorDefault,
+            editorDefault: editorDefault
+        ))
+        let name = proseFontName
+        if let cached = cachedProseFont, cached.name == name, cached.size == size { return cached.font }
+
+        let system = UIFont.systemFont(ofSize: size)
+        let font: UIFont
+        switch name {
+        case nil:
+            font = system
+        case ProseFont.systemSerif?:
+            font = system.fontDescriptor.withDesign(.serif).map { UIFont(descriptor: $0, size: size) } ?? system
+        case let name?:
+            font = UIFont(name: name, size: size) ?? system
+        }
+        cachedProseFont = (name, size, font)
+        return font
+    }
+
+    static func font(for language: Language, traits: UITraitCollection) -> UIFont {
+        ProseFont.applies(to: language, enabled: useProseFont) ? proseFont(for: traits) : font(for: traits)
+    }
+
+    /// The family's regular face, represented by its PostScript name.
+    static func regularFontName(forFamily family: String) -> String? {
+        let names = UIFont.fontNames(forFamilyName: family)
+        return names.first { name in
+            guard let font = UIFont(name: name, size: 13) else { return false }
+            let traits = font.fontDescriptor.symbolicTraits
+            return !traits.contains(.traitBold) && !traits.contains(.traitItalic)
+        } ?? names.first
     }
 }
 

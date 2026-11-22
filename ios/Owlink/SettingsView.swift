@@ -62,6 +62,9 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.openReadOnly) private var openReadOnly = AppSettings.openReadOnlyDefault
     @AppStorage(AppSettings.Key.styleCheck) private var styleCheck = false
     @AppStorage(AppSettings.Key.readableWidthDefault) private var readableWidthDefault = false
+    @AppStorage(AppSettings.Key.useProseFont) private var useProseFont = false
+    @AppStorage(AppSettings.Key.proseFontName) private var proseFontName = ""
+    @AppStorage(AppSettings.Key.proseFontSize) private var proseFontSize = ProseFont.defaultSize
     @State private var styleExtra = ""
     @State private var styleExcept = ""
     @State private var readableColumns = AppSettings.readableColumns
@@ -115,6 +118,28 @@ struct SettingsView: View {
                 .onChange(of: openReadOnly) { AppSettings.post() }
 
                 Section {
+                    Toggle(String(localized: "Use a prose font for Markdown and plain text"), isOn: $useProseFont)
+                        .accessibilityIdentifier("settings.useProseFont")
+                    Picker(String(localized: "Prose font"), selection: $proseFontName) {
+                        Text(String(localized: "System Font (SF Pro)")).tag("")
+                        Text(String(localized: "New York (System Serif)")).tag(ProseFont.systemSerif)
+                        Section {
+                            ForEach(Self.proseFontFamilies, id: \.name) { item in
+                                Text(item.family).tag(item.name)
+                            }
+                        }
+                    }
+                    .disabled(!useProseFont)
+                    .accessibilityIdentifier("settings.proseFont")
+                    Stepper(value: $proseFontSize, in: ProseFont.sizeRange, step: 1) {
+                        HStack {
+                            Text(String(localized: "Prose font size"))
+                            Spacer()
+                            Text("\(Int(proseFontSize)) pt").foregroundStyle(.secondary).monospacedDigit()
+                        }
+                    }
+                    .disabled(!useProseFont)
+                    .accessibilityIdentifier("settings.proseFontSize")
                     Toggle(String(localized: "Style Check"), isOn: $styleCheck)
                         .accessibilityIdentifier("settings.styleCheck")
                     TextField(String(localized: "Also flag"), text: $styleExtra)
@@ -136,8 +161,11 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Writing"))
                 } footer: {
-                    Text(String(localized: "Style Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
+                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
                 }
+                .onChange(of: useProseFont) { AppSettings.useProseFont = useProseFont }
+                .onChange(of: proseFontName) { AppSettings.proseFontName = proseFontName.isEmpty ? nil : proseFontName }
+                .onChange(of: proseFontSize) { AppSettings.proseFontSize = proseFontSize }
                 .onChange(of: styleCheck) { AppSettings.post() }
                 .onChange(of: styleExtra) { writeStylePhrases() }
                 .onChange(of: styleExcept) { writeStylePhrases() }
@@ -152,6 +180,7 @@ struct SettingsView: View {
                         ForEach([LocalAISettings.Backend.apple, .builtIn, .custom], id: \.self) { b in
                             Text(AIStatus.backendTitle(b)).tag(b)
                         }
+
                     }
                     Toggle(String(localized: "Use Cedric AI"), isOn: Binding(get: { ai.enabled }, set: { ai.enabled = $0; save() }))
                         .accessibilityIdentifier("settings.aiEnabled")
@@ -226,6 +255,13 @@ struct SettingsView: View {
                 if AppSettings.phrases(styleExcept) != stored { styleExcept = stored.joined(separator: ", ") }
             }
         }
+    }
+
+    private static var proseFontFamilies: [(family: String, name: String)] {
+        UIFont.familyNames
+            .filter { !$0.hasPrefix(".") }
+            .sorted()
+            .compactMap { family in AppSettings.regularFontName(forFamily: family).map { (family, $0) } }
     }
 
     @ViewBuilder private var builtInSection: some View {

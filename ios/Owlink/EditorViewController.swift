@@ -693,9 +693,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         loading = true
         let sel = textView.selectedRange
         textView.text = document.text
-        textView.font = AppSettings.font(for: traitCollection)
+        let font = AppSettings.font(for: document.language.language, traits: traitCollection)
+        textView.font = font
         textView.textColor = UIColor(hex: palette.foreground)
-        textView.typingAttributes = [.font: AppSettings.font(for: traitCollection), .foregroundColor: UIColor(hex: palette.foreground)]
+        textView.typingAttributes = [.font: font, .foregroundColor: UIColor(hex: palette.foreground)]
         lineIndex = LineIndex(textView.textStorage.string as NSString)
         markdownFenceIndex.invalidateAll()
         cachedMarkdownIndentation = nil
@@ -1165,6 +1166,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if l != .markdown, previewOn { togglePreview() }
         document.language.choose(l)
         colorizer.setLanguage(l)
+        applySettings()
         updateStatus()
         updateBarButtons()
         updateContextBar()
@@ -1250,7 +1252,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         statusBar.backgroundColor = UIColor(hex: palette.statusBar)
         statusLabel.textColor = UIColor(hex: palette.gutterForeground)
         owlSprite.onDark = palette.isDark
-        let font = AppSettings.font(for: traitCollection)
+        let font = AppSettings.font(for: document.language.language, traits: traitCollection)
         if textView.font != font {
             textView.font = font
             textView.typingAttributes[.font] = font
@@ -2458,8 +2460,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func textInsets(gutterWidth: CGFloat) -> (left: CGFloat, right: CGFloat, gutterX: CGFloat) {
         let plain = (left: editorTextInsetLeft + gutterWidth, right: CGFloat(8), gutterX: CGFloat(0))
         guard readableWidthOn, AppSettings.wrap, textView.bounds.width > 1 else { return plain }
-        let font = textView.font ?? AppSettings.font(for: traitCollection)
-        let charWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let font = textView.font ?? AppSettings.font(for: document.language.language, traits: traitCollection)
+        let zeroWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let alphabetWidth = ("abcdefghijklmnopqrstuvwxyz" as NSString).size(withAttributes: [.font: font]).width
+        let fixedPitch = font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace)
+        let charWidth = CGFloat(ProseFont.characterWidth(
+            fixedPitch: fixedPitch,
+            zeroWidth: Double(zeroWidth),
+            lowercaseAlphabetWidth: Double(alphabetWidth)
+        ))
         let padding = textView.textContainer.lineFragmentPadding
         let column = ReadableWidth.columnWidth(columns: AppSettings.readableColumns,
                                                charWidth: Double(max(charWidth, 1)), padding: Double(padding))
@@ -2478,8 +2487,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Readable Width, when this file has it on and lines wrap, centres a
     /// column and draws the gutter in that margin when it fits.
     private func layoutGutter() {
-        let font = (textView.font ?? AppSettings.font(for: traitCollection)).withSize(
-            max(10, (textView.font?.pointSize ?? 13) * 0.85))
+        let font = UIFont.monospacedSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) * 0.85), weight: .regular)
         let (width, insets) = layoutTextInsets()
         guard showLineNumbers else {
             lineNumberGutter.isHidden = true
@@ -2519,8 +2527,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// anything reads textContainerInset (the unwrapped content width).
     @discardableResult
     private func layoutTextInsets() -> (CGFloat, (left: CGFloat, right: CGFloat, gutterX: CGFloat)) {
-        let font = (textView.font ?? AppSettings.font(for: traitCollection)).withSize(
-            max(10, (textView.font?.pointSize ?? 13) * 0.85))
+        let font = UIFont.monospacedSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) * 0.85), weight: .regular)
         let width = showLineNumbers ? LineNumberGutter.width(lineCount: lineIndex.lineCount, font: font) : 0
         let insets = textInsets(gutterWidth: width)
         var edge = textView.textContainerInset
