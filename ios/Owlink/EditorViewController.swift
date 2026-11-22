@@ -59,8 +59,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// line hidden) on the safe area's bottom.
     private var splitBottom: NSLayoutConstraint!
     private var splitBottomFocus: NSLayoutConstraint!
-    /// Status line's bottom, as an offset from the view's bottom: 0 at the
-    /// screen edge, negative while a docked keyboard lifts it.
+    /// Status line's bottom, offset from the view's bottom: above the home
+    /// indicator while resting, or higher while a docked keyboard is up.
     private var statusBarBottomPin: NSLayoutConstraint!
     /// Home-indicator inset last seen while the keyboard was down. A docked
     /// keyboard can inflate the safe area; that must not look like a tall
@@ -244,7 +244,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         hideKeyboardButton.addAction(UIAction { [weak self] _ in self?.hideKeyboard() }, for: .primaryActionTriggered)
         NSLayoutConstraint.activate([
             hideKeyboardButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
-            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 26),
+            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
         ])
         let row = UIStackView(arrangedSubviews: [languageButton, formatButton, UIView(), statusLabel, hideKeyboardButton])
         row.spacing = 14
@@ -252,8 +252,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         row.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(row)
         statusBar.backgroundColor = .secondarySystemBackground
-        // Horizontal margins clear the safe area and rounded corners. The compact
-        // 26 pt row sits at the top, with only background in the safe area and no extra vertical padding.
+        // Horizontal margins clear the safe area and rounded corners. The
+        // 24 pt row is the full height of the gray strip.
         statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
         statusBar.insetsLayoutMarginsFromSafeArea = true
         var guide: UILayoutGuide = statusBar.layoutMarginsGuide
@@ -262,8 +262,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             row.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
             row.topAnchor.constraint(equalTo: statusBar.topAnchor),
-            row.heightAnchor.constraint(equalToConstant: 26),
-            row.bottomAnchor.constraint(equalTo: statusBar.safeAreaLayoutGuide.bottomAnchor),
+            row.heightAnchor.constraint(equalToConstant: 24),
+            row.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
         ])
     }
 
@@ -313,12 +313,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        // Not the keyboard guide. On iOS 26 that guide rests at the safe
-        // area while the keyboard is hidden, which left the bar floating
-        // above the home indicator and cut the editor short of the screen's
-        // rounded bottom. The bar's own margins keep the labels in the safe
-        // area; the background runs to the screen edge. A docked keyboard
-        // lifts the pin (updateStatusBarPin).
+        // Not the keyboard guide. The bar rests just above the home indicator,
+        // clear of the rounded corners; a docked keyboard lifts it onto the
+        // keyboard (updateStatusBarPin).
         statusBarBottomPin = statusBar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         statusBarBottomPin.isActive = true
     }
