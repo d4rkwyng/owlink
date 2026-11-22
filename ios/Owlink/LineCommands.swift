@@ -40,14 +40,16 @@ extension EditorViewController {
         }
     }
 
-    func currentLineIndentation(_ text: NSString) -> Indentation {
+    func resolvedLineIndentation(_ text: NSString) -> (indentation: Indentation, tabTypesSpaces: Bool) {
         let defaults = UserDefaults.standard
         let width = defaults.integer(forKey: "tabWidth")
         let fallback = Indentation(usesTabs: defaults.bool(forKey: "indentWithTabs"), width: width > 0 ? width : 4)
         return LanguageIndent.resolve(language: document.language.language, manual: lineIndentation,
                                       detected: detectedIndentation(for: text), default: fallback,
-                                      defaultSaved: defaults.object(forKey: "indentWithTabs") != nil).indentation
+                                      defaultSaved: defaults.object(forKey: "indentWithTabs") != nil)
     }
+
+    func currentLineIndentation(_ text: NSString) -> Indentation { resolvedLineIndentation(text).indentation }
 
     @objc func indentLines(_ sender: Any?) {
         lineEdit(String(localized: "Indent")) { text, selection in
@@ -65,22 +67,25 @@ extension EditorViewController {
         let from = currentLineIndentation(text)
         let to = Indentation(usesTabs: toTabs, width: from.width)
         let converted = LineOperations.convertIndentation(text as String, from: from, to: to)
-        lineIndentation = to
-        guard converted != text as String else { return }
+        guard converted != text as String || lineIndentation != to else { return }
         let selection = NSRange(location: min(textView.selectedRange.location, (converted as NSString).length), length: 0)
-        applyTextEdit(TextEdit(range: NSRange(location: 0, length: text.length), replacement: converted, selection: selection),
-                      actionName: toTabs ? String(localized: "Convert Indentation to Tabs") : String(localized: "Convert Indentation to Spaces"))
+        let edit = converted == text as String
+            ? TextEdit(range: NSRange(location: 0, length: 0), replacement: "", selection: textView.selectedRange)
+            : TextEdit(range: NSRange(location: 0, length: text.length), replacement: converted, selection: selection)
+        applyTextEdit(edit,
+                      actionName: toTabs ? String(localized: "Convert Indentation to Tabs") : String(localized: "Convert Indentation to Spaces"),
+                      indentation: IndentationChange(value: to))
     }
     @objc func convertIndentationToSpaces(_ sender: Any?) { convertIndentation(toTabs: false) }
     @objc func convertIndentationToTabs(_ sender: Any?) { convertIndentation(toTabs: true) }
 
     func lineEditMenu() -> UIMenu {
-        func action(_ title: String, _ perform: @escaping (EditorViewController) -> Void) -> UIAction {
+        func action(_ title: String, enabled: Bool = true, _ perform: @escaping (EditorViewController) -> Void) -> UIAction {
             let item = UIAction(title: title) { [weak self] _ in
                 guard let self, self.lineEditable else { return }
                 perform(self)
             }
-            if !lineEditable { item.attributes = .disabled }
+            if !lineEditable || !enabled { item.attributes = .disabled }
             return item
         }
         return UIMenu(title: String(localized: "Line"), children: [
@@ -88,55 +93,92 @@ extension EditorViewController {
             action(String(localized: "Delete Line")) { $0.deleteLine(nil) },
             action(String(localized: "Move Line Up")) { $0.moveLineUp(nil) },
             action(String(localized: "Move Line Down")) { $0.moveLineDown(nil) },
-            action(String(localized: "Comment Selection")) { $0.commentSelection(nil) },
+            action(String(localized: "Comment Selection"), enabled: document.language.language.commentSyntax != nil) { $0.commentSelection(nil) },
+            action(String(localized: "Indent")) { $0.indentLines(nil) },
+            action(String(localized: "Outdent")) { $0.outdentLines(nil) },
+            action(String(localized: "Keep Lines Matching…")) { $0.keepLinesMatching(nil) },
+            action(String(localized: "Delete Lines Matching…")) { $0.deleteLinesMatching(nil) },
+            UIMenu(title: String(localized: "Indentation"), children: [
+                action(String(localized: "Convert Indentation to Spaces")) { $0.convertIndentationToSpaces(nil) },
+                action(String(localized: "Convert Indentation to Tabs")) { $0.convertIndentationToTabs(nil) },
+            ]),
         ])
     }
 
     @objc func keepLinesMatching(_ sender: Any?) { showLineFilter(keep: true) }
     @objc func deleteLinesMatching(_ sender: Any?) { showLineFilter(keep: false) }
 
-    @discardableResult
-    func filterLines(pattern: String, regex: Bool, caseSensitive: Bool, keep: Bool) throws -> Int? {
-        guard lineEditable else { return nil }
-        let result = try LineFilter.filter(textView.textStorage.string as NSString, pattern: pattern,
-                                           regex: regex, caseSensitive: caseSensitive, keepMatching: keep)
+    enum FilterOutcome: Equatable {
+        case removed(Int), noChange, stale, notEditable
+    }
+
+    func filterLines(pattern: String, regex: Bool, caseSensitive: Bool, keep: Bool) async throws -> FilterOutcome {
+        guard lineEditable else { return .notEditable }
+        let snapshot = textView.textStorage.string
+        let originalGeneration = generation
+        let task = Task.detached(priority: .userInitiated) {
+            try LineFilter.filter(snapshot as NSString, pattern: pattern, regex: regex,
+                                  caseSensitive: caseSensitive, keepMatching: keep)
+        }
+        let result = try await task.value
+        try Task.checkCancellation()
+        guard generation == originalGeneration else { return .stale }
+        guard lineEditable else { return .notEditable }
         if let result {
             applyTextEdit(result.edit, actionName: keep ? String(localized: "Keep Lines Matching") : String(localized: "Delete Lines Matching"))
+            return .removed(result.removed.count)
         }
-        return result?.removed.count ?? 0
+        return .noChange
     }
 
     private func showLineFilter(keep: Bool) {
         guard lineEditable else { return }
+        present(UINavigationController(rootViewController: makeLineFilter(keep: keep)), animated: true)
+    }
+
+    func makeLineFilter(keep: Bool) -> LineFilterViewController {
         let text = textView.textStorage.string as NSString
         let selection = textView.selectedRange
         let selected = selection.length > 0 && selection.length < 200 && NSMaxRange(selection) <= text.length
             && text.rangeOfCharacter(from: .newlines, options: [], range: selection).location == NSNotFound
         let pattern = selected ? text.substring(with: selection) : (UserDefaults.standard.string(forKey: "filterLinesPattern") ?? "")
         let controller = LineFilterViewController(keep: keep, pattern: pattern) { [weak self] pattern, regex, matchCase in
-            guard let self, self.lineEditable else { return String(localized: "This file is open read-only.") }
+            guard let self else { return String(localized: "The document is no longer available.") }
             do {
-                let count = try self.filterLines(pattern: pattern, regex: regex, caseSensitive: matchCase, keep: keep) ?? 0
-                self.toast(count == 1 ? String(localized: "1 line removed") : String(localized: "\(count) lines removed"))
-                return nil
+                switch try await self.filterLines(pattern: pattern, regex: regex, caseSensitive: matchCase, keep: keep) {
+                case .removed(let count):
+                    self.toast(count == 1 ? String(localized: "1 line removed") : String(localized: "\(count) lines removed"))
+                    return nil
+                case .noChange:
+                    self.toast(String(localized: "No lines matched or removed."))
+                    return nil
+                case .stale: return String(localized: "The document changed. Try again.")
+                case .notEditable: return String(localized: "This file is open read-only.")
+                }
             } catch LineFilter.FilterError.emptyPattern {
                 return String(localized: "Enter text or a pattern.")
-            } catch {
+            } catch LineFilter.FilterError.invalidPattern {
                 return String(localized: "That isn’t a valid regular expression.")
+            } catch is CancellationError {
+                return nil
+            } catch {
+                return error.localizedDescription
             }
         }
-        present(UINavigationController(rootViewController: controller), animated: true)
+        return controller
     }
 }
 
-private final class LineFilterViewController: UIViewController {
+final class LineFilterViewController: UIViewController, UITextFieldDelegate {
     private let keep: Bool
     private let pattern: UITextField
     private let regex = UISwitch()
     private let matchCase = UISwitch()
-    private let apply: (String, Bool, Bool) -> String?
+    private let apply: (String, Bool, Bool) async -> String?
+    private let progress = UIActivityIndicatorView(style: .medium)
+    private var task: Task<Void, Never>?
 
-    init(keep: Bool, pattern: String, apply: @escaping (String, Bool, Bool) -> String?) {
+    init(keep: Bool, pattern: String, apply: @escaping (String, Bool, Bool) async -> String?) {
         self.keep = keep
         self.pattern = UITextField()
         self.pattern.text = pattern
@@ -154,46 +196,105 @@ private final class LineFilterViewController: UIViewController {
                                                             style: .done, target: self, action: #selector(submit))
         pattern.placeholder = String(localized: "Text or pattern")
         pattern.accessibilityLabel = String(localized: "Text or pattern")
+        pattern.accessibilityIdentifier = "filter.pattern"
         pattern.borderStyle = .roundedRect
+        pattern.font = .preferredFont(forTextStyle: .body)
+        pattern.adjustsFontForContentSizeCategory = true
+        pattern.autocorrectionType = .no
+        pattern.smartQuotesType = .no
+        pattern.smartDashesType = .no
+        pattern.spellCheckingType = .no
+        pattern.autocapitalizationType = .none
+        pattern.returnKeyType = .done
+        pattern.clearButtonMode = .whileEditing
+        pattern.delegate = self
         regex.isOn = UserDefaults.standard.bool(forKey: "filterLinesRegex")
         matchCase.isOn = UserDefaults.standard.bool(forKey: "filterLinesMatchCase")
         let message = UILabel()
         message.numberOfLines = 0
+        message.font = .preferredFont(forTextStyle: .body)
+        message.adjustsFontForContentSizeCategory = true
         message.text = keep ? String(localized: "Every line that doesn’t contain this is deleted.")
                             : String(localized: "Every line that contains this is deleted.")
         func row(_ title: String, _ control: UISwitch) -> UIStackView {
             let label = UILabel()
             label.text = title
+            label.font = .preferredFont(forTextStyle: .body)
+            label.adjustsFontForContentSizeCategory = true
+            label.numberOfLines = 0
             control.accessibilityLabel = title
             let stack = UIStackView(arrangedSubviews: [label, control])
             stack.distribution = .equalSpacing
             return stack
         }
         let stack = UIStackView(arrangedSubviews: [message, pattern,
-            row(String(localized: "Regular expression"), regex), row(String(localized: "Match Case"), matchCase)])
+            row(String(localized: "Regular expression"), regex), row(String(localized: "Match Case"), matchCase), progress])
         stack.axis = .vertical
         stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(stack)
+        progress.hidesWhenStopped = true
+        progress.accessibilityLabel = String(localized: "Filtering lines")
+        let scroll = UIScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.keyboardDismissMode = .interactive
+        view.addSubview(scroll)
+        scroll.addSubview(stack)
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 24),
-            stack.leadingAnchor.constraint(equalTo: view.layoutMarginsGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: view.layoutMarginsGuide.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24),
+            stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -20),
+            stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
+            stack.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor, constant: -40),
         ])
     }
 
-    @objc private func cancel() { dismiss(animated: true) }
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        pattern.becomeFirstResponder()
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        submit()
+        return false
+    }
+
+    @objc private func cancel() {
+        task?.cancel()
+        dismiss(animated: true)
+    }
     @objc private func submit() {
+        guard task == nil else { return }
         let value = pattern.text ?? ""
-        if let error = apply(value, regex.isOn, matchCase.isOn) {
-            let alert = UIAlertController(title: error, message: nil, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
-            present(alert, animated: true)
-            return
-        }
         UserDefaults.standard.set(value, forKey: "filterLinesPattern")
         UserDefaults.standard.set(regex.isOn, forKey: "filterLinesRegex")
         UserDefaults.standard.set(matchCase.isOn, forKey: "filterLinesMatchCase")
-        dismiss(animated: true)
+        let useRegex = regex.isOn
+        let sensitive = matchCase.isOn
+        pattern.resignFirstResponder()
+        progress.startAnimating()
+        navigationItem.rightBarButtonItem?.isEnabled = false
+        isModalInPresentation = true
+        navigationController?.isModalInPresentation = true
+        task = Task { [weak self] in
+            guard let self else { return }
+            let error = await self.apply(value, useRegex, sensitive)
+            guard !Task.isCancelled else { return }
+            self.task = nil
+            self.progress.stopAnimating()
+            self.navigationItem.rightBarButtonItem?.isEnabled = true
+            self.isModalInPresentation = false
+            self.navigationController?.isModalInPresentation = false
+            if let error {
+                let alert = UIAlertController(title: error, message: nil, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
+                self.present(alert, animated: true)
+            } else {
+                self.dismiss(animated: true)
+            }
+        }
     }
 }

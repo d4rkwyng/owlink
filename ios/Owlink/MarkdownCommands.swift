@@ -1,6 +1,10 @@
 import UIKit
 import CedricCore
 
+struct IndentationChange {
+    let value: Indentation?
+}
+
 // Format › Markdown on iOS (the Mac's MarkdownCommands): the shared
 // transforms in CedricCore, each one undo step, only for an editable
 // Markdown document. As on the Mac, the line commands (headings, lists,
@@ -21,13 +25,15 @@ extension EditorViewController {
     ]
 
     @discardableResult
-    func applyTextEdit(_ edit: TextEdit, actionName: String) -> Bool {
+    func applyTextEdit(_ edit: TextEdit, actionName: String, indentation: IndentationChange? = nil) -> Bool {
         let storage = textView.textStorage
         let length = storage.length
         guard edit.range.location != NSNotFound, edit.range.location >= 0, edit.range.length >= 0,
               NSMaxRange(edit.range) <= length else { return false }
         let previousSelection = textView.selectedRange
+        let previousIndentation = lineIndentation
         let previousText = (storage.string as NSString).substring(with: edit.range)
+        let changesText = previousText != edit.replacement
         let inverseRange = NSRange(location: edit.range.location, length: (edit.replacement as NSString).length)
         let undo = textView.undoManager
         let grouping = undo.map { !$0.isUndoing && !$0.isRedoing } ?? false
@@ -50,12 +56,14 @@ extension EditorViewController {
         // the characters, and so UITextView.replace cannot close our undo group.
         if grouping { undo?.beginUndoGrouping() }
         undo?.disableUndoRegistration()
-        storage.replaceCharacters(in: edit.range, with: edit.replacement)
+        if changesText { storage.replaceCharacters(in: edit.range, with: edit.replacement) }
         textView.selectedRange = edit.selection
+        if let indentation { lineIndentation = indentation.value }
         undo?.enableUndoRegistration()
         undo?.registerUndo(withTarget: self) { target in
             _ = target.applyTextEdit(TextEdit(range: inverseRange, replacement: previousText, selection: previousSelection),
-                                     actionName: actionName)
+                                     actionName: actionName,
+                                     indentation: indentation == nil ? nil : IndentationChange(value: previousIndentation))
         }
         if grouping, let undo, undo.groupingLevel > 0 {
             undo.setActionName(actionName)
@@ -64,7 +72,7 @@ extension EditorViewController {
         revealRange(edit.selection)
         contextBar?.refreshStates()
         // storage.replaceCharacters does not call the text-view delegate.
-        textViewDidChange(textView)
+        if changesText { textViewDidChange(textView) }
         return true
     }
 

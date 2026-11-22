@@ -765,6 +765,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateWritingInset()
         markdownFenceIndex.invalidateAll()
         cachedIndentation = nil
+        lineIndentation = nil
         autoClosers = []
         if NSMaxRange(sel) <= (textView.text as NSString).length { textView.selectedRange = sel }
         loading = false
@@ -836,12 +837,30 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
               NSMaxRange(range) <= text.length else { return true }
         let language = document.language.language
 
+        if replacement == "\t", !self.textView.isPasting {
+            let resolved = resolvedLineIndentation(text)
+            if resolved.tabTypesSpaces {
+                let start = lineIndex.starts[lineIndex.line(containing: range.location)]
+                var column = 0
+                for position in max(start, range.location - 4096)..<range.location {
+                    column = text.character(at: position) == 9
+                        ? (column / resolved.indentation.width + 1) * resolved.indentation.width : column + 1
+                }
+                let spaces = String(repeating: " ", count: resolved.indentation.width - column % resolved.indentation.width)
+                return !applyTextEdit(TextEdit(range: range, replacement: spaces,
+                                               selection: NSRange(location: range.location + spaces.utf16.count, length: 0)),
+                                      actionName: String(localized: "Typing"))
+            }
+        }
+
         if replacement == "\n", !self.textView.isPasting {
             let singleLineSelection = range.length == 0
                 || text.rangeOfCharacter(from: .newlines, options: [], range: range).location == NSNotFound
             if singleLineSelection {
                 if language == .yaml,
-                   let edit = MarkdownLists.newline(in: text, selection: range, language: .yaml) {
+                   let edit = MarkdownLists.newline(in: text, selection: range, language: .yaml,
+                                                    tabWidth: currentLineIndentation(text).width,
+                                                    useTabs: currentLineIndentation(text).usesTabs) {
                     return !applyTextEdit(edit, actionName: String(localized: "Typing"))
                 }
                 if language == .markdown, !isInMarkdownFence(at: range.location, in: text) {
@@ -857,7 +876,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
             let line = lineIndex.line(containing: range.location)
             let edit = AutoEdit.newlineEdit(in: text, lineStart: lineIndex.starts[line], selection: range,
-                                            language: language, unit: lineIndentation?.unit ?? detectedIndentation(for: text)?.unit)
+                                            language: language, unit: currentLineIndentation(text).unit)
             // Plain newline (no indent to keep): let the system insert it, as the Mac
             // falls back to insertNewline, so it stays in the current typing undo group.
             if edit.replacement == "\n", edit.selection == NSRange(location: range.location + 1, length: 0) {
@@ -990,7 +1009,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func markdownIndentation(for text: NSString) -> Indentation {
-        lineIndentation ?? detectedIndentation(for: text) ?? Indentation(usesTabs: false, width: 4)
+        currentLineIndentation(text)
     }
 
     private func shiftAutoClosers(oldRange: NSRange, newLength: Int) {
@@ -1017,7 +1036,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             above.append(lineRange.length > 4096 ? "x" : text.substring(with: lineRange).trimmingCharacters(in: .newlines))
             position = lineRange.location
         }
-        let width = lineIndentation?.width ?? detectedIndentation(for: text)?.width ?? 4
+        let width = currentLineIndentation(text).width
         guard let indent = LanguageIndent.pythonClauseIndent(head: head, above: above, tabWidth: width) else { return nil }
         let body = head.drop { $0 == " " || $0 == "\t" }
         let replacement = indent + body + ":"
@@ -3167,6 +3186,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return document.language.language == .markdown
         }
         if Self.markdownActions.contains(action) { return markdownEditable }
+        if action == #selector(commentSelection(_:)) { return lineEditable && document.language.language.commentSyntax != nil }
         if Self.lineActions.contains(action) { return lineEditable }
         if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
