@@ -54,8 +54,8 @@ final class EditorSnapshotTests: XCTestCase {
         return doc
     }
 
-    func show(_ doc: TextDocument, size: CGSize, dark: Bool, regular: Bool = false) -> (UIWindow, EditorViewController) {
-        let editor = EditorViewController(document: doc, readModeOnOpen: false)
+    func show(_ doc: TextDocument, size: CGSize, dark: Bool, regular: Bool = false, readMode: Bool = false) -> (UIWindow, EditorViewController) {
+        let editor = EditorViewController(document: doc, readModeOnOpen: readMode)
         let nav = UINavigationController(rootViewController: editor)
         let w = UIWindow(frame: CGRect(origin: .zero, size: size))
         w.overrideUserInterfaceStyle = dark ? .dark : .light
@@ -65,7 +65,7 @@ final class EditorSnapshotTests: XCTestCase {
             nav.traitOverrides.verticalSizeClass = .regular
             nav.traitOverrides.userInterfaceIdiom = .pad
         }
-        w.isHidden = false
+        w.makeKeyAndVisible()
         w.layoutIfNeeded()
         windows.append(w)
         return (w, editor)
@@ -197,6 +197,116 @@ final class EditorSnapshotTests: XCTestCase {
         XCTAssertGreaterThan(textView.caretRect(for: nextStart).midY - textView.bounds.minY - first.midY,
                              textView.font?.lineHeight ?? 0, "the logical line must wrap")
         await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
+    func testWrapToggleAndFixedGutter() async throws {
+        let previousWrap = AppSettings.defaults.object(forKey: AppSettings.Key.wrap)
+        let previousNumbers = AppSettings.defaults.object(forKey: AppSettings.Key.lineNumbers)
+        defer {
+            if let previousWrap { AppSettings.defaults.set(previousWrap, forKey: AppSettings.Key.wrap) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.wrap) }
+            if let previousNumbers { AppSettings.defaults.set(previousNumbers, forKey: AppSettings.Key.lineNumbers) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers) }
+            AppSettings.post()
+        }
+        AppSettings.wrap = true
+        AppSettings.lineNumbers = true
+        let doc = try await open(try sample("sample.swift"))
+        let longLine = String(repeating: "wide words ", count: 400)
+        doc.text = longLine + "\nsecond line\nthird line"
+        let (window, editor) = show(doc, size: Self.iPhone, dark: false)
+        let textView = editor.textView
+        func gutter(in view: UIView) -> LineNumberGutter? {
+            if let g = view as? LineNumberGutter { return g }
+            return view.subviews.lazy.compactMap { gutter(in: $0) }.first
+        }
+        let numbers = try XCTUnwrap(gutter(in: editor.view))
+        let second = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: (longLine as NSString).length + 1))
+        window.layoutIfNeeded()
+        let wrappedY = textView.caretRect(for: second).midY
+        try snapshot(window, "wordwrap-on-iphone")
+
+        AppSettings.wrap = false
+        window.layoutIfNeeded()
+        await spin(0.1)
+        window.layoutIfNeeded()
+        let far = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: 3300))
+        let farRect = textView.caretRect(for: far)
+        XCTAssertGreaterThan(textView.textContainer.size.width, textView.bounds.width * 2)
+        XCTAssertGreaterThan(farRect.minX, textView.bounds.width * 2)
+        XCTAssertGreaterThan(textView.contentSize.width, textView.bounds.width)
+        XCTAssertGreaterThanOrEqual(textView.contentSize.width, farRect.maxX)
+        XCTAssertTrue(textView.showsHorizontalScrollIndicator)
+        try snapshot(window, "wordwrap-off-iphone")
+        let unwrappedY = textView.caretRect(for: second).midY
+        XCTAssertGreaterThan(wrappedY - unwrappedY, textView.font?.lineHeight ?? 0)
+        let gutterX = numbers.frame.minX
+        textView.setContentOffset(CGPoint(x: min(500, textView.contentSize.width - textView.bounds.width), y: 0), animated: false)
+        window.layoutIfNeeded()
+        XCTAssertGreaterThan(textView.contentOffset.x, 0)
+        XCTAssertEqual(numbers.frame.minX, gutterX, accuracy: 0.5)
+        XCTAssertEqual(numbers.rows.map(\.line), [1, 2, 3])
+        try snapshot(window, "wordwrap-off-iphone-scrolled")
+        for row in numbers.rows {
+            let position = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: editor.lineIndex.starts[row.line - 1]))
+            XCTAssertEqual(row.midY, textView.caretRect(for: position).midY - textView.bounds.minY, accuracy: 1)
+        }
+
+        AppSettings.wrap = true
+        window.layoutIfNeeded()
+        await spin(0.1)
+        window.layoutIfNeeded()
+        XCTAssertTrue(textView.textContainer.widthTracksTextView)
+        XCTAssertLessThanOrEqual(textView.textContainer.size.width, textView.bounds.width)
+        XCTAssertLessThanOrEqual(textView.contentSize.width, textView.bounds.width + 1)
+        XCTAssertLessThanOrEqual(abs(textView.contentOffset.x + textView.adjustedContentInset.left), 1)
+        XCTAssertGreaterThan(textView.caretRect(for: second).midY - unwrappedY, textView.font?.lineHeight ?? 0)
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
+    func testUnwrappedRevealColumnAndGoToLineInBothModes() async throws {
+        let previousWrap = AppSettings.defaults.object(forKey: AppSettings.Key.wrap)
+        let previousNumbers = AppSettings.defaults.object(forKey: AppSettings.Key.lineNumbers)
+        defer {
+            if let previousWrap { AppSettings.defaults.set(previousWrap, forKey: AppSettings.Key.wrap) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.wrap) }
+            if let previousNumbers { AppSettings.defaults.set(previousNumbers, forKey: AppSettings.Key.lineNumbers) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers) }
+            AppSettings.post()
+        }
+        AppSettings.wrap = false
+        AppSettings.lineNumbers = true
+        for readMode in [false, true] {
+            let doc = try await open(try sample("sample.swift"))
+            let longLine = String(repeating: "wide words ", count: 100)
+            doc.text = longLine + "\nsecond line"
+            let (window, editor) = show(doc, size: Self.iPhone, dark: false, readMode: readMode)
+            let textView = editor.textView
+            XCTAssertEqual(textView.isEditable, !readMode)
+            window.layoutIfNeeded()
+            func gutter(in view: UIView) -> LineNumberGutter? {
+                if let g = view as? LineNumberGutter { return g }
+                return view.subviews.lazy.compactMap { gutter(in: $0) }.first
+            }
+            let numbers = try XCTUnwrap(gutter(in: editor.view))
+            let column = 800
+            editor.revealRange(NSRange(location: column, length: 4))
+            window.layoutIfNeeded()
+            let position = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: column))
+            let caret = textView.caretRect(for: position)
+            XCTAssertGreaterThan(textView.contentOffset.x, 0)
+            XCTAssertGreaterThanOrEqual(caret.minX, textView.bounds.minX + numbers.bounds.width - 0.5)
+            XCTAssertLessThanOrEqual(caret.maxX, textView.bounds.maxX)
+            editor.revealLine(2)
+            window.layoutIfNeeded()
+            let lineStart = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: (longLine as NSString).length + 1))
+            let lineCaret = textView.caretRect(for: lineStart)
+            XCTAssertGreaterThanOrEqual(lineCaret.minX, textView.bounds.minX)
+            XCTAssertLessThanOrEqual(lineCaret.maxX, textView.bounds.maxX)
+            XCTAssertGreaterThanOrEqual(lineCaret.midY, textView.bounds.minY)
+            XCTAssertLessThanOrEqual(lineCaret.midY, textView.bounds.maxY)
+            await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+        }
     }
 
     func testOpenTypeSaveReadBack() async throws {

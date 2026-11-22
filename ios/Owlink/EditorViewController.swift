@@ -36,7 +36,7 @@ private final class GoToLineAlertController: UIAlertController {
 /// ending, caret), Cedric's hints, the Markdown preview and Ask Cedric.
 final class EditorViewController: UIViewController, UITextViewDelegate, UIGestureRecognizerDelegate {
     let document: TextDocument
-    let textView = UITextView(usingTextLayoutManager: true)
+    let textView = EditorDocumentTextView(usingTextLayoutManager: true)
     private(set) var lineIndex = LineIndex()
     /// Left inset of the text before line numbers claim any of it.
     private let editorTextInsetLeft: CGFloat = 8
@@ -355,6 +355,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateAskPanelWidth()
         layoutOwl()
         layoutDivider()
+        updateUnwrappedContentSize()
         layoutGutter()
     }
 
@@ -548,6 +549,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self?.openQuickly()
         }
         quickly.accessibilityIdentifier = "editor.menu.quickOpen"
+        let wrap = UIAction(title: String(localized: "Wrap Lines"), image: UIImage(systemName: "text.word.spacing")) { [weak self] _ in
+            self?.toggleWrap()
+        }
+        wrap.state = AppSettings.wrap ? .on : .off
+        wrap.accessibilityIdentifier = "editor.menu.wrapLines"
         let readable = UIAction(title: String(localized: "Readable Width"), image: UIImage(systemName: "text.aligncenter")) { [weak self] _ in
             self?.toggleReadableWidth()
         }
@@ -563,7 +569,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let settings = UIAction(title: String(localized: "Settings"), image: UIImage(systemName: "gear")) { [weak self] _ in
             self?.showSettings()
         }
-        var first: [UIMenuElement] = [save, replace, goTo, quickly, readable, ask, check]
+        var first: [UIMenuElement] = [save, replace, goTo, quickly, wrap, readable, ask, check]
         if document.language.language == .markdown {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -659,6 +665,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateStatus()
         scheduleOwl()
         askModel?.documentEdited()
+        updateUnwrappedContentSize()
         if showLineNumbers { layoutGutter() }
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
@@ -716,6 +723,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         jumpShowsLineNumbers = true
         markedLine = line
         layoutGutter()
+        // Find's field has focus during Next/Previous. Skip this while the
+        // person is dragging a selection or typing in the document.
+        if !AppSettings.wrap, !textView.isFirstResponder { revealRange(textView.selectedRange) }
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -911,13 +921,52 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func applyWrap() {
         let c = textView.textContainer
         if AppSettings.wrap {
+            if !c.widthTracksTextView {
+                c.size = CGSize(width: max(0, textView.bounds.width - textView.textContainerInset.left - textView.textContainerInset.right),
+                                height: CGFloat.greatestFiniteMagnitude)
+                textView.setContentOffset(CGPoint(x: -textView.adjustedContentInset.left, y: textView.contentOffset.y), animated: false)
+            }
             c.widthTracksTextView = true
+            textView.showsHorizontalScrollIndicator = false
+            textView.alwaysBounceHorizontal = false
+            textView.minimumContentWidth = 0
         } else {
             c.widthTracksTextView = false
-            c.size = CGSize(width: 20_000, height: CGFloat.greatestFiniteMagnitude)
+            c.size = CGSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+            textView.showsHorizontalScrollIndicator = true
+            textView.alwaysBounceHorizontal = true
         }
         textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        updateUnwrappedContentSize()
         view.setNeedsLayout()
+    }
+
+    /// TextKit 2 keeps a UITextView's contentSize.width at the viewport even
+    /// when unwrapped fragments are much wider. Grow the scroller from the
+    /// laid-out text and from a font estimate of the longest line.
+    private func updateUnwrappedContentSize() {
+        guard !AppSettings.wrap else { return }
+        let insets = textView.textContainerInset
+        var width = textView.bounds.width
+        if let used = textView.textLayoutManager?.usageBoundsForTextContainer, used.width.isFinite {
+            width = max(width, ceil(used.maxX + insets.left + insets.right))
+        }
+        let font = textView.font ?? AppSettings.font(for: traitCollection)
+        let charWidth = max(("0" as NSString).size(withAttributes: [.font: font]).width, 1)
+        // longestLine includes the newline; a little slack covers tabs.
+        width = max(width, ceil(CGFloat(max(0, lineIndex.longestLine)) * charWidth + insets.left + insets.right + 8))
+        textView.minimumContentWidth = width
+        // UITextView/TextKit 2 replaces an infinite container width with the
+        // viewport width, which wraps the line again. Pin a finite width.
+        let containerWidth = max(textView.bounds.width - insets.left - insets.right, width - insets.left - insets.right)
+        let c = textView.textContainer
+        if abs(c.size.width - containerWidth) > 1 {
+            c.size = CGSize(width: containerWidth, height: CGFloat.greatestFiniteMagnitude)
+            textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        }
+        if textView.contentSize.width + 0.5 < width {
+            textView.contentSize = CGSize(width: width, height: textView.contentSize.height)
+        }
     }
 
     // MARK: Owl
@@ -1235,9 +1284,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let abs = NSRange(location: r.location + shown.offset, length: r.length)
         guard NSMaxRange(abs) <= (textView.text as NSString).length else { return }
         textView.selectedRange = abs
-        textView.scrollRangeToVisible(abs)
         jumpShowsLineNumbers = true
         layoutGutter()
+        revealRange(abs)
     }
 
     /// "Ignore this word": the phrase joins Style Check's exceptions.
@@ -1439,7 +1488,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         um?.endUndoGrouping()
         let placed = NSRange(location: range.location, length: (p.replacement as NSString).length)
         textView.selectedRange = placed
-        textView.scrollRangeToVisible(placed)
+        revealRange(placed)
         return .applied
     }
 
@@ -1937,11 +1986,47 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         markedLine = index + 1
         let r = NSRange(location: lineIndex.starts[index], length: 0)
         textView.selectedRange = r
-        textView.scrollRangeToVisible(r)
+        layoutGutter()
+        revealRange(r)
         if let sheet = askSheet?.sheetPresentationController, sheet.selectedDetentIdentifier == .large {
             sheet.animateChanges { sheet.selectedDetentIdentifier = .medium }
         }
         layoutGutter()
+    }
+
+    /// Reveal a selection, including its column when unwrapped. TextKit 2's
+    /// UITextView often leaves the caret off-screen after the system
+    /// helpers; fall back to an explicit offset when that happens.
+    func revealRange(_ range: NSRange) {
+        guard range.location != NSNotFound, range.location <= textView.textStorage.length,
+              let position = textView.position(from: textView.beginningOfDocument, offset: range.location) else {
+            textView.scrollRangeToVisible(range)
+            return
+        }
+        updateUnwrappedContentSize()
+        textView.scrollRangeToVisible(range)
+        var rect = textView.caretRect(for: position)
+        if rect.isNull || rect.isInfinite { return }
+        let gutter: CGFloat = (!AppSettings.wrap && showLineNumbers) ? lineNumberGutter.bounds.width : 0
+        if gutter > 0 {
+            rect.size.width += gutter
+            rect.origin.x -= gutter
+        }
+        textView.scrollRectToVisible(rect, animated: false)
+        let inset = textView.adjustedContentInset
+        var visible = textView.bounds.inset(by: inset)
+        if gutter > 0 {
+            visible.origin.x += gutter
+            visible.size.width = max(0, visible.size.width - gutter)
+        }
+        let target = CGPoint(x: rect.midX, y: rect.midY)
+        if visible.insetBy(dx: -2, dy: -2).contains(target) { return }
+        let minX = -inset.left, minY = -inset.top
+        let maxX = max(minX, textView.contentSize.width + inset.right - textView.bounds.width)
+        let maxY = max(minY, textView.contentSize.height + inset.bottom - textView.bounds.height)
+        let x = AppSettings.wrap ? min(max(textView.contentOffset.x, minX), maxX) : min(max(rect.minX - gutter - 8, minX), maxX)
+        let y = min(max(rect.midY - textView.bounds.height / 3, minY), maxY)
+        textView.setContentOffset(CGPoint(x: x, y: y), animated: false)
     }
 
     /// Horizontal insets for the text. Off, the gutter consumes the left
@@ -2500,3 +2585,16 @@ final class PaddingLabel: UILabel {
         return CGSize(width: s.width + 24, height: s.height + 16)
     }
 }
+
+/// TextKit 2's UITextView reports a viewport-wide contentSize when wrapping
+/// is off. Keep the width we measured so later layout passes cannot shrink it.
+final class EditorDocumentTextView: UITextView {
+    var minimumContentWidth: CGFloat = 0
+    override var contentSize: CGSize {
+        get { super.contentSize }
+        set {
+            super.contentSize = CGSize(width: max(newValue.width, minimumContentWidth), height: newValue.height)
+        }
+    }
+}
+
