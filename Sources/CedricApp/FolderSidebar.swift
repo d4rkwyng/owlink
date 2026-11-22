@@ -409,6 +409,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             split.adjustSubviews()
             split.setHoldingPriority(.init(260), forSubviewAt: 0)
             if split.bounds.width > 0 { split.setPosition(min(width, split.bounds.width * 0.5), ofDividerAt: 0) }
+            split.layoutSubtreeIfNeeded()
             splitObserver = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: split, queue: nil) {
                 [weak self] _ in MainActor.assumeIsolated { self?.splitResized() }
             }
@@ -446,7 +447,8 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     }
 
     private func undock() {
-        if let split = superview as? NSSplitView, let i = split.arrangedSubviews.firstIndex(of: self) {
+        let split = superview as? NSSplitView
+        if let split, let i = split.arrangedSubviews.firstIndex(of: self) {
             // Its holding priority shouldn't stay with whatever lands at its index.
             split.setHoldingPriority(.defaultLow, forSubviewAt: i)
         }
@@ -454,6 +456,15 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         if let o = splitObserver { NotificationCenter.default.removeObserver(o) }
         splitObserver = nil
         removeFromSuperview()
+        // Redistribute now, and lay out remaining panes (the editor's
+        // gutter and scroll view, or a viewer) so they fill at once.
+        if let split {
+            split.adjustSubviews()
+            if split.arrangedSubviews.count == 1 {
+                split.arrangedSubviews[0].frame = split.bounds
+            }
+            split.layoutSubtreeIfNeeded()
+        }
     }
 
     private func startWatching() {

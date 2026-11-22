@@ -1054,7 +1054,8 @@ folder's wait marker as it opens it (the `cli` check).
   resizes or a panel docks, whatever the holding priorities, so the
   sidebar puts its width back after any resize that isn't the user
   dragging its divider (a mouse event in that window, not a live window
-  resize). A divider drag is kept and saved.
+  resize). A divider drag is kept and saved. Removing the sidebar adjusts
+  the old split so its remaining panes fill the freed space.
 - **Lazy listing.** Only expanded folders are listed: `FolderTree.list`
   reads one level with `contentsOfDirectory` and the directory, hidden,
   package and symlink keys, on a background queue. Folders first, then

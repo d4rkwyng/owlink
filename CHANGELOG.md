@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
