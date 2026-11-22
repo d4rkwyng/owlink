@@ -102,6 +102,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var dailyBaselineArm = 0
     private var dailyBaselinePending = false
     private var dailyDropAfterBaseline = false
+    private var dailyPendingWords: Int?
     private static let dailyImmediateLimit = 100_000
     var dailyWords = DailyWordCounter.shared
     var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
@@ -1328,11 +1329,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             dailyBaselineArm &+= 1
             dailyBaselinePending = false
             dailyDropAfterBaseline = false
+            dailyPendingWords = nil
         }
         guard storage.length <= dailyWordCountLimit else {
             dailyBaselineArm &+= 1
             dailyBaselinePending = false
             dailyDropAfterBaseline = false
+            dailyPendingWords = nil
             wordCount = nil
             wordCountGeneration = nil
             dailyWords.drop(key)
@@ -1349,14 +1352,16 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             let text = Self.immutableCopy(storage)
             let arm = dailyBaselineArm
             let counter = dailyWords
-            dailyQueue.async { [weak self] in
+            dailyQueue.async { [self] in
                 let words = TextStats.count(text, range: NSRange(location: 0, length: text.length))?.words
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        guard let self, self.dailyBaselineArm == arm, counter === self.dailyWords else { return }
+                        guard self.dailyBaselineArm == arm, counter === self.dailyWords else { return }
                         self.dailyBaselinePending = false
                         if let words { counter.rebaseOriginal(key: key, original: words) }
                         else { counter.drop(key) }
+                        if let latest = self.dailyPendingWords { counter.note(key: key, words: latest) }
+                        self.dailyPendingWords = nil
                         if self.dailyDropAfterBaseline { counter.drop(key); self.dailyDropAfterBaseline = false }
                     }
                 }
@@ -1369,7 +1374,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     private func record(words: Int?, baseline: Bool, dropAfter: Bool) {
         if baseline { dailyWords.rebaseline(key: dailyKey, words: words) }
-        else { dailyWords.note(key: dailyKey, words: words) }
+        else if dailyBaselinePending {
+            if dailyPendingWords == nil { dailyWords.note(key: dailyKey, words: words) }
+            dailyPendingWords = words
+        } else { dailyWords.note(key: dailyKey, words: words) }
         if dropAfter {
             if dailyBaselinePending { dailyDropAfterBaseline = true }
             else { dailyWords.drop(dailyKey) }

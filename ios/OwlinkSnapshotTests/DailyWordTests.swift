@@ -172,15 +172,19 @@ final class DailyWordTests: XCTestCase {
         editor.textView.text = text + "new words"
         editor.commitDailyWords()
         XCTAssertEqual(counter.wordsToday, 0)
-        for _ in 0..<200 where counter.wordsToday != 2 {
+        editor.textView.text = text + "new words again"
+        editor.commitDailyWords()
+        editor.stopDailyWordTracking()
+        for _ in 0..<200 where counter.wordsToday != 3 {
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertEqual(counter.wordsToday, 2)
+        XCTAssertEqual(counter.wordsToday, 3)
+        editor.textView.text = text + "new words again later"
         editor.commitDailyWords()
-        XCTAssertEqual(counter.wordsToday, 2)
+        XCTAssertEqual(counter.wordsToday, 3)
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suites.last!))
         let day = DailyWords.dayString(for: clock, calendar: .current)
-        XCTAssertEqual(DailyWordDefaults.words(on: day, defaults: defaults), 2)
+        XCTAssertEqual(DailyWordDefaults.words(on: day, defaults: defaults), 3)
     }
 
     func testExplicitRollAtLocalMidnightAndGetterIsPure() {
