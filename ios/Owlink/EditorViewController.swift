@@ -53,9 +53,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var writingCenterPending = false
     private var writingLayoutSize = CGSize.zero
     private(set) var writingLargeReason: LargeDocument.Reason?
-    private var focusPainted: [NSTextRange] = []
+    /// The text range last dimmed (offsets, from the last paint). Stored
+    /// NSTextRanges go stale after edits, so clearing works from this and the
+    /// current viewport instead.
+    private var focusPaintedRange: NSRange?
     private var focusCache: [Int]?
     private var focusPalette: UInt32?
+    /// Counts text edits: part of the dimming's cache key, so an edit before
+    /// the focus never leaves the old paint standing.
+    private var editCount = 0
     private var highlightTimer: Timer?
     private struct HighlightPaint {
         let range: NSRange
@@ -819,6 +825,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let edited = textStorage.editedRange, delta = textStorage.changeInLength
         guard textStorage.editedMask.contains(.editedCharacters), !loading else { return }
         clearEditorHighlights()
+        editCount += 1
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
@@ -1215,6 +1222,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // Find's Next moves the selection with the find bar up. That is the
         // "click next" jump: show the line number it landed on.
         guard textView.findInteraction?.isFindNavigatorVisible == true else { return }
+        scheduleWritingUpdate(center: true)
         let line = lineIndex.line(containing: min(textView.selectedRange.location, lineIndex.length)) + 1
         jumpShowsLineNumbers = true
         markedLine = line
@@ -1701,13 +1709,37 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    private func clearFocusRendering() {
-        if let layout = textView.textLayoutManager {
-            for range in focusPainted { layout.removeRenderingAttribute(.foregroundColor, for: range) }
+    /// Re-checks the large-document pause after the whole text was replaced
+    /// (the Mac leaves large mode only then, not while typing a long line shorter).
+    private func reevaluateWritingLarge() {
+        let reason = LargeDocument.reason(for: lineIndex)
+        guard reason != writingLargeReason else { return }
+        writingLargeReason = reason
+        clearFocusRendering()
+        updateWritingInset()
+        if reason == nil { scheduleWritingUpdate() }
+        else if !writing.isOff { showWritingPaused(reason!) }
+    }
+
+    /// Takes the dimming off the range painted last, and `current` if given
+    /// (clamped to the text, so an edit that moved things cannot leave paint behind).
+    private func clearFocusRendering(also current: NSRange? = nil) {
+        defer { focusPaintedRange = nil; focusCache = nil; focusPalette = nil }
+        guard let layout = textView.textLayoutManager, let manager = layout.textContentManager else { return }
+        let length = textView.textStorage.length
+        let spans = [focusPaintedRange, current].compactMap { $0 }
+            .map { NSIntersectionRange($0, NSRange(location: 0, length: length)) }.filter { $0.length > 0 }
+        guard !spans.isEmpty else { return }
+        var span = spans[0]
+        for other in spans.dropFirst() { span = NSUnionRange(span, other) }
+        let origin = layout.documentRange.location
+        if let a = manager.location(origin, offsetBy: span.location),
+           let b = manager.location(a, offsetBy: span.length),
+           let range = NSTextRange(location: a, end: b) {
+            layout.removeRenderingAttribute(.foregroundColor, for: range)
+        } else {
+            layout.removeRenderingAttribute(.foregroundColor, for: layout.documentRange)
         }
-        focusPainted = []
-        focusCache = nil
-        focusPalette = nil
     }
 
     private func scheduleWritingUpdate(center: Bool = true) {
@@ -1729,21 +1761,20 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if writing.typewriter && center {
             updateWritingInset()
             if !textView.isTracking, !textView.isDragging, let position = textView.selectedTextRange?.end {
+                // Lay out up to the caret only when it is near the viewport:
+                // a far-away caret would otherwise lay out everything between.
                 if let layout = textView.textLayoutManager, let manager = layout.textContentManager,
                    let viewport = layout.textViewportLayoutController.viewportRange {
                     let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
-                    let caret = NSMaxRange(textView.selectedRange)
-                    if let location = manager.location(viewport.location, offsetBy: caret - start) {
+                    let viewportLength = manager.offset(from: viewport.location, to: viewport.endLocation)
+                    let relative = NSMaxRange(textView.selectedRange) - start
+                    if relative >= -3_000, relative <= viewportLength + 3_000,
+                       let location = manager.location(viewport.location, offsetBy: relative) {
                         layout.ensureLayout(for: NSTextRange(location: location))
                     }
                     layout.textViewportLayoutController.layoutViewport()
                 }
                 let rect = textView.caretRect(for: position)
-                if rect.maxY > textView.contentSize.height {
-                    var size = textView.contentSize
-                    size.height = rect.maxY + textView.textContainerInset.bottom
-                    textView.contentSize = size
-                }
                 let top = textView.adjustedContentInset.top
                 let baseBottom = max(0, textView.adjustedContentInset.bottom - writingInset)
                 let height = max(0, textView.bounds.height - top - baseBottom)
@@ -1759,22 +1790,24 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard writing.focus, let layout = textView.textLayoutManager,
               let manager = layout.textContentManager,
               let visible = editorVisibleRange() else { return }
-        let text = textView.textStorage.mutableString
+        let text = textView.textStorage.string as NSString
         let focus = FocusRange.range(AppSettings.focusUnit, in: text, caret: textView.selectedRange.location)
-        let key = [focus.location, focus.length, visible.location, visible.length, text.length]
+        let contrast = UIAccessibility.isDarkerSystemColorsEnabled
+        let key = [focus.location, focus.length, visible.location, visible.length, text.length, editCount, contrast ? 1 : 0]
         if focusCache == key, focusPalette == palette.foreground { return }
         guard let viewport = layout.textViewportLayoutController.viewportRange else { return }
         let viewportStart = manager.offset(from: layout.documentRange.location, to: viewport.location)
         guard let start = manager.location(viewport.location, offsetBy: visible.location - viewportStart) else { return }
-        clearFocusRendering()
-        let color = UIColor(hex: palette.foreground).withAlphaComponent(0.32)
+        clearFocusRendering(also: visible)
+        // Increase Contrast dims less, so the unfocused text stays readable.
+        let color = UIColor(hex: palette.foreground).withAlphaComponent(contrast ? 0.6 : 0.4)
         for range in FocusRange.dimmed(visible: visible, focus: focus) {
             guard let a = manager.location(start, offsetBy: range.location - visible.location),
                   let b = manager.location(a, offsetBy: range.length),
                   let textRange = NSTextRange(location: a, end: b) else { continue }
             layout.addRenderingAttribute(.foregroundColor, value: color, for: textRange)
-            focusPainted.append(textRange)
         }
+        focusPaintedRange = visible
         focusCache = key
         focusPalette = palette.foreground
     }
@@ -1790,6 +1823,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     @objc private func highlightContrastChanged() {
         highlightKey = nil
+        focusCache = nil
+        scheduleWritingUpdate(center: false)
         scheduleEditorHighlights(selectionChanged: false)
     }
 
@@ -3299,6 +3334,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.selectedRange = r
         layoutGutter()
         revealRange(r)
+        scheduleWritingUpdate(center: true)
         if let sheet = askSheet?.sheetPresentationController, sheet.selectedDetentIdentifier == .large {
             sheet.animateChanges { sheet.selectedDetentIdentifier = .medium }
         }
@@ -3468,6 +3504,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     @objc private func undoChanged(_ note: Notification) {
         guard let um = note.object as? UndoManager, um === textView.undoManager else { return }
+        if note.name == .NSUndoManagerDidUndoChange || note.name == .NSUndoManagerDidRedoChange {
+            scheduleWritingUpdate(center: true)
+        }
         // After the group is closed (WillClose comes before it is counted).
         DispatchQueue.main.async { [weak self] in self?.updateUndoItems() }
     }
@@ -3601,11 +3640,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     /// Replaces the whole text as one undoable edit (Undo brings it back).
-    private func replaceAllText(with text: String) {
+    func replaceAllText(with text: String) {
         guard let all = textView.textRange(from: textView.beginningOfDocument, to: textView.endOfDocument) else { return }
         let g = generation
         textView.replace(all, withText: text)
         if generation == g { textViewDidChange(textView) }
+        // A whole-text replacement is the one edit that can leave large mode (as on the Mac).
+        reevaluateWritingLarge()
         textView.selectedRange = NSRange(location: 0, length: 0)
         textView.scrollRangeToVisible(textView.selectedRange)
     }
@@ -3979,10 +4020,27 @@ final class EditorDocumentTextView: UITextView {
     @objc private func markdownBacktab() { onMarkdownTab?(false) }
 
     override func paste(_ sender: Any?) {
-        if onMarkdownPaste?() == true { return }
+        if onMarkdownPaste?() == true { onKeyboardCaretMove?(); return }
         isPasting = true
-        defer { isPasting = false }
+        defer { isPasting = false; onKeyboardCaretMove?() }
         super.paste(sender)
+    }
+
+    override func cut(_ sender: Any?) {
+        super.cut(sender)
+        onKeyboardCaretMove?()
+    }
+
+    override func replace(_ range: UITextRange, withText text: String) {
+        super.replace(range, withText: text)
+        onKeyboardCaretMove?()
+    }
+
+    /// An IME's composition is committed.
+    override func unmarkText() {
+        let hadMarked = markedTextRange != nil
+        super.unmarkText()
+        if hadMarked { onKeyboardCaretMove?() }
     }
 
     override func insertText(_ text: String) {
@@ -4006,7 +4064,7 @@ final class EditorDocumentTextView: UITextView {
         super.pressesEnded(presses, with: event)
         if presses.contains(where: { press in
             guard let key = press.key else { return false }
-            return [.keyboardLeftArrow, .keyboardRightArrow, .keyboardUpArrow, .keyboardDownArrow].contains(key.keyCode)
+            return [.keyboardLeftArrow, .keyboardRightArrow, .keyboardUpArrow, .keyboardDownArrow, .keyboardDeleteForward].contains(key.keyCode)
         }) { onKeyboardCaretMove?() }
     }
 

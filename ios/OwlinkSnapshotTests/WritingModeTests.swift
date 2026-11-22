@@ -151,4 +151,78 @@ final class WritingModeTests: XCTestCase {
         end.updateWriting()
         XCTAssertEqual(end.textView.text, "One.\r\n\r\nLast.")
     }
+
+    // MARK: Follow-up fixes
+
+    /// Polls the run loop until `condition` holds or `timeout` passes.
+    private func wait(timeout: TimeInterval = 2, _ condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        return condition()
+    }
+
+    private func dimmedRanges(_ editor: EditorViewController) throws -> [NSRange] {
+        let layout = try XCTUnwrap(editor.textView.textLayoutManager)
+        let manager = try XCTUnwrap(layout.textContentManager)
+        var actual: [NSRange] = []
+        layout.enumerateRenderingAttributes(from: layout.documentRange.location, reverse: false) { _, attributes, range in
+            if attributes[.foregroundColor] != nil {
+                let start = manager.offset(from: layout.documentRange.location, to: range.location)
+                let end = manager.offset(from: layout.documentRange.location, to: range.endLocation)
+                actual.append(NSRange(location: start, length: end - start))
+            }
+            return true
+        }
+        return actual
+    }
+
+    func testEditBeforeDimmedSpanLeavesExactDimmedSet() throws {
+        let editor = editor("First paragraph.\n\nSecond paragraph.\n\nThird paragraph.")
+        editor.textView.selectedRange = NSRange(location: 20, length: 0)
+        editor.toggleWritingFocus()
+        editor.updateWriting()
+        XCTAssertFalse(try dimmedRanges(editor).isEmpty)
+        // Type before the dimmed first paragraph; the caret stays in the second.
+        editor.textView.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "Inserted words here. ")
+        editor.textView.selectedRange = NSRange(location: 41, length: 0)
+        editor.textViewDidChange(editor.textView)
+        XCTAssertTrue(wait {
+            guard let visible = editor.editorVisibleRange() else { return false }
+            let text = editor.textView.text as NSString
+            let expected = FocusRange.dimmed(visible: visible, focus: FocusRange.range(.paragraph, in: text, caret: 41))
+            return (try? self.dimmedRanges(editor)) == expected
+        }, "dimmed set follows the edit exactly: \((try? dimmedRanges(editor)) ?? [])")
+    }
+
+    func testRecentresAfterReplace() throws {
+        let editor = editor(String(repeating: "A line of text.\n", count: 120))
+        editor.toggleTypewriter()
+        let end = editor.textView.textStorage.length
+        editor.textView.selectedRange = NSRange(location: end, length: 0)
+        editor.updateWriting()
+        let atEnd = editor.textView.contentOffset.y
+        // Move the view away, then an edit through replace(_:withText:) pulls it back to the caret.
+        editor.textView.setContentOffset(.zero, animated: false)
+        let caret = try XCTUnwrap(editor.textView.selectedTextRange)
+        editor.textView.replace(caret, withText: "!")
+        XCTAssertTrue(wait { editor.textView.contentOffset.y > atEnd / 2 }, "recentred after replace(_:withText:)")
+    }
+
+    func testFarCaretDoesNotChangeContentSizeByHand() {
+        let editor = editor(String(repeating: "A line of text.\n", count: 400))
+        editor.toggleTypewriter()
+        editor.textView.selectedRange = NSRange(location: editor.textView.textStorage.length, length: 0)
+        editor.updateWriting()
+        let size = editor.textView.contentSize
+        editor.updateWriting()
+        XCTAssertEqual(editor.textView.contentSize, size)
+        XCTAssertGreaterThan(editor.textView.contentOffset.y, 0)
+    }
+
+    func testWholeTextReplacementLeavesLargeMode() {
+        let editor = editor(String(repeating: "a", count: LargeDocument.lineThreshold + 1))
+        XCTAssertEqual(editor.writingLargeReason, .longLine)
+        editor.replaceAllText(with: "short\ntext")
+        XCTAssertNil(editor.writingLargeReason)
+    }
 }
