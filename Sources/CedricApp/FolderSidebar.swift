@@ -237,6 +237,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     let outline = FolderOutlineView()
     let scroll = NSScrollView()
     let title = NSTextField(labelWithString: "")
+    private let headerMenu = NSMenu()
     private(set) var isShown = false
     private(set) var width: CGFloat
     private(set) var showHidden: Bool
@@ -311,6 +312,20 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
                              target: self, action: #selector(closeFolder(_:)))
         close.isBordered = false
         close.identifier = .init("folder-close")
+        let actions = NSPopUpButton(frame: .zero, pullsDown: true)
+        let actionsLabel = String(localized: "Folder Actions")
+        actions.setAccessibilityLabel(actionsLabel)
+        actions.toolTip = actionsLabel
+        actions.isBordered = false
+        actions.controlSize = .small
+        (actions.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+        headerMenu.autoenablesItems = false
+        headerMenu.delegate = self
+        let menuTitle = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        menuTitle.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: actionsLabel)
+        headerMenu.addItem(menuTitle)
+        actions.menu = headerMenu
+        actions.identifier = .init("folder-actions")
         let col = NSTableColumn(identifier: .init("name"))
         col.resizingMask = .autoresizingMask
         outline.addTableColumn(col)
@@ -337,6 +352,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         addSubview(title)
+        addSubview(actions)
         addSubview(close)
         addSubview(scroll)
     }
@@ -345,7 +361,9 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         super.layout()
         let close = subviews.first { $0.identifier?.rawValue == "folder-close" }
         close?.frame = NSRect(x: bounds.width - 26, y: 5, width: 20, height: 20)
-        title.frame = NSRect(x: 10, y: 7, width: max(0, bounds.width - 40), height: 16)
+        let actions = subviews.first { $0.identifier?.rawValue == "folder-actions" }
+        actions?.frame = NSRect(x: bounds.width - 50, y: 5, width: 20, height: 20)
+        title.frame = NSRect(x: 10, y: 7, width: max(0, bounds.width - 64), height: 16)
         scroll.frame = NSRect(x: 0, y: 28, width: bounds.width, height: max(0, bounds.height - 28))
         outline.tableColumns.first?.width = scroll.contentSize.width
     }
@@ -661,6 +679,10 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     // MARK: Context menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === headerMenu {
+            updateHeaderMenu()
+            return
+        }
         menu.removeAllItems()
         let n = selectedNode
         func add(_ title: String, _ action: Selector) {
@@ -687,6 +709,80 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         add(String(localized: "Show Hidden Files"), #selector(toggleHidden(_:)))
         menu.items.last?.state = showHidden ? .on : .off
         add(String(localized: "Close Folder"), #selector(closeFolder(_:)))
+    }
+
+    func updateHeaderMenu() {
+        let menuTitle = headerMenu.items.first ?? NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        headerMenu.removeAllItems()
+        headerMenu.addItem(menuTitle)
+        let selection: FolderSidebarMenu.Selection
+        if let node = selectedNode {
+            if node.isDirectory {
+                selection = .folder
+            } else {
+                selection = .file(parentIsRoot: node.url.deletingLastPathComponent().standardizedFileURL.path == rootURL.standardizedFileURL.path)
+            }
+        } else {
+            selection = .none
+        }
+        let anyExpanded = (0..<outline.numberOfRows).contains { row in
+            guard let node = outline.item(atRow: row) as? FolderNode else { return false }
+            return outline.isItemExpanded(node)
+        }
+        let state = FolderSidebarMenu.State(selection: selection, anyExpanded: anyExpanded, showHidden: showHidden)
+        for item in FolderSidebarMenu.items(for: state) {
+            switch item {
+            case .separator:
+                headerMenu.addItem(.separator())
+            case let .command(command, isEnabled, isChecked):
+                let menuItem = NSMenuItem(title: Self.title(for: command), action: Self.action(for: command), keyEquivalent: "")
+                menuItem.isEnabled = isEnabled
+                menuItem.state = isChecked.map { $0 ? .on : .off } ?? .off
+                if command == .openFolder {
+                    menuItem.target = NSApp.delegate
+                } else {
+                    menuItem.target = self
+                    menuItem.representedObject = selectedNode ?? root
+                }
+                headerMenu.addItem(menuItem)
+            }
+        }
+    }
+
+    private static func title(for command: FolderSidebarMenu.Command) -> String {
+        switch command {
+        case .newFile: String(localized: "New File…")
+        case .newFolder: String(localized: "New Folder…")
+        case .rename: String(localized: "Rename")
+        case .moveToTrash: String(localized: "Move to Trash…")
+        case .revealInFinder: String(localized: "Reveal in Finder")
+        case .openEnclosingFolder: String(localized: "Open Enclosing Folder")
+        case .copyPath: String(localized: "Copy Path")
+        case .findInFolder: String(localized: "Find in Folder…")
+        case .refresh: String(localized: "Refresh")
+        case .collapseAll: String(localized: "Collapse All")
+        case .showHiddenFiles: String(localized: "Show Hidden Files")
+        case .openFolder: String(localized: "Open Folder…")
+        case .closeFolder: String(localized: "Close Folder")
+        }
+    }
+
+    private static func action(for command: FolderSidebarMenu.Command) -> Selector {
+        switch command {
+        case .newFile: #selector(newFile(_:))
+        case .newFolder: #selector(newFolder(_:))
+        case .rename: #selector(renameItem(_:))
+        case .moveToTrash: #selector(trashItem(_:))
+        case .revealInFinder: #selector(revealInFinder(_:))
+        case .openEnclosingFolder: #selector(openEnclosing(_:))
+        case .copyPath: #selector(copyPath(_:))
+        case .findInFolder: #selector(findInFolder(_:))
+        case .refresh: #selector(refresh(_:))
+        case .collapseAll: #selector(collapseAll(_:))
+        case .showHiddenFiles: #selector(toggleHidden(_:))
+        case .openFolder: #selector(AppDelegate.openFolderMenu(_:))
+        case .closeFolder: #selector(closeFolder(_:))
+        }
     }
 
     private func target(_ sender: Any?) -> FolderNode {
@@ -830,6 +926,19 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         showHidden.toggle()
         if showHidden { revealedHiddenURLs.removeAll() }
         for n in root.loadedFolders { load(n) }
+        onChange?()
+    }
+
+    @objc func refresh(_ sender: Any?) {
+        ignore.invalidate()
+        quickOpen?.markStale()
+        for n in root.loadedFolders { load(n) }
+    }
+
+    @objc func collapseAll(_ sender: Any?) {
+        for node in root.children ?? [] where outline.isItemExpanded(node) {
+            outline.collapseItem(node, collapseChildren: true)
+        }
         onChange?()
     }
 

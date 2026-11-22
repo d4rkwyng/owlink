@@ -107,6 +107,7 @@ extension DevChecks {
         var redockMs = 0.0
         var savedWrap = true
         var savedReadableWidth: Bool?
+        var listingsBeforeRefresh = 0
 
         run([
             sync {
@@ -144,7 +145,43 @@ extension DevChecks {
                 expect(FolderWatcher.running == 1 && s.isWatching, "one FSEvents stream while shown", "\(FolderWatcher.running)")
                 expect(toggleItem().map { app.validateMenuItem($0) && $0.title == "Hide Folder Sidebar" && $0.state == .off } == true,
                        "View › Hide Folder Sidebar enabled (Show/Hide, no checkmark)", toggleItem()?.title ?? "-")
+                guard let actions = s.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" }) as? NSPopUpButton,
+                      let menu = actions.menu else {
+                    expect(false, "the folder-actions pull-down"); return
+                }
+                expect(actions.accessibilityLabel() == String(localized: "Folder Actions") &&
+                       actions.toolTip == String(localized: "Folder Actions"), "folder-actions has a VoiceOver label and tooltip")
+                let expectedMenu = ["", "New File…", "New Folder…", "|", "Rename", "Move to Trash…", "|",
+                                    "Reveal in Finder", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
+                                    "Refresh", "Collapse All", "|", "Show Hidden Files", "|", "Open Folder…", "|", "Close Folder"]
+                @MainActor func checkMenu(_ name: String) {
+                    s.updateHeaderMenu()
+                    let titles = menu.items.map { $0.isSeparatorItem ? "|" : $0.title }
+                    expect(titles == expectedMenu, name, "\(titles)")
+                }
+                func enabled(_ title: String) -> Bool? { menu.items.first { $0.title == title }?.isEnabled }
+                s.outline.deselectAll(nil)
+                checkMenu("header menu titles and separators")
+                expect(enabled("New File…") == true && enabled("New Folder…") == true && enabled("Rename") == false &&
+                       enabled("Move to Trash…") == false && enabled("Reveal in Finder") == true &&
+                       enabled("Open Enclosing Folder") == false && enabled("Copy Path") == true &&
+                       enabled("Find in Folder…") == true && enabled("Refresh") == true &&
+                       enabled("Collapse All") == false && enabled("Open Folder…") == true &&
+                       enabled("Close Folder") == true && menu.items.first { $0.title == "Show Hidden Files" }?.state == .off,
+                       "header menu enablement with no selected row")
+                s.outline.selectRowIndexes([row("alpha.txt")], byExtendingSelection: false)
+                s.updateHeaderMenu()
+                expect(enabled("Rename") == true && enabled("Move to Trash…") == true && enabled("Open Enclosing Folder") == false,
+                       "a root file enables Rename and Trash, not Open Enclosing Folder")
+                s.outline.selectRowIndexes([row("docs")], byExtendingSelection: false)
+                s.updateHeaderMenu()
+                expect(enabled("Rename") == true && enabled("Move to Trash…") == true && enabled("Open Enclosing Folder") == false,
+                       "a selected folder enables Rename and Trash, not Open Enclosing Folder")
+                s.outline.deselectAll(nil)
+                listingsBeforeRefresh = s.listings
+                s.refresh(nil)
             },
+            until("header Refresh re-lists loaded folders") { sidebar.listings > listingsBeforeRefresh },
             snapshot("folder-root.png"),
             { next in
                 // Expand src: a click on its disclosure triangle.
@@ -172,6 +209,12 @@ extension DevChecks {
             sync {
                 expect(sidebar.outline.isItemExpanded(node("docs")), "→ on a selected folder expands it")
                 expect(names(node("docs")) == ["readme.md"], "docs' file", "\(names(node("docs")))")
+                sidebar.outline.selectRowIndexes([row("docs/readme.md")], byExtendingSelection: false)
+                sidebar.updateHeaderMenu()
+                let enclosing = sidebar.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" })
+                    .flatMap { ($0 as? NSPopUpButton)?.menu?.items.first { $0.title == "Open Enclosing Folder" } }
+                expect(enclosing?.isEnabled == true, "a file below the root enables Open Enclosing Folder")
+                sidebar.outline.deselectAll(nil)
                 tabsBefore = app.tabs.count
                 clickRow(row("src/a.swift"), "a.swift")
             },
@@ -399,6 +442,13 @@ extension DevChecks {
             sync {
                 // Close Folder (the × in the header): gone, no stream, menu item off.
                 let s = sidebar
+                s.updateHeaderMenu()
+                let collapse = s.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" })
+                    .flatMap { ($0 as? NSPopUpButton)?.menu?.items.first { $0.title == "Collapse All" } }
+                expect(collapse?.isEnabled == true, "Collapse All is enabled when folders are expanded")
+                s.collapseAll(nil)
+                expect(!(s.outline.isItemExpanded(node("src")) || s.outline.isItemExpanded(node("docs"))),
+                       "Collapse All collapses expanded folder rows")
                 guard let close = s.subviews.first(where: { $0.identifier?.rawValue == "folder-close" }) as? NSButton else {
                     expect(false, "the close button"); return
                 }

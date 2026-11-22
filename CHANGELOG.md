@@ -6,6 +6,9 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [Unreleased]
 
+### Added
+- **Folder sidebar actions menu.** An ellipsis in the sidebar header offers the context menu's folder actions, plus Refresh and Collapse All.
+
 ### Fixed
 - **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
 
