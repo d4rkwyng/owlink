@@ -175,6 +175,27 @@ func randomBlob(_ n: Int) -> Data {
         for m in catalog.models where m.license.lowercased().contains("non-commercial") { #expect(!m.isDefault) }
     }
 
+    @Test func everyCatalogLicenseIsBundledAndClassifiedWithoutNetwork() throws {
+        let catalog = try #require(ModelCatalog.bundled())
+        for model in catalog.models {
+            let url = try #require(ModelCatalog.bundledLicenseURL(for: model.license))
+            #expect(url.isFileURL)
+            let text = try String(contentsOf: url, encoding: .utf8)
+            #expect(model.bundledLicenseText() == text)
+            let confirmation = try #require(model.licenseConfirmation())
+            #expect(confirmation.title == model.name)
+            #expect(confirmation.licenseName == model.license)
+            if model.isNonCommercial {
+                #expect(confirmation.isNonCommercial)
+                #expect(confirmation.body.localizedCaseInsensitiveContains("NON-COMMERCIAL"))
+                #expect(text.localizedCaseInsensitiveContains("NON-COMMERCIAL"))
+            } else {
+                #expect(!confirmation.isNonCommercial)
+                #expect(text.localizedCaseInsensitiveContains("Apache License"))
+            }
+        }
+    }
+
     @Test func validationRejectsUnsafeEntries() throws {
         let good = testModel(body: Data("x".utf8))
         #expect(throws: Never.self) { try ModelCatalog(models: [good]).validate() }

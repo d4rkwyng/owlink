@@ -38,6 +38,22 @@ public struct BuiltInModel: Codable, Sendable, Equatable, Identifiable {
     /// which is how `OwlPrompts` knows to add `/no_think`.
     public var promptModelName: String { family + "-" + id }
 
+    public var isNonCommercial: Bool { license.localizedCaseInsensitiveContains("non-commercial") }
+
+    /// Reads the license text shipped with Cedric. This never performs a
+    /// network request; nil means the bundled/source-tree file is missing.
+    public func bundledLicenseText(bundle: Bundle = .main) -> String? {
+        guard let url = ModelCatalog.bundledLicenseURL(for: license, bundle: bundle) else { return nil }
+        return try? String(contentsOf: url, encoding: .utf8)
+    }
+
+    public func licenseConfirmation(bundle: Bundle = .main) -> BuiltInModelLicenseConfirmation? {
+        guard let text = bundledLicenseText(bundle: bundle) else { return nil }
+        let warning = isNonCommercial ? "NON-COMMERCIAL LICENSE\n\n" : ""
+        return BuiltInModelLicenseConfirmation(title: name, licenseName: license, body: warning + text,
+                                               isNonCommercial: isNonCommercial)
+    }
+
     /// "3.1B · Q4_K_M · 2.1 GB"
     public var shortDescription: String {
         let gb = Double(sizeBytes) / 1_000_000_000
@@ -54,6 +70,13 @@ public struct BuiltInModel: Codable, Sendable, Equatable, Identifiable {
         LocalModelInfo(id: id, sizeBytes: sizeBytes, parametersB: parametersB,
                        quantization: quantization, type: "llm")
     }
+}
+
+public struct BuiltInModelLicenseConfirmation: Sendable, Equatable {
+    public let title: String
+    public let licenseName: String
+    public let body: String
+    public let isNonCommercial: Bool
 }
 
 public enum ModelCatalogError: Error, Equatable, Sendable {
@@ -130,6 +153,18 @@ public struct ModelCatalog: Codable, Sendable, Equatable {
             .deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Resources/AI/models.json")
+        return FileManager.default.fileExists(atPath: source.path) ? source : nil
+    }
+
+    /// The license field determines which bundled text is shown.
+    public static func bundledLicenseURL(for license: String, bundle: Bundle = .main) -> URL? {
+        let fileName = license.localizedCaseInsensitiveContains("non-commercial")
+            ? "Qwen-Research-License" : "Apache-2.0"
+        if let url = bundle.url(forResource: fileName, withExtension: "txt", subdirectory: "AI/licenses") { return url }
+        let source = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Resources/AI/licenses/\(fileName).txt")
         return FileManager.default.fileExists(atPath: source.path) ? source : nil
     }
 
