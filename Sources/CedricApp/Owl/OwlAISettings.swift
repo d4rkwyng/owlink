@@ -19,6 +19,7 @@ import CedricAI
 enum AIStore {
     static let env = DevEnvironment.values
     static var defaults: UserDefaults { env["CEDRIC_AI_DEFAULTS"].flatMap(UserDefaults.init(suiteName:)) ?? .standard }
+    static let serverAutomaticChecksAcknowledgedKey = "CedricServerAutomaticChecksAcknowledged"
 
     static func load() -> LocalAISettings {
         var s = LocalAISettings.load(from: defaults)
@@ -30,7 +31,14 @@ enum AIStore {
         if let v = env["CEDRIC_AI_INTERVAL"].flatMap(Double.init) { s.minInterval = v }
         if let v = env["CEDRIC_AI_TIMEOUT"].flatMap(Double.init) { s.timeout = v }
         if let v = env["CEDRIC_AI_MIN_IDLE"].flatMap(Double.init) { s.minIdle = v }
-        if let v = env["CEDRIC_AI_AUTO"] { s.automaticChecks = v == "1" }
+        if let v = env["CEDRIC_AI_AUTO"] {
+            s.automaticChecks = v == "1"
+        } else if LocalAISettings.shouldShowAutomaticServerNotice(backend: s.backend, automaticChecks: s.automaticChecks,
+                                                                  acknowledged: defaults.bool(forKey: serverAutomaticChecksAcknowledgedKey)) {
+            // Unacknowledged saved automatic-on for a server: leave it off until
+            // the first-use notice is confirmed in Settings.
+            s.automaticChecks = false
+        }
         return s
     }
 
@@ -99,7 +107,7 @@ final class AISettingsSection: NSObject {
     let weakLabel = NSTextField(labelWithString: LocalAISettings.weakModelNote)
     let intervalPopup = NSPopUpButton()
     let automaticBox = NSButton(checkboxWithTitle: String(localized: "Check automatically when I pause typing"), target: nil, action: nil)
-    let automaticNote = NSTextField(wrappingLabelWithString: String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check."))
+    let automaticNote = NSTextField(wrappingLabelWithString: "")
 
     private(set) var settings: LocalAISettings
     private var grid: NSGridView?
@@ -297,6 +305,10 @@ final class AISettingsSection: NSObject {
         }
         noteLabel.stringValue = engine.note ?? ""
         grid?.cell(for: noteLabel)?.row?.isHidden = engine.note == nil
+        let serverDefault = settings.backend.usesServer
+        automaticNote.stringValue = serverDefault
+            ? String(localized: "Automatic checks are off by default for LM Studio, Ollama and custom servers. Review the first-use notice before enabling them.")
+            : String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check.")
 
         modelPopup.removeAllItems()
         let auto: String
@@ -332,10 +344,36 @@ final class AISettingsSection: NSObject {
             modelsLabel.isHidden = true
         }
         grid?.cell(for: modelsLabel)?.row?.isHidden = modelsLabel.isHidden
-        // The interval only matters for automatic checks; the note only where they're off by default.
+        // The interval only matters for automatic checks; explain whichever default applies here.
         intervalPopup.isEnabled = settings.automaticChecks
-        grid?.cell(for: automaticNote)?.row?.isHidden = LocalAISettings.defaultAutomaticChecks
+        grid?.cell(for: automaticNote)?.row?.isHidden = LocalAISettings.defaultAutomaticChecks(for: settings.backend)
         onResize?()
+    }
+
+    private func showAutomaticServerNotice() {
+        let host = settings.baseURL.host ?? settings.baseURL.absoluteString
+        let server: String
+        switch settings.backend {
+        case .lmStudio: server = "LM Studio at \(host)"
+        case .ollama: server = "Ollama at \(host)"
+        case .custom: server = "the server at \(host)"
+        case .builtIn, .apple: return
+        }
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Allow automatic checks to send text to \(server)?")
+        alert.informativeText = String(localized: "When you pause typing, Cedric will send the visible text (up to 8 KB) to \(server) for automatic checks and automatic AI grammar. It is not sent to the cloud and stays on your local network.")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: String(localized: "Confirm"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
+        let finish: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else { self?.refresh(); return }
+            AIStore.defaults.set(true, forKey: AIStore.serverAutomaticChecksAcknowledgedKey)
+            self.settings.automaticChecks = true
+            self.apply()
+            self.refresh()
+        }
+        if let window = view.window { alert.beginSheetModal(for: window, completionHandler: finish) }
+        else { finish(alert.runModal()) }
     }
 
     /// The controls, for `LocalAISettings.readControls` (address validated first).
@@ -365,8 +403,17 @@ final class AISettingsSection: NSObject {
     /// Any control: validate, and if the result is new, apply it. An invalid
     /// address applies only a turn-off; every other control snaps back.
     @objc private func changed() {
+        let controls = draft()
+        if !settings.automaticChecks, controls.backend == settings.backend,
+           LocalAISettings.shouldShowAutomaticServerNotice(backend: controls.backend,
+                                                           automaticChecks: controls.automaticChecks,
+                                                           acknowledged: AIStore.defaults.bool(forKey: AIStore.serverAutomaticChecksAcknowledgedKey)) {
+            automaticBox.state = .off
+            showAutomaticServerNotice()
+            return
+        }
         let before = settings
-        switch settings.readControls(draft()) {
+        switch settings.readControls(controls) {
         case .apply(let next):
             adopt(next)
             status("")

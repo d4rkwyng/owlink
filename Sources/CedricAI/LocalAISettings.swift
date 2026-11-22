@@ -40,19 +40,27 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
     /// A document must have been open and idle this long before the AI
     /// looks at it (any engine). Not shown in Settings; tests shorten it.
     public var minIdle: TimeInterval
-    /// Ask the model on its own after typing pauses. Off by default on
-    /// Intel Macs (`defaultAutomaticChecks`): there the editor comes first
-    /// and the model is asked only when the user clicks "Ask AI Now".
+    /// Ask the model on its own after typing pauses. Off by default for
+    /// servers and on Intel Macs; "Ask AI Now" remains available.
     public var automaticChecks: Bool
 
-    /// True on Apple silicon; false on Intel, where a model on the CPU
-    /// would compete with typing.
+    /// True on Apple silicon for on-device engines; false on Intel, where
+    /// a model on the CPU would compete with typing.
     public static var defaultAutomaticChecks: Bool {
         #if arch(x86_64)
         return false
         #else
         return true
         #endif
+    }
+
+    public static func defaultAutomaticChecks(for backend: Backend) -> Bool {
+        backend.usesServer ? false : defaultAutomaticChecks
+    }
+
+    public static func shouldShowAutomaticServerNotice(backend: Backend, automaticChecks: Bool,
+                                                       acknowledged: Bool) -> Bool {
+        backend.usesServer && automaticChecks && !acknowledged
     }
 
     public init(enabled: Bool = false,
@@ -63,7 +71,7 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
                 pauseDelay: TimeInterval = 5,
                 timeout: TimeInterval = 20,
                 minIdle: TimeInterval = 10,
-                automaticChecks: Bool = LocalAISettings.defaultAutomaticChecks) {
+                automaticChecks: Bool? = nil) {
         self.enabled = enabled
         self.backend = backend
         self.baseURL = baseURL ?? backend.defaultBaseURL
@@ -72,7 +80,7 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         self.pauseDelay = pauseDelay
         self.timeout = timeout
         self.minIdle = minIdle
-        self.automaticChecks = automaticChecks
+        self.automaticChecks = automaticChecks ?? Self.defaultAutomaticChecks(for: backend)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -91,7 +99,7 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         pauseDelay = try c.decode(TimeInterval.self, forKey: .pauseDelay)
         timeout = try c.decode(TimeInterval.self, forKey: .timeout)
         minIdle = try c.decodeIfPresent(TimeInterval.self, forKey: .minIdle) ?? 10
-        automaticChecks = try c.decodeIfPresent(Bool.self, forKey: .automaticChecks) ?? Self.defaultAutomaticChecks
+        automaticChecks = try c.decodeIfPresent(Bool.self, forKey: .automaticChecks) ?? Self.defaultAutomaticChecks(for: backend)
     }
 
     public static let `default` = LocalAISettings()
@@ -284,6 +292,7 @@ extension LocalAISettings {
         backend = b
         if b != .custom { baseURL = b.defaultBaseURL }
         model = nil
+        if b.usesServer { automaticChecks = false }
     }
 
     /// Parses what the user typed in the Custom URL field: adds `http://`
@@ -352,6 +361,7 @@ extension LocalAISettings {
             }
             return .invalidAddress
         }
+        let switchedToServer = draft.backend != backend && draft.backend.usesServer
         var next = self
         next.enabled = draft.enabled
         if draft.backend != next.backend { next.selectBackend(draft.backend) }
@@ -360,7 +370,7 @@ extension LocalAISettings {
         }
         next.model = draft.model
         next.minInterval = draft.minInterval
-        next.automaticChecks = draft.automaticChecks
+        next.automaticChecks = switchedToServer ? false : draft.automaticChecks
         return .apply(next)
     }
 }
