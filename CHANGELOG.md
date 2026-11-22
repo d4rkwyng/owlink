@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [0.5.1]
+
+### Changed
+- **The last session comes back.** Settings › General › Reopen files from last session is on by default and follows macOS's “Close windows when quitting an application” setting until you change it. Closing the last window, or quitting, restores those open tabs and their saved window state on the next launch. Opening a file from Finder still restores the rest of the session and focuses that file. With the setting off, files do not reopen; unsaved text stays in File › Reopen Closed Tab.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added

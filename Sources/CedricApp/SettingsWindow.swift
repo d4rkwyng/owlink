@@ -82,6 +82,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     let fontSize = NSTextField()
     let fontStepper = NSStepper()
     let quitOnLastClose = NSButton(checkboxWithTitle: String(localized: "Quit when the last window closes"), target: nil, action: nil)
+    let reopenLastSession = NSButton(checkboxWithTitle: String(localized: "Reopen files from last session"), target: nil, action: nil)
     /// Default editor for… (0.3.0), built with the General tab.
     private(set) var defaultEditor: DefaultEditorPane?
     // Editor
@@ -178,7 +179,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 MainActor.assumeIsolated { self?.refresh() }
             })
         }
-        for b in [gitChanges, owlChat, showOwl, styleTips, styleCheck, quitOnLastClose, useProseFont, readableWidthDefault] + Array(toggles.values) {
+        for b in [gitChanges, owlChat, showOwl, styleTips, styleCheck, quitOnLastClose, reopenLastSession, useProseFont, readableWidthDefault] + Array(toggles.values) {
             b.target = self; b.action = #selector(changed(_:))
         }
     }
@@ -314,6 +315,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let fontRow = NSStackView(views: [fontPopup, fontSize, fontStepper, NSTextField(labelWithString: "pt")])
         fontRow.spacing = 6
         fontPopup.setAccessibilityLabel(String(localized: "Font"))
+        let appRow = NSStackView(views: [quitOnLastClose, reopenLastSession])
+        appRow.orientation = .vertical
+        appRow.alignment = .leading
+        appRow.spacing = 4
 
         let pane = DefaultEditorPane()
         defaultEditor = pane
@@ -322,7 +327,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             grid([
                 row(String(localized: "Theme:"), theme),
                 [label(String(localized: "Font:")), fontRow],
-                [label(String(localized: "App:")), quitOnLastClose],
+                [label(String(localized: "App:")), appRow],
             ]),
             rule(),
             paneView,
@@ -456,6 +461,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         gitChanges.state = s.showGitChanges ? .on : .off
         quitOnLastClose.state = s.quitWhenLastWindowCloses ? .on : .off
+        reopenLastSession.state = s.reopenFilesFromLastSession ? .on : .off
         for (k, b) in toggles { b.state = s[toggle: k] ? .on : .off }
         showOwl.state = s.showOwl ? .on : .off
         showOwl.toolTip = String(localized: "Cedric the owl in the corner of the editor, with one hint at a time. Also Cedric › Show Cedric.")
@@ -560,6 +566,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             }
         case gitChanges: s.showGitChanges = gitChanges.state == .on
         case quitOnLastClose: s.quitWhenLastWindowCloses = quitOnLastClose.state == .on
+        case reopenLastSession: s.reopenFilesFromLastSession = reopenLastSession.state == .on
         case showOwl: s.showOwl = showOwl.state == .on
         case owlChat: s.owlChat = owlChat.state == .on
         case styleTips: s.owlStyleTips = styleTips.state == .on

@@ -42,7 +42,7 @@ extension AppDelegate {
 
     /// The tab has closed (not by quitting): remember it, keep or delete
     /// its buffer, and save the session now.
-    func rememberClosed(_ t: EditorWindowController) {
+    func rememberClosed(_ t: EditorWindowController, persist: Bool = true) {
         // Restored tabs not built yet (AppDelegate.restoreNextPending) are
         // built first, so the save below keeps them and their bookmarks.
         finishRestore()
@@ -80,7 +80,7 @@ extension AppDelegate {
         }
         // Now, not in 1.5 s: the closed list must name the buffer before a
         // later save could prune it.
-        saveSession()
+        if persist { saveSession() }
     }
 
     @objc func reopenClosedTab(_ sender: Any?) {

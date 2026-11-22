@@ -246,7 +246,11 @@ final class OfficeTabController: NSWindowController, NSWindowDelegate, NSMenuIte
 
     @objc func closeWindow(_ sender: Any?) {
         guard let w = window else { return }
-        for win in w.tabbedWindows ?? [w] { win.performClose(nil) }
+        (NSApp.delegate as? AppDelegate)?.closeDocumentWindows(in: w)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        (NSApp.delegate as? AppDelegate)?.shouldCloseDocumentWindow(sender) ?? true
     }
 
     func windowWillClose(_ notification: Notification) {
