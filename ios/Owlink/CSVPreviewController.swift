@@ -100,7 +100,7 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
         let width = max(visibleWidth, rowWidth + CGFloat(min(data.columnCount, Self.maxColumns)) * columnWidth)
         content.frame = CGRect(x: 0, y: 0, width: width, height: horizontal.bounds.height)
         header.frame = CGRect(x: 0, y: 0, width: width, height: headerHeight)
-        table.frame = CGRect(x: 0, y: headerHeight, width: width, height: visibleHeight - headerHeight)
+        table.frame = CGRect(x: 0, y: headerHeight, width: width, height: max(0, visibleHeight - headerHeight))
         horizontal.contentSize = CGSize(width: width, height: horizontal.bounds.height)
         applyPendingFractionIfReady()
     }

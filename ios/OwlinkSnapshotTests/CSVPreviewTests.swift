@@ -189,4 +189,19 @@ final class CSVPreviewTests: XCTestCase {
         XCTAssertEqual(grid.order, [2, 3, 1])
         XCTAssertEqual(grid.sourceForTesting as String, snapshot as String)
     }
+
+    func testSmallGridAndZoomApplyOnlyOnce() async throws {
+        let editor = editor("name,value\nalpha,1")
+        editor.togglePreview()
+        let preview = try XCTUnwrap(editor.preview)
+        let grid = try XCTUnwrap(preview.csv)
+        try await waitForRender(grid)
+        let before = grid.renders
+        preview.setZoom(1.5, save: false)
+        XCTAssertEqual(grid.renders, before + 1)
+        grid.view.frame = CGRect(x: 0, y: 0, width: 100, height: 10)
+        grid.view.setNeedsLayout()
+        grid.view.layoutIfNeeded()
+        XCTAssertGreaterThanOrEqual(grid.table.frame.height, 0)
+    }
 }

@@ -301,7 +301,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         guard web.pageZoom != z else { return }
         let f = keepingPlace && loaded ? scrollFraction : nil
         web.pageZoom = z
-        if showingCSV { csv?.applyTheme(csvPalette, zoom: userZoom) }
         if let f {
             DispatchQueue.main.async { [weak self] in self?.scrollFraction = f }
         }
