@@ -64,19 +64,25 @@ final class EditorOwl {
     /// "Check with Cedric": the AI engine now, whatever the interval.
     func askAI(_ snap: @escaping () -> Snapshot, quiet: Bool = false) {
         aiTask?.cancel()
-        lastAICheck = Date()
         aiTask = Task { [weak self] in
-            guard let self else { return }
+            guard !Task.isCancelled, let self else { return }
+            let s = snap()
+            let window = Self.window(s, documentID: self.documentID)
+            guard HintPrompt.hasEnoughText(window.context.text) else {
+                if !quiet { self.onNote?(String(localized: "Type a little more and Cedric will take a look.")) }
+                return
+            }
+            self.lastAICheck = Date()
             var settings = AIStore.load()
             if quiet && (!settings.isUsable || !settings.automaticChecks) { return }
             if !settings.isUsable {
                 // Asked for: use whatever is ready, as Ask Cedric does.
-                guard let s = OwlChatSetup.chatSettings(settings, appleAvailable: AppleFoundationModelsProvider.isAvailable,
+                guard let ready = OwlChatSetup.chatSettings(settings, appleAvailable: AppleFoundationModelsProvider.isAvailable,
                                                         builtInInstalled: !BuiltInEngine().installedModels.isEmpty) else {
                     if !quiet { self.onNote?(String(localized: "No AI engine is ready. Set one up in Settings › Cedric AI.")) }
                     return
                 }
-                settings = s
+                settings = ready
             }
             let engine = AIEngines.engine(for: settings)
             guard engine.isAvailable, let provider = await engine.makeProvider(model: settings.model) else {
@@ -84,8 +90,6 @@ final class EditorOwl {
                 return
             }
             if quiet && AIStore.load() != settings { return }
-            let s = snap()
-            let window = Self.window(s, documentID: self.documentID)
             let found = await provider.hints(for: window.context)
             guard !Task.isCancelled else { return }
             if found.isEmpty, !quiet { self.onNote?(String(localized: "Cedric found nothing to point out.")) }
