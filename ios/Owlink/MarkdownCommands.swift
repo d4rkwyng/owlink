@@ -138,9 +138,8 @@ extension EditorViewController {
         revealRange(selection)
         contextBar?.refreshStates()
         // storage.replaceCharacters does not call the text-view delegate;
-        // textViewDidChange also redraws the gutter with the bookmarks
-        // (not before revealRange: TextKit 2 can spin finding the visible
-        // range mid-edit).
+        // textViewDidChange also redraws the gutter with the bookmarks, on
+        // the next turn (TextKit 2 can spin finding the visible range mid-edit).
         if changesText { textViewDidChange(textView) } else { updateUndoItems() }
         return true
     }

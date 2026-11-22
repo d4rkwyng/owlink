@@ -115,6 +115,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let dailyKey = UUID().uuidString
     private let dailyQueue = DispatchQueue(label: "app.owlink.dailyWords", qos: .utility)
     private var dailyTimer: Timer?
+    private var gutterLayoutScheduled = false
     var dailyIdleInterval: TimeInterval = 1
     var dailyWordCountLimit = TextStats.maxCounted
     private var wordCountGeneration: Int?
@@ -930,7 +931,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         askModel?.documentEdited()
         askModel?.scheduleScopeRefresh()
         // Also hides numbers shown only for bookmarks once the last one goes.
-        if showLineNumbers || !lineNumberGutter.isHidden { layoutGutter() } else { layoutTextInsets() }
+        // Not on this turn: the text may have just been replaced through the
+        // storage, and finding the visible range mid-edit can make TextKit 2
+        // spin forever.
+        if showLineNumbers || !lineNumberGutter.isHidden { scheduleGutterLayout() } else { layoutTextInsets() }
         updateUnwrappedContentSize()
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
@@ -940,6 +944,20 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
         }
         if textView.isFirstResponder { revealRange(textView.selectedRange) }
+    }
+
+    /// Lays out the gutter on the next main-queue turn, once for any number
+    /// of edits in this one.
+    private func scheduleGutterLayout() {
+        guard !gutterLayoutScheduled else { return }
+        gutterLayoutScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.gutterLayoutScheduled = false
+                self.layoutGutter()
+            }
+        }
     }
 
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {

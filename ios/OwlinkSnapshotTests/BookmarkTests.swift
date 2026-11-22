@@ -233,6 +233,27 @@ final class BookmarkTests: XCTestCase {
         XCTAssertEqual(editor.textView.text, "a\nb\nc\nd\n")
     }
 
+    func testGutterFollowsDeleteLineOnNextTurn() throws {
+        AppSettings.lineNumbers = true
+        let editor = editor("a\nb\nc\nd\n")
+        let window = try XCTUnwrap(editor.view.window)
+        let numbers = try XCTUnwrap(gutter(in: editor.view))
+        editor.bookmarks = Bookmarks([1, 3])
+        editor.layoutGutter()
+        XCTAssertEqual(numbers.markedRows, [2, 4])
+        caret(editor, line: 0)
+        editor.deleteLine(nil)
+        XCTAssertEqual(editor.bookmarks.lines, [0, 2])
+        // The gutter is laid out on the next main-queue turn, not mid-edit.
+        let laidOut = expectation(description: "next turn")
+        DispatchQueue.main.async { laidOut.fulfill() }
+        wait(for: [laidOut], timeout: 2)
+        XCTAssertEqual(numbers.bookmarked, [1, 3])
+        window.layoutIfNeeded()
+        editor.layoutGutter()
+        XCTAssertEqual(numbers.markedRows, [1, 3])
+    }
+
     func testBookmarksShowGutterWithNumbersOff() throws {
         AppSettings.lineNumbers = false
         let editor = editor("a\nb\nc\n")
