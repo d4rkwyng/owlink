@@ -29,6 +29,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   Jumps show numbers for the open file even when the setting is off.
 - Return keeps the current indent, and brackets and quotes pair in code as
   on the Mac; **Auto-close brackets and quotes** is in Settings (on by default).
+- Writing Mode offers typewriter scrolling and paragraph or sentence focus per document.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
   and Find TODOs in the edit and document menus. Results stay on the device.

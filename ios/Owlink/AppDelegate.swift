@@ -84,6 +84,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                    action: #selector(EditorViewController.toggleContextBarMenu))
         let statistics = UICommand(title: String(localized: "Show Statistics"), action: #selector(EditorViewController.showStatistics))
         builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, contextBar, statistics]), atStartOfMenu: .view)
+        let writing = UIMenu(title: String(localized: "Writing Mode"), children: [
+            UICommand(title: String(localized: "Typewriter Scrolling"), action: #selector(EditorViewController.toggleTypewriter)),
+            UICommand(title: String(localized: "Focus"), action: #selector(EditorViewController.toggleWritingFocus)),
+            UIMenu(options: .displayInline, children: [
+                UICommand(title: String(localized: "Focus on Paragraph"), action: #selector(EditorViewController.focusParagraph)),
+                UICommand(title: String(localized: "Focus on Sentence"), action: #selector(EditorViewController.focusSentence)),
+            ]),
+        ])
+        builder.insertChild(writing, atEndOfMenu: .view)
 
         func key(_ title: String, _ action: Selector, _ input: String, _ modifiers: UIKeyModifierFlags = .command) -> UIKeyCommand {
             UIKeyCommand(title: title, action: action, input: input, modifierFlags: modifiers)

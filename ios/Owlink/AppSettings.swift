@@ -26,6 +26,7 @@ enum AppSettings {
         static let proseFontName = "proseFontName"
         static let proseFontSize = "proseFontSize"
         static let autoCloseBrackets = "autoCloseBrackets"
+        static let focusUnit = "focusUnit"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
         static let theme = EditorTheme.defaultsKey
@@ -84,6 +85,11 @@ enum AppSettings {
     static var autoCloseBrackets: Bool {
         get { defaults.object(forKey: Key.autoCloseBrackets) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.autoCloseBrackets); post() }
+    }
+
+    static var focusUnit: FocusUnit {
+        get { defaults.string(forKey: Key.focusUnit).flatMap(FocusUnit.init(rawValue:)) ?? .paragraph }
+        set { defaults.set(newValue.rawValue, forKey: Key.focusUnit); post() }
     }
 
     /// The owl's offline hints (rules): on by default, like the Mac.

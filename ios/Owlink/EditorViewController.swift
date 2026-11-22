@@ -44,6 +44,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let editorTextInsetLeft: CGFloat = 8
     /// This file's Readable Width choice. Nil follows Settings, which is off.
     private var readableWidthChoice: Bool?
+    private(set) var writing = WritingModeState()
+    private var writingInset: CGFloat = 0
+    private var writingUpdatePending = false
+    private var writingCenterPending = false
+    private var writingLayoutSize = CGSize.zero
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
     private var lastTextScrollOffsetY: CGFloat?
     /// A jump forces numbers on for this tab without changing the setting.
@@ -388,6 +393,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutDivider()
         layoutGutter()
         updateUnwrappedContentSize()
+        updateWritingInset()
+        if writingLayoutSize != textView.bounds.size {
+            writingLayoutSize = textView.bounds.size
+            scheduleWritingUpdate()
+        }
     }
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
@@ -669,7 +679,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
         return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                languageMenu(), formatMenu(),
+                writingModeMenu(), languageMenu(), formatMenu(),
                 UIMenu(options: .displayInline, children: [settings])]
     }
 
@@ -753,6 +763,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textViewDidChange(_ textView: UITextView) {
+        scheduleWritingUpdate()
         generation += 1
         scheduleWordCount()
         scheduleStatisticsUpdate()
@@ -1079,6 +1090,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
+        scheduleWritingUpdate()
         contextBar?.refreshInlineSelectionStates()
         scheduleStatisticsUpdate()
         updateStatus()
@@ -1098,6 +1110,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
+        if scrollView === textView { scheduleWritingUpdate(center: false) }
         fadeOwlNearCaret()
         if scrollView === textView {
             let offsetY = scrollView.contentOffset.y
@@ -1417,7 +1430,126 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.typingAttributes[.foregroundColor] = UIColor(hex: palette.foreground)
         applyWrap()
         colorizer?.setPalette(palette)
+        scheduleWritingUpdate()
         refreshPreview()
+    }
+
+    func writingModeMenu() -> UIMenu {
+        let typewriter = UIAction(title: String(localized: "Typewriter Scrolling"), state: writing.typewriter ? .on : .off) { [weak self] _ in
+            self?.toggleTypewriter()
+        }
+        let focus = UIAction(title: String(localized: "Focus"), state: writing.focus ? .on : .off) { [weak self] _ in
+            self?.toggleWritingFocus()
+        }
+        let paragraph = UIAction(title: String(localized: "Focus on Paragraph"), state: AppSettings.focusUnit == .paragraph ? .on : .off) { _ in
+            AppSettings.focusUnit = .paragraph
+        }
+        let sentence = UIAction(title: String(localized: "Focus on Sentence"), state: AppSettings.focusUnit == .sentence ? .on : .off) { _ in
+            AppSettings.focusUnit = .sentence
+        }
+        return UIMenu(title: String(localized: "Writing Mode"), children: [typewriter, focus,
+            UIMenu(options: .displayInline, children: [paragraph, sentence])])
+    }
+
+    @objc func toggleTypewriter() {
+        writing.typewriter.toggle()
+        updateWritingInset()
+        scheduleWritingUpdate()
+        UIMenuSystem.main.setNeedsRebuild()
+    }
+
+    @objc func toggleWritingFocus() {
+        writing.focus.toggle()
+        if !writing.focus, let layout = textView.textLayoutManager {
+            layout.removeRenderingAttribute(.foregroundColor, for: layout.documentRange)
+        }
+        scheduleWritingUpdate()
+        UIMenuSystem.main.setNeedsRebuild()
+    }
+
+    @objc func focusParagraph() { AppSettings.focusUnit = .paragraph }
+    @objc func focusSentence() { AppSettings.focusUnit = .sentence }
+
+    override func validate(_ command: UICommand) {
+        super.validate(command)
+        switch command.action {
+        case #selector(toggleTypewriter): command.state = writing.typewriter ? .on : .off
+        case #selector(toggleWritingFocus): command.state = writing.focus ? .on : .off
+        case #selector(focusParagraph): command.state = AppSettings.focusUnit == .paragraph ? .on : .off
+        case #selector(focusSentence): command.state = AppSettings.focusUnit == .sentence ? .on : .off
+        default: break
+        }
+    }
+
+    private func updateWritingInset() {
+        let base = max(0, textView.adjustedContentInset.bottom - writingInset)
+        let height = max(0, textView.bounds.height - textView.adjustedContentInset.top - base)
+        let line = textView.font?.lineHeight ?? 20
+        let extra = writing.typewriter ? CGFloat(Typewriter.bottomInset(visibleHeight: Double(height), lineHeight: Double(line))) : 0
+        guard abs(extra - writingInset) > 0.5 else { return }
+        var inset = textView.contentInset
+        inset.bottom += extra - writingInset
+        writingInset = extra
+        textView.contentInset = inset
+    }
+
+    private func scheduleWritingUpdate(center: Bool = true) {
+        guard !writing.isOff else { return }
+        writingCenterPending = writingCenterPending || center
+        guard !writingUpdatePending else { return }
+        writingUpdatePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.writingUpdatePending = false
+            let center = self.writingCenterPending
+            self.writingCenterPending = false
+            self.updateWriting(center: center)
+        }
+    }
+
+    func updateWriting(center: Bool = true) {
+        guard textView.markedTextRange == nil else { return }
+        if writing.typewriter && center {
+            updateWritingInset()
+            let selection = textView.selectedRange
+            let caret = min(NSMaxRange(selection), textView.textStorage.length)
+            if let position = textView.position(from: textView.beginningOfDocument, offset: caret) {
+                let rect = textView.caretRect(for: position)
+                let top = textView.adjustedContentInset.top
+                let baseBottom = max(0, textView.adjustedContentInset.bottom - writingInset)
+                let height = max(0, textView.bounds.height - top - baseBottom)
+                if let target = Typewriter.scrollTarget(caretMidY: Double(rect.midY + top), visibleHeight: Double(height),
+                    currentY: Double(textView.contentOffset.y + top), documentHeight: Double(textView.contentSize.height + top),
+                    bottomInset: Double(writingInset)) {
+                    textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: CGFloat(target) - top), animated: false)
+                }
+            }
+        }
+        guard writing.focus, let layout = textView.textLayoutManager,
+              let manager = layout.textContentManager,
+              let visible = writingVisibleRange() else { return }
+        let text = textView.textStorage.string as NSString
+        let focus = FocusRange.range(AppSettings.focusUnit, in: text, caret: textView.selectedRange.location)
+        guard let start = manager.location(layout.documentRange.location, offsetBy: visible.location),
+              let end = manager.location(start, offsetBy: visible.length),
+              let visibleRange = NSTextRange(location: start, end: end) else { return }
+        layout.removeRenderingAttribute(.foregroundColor, for: visibleRange)
+        let color = UIColor(hex: palette.foreground).withAlphaComponent(0.32)
+        for range in FocusRange.dimmed(visible: visible, focus: focus) {
+            guard let a = manager.location(start, offsetBy: range.location - visible.location),
+                  let b = manager.location(a, offsetBy: range.length),
+                  let textRange = NSTextRange(location: a, end: b) else { continue }
+            layout.addRenderingAttribute(.foregroundColor, value: color, for: textRange)
+        }
+    }
+
+    func writingVisibleRange() -> NSRange? {
+        guard let layout = textView.textLayoutManager, let manager = layout.textContentManager else { return nil }
+        if let visible = SyntaxColorizer.visibleRange(textView), visible.length > 0 { return visible }
+        guard let viewport = layout.textViewportLayoutController.viewportRange else { return nil }
+        let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
+        let length = manager.offset(from: viewport.location, to: viewport.endLocation)
+        return NSRange(location: start, length: length)
     }
 
     /// The window the theme overrode, so dismissing the editor can put the

@@ -3,6 +3,16 @@ import Testing
 @testable import CedricCore
 
 @Suite struct TypewriterTests {
+    @Test func writingSwitchesAreIndependentAndOffByDefault() {
+        var state = WritingModeState()
+        #expect(state.isOff)
+        state.typewriter = true
+        #expect(!state.isOff && !state.focus)
+        state.focus = true
+        state.typewriter = false
+        #expect(!state.isOff && state.focus)
+    }
+
     @Test func caretLineGoesToTheMiddle() {
         // 600 pt visible, caret line's middle at 1000: the top goes to 700.
         #expect(Typewriter.scrollTarget(caretMidY: 1000, visibleHeight: 600, currentY: 0, documentHeight: 5000, bottomInset: 290) == 700)
