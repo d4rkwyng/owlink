@@ -98,6 +98,22 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             UIKeyCommand(title: title, action: action, input: input, modifierFlags: modifiers)
         }
         func command(_ title: String, _ action: Selector) -> UICommand { UICommand(title: title, action: action) }
+        let line = UIMenu(title: String(localized: "Line"), children: [
+            key(String(localized: "Duplicate Line"), #selector(EditorViewController.duplicateLine(_:)), "d", [.command, .shift]),
+            key(String(localized: "Move Line Up"), #selector(EditorViewController.moveLineUp(_:)), UIKeyCommand.inputUpArrow, [.control, .command]),
+            key(String(localized: "Move Line Down"), #selector(EditorViewController.moveLineDown(_:)), UIKeyCommand.inputDownArrow, [.control, .command]),
+            key(String(localized: "Delete Line"), #selector(EditorViewController.deleteLine(_:)), "k", [.command, .shift]),
+            key(String(localized: "Comment Selection"), #selector(EditorViewController.commentSelection(_:)), "/"),
+            key(String(localized: "Indent"), #selector(EditorViewController.indentLines(_:)), "]"),
+            key(String(localized: "Outdent"), #selector(EditorViewController.outdentLines(_:)), "["),
+            command(String(localized: "Keep Lines Matching…"), #selector(EditorViewController.keepLinesMatching(_:))),
+            command(String(localized: "Delete Lines Matching…"), #selector(EditorViewController.deleteLinesMatching(_:))),
+        ])
+        let indentation = UIMenu(title: String(localized: "Indentation"), children: [
+            command(String(localized: "Convert Indentation to Spaces"), #selector(EditorViewController.convertIndentationToSpaces(_:))),
+            command(String(localized: "Convert Indentation to Tabs"), #selector(EditorViewController.convertIndentationToTabs(_:))),
+        ])
+        builder.insertSibling(UIMenu(title: String(localized: "Text"), children: [line, indentation]), afterMenu: .edit)
         let markdown = UIMenu(title: String(localized: "Markdown"), children: [
             key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
             key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),

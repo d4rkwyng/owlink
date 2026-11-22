@@ -27,6 +27,14 @@ import Testing
         #expect(throws: LineFilter.FilterError.emptyPattern) { try run(t, "", keep: true) }
     }
 
+    @Test func caseInsensitiveUnicodeFilterPreservesSurvivingLines() throws {
+        let text = "😀 keep\nDROP\né keep\ndrop"
+        let result = try #require(try LineFilter.filter(text as NSString, pattern: "^drop$", regex: true,
+                                                        caseSensitive: false, keepMatching: false))
+        #expect(result.removed == [1, 3])
+        #expect(result.edit.applied(to: text) == "😀 keep\né keep")
+    }
+
     @Test func lastLineWithoutNewline() throws {
         #expect(try run("a\nb\nx", "x", keep: false) == "a\nb")
         #expect(try run("x\na", "x", keep: false) == "a")

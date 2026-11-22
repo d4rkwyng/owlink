@@ -94,6 +94,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let split = UIStackView()
     private(set) var preview: PreviewController?
     private(set) var previewOn = false
+    var lineIndentation: Indentation?
     private(set) var generation = 0
     var markdownPasteboardReader: () -> (urls: [URL], string: String?) = {
         let pasteboard = UIPasteboard.general
@@ -856,7 +857,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
             let line = lineIndex.line(containing: range.location)
             let edit = AutoEdit.newlineEdit(in: text, lineStart: lineIndex.starts[line], selection: range,
-                                            language: language, unit: detectedIndentation(for: text)?.unit)
+                                            language: language, unit: lineIndentation?.unit ?? detectedIndentation(for: text)?.unit)
             // Plain newline (no indent to keep): let the system insert it, as the Mac
             // falls back to insertNewline, so it stays in the current typing undo group.
             if edit.replacement == "\n", edit.selection == NSRange(location: range.location + 1, length: 0) {
@@ -979,7 +980,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return markdownLinkPaste(pasted)
     }
 
-    private func detectedIndentation(for text: NSString) -> Indentation? {
+    func detectedIndentation(for text: NSString) -> Indentation? {
         if let cachedIndentation, cachedIndentation.generation == generation {
             return cachedIndentation.value
         }
@@ -989,7 +990,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func markdownIndentation(for text: NSString) -> Indentation {
-        detectedIndentation(for: text) ?? Indentation(usesTabs: false, width: 4)
+        lineIndentation ?? detectedIndentation(for: text) ?? Indentation(usesTabs: false, width: 4)
     }
 
     private func shiftAutoClosers(oldRange: NSRange, newLength: Int) {
@@ -1016,7 +1017,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             above.append(lineRange.length > 4096 ? "x" : text.substring(with: lineRange).trimmingCharacters(in: .newlines))
             position = lineRange.location
         }
-        let width = detectedIndentation(for: text)?.width ?? 4
+        let width = lineIndentation?.width ?? detectedIndentation(for: text)?.width ?? 4
         guard let indent = LanguageIndent.pythonClauseIndent(head: head, above: above, tabWidth: width) else { return nil }
         let body = head.drop { $0 == " " || $0 == "\t" }
         let replacement = indent + body + ":"
@@ -1105,8 +1106,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             action.accessibilityIdentifier = "tools.findTodos"
             actions.append(action)
         }
-        guard !actions.isEmpty else { return UIMenu(children: suggestedActions) }
-        return UIMenu(children: suggestedActions + [UIMenu(title: String(localized: "Cedric"), options: .displayInline, children: actions)])
+        var menus = suggestedActions
+        menus.append(lineEditMenu())
+        if !actions.isEmpty {
+            menus.append(UIMenu(title: String(localized: "Cedric"), options: .displayInline, children: actions))
+        }
+        return UIMenu(children: menus)
     }
 
     /// The hide-keyboard button, Esc and ⌘. on a hardware keyboard (and
@@ -3162,6 +3167,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return document.language.language == .markdown
         }
         if Self.markdownActions.contains(action) { return markdownEditable }
+        if Self.lineActions.contains(action) { return lineEditable }
         if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
         if action == #selector(findTodos) { return canFindTodos }
@@ -3596,7 +3602,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Toast
 
-    private func toast(_ text: String) {
+    func toast(_ text: String) {
         let label = PaddingLabel()
         label.text = text
         label.font = .preferredFont(forTextStyle: .footnote)
