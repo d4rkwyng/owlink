@@ -64,15 +64,32 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// the focus never leaves the old paint standing.
     private var editCount = 0
     private var highlightTimer: Timer?
+    /// Painted backgrounds, bottom to top: Mark All's marks, the other
+    /// occurrences, the matching bracket pair.
+    private enum HighlightKind { case mark, occurrence, bracket }
     private struct HighlightPaint {
         let range: NSRange
         let textRange: NSTextRange
-        let bracket: Bool
+        let kind: HighlightKind
+        var bracket: Bool { kind == .bracket }
+    }
+    /// The selection, visible range, generation and setting the
+    /// occurrences were found for, and the marks' needle.
+    private struct HighlightKey: Equatable {
+        var values: [Int]
+        var mark: Occurrences.Needle?
     }
     private var highlightPainted: [HighlightPaint] = []
-    private var highlightKey: [Int]?
+    private var highlightKey: HighlightKey?
     private var highlightBrackets: [NSRange] = []
     private var highlightOccurrenceRanges: [NSRange] = []
+    private var highlightMarkRanges: [NSRange] = []
+    /// Mark All: the needle (nil: no marks), kept until Clear Marks and
+    /// searched again in the visible text after edits and scrolls; the
+    /// whole-document count for the status bar (nil when not counted).
+    private var markNeedle: Occurrences.Needle?
+    private(set) var markCount: Int?
+    private var markCountTimer: Timer?
     private var highlightBracketKey: [Int]?
     private var highlightPalette: UInt32?
     private var highlightCaretColor: UInt32?
@@ -328,7 +345,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             toggle.accessibilityIdentifier = "find.regex"
             toggle.accessibilityLabel = String(localized: "Regex")
             toggle.accessibilityHint = String(localized: "Search with regular expressions")
-            return UIMenu(children: defaults + [toggle])
+            return UIMenu(children: defaults + [toggle, UIMenu(options: .displayInline, children: self.markActions())])
         }
         textView.alwaysBounceVertical = true
         textView.keyboardDismissMode = .interactive
@@ -746,7 +763,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
+        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
         if let checkScript = checkScriptAction() { first.append(checkScript) }
         if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
@@ -837,6 +854,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleOwl()
         refreshPreview()
         askModel?.documentReplaced()
+        scheduleMarkRecount()
         scheduleEditorHighlights()
     }
 
@@ -847,6 +865,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         invisiblesOverlay.textChanged()
         clearEditorHighlights()
         editCount += 1
+        // Marks follow the text: the stale paint is gone; find them again
+        // in view after the pause, and recount.
+        if hasMarks {
+            scheduleMarkRecount()
+            scheduleEditorHighlights(selectionChanged: false)
+        }
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
@@ -1282,6 +1306,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let col = sel.location - lineIndex.starts[line] + 1
         var s = String(localized: "Ln \(line + 1), Col \(col)")
         if sel.length > 0 { s += " · " + String(localized: "\(sel.length) selected") }
+        if let marks = markCount { s += " · " + String(localized: "\(marks) marked") }
         statusLabel.text = s
         languageButton.setTitle(document.language.displayTitle, for: .normal)
         languageButton.menu = languageMenu()
@@ -1895,6 +1920,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         highlightBracketKey = nil
         highlightBrackets = []
         highlightOccurrenceRanges = []
+        highlightMarkRanges = []
     }
 
     private func scheduleEditorHighlights(selectionChanged: Bool = true) {
@@ -1907,9 +1933,89 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         highlightTimer = timer
     }
 
-    /// Paints the matching bracket pair (always, as on the Mac) and, with
-    /// "Highlight occurrences" on, the other occurrences of the word or
-    /// selection in view. `includeOccurrences: false` keeps the occurrences
+    // MARK: Mark All
+
+    /// Mark counts are kept up to date while typing only up to this size
+    /// (UTF-16 units, the Mac's `markRecountLimit`); a bigger document is
+    /// counted when Mark All runs.
+    static let markRecountLimit = 2_000_000
+
+    var hasMarks: Bool { markNeedle != nil }
+
+    /// The status line as shown (for tests and VoiceOver).
+    var statusText: String { statusLabel.text ?? "" }
+
+    /// Mark All: every occurrence of the selection, or of the word under
+    /// the caret (Occurrences.needle: literal, whole word as highlighting
+    /// does), until Clear Marks. Only the needle is kept; the visible text
+    /// is searched again after edits. Nothing to mark: nothing happens.
+    @objc func markAll() {
+        let text = textView.textStorage.string as NSString
+        let selection = textView.selectedRange
+        guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length,
+              let needle = Occurrences.needle(selection: selection, in: text) else { return }
+        let had = hasMarks
+        markCountTimer?.invalidate()
+        markCountTimer = nil
+        markNeedle = needle
+        markCount = Occurrences.count(needle, in: text)
+        refreshEditorHighlights()
+        updateStatus()
+        if !had { UIMenuSystem.main.setNeedsRebuild() }
+    }
+
+    @objc func clearMarks() {
+        guard hasMarks else { return }
+        markCountTimer?.invalidate()
+        markCountTimer = nil
+        markNeedle = nil
+        markCount = nil
+        refreshEditorHighlights()
+        updateStatus()
+        UIMenuSystem.main.setNeedsRebuild()
+    }
+
+    /// After an edit: count the marks again a moment later (documents up
+    /// to `markRecountLimit`; a bigger one loses its count, not its marks).
+    private func scheduleMarkRecount() {
+        guard let needle = markNeedle else { return }
+        markCountTimer?.invalidate()
+        markCountTimer = nil
+        guard textView.textStorage.length <= Self.markRecountLimit else {
+            if markCount != nil {
+                markCount = nil
+                updateStatus()
+            }
+            return
+        }
+        let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.markNeedle == needle else { return }
+                self.markCountTimer = nil
+                self.markCount = Occurrences.count(needle, in: self.textView.textStorage.string as NSString)
+                self.updateStatus()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        markCountTimer = timer
+    }
+
+    private func markActions() -> [UIAction] {
+        let mark = UIAction(title: String(localized: "Mark All"), image: UIImage(systemName: "highlighter")) { [weak self] _ in
+            self?.markAll()
+        }
+        mark.accessibilityIdentifier = "editor.markAll"
+        let clear = UIAction(title: String(localized: "Clear Marks"), image: UIImage(systemName: "eraser")) { [weak self] _ in
+            self?.clearMarks()
+        }
+        clear.accessibilityIdentifier = "editor.clearMarks"
+        if !hasMarks { clear.attributes = .disabled }
+        return [mark, clear]
+    }
+
+    /// Paints Mark All's marks, the matching bracket pair (always, as on
+    /// the Mac) and, with "Highlight occurrences" on, the other occurrences
+    /// of the word or selection in view. `includeOccurrences: false` keeps the occurrences
     /// as they were (a selection change: the debounced pass catches up).
     func refreshEditorHighlights(includeOccurrences: Bool = true) {
         guard textView.markedTextRange == nil,
@@ -1921,7 +2027,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length else { clearEditorHighlights(); return }
         let wantOccurrences = AppSettings.highlightOccurrences
         let contrast = UIAccessibility.isDarkerSystemColorsEnabled
-        let key = [selection.location, selection.length, visible.location, visible.length, generation, wantOccurrences ? 1 : 0]
+        let key = HighlightKey(values: [selection.location, selection.length, visible.location, visible.length, generation, editCount,
+                                        wantOccurrences ? 1 : 0],
+                               mark: markNeedle)
         let sameLook = highlightPalette == palette.findMatch && highlightCaretColor == palette.caret && highlightContrast == contrast
         if includeOccurrences, sameLook, highlightKey == key { return }
         let bracketKey = [selection.location, selection.length, generation]
@@ -1933,68 +2041,88 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
         }
         var occurrences = highlightOccurrenceRanges
+        var marks = highlightMarkRanges
         if includeOccurrences {
             occurrences = []
+            marks = []
+            let start = max(0, visible.location - 2_000)
+            let end = min(text.length, NSMaxRange(visible) + 2_000)
+            let searched = NSRange(location: start, length: end - start)
+            if let markNeedle {
+                marks = Occurrences.find(markNeedle, in: text, range: searched)
+                    .map { NSIntersectionRange($0, visible) }.filter { $0.length > 0 }
+            }
             if wantOccurrences, let needle = Occurrences.needle(selection: selection, in: text) {
-                let start = max(0, visible.location - 2_000)
-                let end = min(text.length, NSMaxRange(visible) + 2_000)
-                let found = Occurrences.find(needle, in: text, range: NSRange(location: start, length: end - start))
+                let found = Occurrences.find(needle, in: text, range: searched)
                 let source = selection.length == 0 ? Occurrences.word(at: selection.location, in: text) : selection
                 if found.count >= 2 || source.map({ !found.contains($0) }) == true {
                     occurrences = found.filter { $0 != selection }.map { NSIntersectionRange($0, visible) }.filter { $0.length > 0 }
                 }
             }
             highlightOccurrenceRanges = occurrences
+            highlightMarkRanges = marks
             highlightKey = key
         }
         if !wantOccurrences { occurrences = [] }
+        if markNeedle == nil { marks = [] }
+        // An occurrence that is also a mark keeps the mark's (full) colour,
+        // as the Mac's half-alpha layer over a mark does.
+        if !marks.isEmpty { occurrences = occurrences.filter { !marks.contains($0) } }
         let brackets = highlightBrackets.map { NSIntersectionRange($0, visible) }.filter { $0.length > 0 }
-        let wanted = occurrences.map { ($0, false) } + brackets.map { ($0, true) }
+        let wanted = marks.map { ($0, HighlightKind.mark) } + occurrences.map { ($0, HighlightKind.occurrence) }
+            + brackets.map { ($0, HighlightKind.bracket) }
         let unchanged = highlightPainted.count == wanted.count
-            && zip(highlightPainted, wanted).allSatisfy { $0.range == $1.0 && $0.bracket == $1.1 }
+            && zip(highlightPainted, wanted).allSatisfy { $0.range == $1.0 && $0.kind == $1.1 }
         let previousKey = highlightKey
         let canDiffBrackets = !includeOccurrences && sameLook && previousKey.map {
-            $0[2] == key[2] && $0[3] == key[3] && $0[4] == key[4] && $0[5] == key[5]
+            Array($0.values[2...]) == Array(key.values[2...]) && $0.mark == key.mark
         } == true
+        func color(_ kind: HighlightKind) -> UIColor {
+            switch kind {
+            // The theme's find colour is opaque: marks are already at full
+            // strength, with or without Increase Contrast.
+            case .mark: UIColor(hex: palette.findMatch)
+            case .occurrence: UIColor(hex: palette.findMatch).withAlphaComponent(contrast ? 0.85 : 0.55)
+            case .bracket: UIColor(hex: palette.caret).withAlphaComponent(contrast ? 0.65 : 0.3)
+            }
+        }
         if !unchanged && canDiffBrackets {
             let oldBrackets = highlightPainted.filter(\.bracket)
             let removed = oldBrackets.filter { !brackets.contains($0.range) }
             let added = brackets.filter { range in !oldBrackets.contains { $0.range == range } }
             let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
-            func paint(_ range: NSRange, bracket: Bool) -> HighlightPaint? {
+            func paint(_ range: NSRange, kind: HighlightKind) -> HighlightPaint? {
                 guard let a = manager.location(viewport.location, offsetBy: range.location - start),
                       let b = manager.location(a, offsetBy: range.length),
                       let r = NSTextRange(location: a, end: b) else { return nil }
-                let color = bracket ? UIColor(hex: palette.caret).withAlphaComponent(contrast ? 0.65 : 0.3)
-                    : UIColor(hex: palette.findMatch).withAlphaComponent(contrast ? 0.85 : 0.55)
-                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
-                return HighlightPaint(range: range, textRange: r, bracket: bracket)
+                layout.addRenderingAttribute(.backgroundColor, value: color(kind), for: r)
+                return HighlightPaint(range: range, textRange: r, kind: kind)
             }
             for old in removed {
                 layout.removeRenderingAttribute(.backgroundColor, for: old.textRange)
-                for occurrence in occurrences {
-                    let overlap = NSIntersectionRange(old.range, occurrence)
-                    if overlap.length > 0 { _ = paint(overlap, bracket: false) }
+                // Put back what the bracket covered, marks under occurrences.
+                for (range, kind) in wanted where kind != .bracket {
+                    let overlap = NSIntersectionRange(old.range, range)
+                    if overlap.length > 0 { _ = paint(overlap, kind: kind) }
                 }
             }
             highlightPainted.removeAll { paint in paint.bracket && removed.contains { $0.range == paint.range } }
             for range in added {
-                if let painted = paint(range, bracket: true) { highlightPainted.append(painted) }
+                if let painted = paint(range, kind: .bracket) { highlightPainted.append(painted) }
             }
         } else if !unchanged || !sameLook {
             // A handful of ranges: take all the paint off and put it back,
-            // occurrences first so a bracket on top of one stays visible.
+            // marks, then occurrences, then brackets, so a bracket on top
+            // of one stays visible.
             for paint in highlightPainted { layout.removeRenderingAttribute(.backgroundColor, for: paint.textRange) }
             highlightPainted = []
             let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
-            for (range, bracket) in wanted {
+            for (range, kind) in wanted {
                 guard let a = manager.location(viewport.location, offsetBy: range.location - start),
                       let b = manager.location(a, offsetBy: range.length),
                       let r = NSTextRange(location: a, end: b) else { continue }
-                let color = bracket ? UIColor(hex: palette.caret).withAlphaComponent(contrast ? 0.65 : 0.3)
-                    : UIColor(hex: palette.findMatch).withAlphaComponent(contrast ? 0.85 : 0.55)
-                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
-                highlightPainted.append(HighlightPaint(range: range, textRange: r, bracket: bracket))
+                layout.addRenderingAttribute(.backgroundColor, value: color(kind), for: r)
+                highlightPainted.append(HighlightPaint(range: range, textRange: r, kind: kind))
             }
         }
         highlightPalette = palette.findMatch
@@ -3585,6 +3713,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
         if action == #selector(findTodos) { return canFindTodos }
+        if action == #selector(markAll) { return textView.window != nil }
+        if action == #selector(clearMarks) { return hasMarks }
         if action == #selector(showStatistics) { return true }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {

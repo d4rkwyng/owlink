@@ -56,6 +56,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)
         builder.insertChild(UIMenu(options: .displayInline, children: [goTo]), atEndOfMenu: .edit)
+        // Mark All / Clear Marks, with the Mac's shortcuts, in Edit › Find.
+        let marks = UIMenu(options: .displayInline, children: [
+            UIKeyCommand(title: String(localized: "Mark All"), action: #selector(EditorViewController.markAll),
+                         input: "m", modifierFlags: [.control, .command]),
+            UIKeyCommand(title: String(localized: "Clear Marks"), action: #selector(EditorViewController.clearMarks),
+                         input: "m", modifierFlags: [.control, .command, .shift]),
+        ])
+        if builder.menu(for: .find) != nil {
+            builder.insertChild(marks, atEndOfMenu: .find)
+        } else {
+            builder.insertChild(marks, atEndOfMenu: .edit)
+        }
         let copyHTML = UICommand(title: String(localized: "Copy as HTML"), action: #selector(EditorViewController.copyAsHTML))
         let copyRich = UICommand(title: String(localized: "Copy as Rich Text"), action: #selector(EditorViewController.copyAsRichText))
         let tools = UIMenu(title: String(localized: "Text Tools"), children: [

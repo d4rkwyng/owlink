@@ -211,4 +211,127 @@ final class EditorHighlightTests: XCTestCase {
         XCTAssertEqual(try background(at: 4, in: editor), occurrence)
         XCTAssertNil(try background(at: 6, in: editor))
     }
+
+    // MARK: Mark All
+
+    func testMarkAllMarksWholeWordsUntilCleared() throws {
+        let text = "alpha beta alpha alphabet alpha"
+        let editor = editor(text)
+        let couldUndo = editor.textView.undoManager?.canUndo
+        editor.textView.selectedRange = NSRange(location: 0, length: 5)
+        editor.markAll()
+        XCTAssertTrue(editor.hasMarks)
+        XCTAssertEqual(editor.markCount, 3)
+        XCTAssertTrue(editor.statusText.contains(String(localized: "\(3) marked")), editor.statusText)
+        XCTAssertTrue(editor.statusText.contains(" · "))
+        // Marks include the selected one (occurrences leave it out), not "alphabet".
+        let mark = try XCTUnwrap(background(at: 1, in: editor))
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+        XCTAssertEqual(try background(at: 27, in: editor), mark)
+        XCTAssertNil(try background(at: 18, in: editor))
+        XCTAssertNil(try background(at: 7, in: editor))
+        XCTAssertEqual(editor.textView.text, text)
+        XCTAssertEqual(editor.textView.undoManager?.canUndo, couldUndo)
+
+        // The caret moves on, Highlight Occurrences goes off: the marks stay.
+        editor.textView.selectedRange = NSRange(location: 7, length: 0)
+        AppSettings.highlightOccurrences = false
+        editor.refreshEditorHighlights()
+        XCTAssertEqual(try background(at: 1, in: editor), mark)
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+        XCTAssertEqual(try background(at: 27, in: editor), mark)
+        XCTAssertNil(try background(at: 7, in: editor))
+
+        // Off screen and back: the needle survives clearing the paint.
+        editor.viewDidDisappear(false)
+        XCTAssertNil(try background(at: 12, in: editor))
+        editor.refreshEditorHighlights()
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+
+        editor.clearMarks()
+        XCTAssertFalse(editor.hasMarks)
+        XCTAssertNil(editor.markCount)
+        XCTAssertFalse(editor.statusText.contains(String(localized: "\(3) marked")), editor.statusText)
+        for offset in [1, 12, 27] { XCTAssertNil(try background(at: offset, in: editor)) }
+    }
+
+    func testMarksAreDistinctFromOccurrences() throws {
+        let editor = editor("alpha beta alpha beta")
+        editor.textView.selectedRange = NSRange(location: 0, length: 5)
+        editor.markAll()
+        let mark = try XCTUnwrap(background(at: 12, in: editor))
+        editor.textView.selectedRange = NSRange(location: 6, length: 4)
+        editor.refreshEditorHighlights()
+        let occurrence = try XCTUnwrap(background(at: 18, in: editor))
+        XCTAssertNotEqual(mark, occurrence)
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+    }
+
+    func testMarkAllWithNothingToMarkDoesNothing() throws {
+        let editor = editor("alpha  beta, alpha\nx")
+        for selection in [NSRange(location: 5, length: 2),   // whitespace only
+                          NSRange(location: 6, length: 0),   // caret between two spaces
+                          NSRange(location: 0, length: 20)] { // spans a line break
+            editor.textView.selectedRange = selection
+            editor.markAll()
+            XCTAssertFalse(editor.hasMarks, "\(selection)")
+            XCTAssertNil(editor.markCount)
+            XCTAssertFalse(editor.statusText.contains("marked"), editor.statusText)
+        }
+        // A one-letter word is too short to mark from the caret.
+        editor.textView.selectedRange = NSRange(location: 19, length: 0)
+        editor.markAll()
+        XCTAssertFalse(editor.hasMarks)
+        let empty = self.editor("")
+        empty.markAll()
+        XCTAssertFalse(empty.hasMarks)
+    }
+
+    func testMarkAllUsesTheWordUnderTheCaret() throws {
+        let editor = editor("alpha beta alpha alphabet alpha")
+        editor.textView.selectedRange = NSRange(location: 2, length: 0)
+        editor.markAll()
+        XCTAssertTrue(editor.hasMarks)
+        XCTAssertEqual(editor.markCount, 3)
+        let mark = try XCTUnwrap(background(at: 1, in: editor))
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+        XCTAssertEqual(try background(at: 27, in: editor), mark)
+        XCTAssertNil(try background(at: 18, in: editor))
+    }
+
+    func testMarksFollowEditsAndRecount() async throws {
+        let editor = editor("alpha beta alpha alphabet alpha")
+        editor.textView.selectedRange = NSRange(location: 0, length: 5)
+        editor.markAll()
+        XCTAssertEqual(editor.markCount, 3)
+        let mark = try XCTUnwrap(background(at: 12, in: editor))
+        let end = editor.textView.textStorage.length
+        editor.textView.selectedRange = NSRange(location: end, length: 0)
+        editor.textView.insertText(" alpha")
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(editor.hasMarks)
+        XCTAssertEqual(editor.markCount, 4)
+        XCTAssertTrue(editor.statusText.contains(String(localized: "\(4) marked")), editor.statusText)
+        XCTAssertEqual(try background(at: end + 2, in: editor), mark)
+        XCTAssertEqual(try background(at: 12, in: editor), mark)
+        // An edit that breaks one up: it is no longer marked.
+        editor.textView.selectedRange = NSRange(location: 13, length: 0)
+        editor.textView.insertText("x")
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(editor.markCount, 3)
+        XCTAssertNotEqual(try background(at: 12, in: editor), mark)
+    }
+
+    func testOccurrencesUnchangedWithoutMarks() throws {
+        let editor = editor("alpha beta alpha")
+        XCTAssertFalse(editor.hasMarks)
+        editor.textView.selectedRange = NSRange(location: 0, length: 5)
+        editor.refreshEditorHighlights()
+        XCTAssertNil(try background(at: 1, in: editor))
+        let occurrence = try XCTUnwrap(background(at: 12, in: editor))
+        XCTAssertFalse(editor.statusText.contains("marked"), editor.statusText)
+        editor.clearMarks()
+        editor.refreshEditorHighlights()
+        XCTAssertEqual(try background(at: 12, in: editor), occurrence)
+    }
 }
