@@ -83,7 +83,36 @@ final class AskCedricModel: ObservableObject {
     var displayedScopeLabel: String { reviewScopeLabel ?? scopeLabel }
 
     var actions: [OwlQuickAction] {
-        OwlQuickAction.allCases.filter { $0 != .scriptSafety && $0.isOffered(prose: prose, language: language) }
+        OwlQuickAction.allCases.filter { $0.isOffered(prose: prose, language: language) }
+    }
+
+    /// Check for Risks: shell, PowerShell, batch, .reg, Python, Ruby.
+    var canCheckScript: Bool { ScriptSafety.isScript(language) }
+
+    /// A quick action's chip. Check for Risks runs the offline scan first.
+    func quickAction(_ action: OwlQuickAction) {
+        if action == .scriptSafety { checkScriptSafety() } else { ask("", action: action) }
+    }
+
+    /// A chip can be tapped: Check for Risks needs no engine (the offline scan).
+    func actionEnabled(_ action: OwlQuickAction) -> Bool {
+        action == .scriptSafety ? canCheckScript : unavailable == nil
+    }
+
+    /// The offline findings of the last script check.
+    private(set) var lastScan: [ScriptSafety.Finding]?
+    /// The last script check's scan stopped at `ScriptSafety.maxLines`.
+    private(set) var lastScanTruncated = false
+    /// The answer being written is about a script: clamped as it streams in.
+    private var verdictStream: ScriptVerdictStream?
+    /// Every text a guarded answer showed while streaming (tests).
+    private(set) var streamedRenders: [String] = []
+
+    /// The script check's findings, for the request (`OwlChatRequest.scan`).
+    private struct ScanRequest {
+        var summary: String?
+        var hasHigh: Bool
+        var truncated: Bool
     }
 
     /// The settings Ask Cedric runs on (nil: nothing ready), as on the Mac.
@@ -177,6 +206,72 @@ final class AskCedricModel: ObservableObject {
         let scope: OwlChatScope = inlineSelection == nil ? self.scope : .selection
         let history = self.history
         entries.append(Entry(role: .user, text: shown))
+        begin(q, action: action, snapshot: snap, scope: scope, history: history, inlineSelection: inlineSelection)
+    }
+
+    /// Check for Risks, as on the Mac: the offline scan first (no AI, never
+    /// runs the script, nothing sent anywhere), then, with an engine ready,
+    /// the model's review of the whole script with the findings attached.
+    /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run it"
+    /// after a high finding or a partial review.
+    func checkScriptSafety() {
+        guard canCheckScript, !running else { return }
+        let snap = makeSnapshot()
+        let text = snap.text
+        let language = self.language
+        let question = String(localized: "Check this script for risks.")
+        // The question is shown once; the model's history is what came before.
+        let history = self.history
+        entries.append(Entry(role: .user, text: question))
+        self.question = ""
+        running = true
+        lastQuestion = question
+        lastAction = .scriptSafety
+        lastInlineSelection = nil
+        lastInlineAnswer = nil
+        verdictStream = nil
+        streamedRenders = []
+        task = Task { [weak self] in
+            let report = await Task.detached(priority: .userInitiated) { ScriptSafety.check(text, language: language) }.value
+            guard let self else { return }
+            self.lastScan = report.findings
+            self.lastScanTruncated = report.truncated
+            let summary = ScriptSafety.summary(report)
+            self.entries.append(Entry(role: .scan, text: summary))
+            if Task.isCancelled {
+                self.entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
+                self.running = false
+                return
+            }
+            if let s = self.settingsProvider(), let engine = await self.makeEngine(s) {
+                guard !Task.isCancelled else {
+                    self.entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
+                    self.running = false
+                    return
+                }
+                self.unavailable = nil
+                self.rememberEngine(engine)
+                self.selectScope(.wholeDocument)
+                let scan = ScanRequest(summary: report.findings.isEmpty && !report.truncated ? nil : summary,
+                                       hasHigh: report.hasHigh, truncated: report.truncated)
+                self.begin(question, action: .scriptSafety, snapshot: snap, scope: .wholeDocument, history: history,
+                           inlineSelection: nil, scan: scan, engine: engine)
+                return
+            }
+            var note = String(localized: "No AI engine is set up, so this is the offline scan only: it flags risky patterns, it can’t prove a script is harmless.")
+            if let reason = ScriptVerdict.forcedReason(scanHasHigh: report.hasHigh, truncated: report.truncated) {
+                note += "\n" + reason.note + "\nVerdict: " + ScriptVerdict.forcedDontRun + "."
+            }
+            self.entries.append(Entry(role: .note, text: note))
+            self.running = false
+        }
+    }
+
+    /// The answer: an empty Cedric entry, then the engine's reply into it.
+    /// `engine` is one already made (the script check); `scan` the check's findings.
+    private func begin(_ q: String, action: OwlQuickAction?, snapshot snap: OwlDocumentSnapshot, scope: OwlChatScope,
+                       history: [OwlChatEntry], inlineSelection: NSRange?, scan: ScanRequest? = nil,
+                       engine madeEngine: (any OwlChatEngine)? = nil) {
         let answer = Entry(role: .owl, text: "")
         entries.append(answer)
         question = ""
@@ -185,16 +280,21 @@ final class AskCedricModel: ObservableObject {
         lastAction = action
         lastInlineSelection = inlineSelection.map { _ in (snap.selection, snap.substring(snap.selection)) }
         lastInlineAnswer = inlineSelection == nil ? nil : answer.id
+        verdictStream = nil
+        streamedRenders = []
         let prose = self.prose
         task = Task { [weak self] in
             guard let self else { return }
             defer {
                 self.running = false
+                self.verdictStream = nil
                 self.reviewProgress = nil
                 self.reviewScopeLabel = nil
                 self.refreshScope()
             }
-            guard let s = self.settingsProvider(), let engine = await self.makeEngine(s) else {
+            var made = madeEngine
+            if made == nil, let s = self.settingsProvider() { made = await self.makeEngine(s) }
+            guard let engine = made else {
                 self.finish(error: AIStatus.noEngineMessage)
                 return
             }
@@ -207,7 +307,7 @@ final class AskCedricModel: ObservableObject {
             guard let ctx = OwlChatRequest.documentContext(snap, scope: scope, engineBudget: engine.contextBudget,
                                                            history: history, question: q, action: action, tools: tools,
                                                            server: engine.usesServer, prose: prose,
-                                                           inline: inlineSelection != nil) else {
+                                                           scan: scan?.summary, inline: inlineSelection != nil) else {
                 self.finish(error: String(localized: "Too much text for this model: select less and ask again."))
                 return
             }
@@ -224,10 +324,14 @@ final class AskCedricModel: ObservableObject {
                 }
             } else {
                 req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
-                                     useTools: tools, prose: prose)
+                                     useTools: tools, prose: prose, scan: scan?.summary,
+                                     scanHasHigh: scan?.hasHigh ?? false, scanTruncated: scan?.truncated ?? false)
+                if action == .scriptSafety { req.scanFindings = self.lastScan }
             }
             if await self.runChunkedReview(req, engine: engine) { return }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
+            // About a script: clamped before it shows (ScriptVerdictStream), as on the Mac.
+            if let mode = req.safeClaimGuard { self.verdictStream = ScriptVerdictStream(forced: req.forcedVerdict, guard: mode) }
             do {
                 let outcome = try await OwlChatRunner.run(req, engine: engine, model: engine.scoreKey) { ev in
                     if case .text(let t) = ev {
@@ -312,7 +416,14 @@ final class AskCedricModel: ObservableObject {
 
     private func append(_ t: String) {
         guard running, var last = entries.last, last.role == .owl else { return }
-        last.text += t
+        if var vs = verdictStream {
+            let shown = vs.append(t)
+            verdictStream = vs
+            streamedRenders.append(shown)
+            last.text = shown
+        } else {
+            last.text += t
+        }
         entries[entries.count - 1] = last
     }
 
@@ -438,6 +549,7 @@ final class AskCedricModel: ObservableObject {
             return
         }
         for i in entries.indices { entries[i].cards = [] }
+        if action == .scriptSafety { checkScriptSafety(); return }
         guard !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || action != nil else { return }
         ask(action == nil ? q : "", action: action)
     }
@@ -613,8 +725,8 @@ struct AskCedricView: View {
             }
             if !model.actions.isEmpty {
                 section(String(localized: "Quick actions"), c)
-                FlowButtons(actions: model.actions, prose: model.prose, colors: c) { model.ask("", action: $0) }
-                    .disabled(model.unavailable != nil)
+                FlowButtons(actions: model.actions, prose: model.prose, colors: c,
+                            enabled: { model.actionEnabled($0) }) { model.quickAction($0) }
             }
             section(String(localized: "Try asking…"), c)
             VStack(spacing: 8) {
@@ -696,9 +808,28 @@ struct AskCedricView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+        case .scan:
+            // The offline findings, labelled as on the Mac: no AI was involved.
+            let scan = Self.scanRow(e.text)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(scan.label)
+                    .font(.footnote.weight(.semibold)).foregroundStyle(c.secondary)
+                    .accessibilityAddTraits(.isHeader)
+                Text(scan.body).font(.callout).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("ask.scan")
         default:
             Text(e.text).font(.footnote).foregroundStyle(c.secondary)
         }
+    }
+
+    /// The offline scan's row, as on the Mac: its label, then the summary
+    /// (`ScriptSafety.summary`, with the truncation note when cut short).
+    static func scanRow(_ text: String) -> (label: String, body: String) {
+        (String(localized: "Offline scan (no AI)"), text)
     }
 
     // MARK: Input
@@ -940,8 +1071,9 @@ struct FlowButtons: View {
     let actions: [OwlQuickAction]
     let prose: Bool
     let colors: AskColors
+    /// Check for Risks works without an engine; the others need one.
+    var enabled: (OwlQuickAction) -> Bool = { _ in true }
     let tap: (OwlQuickAction) -> Void
-    @Environment(\.isEnabled) private var enabled
 
     var body: some View {
         FlowLayout(spacing: 8) {
@@ -957,9 +1089,11 @@ struct FlowButtons: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(colors.text)
+                .disabled(!enabled(a))
+                .opacity(enabled(a) ? 1 : 0.5)
+                .accessibilityIdentifier(a == .scriptSafety ? "ask.action.checkScript" : "ask.action")
             }
         }
-        .opacity(enabled ? 1 : 0.5)
     }
 }
 

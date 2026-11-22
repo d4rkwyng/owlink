@@ -747,6 +747,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportPDF.attributes = .disabled
         }
         var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
+        if let checkScript = checkScriptAction() { first.append(checkScript) }
         if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -2271,7 +2272,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let reset = UIAction(title: String(localized: "Reset Position"), image: UIImage(systemName: "arrow.down.right.square")) { [weak self] _ in
             self?.moveOwl(to: .default)
         }
-        return UIMenu(children: [ask, check, UIMenu(options: .displayInline, children: [hints, reset])])
+        let top: [UIMenuElement] = [ask, check] + (checkScriptAction().map { [$0] } ?? [])
+        return UIMenu(children: top + [UIMenu(options: .displayInline, children: [hints, reset])])
+    }
+
+    /// "Check Script for Risks…", only for a script (the overflow menu and the owl's).
+    private func checkScriptAction() -> UIAction? {
+        guard canCheckScript else { return nil }
+        let action = UIAction(title: String(localized: "Check Script for Risks…"), image: UIImage(systemName: "exclamationmark.shield")) { [weak self] _ in
+            self?.checkScriptForRisks()
+        }
+        action.accessibilityIdentifier = "editor.checkScript"
+        return action
     }
 
     /// Where he may sit: the text pane (inside the safe area, above the
@@ -2466,6 +2478,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     // MARK: Ask Cedric
+
+    /// Check Script for Risks…: shell, PowerShell, batch, .reg, Python, Ruby.
+    var canCheckScript: Bool { ScriptSafety.isScript(document.language.language) }
+
+    /// Opens Ask Cedric and starts the check: the offline scan (the script
+    /// is never run, nothing is sent for it), then the model's review when
+    /// an engine is ready.
+    @objc func checkScriptForRisks() {
+        guard canCheckScript else { return }
+        if askPanel == nil && askSheet == nil { askCedric() }
+        askModel?.checkScriptSafety()
+    }
 
     private static let inlineToolGate = OwlToolGate.bundled()
 
@@ -3562,6 +3586,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
         if action == #selector(findTodos) { return canFindTodos }
         if action == #selector(showStatistics) { return true }
+        if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)
         }

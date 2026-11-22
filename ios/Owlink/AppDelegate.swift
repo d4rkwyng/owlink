@@ -145,13 +145,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                input: "k", modifierFlags: [.command, .shift])
         let check = UIKeyCommand(title: String(localized: "Check with Cedric"), action: #selector(EditorViewController.checkWithCedric),
                                  input: "h", modifierFlags: [.command, .alternate])
+        let checkScript = UICommand(title: String(localized: "Check Script for Risks…"),
+                                    action: #selector(EditorViewController.checkScriptForRisks))
         let explain = UIKeyCommand(title: String(localized: "Explain Selection"), action: #selector(EditorViewController.explainSelection),
                                    input: "e", modifierFlags: [.command, .alternate])
         let rewrite = UIKeyCommand(title: String(localized: "Rewrite Selection"), action: #selector(EditorViewController.rewriteSelection),
                                    input: "e", modifierFlags: [.command, .alternate, .shift])
         let settings = UIKeyCommand(title: String(localized: "Settings…"), action: #selector(EditorViewController.showSettings),
                                     input: ",", modifierFlags: .command)
-        builder.insertSibling(UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, settings]), afterMenu: .view)
+        builder.insertSibling(UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript, settings]), afterMenu: .view)
     }
 }
 

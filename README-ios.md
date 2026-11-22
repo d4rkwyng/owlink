@@ -112,8 +112,13 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   Explain, Find Problems and typed whole-document questions review a file
   that doesn't fit in up to eight overlapping parts, then combine their
   answers into one response; progress says “Reviewing…” without part counts,
-  with a note on any lines not reviewed (`OwlChunkedReviewRunner`). Check for
-  Risks stays Mac-only (iOS has no offline script scan yet).
+  with a note on any lines not reviewed (`OwlChunkedReviewRunner`). **Check
+  Script for Risks…** (the chip, the ⋯ menu, the owl's menu and the iPad's
+  Cedric menu, for shell, PowerShell, batch, .reg, Python and Ruby) runs the
+  shared offline scan (`ScriptSafety`): nothing is executed and nothing is
+  sent anywhere for the scan, and the findings show as "Offline scan (no AI)"
+  with the same summary as the Mac. When Ask Cedric has an engine, the
+  model's review and the `ScriptVerdict` clamp follow, as on the Mac.
 - **Explain Selection** and **Rewrite Selection** in the text's edit menu
   and the Cedric menu (`⌥⌘E`, `⌥⇧⌘E`): the exact selection (clipped to
   the model, with a note when it was), Rewrite only with a model that
