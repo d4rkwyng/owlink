@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [0.5.0] - Unreleased
+
+### Added
+- **Explain and Rewrite Selection.** Select text and use the Cedric menu, editor context menu, Markdown Context Bar, or ⌥⌘E / ⌥⇧⌘E. Explain works with any ready local engine; Rewrite requires a model that passes the existing tool gate and offers Apply / Skip edit cards. Engines run on this Mac or a configured private LAN server only.
+
 ## [0.4.1] - 2026-11-21
 
 ### Added

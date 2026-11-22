@@ -1273,6 +1273,17 @@ work offline.
 
 ### Ask Cedric
 
+**Explain Selection** (⌥⌘E) and **Rewrite Selection** (⌥⇧⌘E) are
+available in the Cedric menu, the editor's context menu, and the Markdown
+Context Bar. Select text first and turn on Ask Cedric with a local engine
+ready. Explain works with any ready engine; Rewrite requires a model that
+passes the existing tool gate (at least 80%, with unmeasured models off).
+For a server set to choose its model automatically, Rewrite becomes
+available after Ask Cedric has resolved that model and its score.
+Rewrite offers the existing Apply / Skip cards; nothing changes until
+you apply a proposal. Engines run on this Mac or a configured private
+LAN server, never in the cloud.
+
 **Ask Cedric** (Settings › Cedric › "Ask Cedric"; on by default when a local
 engine is ready: Apple Intelligence, a downloaded built-in model, or an
 LM Studio / Ollama / other-Mac server you set up and turned on; with
