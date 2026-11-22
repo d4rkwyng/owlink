@@ -4,6 +4,14 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- VoiceOver names for the folder sidebar, Find controls, Ask Cedric scope and input, and line entry.
+
+### Fixed
+- Localized remaining UI prompts, settings units, and dynamic action labels.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added

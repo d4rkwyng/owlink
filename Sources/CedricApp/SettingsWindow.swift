@@ -311,7 +311,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         fontStepper.minValue = 6; fontStepper.maxValue = 72; fontStepper.increment = 1
         fontStepper.target = self; fontStepper.action = #selector(stepped(_:))
         fontStepper.setAccessibilityLabel(String(localized: "Font size"))
-        let fontRow = NSStackView(views: [fontPopup, fontSize, fontStepper, NSTextField(labelWithString: "pt")])
+        let fontRow = NSStackView(views: [fontPopup, fontSize, fontStepper, NSTextField(labelWithString: String(localized: "pt"))])
         fontRow.spacing = 6
         fontPopup.setAccessibilityLabel(String(localized: "Font"))
 
@@ -399,7 +399,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         proseFontStepper.increment = 1
         proseFontStepper.target = self; proseFontStepper.action = #selector(stepped(_:))
         proseFontStepper.setAccessibilityLabel(String(localized: "Prose font size"))
-        let proseRow = NSStackView(views: [proseFontPopup, proseFontSize, proseFontStepper, NSTextField(labelWithString: "pt")])
+        let proseRow = NSStackView(views: [proseFontPopup, proseFontSize, proseFontStepper, NSTextField(labelWithString: String(localized: "pt"))])
         proseRow.spacing = 6
         useProseFont.toolTip = String(localized: "Markdown and plain-text tabs use this font; code keeps the monospaced font in General. Zoom changes both.")
         let t = toggles

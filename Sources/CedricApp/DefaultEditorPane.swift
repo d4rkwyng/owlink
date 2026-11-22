@@ -45,7 +45,7 @@ final class DefaultEditorPane: NSObject {
         title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         var rows: [[NSView]] = []
         for t in DocumentTypes.settingsTypes {
-            let box = NSButton(checkboxWithTitle: "\(t.name) (.\(t.sampleExtension))", target: self, action: #selector(toggled(_:)))
+            let box = NSButton(checkboxWithTitle: String(localized: "\(t.name) (.\(t.sampleExtension))"), target: self, action: #selector(toggled(_:)))
             box.identifier = NSUserInterfaceItemIdentifier("defaultEditor.\(t.label)")
             let cur = NSTextField(labelWithString: "")
             cur.textColor = .secondaryLabelColor
