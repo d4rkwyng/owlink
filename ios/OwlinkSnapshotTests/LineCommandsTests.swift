@@ -358,6 +358,142 @@ final class LineCommandsTests: XCTestCase {
         XCTAssertTrue(editor.undoBarItem.isEnabled)
     }
 
+    private func actions(_ elements: [UIMenuElement]) -> [UIAction] {
+        elements.flatMap { element -> [UIAction] in
+            if let action = element as? UIAction { return [action] }
+            if let menu = element as? UIMenu { return actions(menu.children) }
+            return []
+        }
+    }
+
+    private func tabInterval(_ editor: EditorViewController) -> CGFloat? {
+        (editor.textView.typingAttributes[.paragraphStyle] as? NSParagraphStyle)?.defaultTabInterval
+    }
+
+    func testIndentUsingTabsAndSpacesKeepsTextAndDrivesIndent() {
+        withIndentDefaultsRestored {
+            AppSettings.defaultIndentation = Indentation(usesTabs: false, width: 4)
+            let editor = editor("one\ntwo")
+            editor.textView.selectedRange = NSRange(location: 0, length: 0)
+            editor.indentUsingTabs(nil)
+            XCTAssertEqual(editor.lineIndentation, Indentation(usesTabs: true, width: 4))
+            XCTAssertEqual(editor.currentLineIndentation(editor.textView.text as NSString), Indentation(usesTabs: true, width: 4))
+            XCTAssertEqual(editor.textView.text, "one\ntwo")
+            XCTAssertFalse(editor.textView.undoManager?.canUndo ?? false)
+            editor.indentLines(nil)
+            XCTAssertEqual(editor.textView.text, "\tone\ntwo")
+            editor.outdentLines(nil)
+            XCTAssertEqual(editor.textView.text, "one\ntwo")
+
+            editor.indentUsingSpaces(nil)
+            XCTAssertEqual(editor.lineIndentation, Indentation(usesTabs: false, width: 4))
+            XCTAssertEqual(editor.textView.text, "one\ntwo")
+            editor.textView.selectedRange = NSRange(location: 0, length: 0)
+            XCTAssertFalse(editor.textView(editor.textView, shouldChangeTextIn: editor.textView.selectedRange, replacementText: "\t"))
+            XCTAssertEqual(editor.textView.text, "    one\ntwo")
+        }
+    }
+
+    func testTabWidthPickKeepsModeAndText() {
+        withIndentDefaultsRestored {
+            AppSettings.defaultIndentation = Indentation(usesTabs: false, width: 4)
+            let editor = editor("one")
+            editor.textView.selectedRange = NSRange(location: 0, length: 0)
+            editor.setTabWidth(8)
+            XCTAssertEqual(editor.lineIndentation, Indentation(usesTabs: false, width: 8))
+            XCTAssertEqual(editor.currentLineIndentation(editor.textView.text as NSString), Indentation(usesTabs: false, width: 8))
+            XCTAssertEqual(editor.textView.text, "one")
+            editor.indentLines(nil)
+            XCTAssertEqual(editor.textView.text, "        one")
+            editor.textView.undoManager?.undo()
+            XCTAssertEqual(editor.textView.text, "one")
+
+            editor.indentUsingTabs(nil)
+            editor.setTabWidth(2)
+            XCTAssertEqual(editor.lineIndentation, Indentation(usesTabs: true, width: 2))
+            XCTAssertEqual(editor.textView.text, "one")
+            editor.setIndentation(Indentation(usesTabs: false, width: 2))
+            editor.indentLines(nil)
+            XCTAssertEqual(editor.textView.text, "  one")
+        }
+    }
+
+    func testIndentationMenusShowWhatIsInEffect() {
+        withIndentDefaultsRestored {
+            AppSettings.defaultIndentation = Indentation(usesTabs: false, width: 4)
+            let editor = editor("no indent")
+            @MainActor func state(_ id: String) -> UIMenuElement.State? {
+                actions(editor.moreMenuItems()).first { $0.accessibilityIdentifier == id }?.state
+            }
+            XCTAssertEqual(state("editor.indentUsingSpaces"), .on)
+            XCTAssertEqual(state("editor.indentUsingTabs"), .off)
+            XCTAssertEqual(state("editor.tabWidth.4"), .on)
+            editor.setIndentation(Indentation(usesTabs: true, width: 8))
+            XCTAssertEqual(state("editor.indentUsingSpaces"), .off)
+            XCTAssertEqual(state("editor.indentUsingTabs"), .on)
+            XCTAssertEqual(state("editor.tabWidth.8"), .on)
+            XCTAssertEqual(state("editor.tabWidth.4"), .off)
+            let titles = actions([editor.indentationMenu()]).map(\.title)
+            XCTAssertEqual(titles, [String(localized: "Indent Using Spaces"), String(localized: "Indent Using Tabs"),
+                                    "Tab Width: 2", "Tab Width: 3", "Tab Width: 4", "Tab Width: 8",
+                                    String(localized: "Convert Indentation to Spaces"), String(localized: "Convert Indentation to Tabs")])
+            // The Text menu's Line › Indentation has the same picks.
+            XCTAssertTrue(actions([editor.lineEditMenu()]).contains { $0.accessibilityIdentifier == "editor.tabWidth.8" && $0.state == .on })
+
+            let spaces = UICommand(title: "", action: #selector(EditorViewController.indentUsingSpaces(_:)))
+            let width8 = UICommand(title: "", action: #selector(EditorViewController.tabWidthMenu(_:)), propertyList: 8)
+            editor.validate(spaces)
+            editor.validate(width8)
+            XCTAssertEqual(spaces.state, .off)
+            XCTAssertEqual(width8.state, .on)
+        }
+    }
+
+    func testIndentationPicksWorkReadOnlyButConvertDoesNot() {
+        let editor = editor("    one\n    two")
+        editor.setEditLock(.readMode, true)
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.indentUsingTabs(_:)), withSender: nil))
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.tabWidthMenu(_:)), withSender: nil))
+        XCTAssertFalse(editor.canPerformAction(#selector(EditorViewController.convertIndentationToTabs(_:)), withSender: nil))
+        let items = actions([editor.indentationMenu()])
+        for id in ["editor.indentUsingSpaces", "editor.indentUsingTabs", "editor.tabWidth.2", "editor.tabWidth.8"] {
+            XCTAssertEqual(items.first { $0.accessibilityIdentifier == id }?.attributes.contains(.disabled), false, id)
+        }
+        for id in ["editor.convertIndentationToSpaces", "editor.convertIndentationToTabs"] {
+            XCTAssertEqual(items.first { $0.accessibilityIdentifier == id }?.attributes.contains(.disabled), true, id)
+        }
+        editor.tabWidthMenu(UICommand(title: "", action: #selector(EditorViewController.tabWidthMenu(_:)), propertyList: 2))
+        XCTAssertEqual(editor.lineIndentation, Indentation(usesTabs: false, width: 2))
+        XCTAssertEqual(editor.textView.text, "    one\n    two")
+    }
+
+    func testTabWidthSetsTabStops() throws {
+        let editor = editor("\tone\n\t\ttwo")
+        let font = editor.textView.font
+        editor.setTabWidth(2)
+        let narrow = try XCTUnwrap(tabInterval(editor))
+        editor.setTabWidth(8)
+        let wide = try XCTUnwrap(tabInterval(editor))
+        XCTAssertEqual(editor.textView.font, font)
+        XCTAssertGreaterThan(wide, narrow)
+        XCTAssertEqual(wide, narrow * 4, accuracy: 0.01)
+        let stored = try XCTUnwrap(editor.textView.textStorage.attribute(.paragraphStyle, at: 5, effectiveRange: nil) as? NSParagraphStyle)
+        XCTAssertEqual(stored.defaultTabInterval, wide, accuracy: 0.01)
+        XCTAssertTrue(stored.tabStops.isEmpty)
+        XCTAssertEqual(editor.textView.text, "\tone\n\t\ttwo")
+    }
+
+    func testLoadedDocumentHasDefaultTabStops() throws {
+        withIndentDefaultsRestored {
+            AppSettings.defaultIndentation = Indentation(usesTabs: true, width: 8)
+            let editor = editor("\tone")
+            let loaded = tabInterval(editor)
+            editor.setTabWidth(8)
+            XCTAssertNotNil(loaded)
+            XCTAssertEqual(loaded ?? 0, tabInterval(editor) ?? -1, accuracy: 0.01)
+        }
+    }
+
     func testCancellingFilterTaskThrowsCancellation() async throws {
         let editor = editor(String(repeating: "line\n", count: 200_000))
         let filter = Task { try await editor.filterLines(pattern: "line", regex: false, caseSensitive: true, keep: false) }

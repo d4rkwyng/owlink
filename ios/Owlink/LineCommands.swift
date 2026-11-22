@@ -76,6 +76,104 @@ extension EditorViewController {
     @objc func convertIndentationToSpaces(_ sender: Any?) { convertIndentation(toTabs: false) }
     @objc func convertIndentationToTabs(_ sender: Any?) { convertIndentation(toTabs: true) }
 
+    /// Indent Using Spaces / Tabs, Tab Width: for this document until it is
+    /// closed or reloaded. Not an edit: the text stays as it is (Convert
+    /// Indentation rewrites it).
+    static let indentationModeActions: Set<Selector> = [
+        #selector(indentUsingSpaces(_:)), #selector(indentUsingTabs(_:)), #selector(tabWidthMenu(_:)),
+    ]
+
+    func setIndentation(_ ind: Indentation) {
+        lineIndentation = ind
+        applyTabStops()
+    }
+
+    private var indentationInEffect: Indentation { currentLineIndentation(textView.textStorage.string as NSString) }
+
+    @objc func indentUsingSpaces(_ sender: Any?) {
+        setIndentation(Indentation(usesTabs: false, width: indentationInEffect.width))
+    }
+    @objc func indentUsingTabs(_ sender: Any?) {
+        setIndentation(Indentation(usesTabs: true, width: indentationInEffect.width))
+    }
+    func setTabWidth(_ width: Int) {
+        setIndentation(Indentation(usesTabs: indentationInEffect.usesTabs, width: width))
+    }
+    /// Text › Indentation › Tab Width: n (the width is the command's
+    /// property list).
+    @objc func tabWidthMenu(_ sender: Any?) {
+        guard let width = (sender as? UICommand)?.propertyList as? Int else { return }
+        setTabWidth(width)
+    }
+
+    /// The Text › Indentation commands' checkmarks: what is in effect now.
+    func validateIndentationCommand(_ command: UICommand) {
+        let current = indentationInEffect
+        switch command.action {
+        case #selector(indentUsingSpaces(_:)): command.state = current.usesTabs ? .off : .on
+        case #selector(indentUsingTabs(_:)): command.state = current.usesTabs ? .on : .off
+        case #selector(tabWidthMenu(_:)): command.state = (command.propertyList as? Int) == current.width ? .on : .off
+        default: break
+        }
+    }
+
+    /// How wide a tab is drawn: this document's pick, else the default (no
+    /// detection, as on the Mac). Tab stops every `width` spaces of the
+    /// editor font, on typing and over the whole text.
+    func applyTabStops() {
+        let font = textView.font ?? AppSettings.font(for: document.language.language, traits: traitCollection)
+        let width = lineIndentation?.width ?? AppSettings.defaultIndentation.width
+        let space = (" " as NSString).size(withAttributes: [.font: font]).width
+        let para = NSMutableParagraphStyle()
+        para.tabStops = []
+        para.defaultTabInterval = space * CGFloat(max(1, width))
+        textView.typingAttributes[.paragraphStyle] = para
+        let storage = textView.textStorage
+        guard storage.length > 0,
+              (storage.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.defaultTabInterval != para.defaultTabInterval
+        else { return }
+        // One attribute over the whole text, as a theme or font change does.
+        storage.beginEditing()
+        storage.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: storage.length))
+        storage.endEditing()
+    }
+
+    /// Indent Using Spaces / Tabs, Tab Width: 2…8, then Convert, as on the
+    /// Mac. The picks are offered whenever the editor is open (not edits);
+    /// Convert only when the document can be edited.
+    func indentationMenu() -> UIMenu {
+        let current = indentationInEffect
+        func pick(_ title: String, _ id: String, on: Bool, _ perform: @escaping (EditorViewController) -> Void) -> UIAction {
+            let item = UIAction(title: title, state: on ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                perform(self)
+            }
+            item.accessibilityIdentifier = id
+            return item
+        }
+        func convert(_ title: String, _ id: String, _ perform: @escaping (EditorViewController) -> Void) -> UIAction {
+            let item = UIAction(title: title) { [weak self] _ in
+                guard let self, self.lineEditable else { return }
+                perform(self)
+            }
+            item.accessibilityIdentifier = id
+            if !lineEditable { item.attributes = .disabled }
+            return item
+        }
+        let mode = UIMenu(options: .displayInline, children: [
+            pick(String(localized: "Indent Using Spaces"), "editor.indentUsingSpaces", on: !current.usesTabs) { $0.indentUsingSpaces(nil) },
+            pick(String(localized: "Indent Using Tabs"), "editor.indentUsingTabs", on: current.usesTabs) { $0.indentUsingTabs(nil) },
+        ])
+        let widths = UIMenu(options: .displayInline, children: Indentation.widths.map { width in
+            pick(String(localized: "Tab Width: \(width)"), "editor.tabWidth.\(width)", on: current.width == width) { $0.setTabWidth(width) }
+        })
+        return UIMenu(title: String(localized: "Indentation"), image: UIImage(systemName: "increase.indent"), children: [
+            mode, widths,
+            convert(String(localized: "Convert Indentation to Spaces"), "editor.convertIndentationToSpaces") { $0.convertIndentationToSpaces(nil) },
+            convert(String(localized: "Convert Indentation to Tabs"), "editor.convertIndentationToTabs") { $0.convertIndentationToTabs(nil) },
+        ])
+    }
+
     func lineEditMenu() -> UIMenu {
         func action(_ title: String, enabled: Bool = true, _ perform: @escaping (EditorViewController) -> Void) -> UIAction {
             let item = UIAction(title: title) { [weak self] _ in
@@ -95,10 +193,7 @@ extension EditorViewController {
             action(String(localized: "Outdent")) { $0.outdentLines(nil) },
             action(String(localized: "Keep Lines Matching…")) { $0.keepLinesMatching(nil) },
             action(String(localized: "Delete Lines Matching…")) { $0.deleteLinesMatching(nil) },
-            UIMenu(title: String(localized: "Indentation"), children: [
-                action(String(localized: "Convert Indentation to Spaces")) { $0.convertIndentationToSpaces(nil) },
-                action(String(localized: "Convert Indentation to Tabs")) { $0.convertIndentationToTabs(nil) },
-            ]),
+            indentationMenu(),
         ])
     }
 

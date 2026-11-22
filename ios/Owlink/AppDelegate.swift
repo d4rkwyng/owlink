@@ -127,6 +127,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             command(String(localized: "Delete Lines Matching…"), #selector(EditorViewController.deleteLinesMatching(_:))),
         ])
         let indentation = UIMenu(title: String(localized: "Indentation"), children: [
+            UIMenu(options: .displayInline, children: [
+                command(String(localized: "Indent Using Spaces"), #selector(EditorViewController.indentUsingSpaces(_:))),
+                command(String(localized: "Indent Using Tabs"), #selector(EditorViewController.indentUsingTabs(_:))),
+            ]),
+            UIMenu(options: .displayInline, children: Indentation.widths.map { width in
+                UICommand(title: String(localized: "Tab Width: \(width)"), action: #selector(EditorViewController.tabWidthMenu(_:)),
+                          propertyList: width)
+            }),
             command(String(localized: "Convert Indentation to Spaces"), #selector(EditorViewController.convertIndentationToSpaces(_:))),
             command(String(localized: "Convert Indentation to Tabs"), #selector(EditorViewController.convertIndentationToTabs(_:))),
         ])

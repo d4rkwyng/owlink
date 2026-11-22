@@ -777,7 +777,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
         return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                writingModeMenu(), languageMenu(), formatMenu(),
+                writingModeMenu(), languageMenu(), indentationMenu(), formatMenu(),
                 UIMenu(options: .displayInline, children: [settings])]
     }
 
@@ -836,6 +836,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         markdownFenceIndex.invalidateAll()
         cachedIndentation = nil
         lineIndentation = nil
+        applyTabStops()
         autoClosers = []
         if NSMaxRange(sel) <= (textView.text as NSString).length { textView.selectedRange = sel }
         loading = false
@@ -1706,6 +1707,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             textView.typingAttributes[.font] = font
         }
         textView.typingAttributes[.foregroundColor] = UIColor(hex: palette.foreground)
+        applyTabStops()
         applyWrap()
         invisiblesOverlay.refresh()
         colorizer?.setPalette(palette)
@@ -1756,6 +1758,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         case #selector(toggleInvisibles): command.state = AppSettings.showInvisibles ? .on : .off
         case #selector(focusParagraph): command.state = AppSettings.focusUnit == .paragraph ? .on : .off
         case #selector(focusSentence): command.state = AppSettings.focusUnit == .sentence ? .on : .off
+        case #selector(indentUsingSpaces(_:)), #selector(indentUsingTabs(_:)), #selector(tabWidthMenu(_:)):
+            validateIndentationCommand(command)
         default: break
         }
     }
@@ -3710,6 +3714,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(commentSelection(_:)) { return lineEditable && document.language.language.commentSyntax != nil }
         if Self.lineActions.contains(action) { return lineEditable }
+        if Self.indentationModeActions.contains(action) { return true }
         if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
         if action == #selector(findTodos) { return canFindTodos }

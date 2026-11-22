@@ -94,7 +94,7 @@ extension EditorViewController {
             if edits.count > 1 { storage.endEditing() }
         }
         textView.selectedRange = selection
-        if let indentation { lineIndentation = indentation.value }
+        if let indentation { lineIndentation = indentation.value; applyTabStops() }
         undo?.enableUndoRegistration()
         undo?.registerUndo(withTarget: self) { target in
             _ = target.applyTextEdits(inverse, selection: previousSelection, actionName: actionName,
