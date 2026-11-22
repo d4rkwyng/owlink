@@ -237,6 +237,26 @@ final class LineCommandsTests: XCTestCase {
         XCTAssertEqual(editor.lineIndentation?.usesTabs, true)
     }
 
+    func testModeOnlyConversionRefreshesUndoButtons() {
+        let editor = editor("no indent")
+        editor.loadViewIfNeeded()
+        XCTAssertFalse(editor.undoBarItem.isEnabled)
+        editor.convertIndentationToTabs(nil)
+        XCTAssertTrue(editor.undoBarItem.isEnabled)
+    }
+
+    func testCancellingFilterTaskThrowsCancellation() async throws {
+        let editor = editor(String(repeating: "line\n", count: 200_000))
+        let filter = Task { try await editor.filterLines(pattern: "line", regex: false, caseSensitive: true, keep: false) }
+        await Task.yield()
+        filter.cancel()
+        do {
+            let result = try await filter.value
+            XCTFail("expected cancellation, got \(result)")
+        } catch is CancellationError {}
+        XCTAssertTrue(editor.textView.text.hasPrefix("line\n"))
+    }
+
     func testResolvedIndentationForCommandsAndTyping() {
         let editor = editor("  if ready {\n  other")
         editor.textView.selectedRange = NSRange(location: 12, length: 0)

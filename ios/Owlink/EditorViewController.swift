@@ -3439,7 +3439,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         DispatchQueue.main.async { [weak self] in self?.updateUndoItems() }
     }
 
-    private func updateUndoItems() {
+    func updateUndoItems() {
         let um = textView.undoManager
         undoItem.isEnabled = editGate.isEditable && um?.canUndo ?? false
         redoItem.isEnabled = editGate.isEditable && um?.canRedo ?? false

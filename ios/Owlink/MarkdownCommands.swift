@@ -72,7 +72,7 @@ extension EditorViewController {
         revealRange(edit.selection)
         contextBar?.refreshStates()
         // storage.replaceCharacters does not call the text-view delegate.
-        if changesText { textViewDidChange(textView) }
+        if changesText { textViewDidChange(textView) } else { updateUndoItems() }
         return true
     }
 

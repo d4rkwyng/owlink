@@ -120,7 +120,7 @@ extension EditorViewController {
             try LineFilter.filter(snapshot as NSString, pattern: pattern, regex: regex,
                                   caseSensitive: caseSensitive, keepMatching: keep)
         }
-        let result = try await task.value
+        let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
         try Task.checkCancellation()
         guard generation == originalGeneration else { return .stale }
         guard lineEditable else { return .notEditable }

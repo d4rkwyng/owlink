@@ -59,7 +59,15 @@ public enum LineFilter {
     public static func filter(_ text: NSString, pattern: String, regex: Bool, caseSensitive: Bool,
                               keepMatching: Bool) throws -> (edit: TextEdit, removed: [Int])? {
         let matches = try matcher(pattern, regex: regex, caseSensitive: caseSensitive)
-        return removing(in: text) { _, r in matches(text, r) != keepMatching }
+        // Long documents: stop early when the surrounding task is cancelled.
+        var cancelled = false
+        let result = removing(in: text) { line, r in
+            if cancelled { return false }
+            if line & 0xFF == 0, Task.isCancelled { cancelled = true; return false }
+            return matches(text, r) != keepMatching
+        }
+        try Task.checkCancellation()
+        return result
     }
 
     /// The given lines (0-based, in order), each ending in a newline.

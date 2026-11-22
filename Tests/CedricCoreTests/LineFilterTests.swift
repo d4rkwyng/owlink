@@ -68,4 +68,15 @@ import Testing
         #expect(LineFilter.renumber(3, removed: removed) == 2)
         #expect(LineFilter.renumber(6, removed: removed) == 3)
     }
+
+    @Test func cancelledFilterThrows() async {
+        let text = String(repeating: "line\n", count: 50_000) as NSString
+        let task = Task.detached { () -> Bool in
+            while !Task.isCancelled { await Task.yield() }
+            do { _ = try LineFilter.filter(text, pattern: "line", regex: false, caseSensitive: true, keepMatching: false); return false }
+            catch is CancellationError { return true } catch { return false }
+        }
+        task.cancel()
+        #expect(await task.value)
+    }
 }
