@@ -1072,8 +1072,10 @@ when a fix is applied, thinks / searches / writes while the AI works,
 and falls asleep after 5 minutes without typing (a click wakes him).
 With Reduce Motion on (System Settings › Accessibility) he stays still:
 no gestures, a single still frame for each state. His rules need no AI.
-Most look at the text in view (at most 8 KB); some also check saved files
-or wait until the whole file fits:
+His rules see an 8 KB window (8,192 UTF-16 units): the whole document when
+it fits, otherwise the text in view plus about 40 lines either side. Some
+also check saved files. Checks about the whole file wait until the document
+fits in that window:
 - warnings: merge-conflict markers left in the file; something that looks
   like a secret (a private key, an AWS key, a GitHub, Slack, Stripe or
   OpenAI/Anthropic token); JSON that doesn't parse (with the line; a
@@ -1223,8 +1225,9 @@ Generated scripts (`configure`, `config.status`, `libtool` and other
 autoconf output) and minified code get none of these checks.
 
 Some checks are about the whole file (a key set twice, a missing `#!`
-line, XML that doesn't parse, `cd` before a delete): in a file longer
-than Cedric's 8 KB view they wait until the whole file fits.
+line, XML that doesn't parse, `cd` before a delete). Those rules do not
+run on a window of a longer file: they wait until the whole document
+fits in Cedric's 8 KB window.
 
 **Settings › Cedric › Style tips in code** (off by default) adds Cedric's style
 suggestions: a bare `except:` in Python (Fix it: `except Exception:`),
