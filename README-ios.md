@@ -40,7 +40,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   reading time and a per-file word goal in Statistics. Goals stay in settings,
   not in the file.
 - Statistics also tracks a daily word target across documents, including edits made while a large document's opening count is calculated, resetting at local midnight.
-- Copy Markdown as HTML or rich text from the edit menu or iPad Edit menu.
+- Copy Markdown as HTML or rich text from the edit menu or iPad Edit menu, with VoiceOver announcements for copy errors.
 - Find and Replace supports regular expressions (the **Regex** option in the find navigator's options menu, remembered between launches; `$1` in replacements). Replace All has no match limit and is one undo step; live results stop at 10,000 matches.
 - Markdown Context Bar above the keyboard and Format › Markdown commands:
   bold `⌘B`, italic `⌘I`, strikethrough `⇧⌘X`, inline code Control-backtick,

@@ -105,6 +105,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private static let dailyImmediateLimit = 100_000
     var dailyWords = DailyWordCounter.shared
     var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
+    var announceAccessibility: (String) -> Void = { UIAccessibility.post(notification: .announcement, argument: $0) }
     private var toolStatesCache: (generation: Int, selection: NSRange, explain: Bool, decode: Bool)?
     private weak var statisticsSheet: StatisticsViewController?
     private var statisticsTimer: Timer?
@@ -2986,7 +2987,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func findError(_ message: String, announce: Bool = true) {
         toast(message)
-        if announce { UIAccessibility.post(notification: .announcement, argument: message) }
+        if announce { announceAccessibility(message) }
     }
 
     @discardableResult
@@ -3018,13 +3019,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
               selection.length <= text.length - selection.location else { done?(); return }
         let markdown = selection.length > 0 ? text.substring(with: selection) : text as String
         guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            toast(String(localized: "Nothing to copy."))
+            findError(String(localized: "Nothing to copy."))
             done?()
             return
         }
         // The HTML importer runs on the main thread: a very long text would freeze the editor.
         if rich && (markdown as NSString).length > Self.richTextCopyLimit {
-            toast(String(localized: "That’s too much to copy as rich text. Select less."))
+            findError(String(localized: "That’s too much to copy as rich text. Select less."))
             done?()
             return
         }

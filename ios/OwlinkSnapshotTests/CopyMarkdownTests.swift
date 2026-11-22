@@ -108,8 +108,11 @@ final class CopyMarkdownTests: XCTestCase {
 
         let (empty, w2) = makeEditor("  \n", pasteboard: pasteboard)
         defer { w2.isHidden = true; w2.rootViewController = nil }
+        var announcements: [String] = []
+        empty.announceAccessibility = { announcements.append($0) }
         await copy(empty, rich: false)
         await copy(empty, rich: true)
+        XCTAssertEqual(announcements, ["Nothing to copy.", "Nothing to copy."])
         XCTAssertEqual(pasteboard.changeCount, 0)
         XCTAssertTrue(empty.canPerformAction(#selector(EditorViewController.copyAsHTML), withSender: nil))
     }
@@ -140,7 +143,10 @@ final class CopyMarkdownTests: XCTestCase {
         XCTAssertEqual(pasteboard.changeCount, 0)
         let big = String(repeating: "word ", count: EditorViewController.richTextCopyLimit / 5 + 10)
         editor.textView.text = big
+        var announcements: [String] = []
+        editor.announceAccessibility = { announcements.append($0) }
         await copy(editor, rich: true)
+        XCTAssertEqual(announcements, ["That’s too much to copy as rich text. Select less."])
         XCTAssertEqual(pasteboard.changeCount, 0)
         await copy(editor, rich: false)
         XCTAssertEqual(pasteboard.changeCount, 1, "the HTML copy has no such limit")
