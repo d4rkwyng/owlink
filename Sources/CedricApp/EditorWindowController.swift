@@ -1128,6 +1128,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     // MARK: Closing
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if let allow = (NSApp.delegate as? AppDelegate)?.shouldCloseDocumentWindow(sender) { return allow }
         guard doc.isDirty, !(doc.fileURL == nil && textView.string.isEmpty) else { return true }
         // Hot close (ClosedTabs.swift): the unsaved text is kept for File ›
         // Reopen Closed Tab. Only if it can't be written do we ask.

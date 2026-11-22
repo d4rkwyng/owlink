@@ -121,7 +121,7 @@ extension AppDelegate {
     }
 
     /// A closed viewer tab, for File › Reopen Closed Tab (no text to keep).
-    func rememberClosedViewer(_ t: any ViewerTab) {
+    func rememberClosedViewer(_ t: any ViewerTab, persist: Bool = true) {
         finishRestore()
         let r = ClosedTabs.push(t.sessionTab, onto: closedTabs)
         closedTabs = r.list
@@ -129,7 +129,7 @@ extension AppDelegate {
             closedTexts[gone.id] = nil
             if gone.hasBuffer { store.removeBuffer(gone.id) }
         }
-        saveSession()
+        if persist { saveSession() }
     }
 
     /// A viewer can't open the file: an alert on the front window.
