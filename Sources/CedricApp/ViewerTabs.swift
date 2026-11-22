@@ -9,12 +9,59 @@ import CedricCore
 @MainActor
 protocol ViewerTab: NSWindowController {
     var id: UUID { get }
-    var fileURL: URL { get }
+    var fileURL: URL { get set }
     var sessionTab: SessionTab { get }
     func reloadIfChangedOnDisk()
 }
 
 extension PDFTabController: ViewerTab {}
+
+@MainActor
+final class ViewerSidebarHost: NSStackView {
+    let split = NSSplitView()
+    private let missing = NoticeBar(symbol: "exclamationmark.arrow.circlepath")
+
+    init(content: NSView) {
+        super.init(frame: content.frame)
+        orientation = .vertical
+        alignment = .width
+        spacing = 0
+        detachesHiddenViews = true
+        split.isVertical = true
+        split.dividerStyle = .thin
+        split.addArrangedSubview(content)
+        split.setContentHuggingPriority(.init(1), for: .vertical)
+        addArrangedSubview(missing)
+        addArrangedSubview(split)
+        missing.isHidden = true
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    func showMissing(_ url: URL) {
+        missing.show(String(localized: "“\(url.lastPathComponent)” was deleted or moved."), buttons: [
+            (String(localized: "Keep Open"), { [weak self] in self?.missing.isHidden = true })
+        ])
+        missing.setAccessibilityLabel(missing.label.stringValue)
+    }
+}
+
+extension ViewerTab {
+    var sidebarHost: ViewerSidebarHost? {
+        guard let window, let content = window.contentView else { return nil }
+        if let host = content as? ViewerSidebarHost { return host }
+        let host = ViewerSidebarHost(content: content)
+        window.contentView = host
+        return host
+    }
+
+    func followRename(_ url: URL) {
+        fileURL = url
+        window?.title = url.lastPathComponent
+        window?.representedURL = url
+        window?.tab.toolTip = url.path
+    }
+}
 
 extension AppDelegate {
     /// Every viewer tab, of every kind.

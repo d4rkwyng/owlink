@@ -176,7 +176,7 @@ struct ImageFileInfo: @unchecked Sendable {
 @MainActor
 final class ImageTabController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, ViewerTab {
     let id: UUID
-    let fileURL: URL
+    var fileURL: URL
     private var state: ImageTabState
     private(set) var isLoaded = false
     /// Decoding (off the main thread).
@@ -323,18 +323,23 @@ final class ImageTabController: NSWindowController, NSWindowDelegate, NSMenuItem
         let url = fileURL
         DispatchQueue.global(qos: .userInitiated).async {
             let info = ImageFileInfo.load(url)
-            Task { @MainActor [weak self] in self?.loaded(info) }
+            Task { @MainActor [weak self] in self?.loaded(info, from: url) }
         }
     }
 
     /// How long the last `loaded` took on the main thread (the checks).
     private(set) var loadedMs = 0.0
 
-    private func loaded(_ info: ImageFileInfo?) {
+    private func loaded(_ info: ImageFileInfo?, from url: URL) {
         let t0 = Date()
         defer { loadedMs = Date().timeIntervalSince(t0) * 1000 }
         loading = false
         statusBar.counts.stringValue = ""
+        if info == nil, url != fileURL {
+            isLoaded = false
+            ensureLoaded()
+            return
+        }
         guard let info, info.width > 0, info.height > 0, info.display != nil else {
             self.info = nil
             showMessage(Self.damagedMessage(fileURL))
@@ -676,7 +681,10 @@ final class ImageTabController: NSWindowController, NSWindowDelegate, NSMenuItem
         window?.contentView = NSView()
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { loadIfShown() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        loadIfShown()
+        (NSApp.delegate as? AppDelegate)?.folderSidebarFollow(self)
+    }
     func windowDidBecomeMain(_ notification: Notification) { loadIfShown() }
     func windowDidChangeOcclusionState(_ notification: Notification) { loadIfShown() }
 

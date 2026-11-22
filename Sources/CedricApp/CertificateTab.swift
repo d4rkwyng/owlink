@@ -198,7 +198,7 @@ final class CertificatePanel: PreviewRenderer {
 @MainActor
 final class CertificateTabController: NSWindowController, NSWindowDelegate, NSMenuItemValidation, ViewerTab {
     let id: UUID
-    let fileURL: URL
+    var fileURL: URL
     private(set) var isLoaded = false
     let details = CertificateDetailsView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
     /// The main action: the certificates as PEM on the clipboard.
@@ -328,7 +328,10 @@ final class CertificateTabController: NSWindowController, NSWindowDelegate, NSMe
         window?.contentView = NSView()
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { loadIfShown() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        loadIfShown()
+        (NSApp.delegate as? AppDelegate)?.folderSidebarFollow(self)
+    }
     func windowDidBecomeMain(_ notification: Notification) { loadIfShown() }
     func windowDidChangeOcclusionState(_ notification: Notification) { loadIfShown() }
 
