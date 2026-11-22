@@ -15,8 +15,7 @@ public enum OwlChunkedReviewRunner {
                 || request.action == .findProblems || request.action == .scriptSafety)
     }
 
-    private static func partRequest(_ request: OwlChatRequest, part: OwlChunkedReview.Part,
-                                    index: Int, count: Int) -> OwlChatRequest {
+    private static func partRequest(_ request: OwlChatRequest, part: OwlChunkedReview.Part) -> OwlChatRequest {
         var r = request
         r.context = OwlChatContext.reviewPart(r.snapshot, first: part.first, last: part.last)
         // Tools could read beyond this part and change the coverage being reported.
@@ -26,7 +25,7 @@ public enum OwlChunkedReviewRunner {
             let inPart = findings.filter { (part.first...part.last).contains($0.line) }
             r.scan = inPart.isEmpty ? nil : ScriptSafety.summary(inPart)
         }
-        r.reviewPartHeader = "Lines \(part.first)–\(part.last) of \(r.snapshot.countedLines), part \(index) of \(count)"
+        r.reviewPartHeader = "Lines \(part.first)–\(part.last) of \(r.snapshot.countedLines)"
         return r
     }
 
@@ -41,8 +40,8 @@ public enum OwlChunkedReviewRunner {
         var budget = engine.contextBudget
         while true {
             let plan = OwlChunkedReview.plan(request.snapshot, budget: budget)
-            let remaining = plan.parts.enumerated().map { index, part in
-                partRequest(request, part: part, index: index + 1, count: plan.parts.count)
+            let remaining = plan.parts.map { part in
+                partRequest(request, part: part)
                     .documentBudget(engineBudget: engine.contextBudget, server: engine.usesServer)
             }.min() ?? 0
             if remaining >= budget { return plan }
@@ -74,7 +73,7 @@ public enum OwlChunkedReviewRunner {
                     skipped.append(part)
                     continue
                 }
-                let r = partRequest(request, part: part, index: index + 1, count: plan.parts.count)
+                let r = partRequest(request, part: part)
                 let outcome = try await OwlChatRunner.run(r, engine: engine, model: model) { _ in }
                 answers.append(outcome.modelAnswer)
                 completed.append(part)
@@ -84,9 +83,7 @@ public enum OwlChunkedReviewRunner {
                     stopped = true
                 } else {
                     let reason = describeError(error)
-                    let number = index + 1
-                    let count = plan.parts.count
-                    errorMessage = String(localized: "The review stopped at part \(number) of \(count): \(reason)")
+                    errorMessage = String(localized: "The review stopped: \(reason)")
                 }
                 break
             }
@@ -114,16 +111,13 @@ public enum OwlChunkedReviewRunner {
                 text = OwlChunkedReview.mergeFindings(answers)
             }
         } else {
-            text = zip(completed, answers).enumerated().map { index, item in
-                let (part, answer) = item
-                let number = index + 1
-                return String(localized: "Part \(number) (lines \(part.first)–\(part.last))") + "\n" + answer
-            }.joined(separator: "\n\n")
+            text = answers.joined(separator: "\n\n")
         }
 
-        if request.action == .explain, !stopped, errorMessage == nil {
-            let instruction = "Combine these reviewed parts into one brief explanation. Keep real file line numbers. "
-                + "Do not infer what unreviewed lines contain.\n\n" + text
+        if !findings, !stopped, errorMessage == nil, !answers.isEmpty {
+            let instruction = "Answer the user's request with one brief response based only on these reviewed answers. "
+                + "Keep real file line numbers. Do not invent details from lines not reviewed or mention the review process.\n\n"
+                + "User's request: \(request.question)\n\nReviewed answers:\n" + text
             let system = OwlPrompts.chatSystem(toolsOn: false, server: engine.usesServer, partial: !complete)
             let room = OwlInlineAssist.documentBudget(engineBudget: engine.contextBudget, instructionWrapper: instruction,
                                                        systemPrompt: system, history: request.history)
@@ -137,19 +131,19 @@ public enum OwlChunkedReviewRunner {
                         let combined = OwlChatRunner.stripThinking(answer)
                         let final = combined.isEmpty ? OwlChatRunner.stripThinking(streamed.value) : combined
                         if final.isEmpty {
-                            errorMessage = String(localized: "The model returned no combined explanation; the reviewed parts are shown instead.")
+                            errorMessage = errorMessage ?? String(localized: "The model returned no combined answer; the reviewed answers are shown below.")
                         } else {
                             text = final
                         }
                     } else {
-                        errorMessage = String(localized: "The model did not return a combined explanation; the reviewed parts are shown instead.")
+                        errorMessage = errorMessage ?? String(localized: "The model did not return a combined answer; the reviewed answers are shown below.")
                     }
                     try Task.checkCancellation()
                 } catch {
                     if error is CancellationError || (error as? LocalAIError) == .cancelled || (error as? BuiltInError) == .cancelled || Task.isCancelled {
                         stopped = true
                     } else {
-                        errorMessage = String(localized: "The review could not combine the parts: \(describeError(error))")
+                        errorMessage = errorMessage ?? String(localized: "The review could not combine the answers: \(describeError(error))")
                     }
                 }
             }

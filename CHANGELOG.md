@@ -4,6 +4,12 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Changed
+- **Ask Cedric names its model and shows typing dots while it writes.** Whole-file answers are combined without part labels.
+- **Whole-file context is larger for built-in and server models.** Qwen can review a whole file when it fits; Apple Intelligence remains at a 5,000-unit budget / 4,096-token window.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
