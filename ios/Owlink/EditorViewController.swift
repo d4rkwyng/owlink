@@ -100,6 +100,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     var dailyWordCountLimit = TextStats.maxCounted
     private var wordCountGeneration: Int?
     private var dailyBaselineArm = 0
+    private var dailyBaselinePending = false
+    private var dailyDropAfterBaseline = false
     private static let dailyImmediateLimit = 100_000
     var dailyWords = DailyWordCounter.shared
     var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
@@ -1321,8 +1323,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func countDailyWords(baseline: Bool, dropAfter: Bool = false) {
         let key = dailyKey
         let storage = textView.textStorage
-        dailyBaselineArm &+= 1
+        if baseline {
+            dailyBaselineArm &+= 1
+            dailyBaselinePending = false
+            dailyDropAfterBaseline = false
+        }
         guard storage.length <= dailyWordCountLimit else {
+            dailyBaselineArm &+= 1
+            dailyBaselinePending = false
+            dailyDropAfterBaseline = false
             wordCount = nil
             wordCountGeneration = nil
             dailyWords.drop(key)
@@ -1334,6 +1343,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if baseline && storage.length > Self.dailyImmediateLimit {
             // A long text is counted off the main thread, from a copy.
+            dailyWords.drop(key)
+            dailyBaselinePending = true
             let text = Self.immutableCopy(storage)
             let arm = dailyBaselineArm
             let counter = dailyWords
@@ -1342,7 +1353,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard let self, self.dailyBaselineArm == arm, counter === self.dailyWords else { return }
-                        self.record(words: words, baseline: true, dropAfter: dropAfter)
+                        self.dailyBaselinePending = false
+                        if let words { counter.rebaseOriginal(key: key, original: words) }
+                        else { counter.drop(key) }
+                        if self.dailyDropAfterBaseline { counter.drop(key); self.dailyDropAfterBaseline = false }
                     }
                 }
             }
@@ -1355,7 +1369,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func record(words: Int?, baseline: Bool, dropAfter: Bool) {
         if baseline { dailyWords.rebaseline(key: dailyKey, words: words) }
         else { dailyWords.note(key: dailyKey, words: words) }
-        if dropAfter { dailyWords.drop(dailyKey) }
+        if dropAfter {
+            if dailyBaselinePending { dailyDropAfterBaseline = true }
+            else { dailyWords.drop(dailyKey) }
+        }
     }
 
     func stopDailyWordTracking() {

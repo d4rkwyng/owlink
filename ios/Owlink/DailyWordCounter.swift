@@ -34,6 +34,14 @@ final class DailyWordCounter {
         }
     }
 
+    func rebaseOriginal(key: String, original: Int) {
+        let day = DailyWords.dayString(for: now(), calendar: calendar)
+        if log.rebaseOriginal(key: key, original: original, on: day) {
+            DailyWordDefaults.setWords(log.wordsToday, on: log.day, defaults: defaults)
+            NotificationCenter.default.post(name: Self.changed, object: self)
+        }
+    }
+
     func drop(_ key: String) { log.drop(key) }
 
     func setTarget(_ target: Int?) {

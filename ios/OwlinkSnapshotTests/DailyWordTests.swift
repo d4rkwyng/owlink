@@ -145,11 +145,13 @@ final class DailyWordTests: XCTestCase {
         field.text = "000500"
         stats.saveDailyTarget()
         XCTAssertEqual(counter.target, 500)
+        XCTAssertEqual(DailyWordDefaults.target(in: try XCTUnwrap(UserDefaults(suiteName: suites.last!))), 500)
         XCTAssertEqual(field.text, "500")
 
         field.text = "0"
         stats.saveDailyTarget()
         XCTAssertNil(counter.target)
+        XCTAssertNil(DailyWordDefaults.target(in: try XCTUnwrap(UserDefaults(suiteName: suites.last!))))
         XCTAssertEqual(field.text, "")
 
         field.text = "10000001"
@@ -161,6 +163,24 @@ final class DailyWordTests: XCTestCase {
         field.text = "not a number"
         stats.saveDailyTarget()
         XCTAssertFalse(try XCTUnwrap(targetError(in: stats.view)).isHidden)
+    }
+
+    func testLateBaselineCountsEditsOnceAndPersists() async throws {
+        let counter = counter()
+        let text = String(repeating: "word ", count: 21_000)
+        let editor = editor(text, counter: counter)
+        editor.textView.text = text + "new words"
+        editor.commitDailyWords()
+        XCTAssertEqual(counter.wordsToday, 0)
+        for _ in 0..<200 where counter.wordsToday != 2 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(counter.wordsToday, 2)
+        editor.commitDailyWords()
+        XCTAssertEqual(counter.wordsToday, 2)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suites.last!))
+        let day = DailyWords.dayString(for: clock, calendar: .current)
+        XCTAssertEqual(DailyWordDefaults.words(on: day, defaults: defaults), 2)
     }
 
     func testExplicitRollAtLocalMidnightAndGetterIsPure() {
