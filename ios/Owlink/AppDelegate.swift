@@ -85,7 +85,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                action: #selector(EditorViewController.openPreviewInNewWindow))
         let contextBar = UICommand(title: AppSettings.showContextBar ? String(localized: "Hide Context Bar") : String(localized: "Show Context Bar"),
                                    action: #selector(EditorViewController.toggleContextBarMenu))
-        let invisibles = UICommand(title: String(localized: "Show Invisibles"), action: #selector(EditorViewController.toggleInvisibles))
+        let invisibles = UICommand(title: AppSettings.showInvisibles ? String(localized: "Hide Invisibles") : String(localized: "Show Invisibles"),
+                                   action: #selector(EditorViewController.toggleInvisibles))
         let statistics = UICommand(title: String(localized: "Show Statistics"), action: #selector(EditorViewController.showStatistics))
         builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, invisibles, contextBar, statistics]), atStartOfMenu: .view)
         let writing = UIMenu(title: String(localized: "Writing Mode"), children: [

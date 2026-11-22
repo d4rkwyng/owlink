@@ -709,11 +709,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         wrap.state = AppSettings.wrap ? .on : .off
         wrap.accessibilityIdentifier = "editor.menu.wrapLines"
-        let invisibles = UIAction(title: String(localized: "Show Invisibles"), state: AppSettings.showInvisibles ? .on : .off) { [weak self] _ in
+        let invisiblesTitle = AppSettings.showInvisibles ? String(localized: "Hide Invisibles") : String(localized: "Show Invisibles")
+        let invisibles = UIAction(title: invisiblesTitle, state: AppSettings.showInvisibles ? .on : .off) { [weak self] _ in
             self?.toggleInvisibles()
         }
         invisibles.accessibilityIdentifier = "editor.menu.showInvisibles"
-        invisibles.accessibilityLabel = String(localized: "Show Invisibles")
+        invisibles.accessibilityLabel = invisiblesTitle
         let readable = UIAction(title: String(localized: "Readable Width"), image: UIImage(systemName: "text.aligncenter")) { [weak self] _ in
             self?.toggleReadableWidth()
         }
@@ -805,7 +806,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         loading = true
         let sel = textView.selectedRange
         textView.text = document.text
-        invisiblesOverlay.refresh()
+        invisiblesOverlay.textChanged()
         let font = AppSettings.font(for: document.language.language, traits: traitCollection)
         textView.font = font
         textView.textColor = UIColor(hex: palette.foreground)
@@ -842,7 +843,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let textStorage = textView.textStorage
         let edited = textStorage.editedRange, delta = textStorage.changeInLength
         guard textStorage.editedMask.contains(.editedCharacters), !loading else { return }
-        invisiblesOverlay.refresh()
+        invisiblesOverlay.textChanged()
         clearEditorHighlights()
         editCount += 1
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
@@ -1662,7 +1663,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         palette = AppSettings.theme.palette(systemIsDark: dark)
         invisiblesOverlay.color = UIColor(hex: palette.invisibles)
         invisiblesOverlay.isHidden = !AppSettings.showInvisibles
-        invisiblesOverlay.refresh()
         updateContextBar()
         contextBar?.applyPalette(palette)
         applyBarStyle()
@@ -1681,6 +1681,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         textView.typingAttributes[.foregroundColor] = UIColor(hex: palette.foreground)
         applyWrap()
+        invisiblesOverlay.refresh()
         colorizer?.setPalette(palette)
         scheduleWritingUpdate()
         scheduleEditorHighlights()
