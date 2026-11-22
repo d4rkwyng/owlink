@@ -1355,8 +1355,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if let used = textView.textLayoutManager?.usageBoundsForTextContainer, used.width.isFinite {
             width = max(width, ceil(used.maxX + insets.left + insets.right))
         }
-        let font = textView.font ?? AppSettings.font(for: traitCollection)
-        let charWidth = max(("0" as NSString).size(withAttributes: [.font: font]).width, 1)
+        let font = textView.font ?? AppSettings.font(for: document.language.language, traits: traitCollection)
+        let zeroWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        let alphabetWidth = ("abcdefghijklmnopqrstuvwxyz" as NSString).size(withAttributes: [.font: font]).width
+        let fixedPitch = font.fontDescriptor.symbolicTraits.contains(.traitMonoSpace)
+        let charWidth = max(CGFloat(ProseFont.characterWidth(
+            fixedPitch: fixedPitch,
+            zeroWidth: Double(zeroWidth),
+            lowercaseAlphabetWidth: Double(alphabetWidth)
+        )), 1)
         // longestLine includes the newline; a little slack covers tabs.
         width = max(width, ceil(CGFloat(max(0, lineIndex.longestLine)) * charWidth + insets.left + insets.right + 8))
         textView.minimumContentWidth = width

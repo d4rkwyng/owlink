@@ -90,6 +90,7 @@ enum SelfCheck {
     static func behaviour(_ editor: EditorViewController) async {
         let doc = editor.document
         check(doc.language.language == .swift, "language detected: Swift")
+        check(!AppSettings.useProseFont && AppSettings.proseFontSize == 15, "prose font is off by default, 15 pt")
         check(editor.textView.inputAccessoryView == nil, "code has no context bar")
         check(doc.encoding == .utf8 && doc.lineEnding == .lf, "encoding UTF-8, line ending LF")
         for _ in 0..<30 where editor.owl.visible == nil { try? await Task.sleep(for: .milliseconds(200)) }

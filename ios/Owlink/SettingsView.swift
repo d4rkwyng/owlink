@@ -180,7 +180,6 @@ struct SettingsView: View {
                         ForEach([LocalAISettings.Backend.apple, .builtIn, .custom], id: \.self) { b in
                             Text(AIStatus.backendTitle(b)).tag(b)
                         }
-
                     }
                     Toggle(String(localized: "Use Cedric AI"), isOn: Binding(get: { ai.enabled }, set: { ai.enabled = $0; save() }))
                         .accessibilityIdentifier("settings.aiEnabled")
