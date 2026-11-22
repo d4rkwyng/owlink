@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Changed
+- **Finder document icons.** Type-coloured pages now show a white symbol, with a short file type label in larger views.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
