@@ -42,6 +42,8 @@ final class AskCedricModel: ObservableObject {
     @Published var running = false
     @Published var engineTitle: String?
     @Published var unavailable: String?
+    @Published private(set) var reviewProgress: String?
+    @Published private(set) var reviewScopeLabel: String?
     @Published private(set) var scope: OwlChatScope = .wholeDocument
     @Published private(set) var scopes: [OwlChatScope] = [.visible, .wholeDocument]
     @Published private(set) var scopeLabel = OwlChatScope.wholeDocument.title
@@ -56,6 +58,8 @@ final class AskCedricModel: ObservableObject {
     var documentNow: () -> DocumentNow = { DocumentNow(text: "", generation: 0, readOnly: true, large: false, lines: LineIndex()) }
     var makeSnapshot: () -> OwlDocumentSnapshot = { OwlDocumentSnapshot(text: "", generation: 0) }
     var askIsVisible: () -> Bool = { false }
+    var settingsProvider: () -> LocalAISettings? = { AskCedricModel.chatSettings() }
+    var makeEngine: (LocalAISettings) async -> (any OwlChatEngine)? = { await OwlChatEngines.make(settings: $0) }
     private var task: Task<Void, Never>?
     private var recheck: Task<Void, Never>?
     private var scopeRefresh: Task<Void, Never>?
@@ -74,6 +78,7 @@ final class AskCedricModel: ObservableObject {
     }
 
     var prose: Bool { SpellScope.isProse(language) }
+    var displayedScopeLabel: String { reviewScopeLabel ?? scopeLabel }
 
     var actions: [OwlQuickAction] {
         OwlQuickAction.allCases.filter { $0 != .scriptSafety && $0.isOffered(prose: prose, language: language) }
@@ -136,7 +141,7 @@ final class AskCedricModel: ObservableObject {
     }
 
     func prepare() async {
-        guard let s = Self.chatSettings() else {
+        guard let s = settingsProvider() else {
             unavailable = AIStatus.noEngineMessage
             refreshScope()
             return
@@ -144,7 +149,7 @@ final class AskCedricModel: ObservableObject {
         previewServer = s.backend.usesServer
         previewTools = OwlChatEngines.configuredScoreKey(settings: s).map { gate.allowsTools($0) } ?? false
         refreshScope()
-        guard let engine = await OwlChatEngines.make(settings: s) else {
+        guard let engine = await makeEngine(s) else {
             unavailable = AIStatus.noEngineMessage
             return
         }
@@ -169,8 +174,13 @@ final class AskCedricModel: ObservableObject {
         let prose = self.prose
         task = Task { [weak self] in
             guard let self else { return }
-            defer { self.running = false; self.refreshScope() }
-            guard let s = Self.chatSettings(), let engine = await OwlChatEngines.make(settings: s) else {
+            defer {
+                self.running = false
+                self.reviewProgress = nil
+                self.reviewScopeLabel = nil
+                self.refreshScope()
+            }
+            guard let s = self.settingsProvider(), let engine = await self.makeEngine(s) else {
                 self.finish(error: AIStatus.noEngineMessage)
                 return
             }
@@ -182,8 +192,10 @@ final class AskCedricModel: ObservableObject {
                 self.finish(error: String(localized: "Too much text for this model: select less and ask again."))
                 return
             }
-            let req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
+            var req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
                                      useTools: tools, prose: prose)
+            if await self.runChunkedReview(req, engine: engine) { return }
+            if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
             do {
                 let outcome = try await OwlChatRunner.run(req, engine: engine, model: engine.scoreKey) { ev in
                     if case .text(let t) = ev {
@@ -203,6 +215,42 @@ final class AskCedricModel: ObservableObject {
                 self.finish(error: AIStatus.describe(error))
             }
         }
+    }
+
+    private func runChunkedReview(_ request: OwlChatRequest, engine: any OwlChatEngine) async -> Bool {
+        guard let plan = OwlChunkedReviewRunner.plan(request, engine: engine) else { return false }
+        guard running, !Task.isCancelled else {
+            finish(error: String(localized: "Stopped."))
+            return true
+        }
+        let label: String
+        if plan.isComplete {
+            label = String(localized: "Whole document (\(plan.totalLines) lines)")
+        } else if let first = plan.parts.first, let last = plan.parts.last {
+            label = String(localized: "Lines \(first.first)–\(last.last) of \(plan.totalLines) (rest not reviewed)")
+        } else {
+            label = String(localized: "Whole document")
+        }
+        reviewScopeLabel = label
+        let result = await OwlChunkedReviewRunner.run(request, plan: plan, engine: engine, model: engine.scoreKey,
+                                                      describeError: { @Sendable error in AIStatus.describe(error) }) { [weak self] part, total in
+            DispatchQueue.main.async { MainActor.assumeIsolated {
+                guard let self, self.running, self.reviewScopeLabel != nil else { return }
+                self.reviewProgress = String(localized: "Reviewing part \(part) of \(total)")
+            } }
+        }
+        let answer = OwlChatRunner.stripThinking(result.outcome.answer)
+        if answer.isEmpty {
+            finish(error: result.error ?? String(localized: "Stopped."))
+            return true
+        }
+        if var last = entries.last, last.role == .owl {
+            last.text = answer
+            last.cards = Self.cards(Array(result.outcome.proposals.prefix(OwlTools.maxProposals)))
+            entries[entries.count - 1] = last
+            refreshCards()
+        }
+        return true
     }
 
     private func append(_ t: String) {
@@ -588,7 +636,7 @@ struct AskCedricView: View {
                 }
             } label: {
                 HStack(spacing: 5) {
-                    Text(model.scopeLabel).lineLimit(1)
+                    Text(model.displayedScopeLabel).lineLimit(1)
                     Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
                 }
                 .font(.caption.weight(.medium))
@@ -600,8 +648,14 @@ struct AskCedricView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(String(localized: "Context"))
-            .accessibilityValue(model.scopeLabel)
+            .accessibilityValue(model.displayedScopeLabel)
             .accessibilityIdentifier("ask.scope")
+            if let progress = model.reviewProgress {
+                Text(progress)
+                    .font(.caption)
+                    .foregroundStyle(c.secondary)
+                    .accessibilityIdentifier("ask.reviewProgress")
+            }
             HStack(alignment: .bottom, spacing: 4) {
                 TextField(String(localized: "Ask Cedric…"), text: $model.question, axis: .vertical)
                     .textFieldStyle(.plain)
