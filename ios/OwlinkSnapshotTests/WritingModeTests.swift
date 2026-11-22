@@ -64,8 +64,17 @@ final class WritingModeTests: XCTestCase {
         editor.toggleTypewriter()
         XCTAssertGreaterThan(editor.textView.contentInset.bottom, original)
         editor.textView.selectedRange = NSRange(location: editor.textView.textStorage.length, length: 0)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         editor.updateWriting()
         XCTAssertGreaterThan(editor.textView.contentOffset.y, 0)
+        if let position = editor.textView.selectedTextRange?.end {
+            let caret = editor.textView.caretRect(for: position)
+            let top = editor.textView.contentOffset.y + editor.textView.adjustedContentInset.top
+            let bottom = editor.textView.contentOffset.y + editor.textView.bounds.height
+            XCTAssertEqual(caret.midY, (top + bottom) / 2, accuracy: 30)
+        } else {
+            XCTFail("Missing caret")
+        }
         editor.toggleTypewriter()
         XCTAssertEqual(editor.textView.contentInset.bottom, original, accuracy: 0.5)
     }
@@ -77,8 +86,7 @@ final class WritingModeTests: XCTestCase {
         AppSettings.focusUnit = .sentence
         XCTAssertEqual(AppSettings.focusUnit, .sentence)
         XCTAssertEqual(editor.textView.selectedRange.location, 2)
-        XCTAssertGreaterThan((editor.editorVisibleRange()?.length ?? 0), 20,
-                             "bounds \(editor.textView.bounds), content \(editor.textView.contentSize), text \(editor.textView.textStorage.length)")
+        XCTAssertGreaterThan((editor.editorVisibleRange()?.length ?? 0), 20)
         editor.updateWriting()
         let layout = try XCTUnwrap(editor.textView.textLayoutManager)
         let manager = try XCTUnwrap(layout.textContentManager)
@@ -93,5 +101,54 @@ final class WritingModeTests: XCTestCase {
         }
         XCTAssertTrue(dimmed, "Second sentence should be dimmed")
         XCTAssertEqual(editor.textView.text, "First sentence. Second sentence.\n\nLast paragraph.")
+    }
+
+    func testChangingUnitReappliesFocusThroughSettings() async throws {
+        let text = "First sentence. Second sentence.\r\n\r\nLast paragraph."
+        let editor = editor(text)
+        editor.textView.selectedRange = NSRange(location: 2, length: 0)
+        editor.toggleWritingFocus()
+        editor.updateWriting()
+        AppSettings.focusUnit = .sentence
+        try await Task.sleep(for: .milliseconds(150))
+        let layout = try XCTUnwrap(editor.textView.textLayoutManager)
+        let manager = try XCTUnwrap(layout.textContentManager)
+        let visible = try XCTUnwrap(editor.editorVisibleRange())
+        let expected = FocusRange.dimmed(visible: visible, focus: FocusRange.range(.sentence, in: text as NSString, caret: 2))
+        var actual: [NSRange] = []
+        layout.enumerateRenderingAttributes(from: layout.documentRange.location, reverse: false) { _, attributes, range in
+            if attributes[.foregroundColor] != nil {
+                let start = manager.offset(from: layout.documentRange.location, to: range.location)
+                let end = manager.offset(from: layout.documentRange.location, to: range.endLocation)
+                actual.append(NSRange(location: start, length: end - start))
+            }
+            return true
+        }
+        XCTAssertEqual(actual, expected)
+    }
+
+    func testLargeDocumentPausesWritingAndRestoresInset() {
+        let editor = editor(String(repeating: "a", count: LargeDocument.lineThreshold + 1))
+        XCTAssertEqual(editor.writingLargeReason, .longLine)
+        let base = editor.textView.contentInset
+        editor.toggleWritingFocus()
+        editor.toggleTypewriter()
+        editor.updateWriting()
+        XCTAssertEqual(editor.textView.contentInset, base)
+        XCTAssertTrue(editor.writing.focus)
+        XCTAssertTrue(editor.writing.typewriter)
+    }
+
+    func testEmptyDocumentAndEndCaret() {
+        let empty = editor("")
+        empty.toggleWritingFocus()
+        empty.toggleTypewriter()
+        empty.updateWriting()
+        XCTAssertEqual(empty.textView.text, "")
+        let end = editor("One.\r\n\r\nLast.")
+        end.textView.selectedRange = NSRange(location: end.textView.textStorage.length, length: 0)
+        end.toggleWritingFocus()
+        end.updateWriting()
+        XCTAssertEqual(end.textView.text, "One.\r\n\r\nLast.")
     }
 }

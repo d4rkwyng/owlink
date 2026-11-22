@@ -46,9 +46,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var readableWidthChoice: Bool?
     private(set) var writing = WritingModeState()
     private var writingInset: CGFloat = 0
+    private var writingBaseInset: UIEdgeInsets?
     private var writingUpdatePending = false
     private var writingCenterPending = false
     private var writingLayoutSize = CGSize.zero
+    private(set) var writingLargeReason: LargeDocument.Reason?
+    private var focusPainted: [NSTextRange] = []
+    private var focusCache: [Int]?
+    private var focusPalette: UInt32?
     private var highlightTimer: Timer?
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
     private var lastTextScrollOffsetY: CGFloat?
@@ -275,6 +280,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.markdownKeysEnabled = { [weak self] in self?.markdownEditable ?? false }
         textView.onMarkdownTab = { [weak self] forward in self?.handleMarkdownTab(forward: forward) }
         textView.onMarkdownPaste = { [weak self] in self?.handleMarkdownPaste() ?? false }
+        textView.onKeyboardCaretMove = { [weak self] in self?.scheduleWritingUpdate(center: true) }
+        textView.onTypewriterScroll = { [weak self] in
+            guard let self, self.writing.typewriter, self.writingLargeReason == nil else { return false }
+            self.updateWriting(center: true)
+            return true
+        }
     }
 
     private func setUpStatusBar() {
@@ -732,6 +743,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.textColor = UIColor(hex: palette.foreground)
         textView.typingAttributes = [.font: font, .foregroundColor: UIColor(hex: palette.foreground)]
         lineIndex = LineIndex(textView.textStorage.string as NSString)
+        writingLargeReason = LargeDocument.reason(for: lineIndex)
+        clearFocusRendering()
+        updateWritingInset()
         markdownFenceIndex.invalidateAll()
         cachedIndentation = nil
         autoClosers = []
@@ -760,6 +774,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
         let first = lineIndex.replace(oldRange, newLength: edited.length, in: textStorage.string as NSString)
+        if writingLargeReason == nil,
+           let reason = LargeDocument.reason(afterEditOf: first..<(lineIndex.line(containing: NSMaxRange(edited)) + 1), in: lineIndex) {
+            writingLargeReason = reason
+            clearFocusRendering()
+            updateWritingInset()
+            if !writing.isOff { showWritingPaused(reason) }
+        }
         markdownFenceIndex.invalidate(fromLine: first)
         colorizer?.textDidChange(firstLine: first, lastLine: lineIndex.line(containing: NSMaxRange(edited)),
                                  lineDelta: lineIndex.lineCount - oldLines)
@@ -1094,7 +1115,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
-        scheduleWritingUpdate()
+        scheduleWritingUpdate(center: false)
         scheduleEditorHighlights()
         contextBar?.refreshInlineSelectionStates()
         scheduleStatisticsUpdate()
@@ -1116,7 +1137,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
         if scrollView === textView {
-            scheduleWritingUpdate(center: false)
+            if writing.focus { scheduleWritingUpdate(center: false) }
             scheduleEditorHighlights()
         }
         fadeOwlNearCaret()
@@ -1467,16 +1488,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         writing.typewriter.toggle()
         updateWritingInset()
         scheduleWritingUpdate()
-        UIMenuSystem.main.setNeedsRebuild()
+        if writing.typewriter, let reason = writingLargeReason { showWritingPaused(reason) }
     }
 
     @objc func toggleWritingFocus() {
         writing.focus.toggle()
-        if !writing.focus, let layout = textView.textLayoutManager {
-            layout.removeRenderingAttribute(.foregroundColor, for: layout.documentRange)
-        }
+        if !writing.focus { clearFocusRendering() }
         scheduleWritingUpdate()
-        UIMenuSystem.main.setNeedsRebuild()
+        if writing.focus, let reason = writingLargeReason { showWritingPaused(reason) }
     }
 
     @objc func focusParagraph() { AppSettings.focusUnit = .paragraph }
@@ -1494,19 +1513,42 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func updateWritingInset() {
+        let active = writing.typewriter && writingLargeReason == nil
+        if writingBaseInset == nil {
+            guard active else { return }
+            writingBaseInset = textView.contentInset
+        }
+        guard let original = writingBaseInset else { return }
         let base = max(0, textView.adjustedContentInset.bottom - writingInset)
         let height = max(0, textView.bounds.height - textView.adjustedContentInset.top - base)
         let line = textView.font?.lineHeight ?? 20
-        let extra = writing.typewriter ? CGFloat(Typewriter.bottomInset(visibleHeight: Double(height), lineHeight: Double(line))) : 0
+        let extra = active ? CGFloat(Typewriter.bottomInset(visibleHeight: Double(height), lineHeight: Double(line))) : 0
         guard abs(extra - writingInset) > 0.5 else { return }
-        var inset = textView.contentInset
-        inset.bottom += extra - writingInset
+        var inset = original
+        inset.bottom += extra
         writingInset = extra
         textView.contentInset = inset
+        if extra == 0 { writingBaseInset = nil }
+    }
+
+    private func showWritingPaused(_ reason: LargeDocument.Reason) {
+        switch reason {
+        case .longLine: toast(String(localized: "Very long lines: colouring, spell check, the owl and Writing Mode are paused for speed."))
+        case .size: toast(String(localized: "Large file: colouring, spell check, the owl and Writing Mode are paused for speed."))
+        }
+    }
+
+    private func clearFocusRendering() {
+        if let layout = textView.textLayoutManager {
+            for range in focusPainted { layout.removeRenderingAttribute(.foregroundColor, for: range) }
+        }
+        focusPainted = []
+        focusCache = nil
+        focusPalette = nil
     }
 
     private func scheduleWritingUpdate(center: Bool = true) {
-        guard !writing.isOff else { return }
+        guard !writing.isOff, writingLargeReason == nil else { return }
         writingCenterPending = writingCenterPending || center
         guard !writingUpdatePending else { return }
         writingUpdatePending = true
@@ -1520,39 +1562,58 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func updateWriting(center: Bool = true) {
-        guard textView.markedTextRange == nil else { return }
+        guard writingLargeReason == nil, textView.markedTextRange == nil else { return }
         if writing.typewriter && center {
             updateWritingInset()
-            let selection = textView.selectedRange
-            let caret = min(NSMaxRange(selection), textView.textStorage.length)
-            if let position = textView.position(from: textView.beginningOfDocument, offset: caret) {
+            if !textView.isTracking, !textView.isDragging, let position = textView.selectedTextRange?.end {
+                if let layout = textView.textLayoutManager, let manager = layout.textContentManager,
+                   let viewport = layout.textViewportLayoutController.viewportRange {
+                    let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
+                    let caret = NSMaxRange(textView.selectedRange)
+                    if let location = manager.location(viewport.location, offsetBy: caret - start) {
+                        layout.ensureLayout(for: NSTextRange(location: location))
+                    }
+                    layout.textViewportLayoutController.layoutViewport()
+                }
                 let rect = textView.caretRect(for: position)
+                if rect.maxY > textView.contentSize.height {
+                    var size = textView.contentSize
+                    size.height = rect.maxY + textView.textContainerInset.bottom
+                    textView.contentSize = size
+                }
                 let top = textView.adjustedContentInset.top
                 let baseBottom = max(0, textView.adjustedContentInset.bottom - writingInset)
                 let height = max(0, textView.bounds.height - top - baseBottom)
                 if let target = Typewriter.scrollTarget(caretMidY: Double(rect.midY + top), visibleHeight: Double(height),
                     currentY: Double(textView.contentOffset.y + top), documentHeight: Double(textView.contentSize.height + top),
                     bottomInset: Double(writingInset)) {
-                    textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: CGFloat(target) - top), animated: false)
+                    let minY = -top
+                    let maxY = max(minY, textView.contentSize.height + textView.adjustedContentInset.bottom - textView.bounds.height)
+                    textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: min(maxY, max(minY, CGFloat(target) - top))), animated: false)
                 }
             }
         }
         guard writing.focus, let layout = textView.textLayoutManager,
               let manager = layout.textContentManager,
               let visible = editorVisibleRange() else { return }
-        let text = textView.textStorage.string as NSString
+        let text = textView.textStorage.mutableString
         let focus = FocusRange.range(AppSettings.focusUnit, in: text, caret: textView.selectedRange.location)
-        guard let start = manager.location(layout.documentRange.location, offsetBy: visible.location),
-              let end = manager.location(start, offsetBy: visible.length),
-              let visibleRange = NSTextRange(location: start, end: end) else { return }
-        layout.removeRenderingAttribute(.foregroundColor, for: visibleRange)
+        let key = [focus.location, focus.length, visible.location, visible.length, text.length]
+        if focusCache == key, focusPalette == palette.foreground { return }
+        guard let viewport = layout.textViewportLayoutController.viewportRange else { return }
+        let viewportStart = manager.offset(from: layout.documentRange.location, to: viewport.location)
+        guard let start = manager.location(viewport.location, offsetBy: visible.location - viewportStart) else { return }
+        clearFocusRendering()
         let color = UIColor(hex: palette.foreground).withAlphaComponent(0.32)
         for range in FocusRange.dimmed(visible: visible, focus: focus) {
             guard let a = manager.location(start, offsetBy: range.location - visible.location),
                   let b = manager.location(a, offsetBy: range.length),
                   let textRange = NSTextRange(location: a, end: b) else { continue }
             layout.addRenderingAttribute(.foregroundColor, value: color, for: textRange)
+            focusPainted.append(textRange)
         }
+        focusCache = key
+        focusPalette = palette.foreground
     }
 
     func editorVisibleRange() -> NSRange? {
@@ -3531,6 +3592,9 @@ final class EditorDocumentTextView: UITextView {
     var markdownKeysEnabled: (() -> Bool)?
     var onMarkdownTab: ((Bool) -> Void)?
     var onMarkdownPaste: (() -> Bool)?
+    var onKeyboardCaretMove: (() -> Void)?
+    var onTypewriterScroll: (() -> Bool)?
+    private var keyboardEdit = false
     private(set) var isPasting = false
 
     override var keyCommands: [UIKeyCommand]? {
@@ -3550,6 +3614,31 @@ final class EditorDocumentTextView: UITextView {
         isPasting = true
         defer { isPasting = false }
         super.paste(sender)
+    }
+
+    override func insertText(_ text: String) {
+        keyboardEdit = true
+        defer { keyboardEdit = false }
+        super.insertText(text)
+    }
+
+    override func deleteBackward() {
+        keyboardEdit = true
+        defer { keyboardEdit = false }
+        super.deleteBackward()
+    }
+
+    override func scrollRangeToVisible(_ range: NSRange) {
+        if keyboardEdit, onTypewriterScroll?() == true { return }
+        super.scrollRangeToVisible(range)
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        super.pressesEnded(presses, with: event)
+        if presses.contains(where: { press in
+            guard let key = press.key else { return false }
+            return [.keyboardLeftArrow, .keyboardRightArrow, .keyboardUpArrow, .keyboardDownArrow].contains(key.keyCode)
+        }) { onKeyboardCaretMove?() }
     }
 
     override var contentSize: CGSize {

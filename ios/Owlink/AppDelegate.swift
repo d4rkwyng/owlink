@@ -15,7 +15,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         if ProcessInfo.processInfo.arguments.contains("-OwlinkResetSettings") {
             for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.showContextBar, AppSettings.Key.owlHints, AppSettings.Key.theme,
                       AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly,
-                      AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement] {
+                      AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement, AppSettings.Key.focusUnit] {
                 UserDefaults.standard.removeObject(forKey: k)
             }
         }
