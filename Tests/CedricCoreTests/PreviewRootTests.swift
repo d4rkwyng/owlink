@@ -177,6 +177,7 @@ func makeTree(_ files: [String]) throws -> URL {
 
     /// The owner's real case: the mindtricks Quartz site's content/index.md,
     /// read-only, when a checkout is on this machine.
+    #if os(macOS)
     @Test func mindtricksIndexRendersItsImagesAndWikilinks() throws {
         let content = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("GitHub/mindtricks/content")
         let index = content.appendingPathComponent("index.md")
@@ -194,4 +195,5 @@ func makeTree(_ files: [String]) throws -> URL {
         #expect(html.contains(#">Intelbrew and Tankard: Keeping Homebrew on Intel Macs</a>"#))
         #expect(html.contains("blog/20261117-intelbrew-tankard.md"))
     }
+    #endif
 }

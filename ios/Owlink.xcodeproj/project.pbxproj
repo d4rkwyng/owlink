@@ -161,6 +161,8 @@
 			membershipExceptions = (
 				"LiveBuiltInTests.swift",
 				"DescribeImageTests.swift",
+				"KVCacheTests.swift",
+				"LiveKVCacheTests.swift",
 			);
 			target = 70A7AD607E9CC750EBDAACA9;
 		};

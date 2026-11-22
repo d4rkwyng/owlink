@@ -24,6 +24,8 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   ending are detected and written back unchanged (the core's `TextCodec`).
 - Syntax colouring (the core's highlighter), the seven themes including
   Dracula, font size, wrap, and **Show Line Numbers** (on by default).
+  Settings › Writing can use a prose font for Markdown and plain text; code
+  keeps the monospaced editor font.
   Jumps show numbers for the open file even when the setting is off.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
@@ -53,6 +55,8 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   Duo. **Focus Preview** (the bar's expand button, the ⋯ menu, `⌥⌘P`)
   shows the preview alone on any screen; back with Edit, Esc, `⇧⌘P`, a
   swipe down at the top of the page or a swipe in from the leading edge.
+  Print documents, or export Markdown as HTML or a rendered PDF, from the
+  document menu.
   Text and preview open at the same place both ways (`ScrollSync`). Side
   by side, the handle between them drags (44 pt wide) and snaps to 1/3,
   1/2, 2/3 and the fold (the default, a strong snap); double-tap resets
@@ -109,12 +113,15 @@ functions in CedricCore (`FoldLayout`, `OwlPlacement`, `OwlBadge`,
 `EditorContinuity`) with tests in `DuoLayoutTests`.
 
 On iOS, as on the Mac: the writing checks run with Cedric’s offline hints.
-Settings › Writing holds Style Check and Readable Width, both off until
-turned on; the document menu also switches Readable Width for the open
-file. Open Quickly (⌥⌘O) finds files in a folder Owlink can list and the
+Settings › Writing holds the prose font setting, Style Check and Readable
+Width. Style Check and Readable Width are off until turned on; the document
+menu also switches Readable Width for the open file. Open Quickly (⌥⌘O)
+finds files in a folder Owlink can list and the
 headings of the open Markdown document. Ask Cedric can call check_document
 and read_section, and a propose_edit is a card with Apply and Skip (never
 applied while the file is read-only).
+Print documents, or export Markdown as HTML or a rendered PDF, from the
+document menu.
 
 Not on iOS: the `cedric` command, Replace in Files, the folder sidebar, Git,
 the certificate view, XML formatting, and the command palette’s menu

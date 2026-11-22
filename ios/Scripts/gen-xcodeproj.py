@@ -64,7 +64,8 @@ objs[core_t2] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productNam
 MAC_ONLY_TESTS = {
     'CedricCoreTests': ['CertificateTests.swift', 'GitSafetyTests.swift', 'SecurityReviewTests.swift',
                         'ViewerFormatsTests.swift', 'ScriptTokenTests.swift'],
-    'CedricAITests': ['LiveBuiltInTests.swift', 'DescribeImageTests.swift'],
+    'CedricAITests': ['LiveBuiltInTests.swift', 'DescribeImageTests.swift',
+                      'KVCacheTests.swift', 'LiveKVCacheTests.swift'],
 }
 
 def sync(name, path, target_name=None):
