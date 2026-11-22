@@ -2141,7 +2141,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         present(a, animated: true)
     }
 
-    private func restore(_ c: SafetyCopy) {
+    func restore(_ c: SafetyCopy) {
         guard explicitChangeAllowed() else { return }
         guard let data = SaveSafetyStores.copies.data(for: c), let decoded = c.decode(data) else {
             toast(String(localized: "Couldn’t read that version."))

@@ -22,6 +22,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             SelfCheck.run(in: w, browser: browser, out: out)
             return
         }
+        if let out = RevertCheck.outDir {
+            RecoveryOffer.skipLaunchOffer()
+            RevertCheck.run(in: w, browser: browser, out: out)
+            return
+        }
         if let out = SaveCheck.outDir {
             RecoveryOffer.skipLaunchOffer()
             SaveCheck.run(in: w, browser: browser, out: out)
