@@ -20,6 +20,9 @@ public enum FindEngine {
     public enum FindError: Error, Equatable {
         case emptyPattern
         case invalidPattern(String)
+        case timedOut
+        case tooManyMatches
+        case cancelled
     }
 
     public static func regex(_ pattern: String, _ options: FindOptions) throws -> NSRegularExpression {
@@ -70,6 +73,38 @@ public enum FindEngine {
     /// All non-empty matches (for counts and Replace All).
     public static func matches(_ regex: NSRegularExpression, in text: NSString) -> [NSTextCheckingResult] {
         regex.matches(in: text as String, range: NSRange(location: 0, length: text.length)).filter { $0.range.length > 0 }
+    }
+
+    /// Searches off the UI thread, stopping even during a long ICU match.
+    /// A partial result is never returned, so Replace All cannot silently
+    /// replace only some occurrences.
+    public static func boundedMatches(_ regex: NSRegularExpression, in text: String,
+                                      timeLimit: TimeInterval = 0.5, maxMatches: Int = 10_000,
+                                      isCancelled: @Sendable () -> Bool = { false }) throws -> [NSTextCheckingResult] {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeLimit)
+        var found: [NSTextCheckingResult] = []
+        var failure: FindError?
+        regex.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(location: 0, length: (text as NSString).length)) { match, _, stop in
+            if isCancelled() {
+                failure = .cancelled
+                stop.pointee = true
+                return
+            }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                failure = .timedOut
+                stop.pointee = true
+                return
+            }
+            guard let match, match.range.length > 0 else { return }
+            if found.count >= maxMatches {
+                failure = .tooManyMatches
+                stop.pointee = true
+                return
+            }
+            found.append(match)
+        }
+        if let failure { throw failure }
+        return found
     }
 
     /// The replacement text for one match: the template with `$1`… filled

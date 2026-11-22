@@ -38,6 +38,7 @@ private final class GoToLineAlertController: UIAlertController {
 final class EditorViewController: UIViewController, UITextViewDelegate, UIGestureRecognizerDelegate {
     let document: TextDocument
     let textView = EditorDocumentTextView(usingTextLayoutManager: true)
+    lazy var regexFind = RegexFind(editor: self)
     var contextBar: MarkdownContextBar?
     private(set) var lineIndex = LineIndex()
     let markdownFenceIndex = FenceIndex()
@@ -295,6 +296,16 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.delegate = self
         disableAutomaticSubstitutions(textView)
         textView.isFindInteractionEnabled = true
+        textView.regexFind = regexFind
+        textView.findInteraction?.optionsMenuProvider = { [weak self] defaults in
+            guard let self else { return UIMenu(children: defaults) }
+            let toggle = UIAction(title: String(localized: "Regular Expression"), state: self.regexFind.enabled ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                self.regexFind.setEnabled(!self.regexFind.enabled)
+            }
+            toggle.accessibilityIdentifier = "find.regex"
+            return UIMenu(children: defaults + [toggle])
+        }
         textView.alwaysBounceVertical = true
         textView.keyboardDismissMode = .interactive
         textView.textContainerInset = UIEdgeInsets(top: 10, left: editorTextInsetLeft, bottom: 80, right: 8)
@@ -781,6 +792,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.undoManager?.removeAllActions()
         colorizer.setLanguage(document.language.language)
         generation += 1
+        if regexFind.enabled { regexFind.invalidate() }
         dailyTimer?.invalidate()
         countDailyWords(baseline: true)
         scheduleWordCount()
@@ -818,6 +830,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleWritingUpdate()
         scheduleEditorHighlights(selectionChanged: false)
         generation += 1
+        if regexFind.enabled { regexFind.invalidate() }
         dailyTimer?.invalidate()
         let timer = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.commitDailyWords() }
@@ -2828,6 +2841,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Commands
 
+    func findError(_ message: String) {
+        toast(message)
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
+    func applyFindReplacement(range: NSRange, replacement: String, name: String) {
+        guard textView.isEditable, editGate.isEditable, textView.markedTextRange == nil else { return }
+        let selection = NSRange(location: range.location + (replacement as NSString).length, length: 0)
+        applyTextEdit(TextEdit(range: range, replacement: replacement, selection: selection), actionName: name)
+    }
+
     @objc func copyAsHTML() {
         copyMarkdown(rich: false, selection: textView.selectedRange)
     }
@@ -3789,6 +3813,17 @@ final class PaddingLabel: UILabel {
 /// TextKit 2's UITextView reports a viewport-wide contentSize when wrapping
 /// is off. Keep the width we measured so later layout passes cannot shrink it.
 final class EditorDocumentTextView: UITextView {
+    weak var regexFind: RegexFind?
+    override func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
+        guard let regexFind else { return super.findInteraction(interaction, sessionFor: view) }
+        let session = UITextSearchingFindSession(searchableObject: regexFind)
+        regexFind.session = session
+        return session
+    }
+    override func findInteraction(_ interaction: UIFindInteraction, didEnd session: UIFindSession) {
+        regexFind?.endSession()
+        super.findInteraction(interaction, didEnd: session)
+    }
     var minimumContentWidth: CGFloat = 0
     var markdownKeysEnabled: (() -> Bool)?
     var onMarkdownTab: ((Bool) -> Void)?
