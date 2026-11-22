@@ -88,9 +88,10 @@ public enum EditorPanes {
         return keyboardTop
     }
 
-    /// Height of the status bar: fill the home-indicator zone when resting,
-    /// but keep a readable strip when there is no inset or a keyboard is up.
+    /// Height of the status bar: fill the home-indicator zone up to a 34 pt
+    /// cap, and stay a 24 pt readable strip when the inset is smaller or a
+    /// keyboard is up.
     public static func statusBarHeight(homeInset: CGFloat) -> CGFloat {
-        max(max(homeInset, 0), 24)
+        min(max(max(homeInset, 0), 24), 34)
     }
 }

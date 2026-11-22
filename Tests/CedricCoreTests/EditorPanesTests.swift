@@ -98,10 +98,12 @@ import Testing
         #expect(EditorPanes.statusBarBottom(viewHeight: 0, keyboardTop: 0, keyboardBottom: 0, homeInset: 0) == 0)
     }
 
-    @Test func statusBarHeightFillsTheHomeIndicatorOrKeepsAReadableStrip() {
+    @Test func statusBarHeightFillsTheHomeIndicatorUpToACapOrKeepsAReadableStrip() {
         #expect(EditorPanes.statusBarHeight(homeInset: 34) == 34)
         #expect(EditorPanes.statusBarHeight(homeInset: 20) == 24)
         #expect(EditorPanes.statusBarHeight(homeInset: 21) == 24)
         #expect(EditorPanes.statusBarHeight(homeInset: 0) == 24)
+        #expect(EditorPanes.statusBarHeight(homeInset: 40) == 34)
+        #expect(EditorPanes.statusBarHeight(homeInset: 50) == 34)
     }
 }
