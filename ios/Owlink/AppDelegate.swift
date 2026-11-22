@@ -13,7 +13,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let copies = SaveSafetyStores.copies
         DispatchQueue.global(qos: .utility).async { copies.prune() }
         if ProcessInfo.processInfo.arguments.contains("-OwlinkResetSettings") {
-            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.owlHints, AppSettings.Key.theme,
+            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.showContextBar, AppSettings.Key.owlHints, AppSettings.Key.theme,
                       AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly,
                       AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement] {
                 UserDefaults.standard.removeObject(forKey: k)
@@ -71,7 +71,35 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                 input: "w", modifierFlags: [.command, .alternate])
         let detach = UICommand(title: String(localized: "Open Preview in New Window"),
                                action: #selector(EditorViewController.openPreviewInNewWindow))
-        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap]), atStartOfMenu: .view)
+        let contextBar = UICommand(title: AppSettings.showContextBar ? String(localized: "Hide Context Bar") : String(localized: "Show Context Bar"),
+                                   action: #selector(EditorViewController.toggleContextBarMenu))
+        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, contextBar]), atStartOfMenu: .view)
+
+        func key(_ title: String, _ action: Selector, _ input: String, _ modifiers: UIKeyModifierFlags = .command) -> UIKeyCommand {
+            UIKeyCommand(title: title, action: action, input: input, modifierFlags: modifiers)
+        }
+        func command(_ title: String, _ action: Selector) -> UICommand { UICommand(title: title, action: action) }
+        let markdown = UIMenu(title: String(localized: "Markdown"), children: [
+            key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
+            key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),
+            key(String(localized: "Strikethrough"), #selector(EditorViewController.markdownStrikethroughMenu(_:)), "x", [.command, .shift]),
+            key(String(localized: "Inline Code"), #selector(EditorViewController.markdownCodeMenu(_:)), "`", .control),
+            key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k"),
+            command(String(localized: "Image Link"), #selector(EditorViewController.markdownImageMenu(_:))),
+            command(String(localized: "Body"), #selector(EditorViewController.markdownBodyMenu(_:))),
+            key(String(localized: "Heading 1"), #selector(EditorViewController.markdownHeading1Menu(_:)), "1"),
+            key(String(localized: "Heading 2"), #selector(EditorViewController.markdownHeading2Menu(_:)), "2"),
+            key(String(localized: "Heading 3"), #selector(EditorViewController.markdownHeading3Menu(_:)), "3"),
+            command(String(localized: "Bulleted List"), #selector(EditorViewController.markdownBulletListMenu(_:))),
+            command(String(localized: "Numbered List"), #selector(EditorViewController.markdownNumberedListMenu(_:))),
+            key(String(localized: "Checkbox"), #selector(EditorViewController.toggleCheckboxMenu(_:)), "\r"),
+            command(String(localized: "Quote"), #selector(EditorViewController.markdownQuoteMenu(_:))),
+            command(String(localized: "Code Block"), #selector(EditorViewController.markdownCodeBlockMenu(_:))),
+            command(String(localized: "Insert Table"), #selector(EditorViewController.markdownTableMenu(_:))),
+            command(String(localized: "Format Table"), #selector(EditorViewController.formatTableMenu(_:))),
+        ])
+        builder.remove(menu: .format)
+        builder.insertSibling(UIMenu(title: String(localized: "Format"), children: [markdown]), afterMenu: .view)
 
         let ask = UIKeyCommand(title: String(localized: "Ask Cedric…"), action: #selector(EditorViewController.askCedric),
                                input: "k", modifierFlags: [.command, .shift])

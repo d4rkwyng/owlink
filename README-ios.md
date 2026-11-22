@@ -26,6 +26,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   Dracula, font size, wrap, and **Show Line Numbers** (on by default).
   Jumps show numbers for the open file even when the setting is off.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
+- Markdown Context Bar above the keyboard and Format › Markdown commands:
+  bold `⌘B`, italic `⌘I`, strikethrough `⇧⌘X`, inline code Control-backtick,
+  link `⌘K`, headings `⌘1`–`⌘3`, and checkbox `⌘↩`.
 - Data safety: "Edited" under the title while there are unsaved changes
   (UIDocument's `hasUnsavedChanges`); Undo and Redo in the bar; Revert to
   Opened Version in the ⋯ menu (a private copy of the file as opened, in

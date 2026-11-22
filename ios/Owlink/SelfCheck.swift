@@ -48,6 +48,7 @@ enum SelfCheck {
                         if device == "iphone" && !dark { await behaviour(editor) }
                     }
                     await shot(window, browser, sample: "README.md", sizeClass: sizeClass, name: "\(device)-\(mode)-markdown-preview") { editor in
+                        if device == "iphone" && !dark { markdownBar(editor) }
                         editor.togglePreview()
                         check(editor.previewOn, "\(device) \(mode): preview on")
                         try? await Task.sleep(for: .seconds(2))
@@ -89,6 +90,7 @@ enum SelfCheck {
     static func behaviour(_ editor: EditorViewController) async {
         let doc = editor.document
         check(doc.language.language == .swift, "language detected: Swift")
+        check(editor.textView.inputAccessoryView == nil, "code has no context bar")
         check(doc.encoding == .utf8 && doc.lineEnding == .lf, "encoding UTF-8, line ending LF")
         for _ in 0..<30 where editor.owl.visible == nil { try? await Task.sleep(for: .milliseconds(200)) }
         let hint = editor.owl.visible?.hint.title ?? "none"
@@ -113,6 +115,22 @@ enum SelfCheck {
         check(find != nil, "find interaction present")
         // Wait for the hint the edit may bring back to settle before the shot.
         try? await Task.sleep(for: .seconds(1))
+    }
+
+    static func markdownBar(_ editor: EditorViewController) {
+        AppSettings.showContextBar = true
+        let bar = editor.contextBar
+        let ids = ContextBarSet.items(for: .markdown).map(\.id)
+        check(bar != nil && bar?.items.map(\.id) == ids && Set(bar?.buttons.keys.map { $0 } ?? []) == Set(ids),
+              "Markdown context bar has the shared items")
+        let original = editor.textView.text ?? ""
+        guard !original.isEmpty else { check(false, "Markdown sample has text"); return }
+        editor.textView.becomeFirstResponder()
+        editor.textView.selectedRange = NSRange(location: 0, length: 1)
+        editor.markdownBoldMenu(nil)
+        check(editor.textView.text != original, "Markdown Bold changes the selection")
+        editor.textView.undoManager?.undo()
+        check(editor.textView.text == original, "one Undo restores Markdown Bold")
     }
 
     /// Ask Cedric for real when an engine is ready here (Apple

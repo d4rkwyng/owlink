@@ -55,6 +55,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.fontSize) private var fontSize = AppSettings.defaultFontSize
     @AppStorage(AppSettings.Key.wrap) private var wrap = true
     @AppStorage(AppSettings.Key.lineNumbers) private var lineNumbers = true
+    @AppStorage(AppSettings.Key.showContextBar) private var showContextBar = true
     @AppStorage(AppSettings.Key.owlHints) private var owlHints = true
     @AppStorage(AppSettings.Key.theme) private var theme = EditorTheme.system.rawValue
     @AppStorage(AppSettings.Key.saveAutomatically) private var saveAutomatically = true
@@ -89,11 +90,14 @@ struct SettingsView: View {
                     Toggle(String(localized: "Wrap Lines"), isOn: $wrap)
                     Toggle(String(localized: "Show Line Numbers"), isOn: $lineNumbers)
                         .accessibilityIdentifier("settings.lineNumbers")
+                    Toggle(String(localized: "Show Context Bar"), isOn: $showContextBar)
+                        .accessibilityIdentifier("settings.contextBar")
                     Toggle(String(localized: "Cedric’s Hints"), isOn: $owlHints)
                 }
                 .onChange(of: fontSize) { AppSettings.post() }
                 .onChange(of: wrap) { AppSettings.post() }
                 .onChange(of: lineNumbers) { AppSettings.post() }
+                .onChange(of: showContextBar) { AppSettings.post() }
                 .onChange(of: owlHints) { AppSettings.post() }
                 .onChange(of: theme) { AppSettings.post() }
 

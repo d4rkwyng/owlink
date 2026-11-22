@@ -37,6 +37,7 @@ private final class GoToLineAlertController: UIAlertController {
 final class EditorViewController: UIViewController, UITextViewDelegate, UIGestureRecognizerDelegate {
     let document: TextDocument
     let textView = EditorDocumentTextView(usingTextLayoutManager: true)
+    var contextBar: MarkdownContextBar?
     private(set) var lineIndex = LineIndex()
     /// Left inset of the text before line numbers claim any of it.
     private let editorTextInsetLeft: CGFloat = 8
@@ -63,7 +64,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let split = UIStackView()
     private(set) var preview: PreviewController?
     private(set) var previewOn = false
-    private var generation = 0
+    private(set) var generation = 0
     private var loading = false
     private(set) var palette = EditorPalettes.light
     private var previewTimer: Timer?
@@ -91,10 +92,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Status line's bottom and height, offset from the view's bottom.
     private var statusBarBottomPin: NSLayoutConstraint!
     private var statusBarHeightPin: NSLayoutConstraint!
-    /// Home-indicator inset last seen while the keyboard was down. A docked
-    /// keyboard can inflate the safe area; that must not look like a tall
-    /// home indicator and pin the bar under the keys.
-    private var restingHomeInset: CGFloat = 0
     /// A keyboard animation owns the pin; layout must not fight it.
     private var animatingStatusBar = false
     /// Focus Preview: the preview alone, editor, status line and owl hidden.
@@ -368,12 +365,36 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         view.setNeedsLayout()
     }
 
-    /// Home-indicator inset, ignoring a keyboard that has been added to the
-    /// safe area (those are well over 80 pt; the indicator is not).
+    /// The window's safe area excludes the keyboard and its accessory.
     private func homeInsetForStatusBar() -> CGFloat {
-        let inset = view.safeAreaInsets.bottom
-        if inset <= 80 { restingHomeInset = inset }
-        return restingHomeInset
+        view.window?.safeAreaInsets.bottom ?? 0
+    }
+
+    /// Where the status line's bottom goes for a keyboard frame (the guide's,
+    /// or a notification's end frame; both include the Context Bar, the
+    /// text view's inputAccessoryView). A software keyboard is handled by
+    /// EditorPanes. With a hardware keyboard the "keyboard" is only the bar
+    /// (44 pt over the home inset), which EditorPanes ignores as too short to
+    /// be a keyboard; while the bar is attached and the frame covers the
+    /// bottom edge, the status line sits on the frame's top instead, so it
+    /// is never under the bar. The frame comes first: the bar view's own
+    /// position lags behind an animation's end frame.
+    func statusBottom(keyboard: CGRect, homeInset: CGFloat) -> CGFloat {
+        let height = view.bounds.height
+        let bottom = EditorPanes.statusBarBottom(viewHeight: height, keyboardTop: keyboard.minY,
+                                                  keyboardBottom: keyboard.maxY, homeInset: homeInset)
+        guard bottom == height, textView.isFirstResponder, let bar = contextBar else { return bottom }
+        if keyboard.height > 0, keyboard.maxY >= height - 1, keyboard.minY < height - homeInset - 1 {
+            return max(keyboard.minY, 0)
+        }
+        // A frame that stops at the home inset (the bar not counted yet):
+        // the bar's own frame, once it is on screen at the bottom.
+        guard bar.window != nil, keyboard.intersects(view.bounds),
+              keyboard.maxY >= height - homeInset - 1 else { return bottom }
+        let frame = bar.convert(bar.bounds, to: view)
+        guard frame.height > 0, frame.intersects(view.bounds),
+              frame.maxY >= view.bounds.maxY - homeInset - 1 else { return bottom }
+        return min(bottom, frame.minY)
     }
 
     /// The keyboard guide in this view's coordinates, or nil before the
@@ -386,8 +407,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard !animatingStatusBar, let pin = statusBarBottomPin else { return }
         let g = keyboardFrameInView()
         let homeInset = homeInsetForStatusBar()
-        let y = EditorPanes.statusBarBottom(viewHeight: view.bounds.height, keyboardTop: g.minY, keyboardBottom: g.maxY,
-                                            homeInset: homeInset)
+        let y = statusBottom(keyboard: g, homeInset: homeInset)
         statusBarHeightPin.constant = EditorPanes.statusBarHeight(homeInset: y < view.bounds.height ? 0 : homeInset)
         let constant = y - view.bounds.height
         guard abs(pin.constant - constant) > 0.5 else { return }
@@ -402,8 +422,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
               let pin = statusBarBottomPin else { return }
         let frame = keyboardFrame(raw)
         let homeInset = homeInsetForStatusBar()
-        let y = EditorPanes.statusBarBottom(viewHeight: view.bounds.height, keyboardTop: frame.minY, keyboardBottom: frame.maxY,
-                                            homeInset: homeInset)
+        let y = statusBottom(keyboard: frame, homeInset: homeInset)
         let barHeight = EditorPanes.statusBarHeight(homeInset: y < view.bounds.height ? 0 : homeInset)
         let constant = y - view.bounds.height
         let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0
@@ -693,7 +712,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    func textViewDidBeginEditing(_ textView: UITextView) { hideKeyboardButton.isHidden = false }
+    func textViewDidBeginEditing(_ textView: UITextView) {
+        hideKeyboardButton.isHidden = false
+        contextBar?.refreshStates()
+    }
     func textViewDidEndEditing(_ textView: UITextView) { hideKeyboardButton.isHidden = true }
 
     func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
@@ -741,6 +763,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
+        contextBar?.refreshInlineSelectionStates()
         updateStatus()
         fadeOwlNearCaret()
         askModel?.scheduleScopeRefresh()
@@ -817,11 +840,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func setLanguage(_ l: Language) {
+        if l != .markdown, previewOn { togglePreview() }
         document.language.choose(l)
         colorizer.setLanguage(l)
         updateStatus()
         updateBarButtons()
-        if l != .markdown, previewOn { togglePreview() }
+        updateContextBar()
         scheduleOwl()
     }
 
@@ -884,6 +908,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         lastLineNumbersSetting = lineNumbers
         applySettings()
+        UIMenuSystem.main.setNeedsRebuild()
         updateBarButtons()
         scheduleOwl()
         showHint()
@@ -892,6 +917,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func applySettings() {
         let dark = traitCollection.userInterfaceStyle == .dark
         palette = AppSettings.theme.palette(systemIsDark: dark)
+        updateContextBar()
+        contextBar?.applyPalette(palette)
         applyBarStyle()
         let bg = UIColor(hex: palette.background)
         textView.backgroundColor = bg
@@ -1343,19 +1370,27 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Ask Cedric
 
-    private func canInlineAssist(_ action: OwlQuickAction, selection: NSRange) -> Bool {
-        let now = currentDocument()
-        let settings = AskCedricModel.chatSettings()
-        let enabled = !now.large && askModel?.running != true
+    private static let inlineToolGate = OwlToolGate.bundled()
+
+    func inlineAssistStates(selection: NSRange) -> (explain: Bool, rewrite: Bool) {
+        let length = textView.textStorage.length
         let hasSelection = selection.location != NSNotFound && selection.length > 0
-            && selection.location <= now.text.length && selection.length <= now.text.length - selection.location
-        if action == .rewrite {
-            let allowsTools = settings.flatMap { OwlChatEngines.configuredScoreKey(settings: $0) }
-                .map { OwlToolGate.bundled().allowsTools($0) } ?? false
-            return OwlInlineAssist.canRewrite(askEnabled: enabled && !now.readOnly, engineReady: settings != nil,
-                                              hasSelection: hasSelection, allowsTools: allowsTools)
-        }
-        return OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: settings != nil, hasSelection: hasSelection)
+            && selection.location <= length && selection.length <= length - selection.location
+        guard hasSelection else { return (false, false) }
+        let large = LargeDocument.reason(for: lineIndex) != nil
+        let settings = AskCedricModel.chatSettings()
+        let enabled = !large && askModel?.running != true
+        let allowsTools = settings.flatMap { OwlChatEngines.configuredScoreKey(settings: $0) }
+            .map { Self.inlineToolGate.allowsTools($0) } ?? false
+        let readOnly = OwlEditAccess.readOnly(editable: editGate.isEditable, following: false, largeDocument: large, extrasPaused: false)
+        return (OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: settings != nil, hasSelection: hasSelection),
+                OwlInlineAssist.canRewrite(askEnabled: enabled && !readOnly, engineReady: settings != nil,
+                                           hasSelection: hasSelection, allowsTools: allowsTools))
+    }
+
+    func canInlineAssist(_ action: OwlQuickAction, selection: NSRange) -> Bool {
+        let states = inlineAssistStates(selection: selection)
+        return action == .rewrite ? states.rewrite : states.explain
     }
 
     @objc func explainSelection() { inlineAssist(.explain, selection: textView.selectedRange) }
@@ -1566,6 +1601,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutPreview()
         refreshPreview()
         updateBarButtons()
+        contextBar?.refreshStates()
     }
 
     private func makePreview() {
@@ -2175,6 +2211,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)
         }
@@ -2225,6 +2262,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         _ = configuredEditItem()
         if isViewLoaded { updateStatus() }
         askModel?.documentEdited()
+        contextBar?.refreshStates()
     }
 
     /// Edit / Done / Read Only for the bar (nil: read mode not in use).
