@@ -163,6 +163,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         files.folder = folder
         files.openedRoot = opened
         files.vaultRoot = vault?.root
+        files.vault = vault
         let baseURL = folder.flatMap(PreviewFolder.pageURL(for:))
         let document = documentURL
         let accessKey = "\(folder?.path ?? "-")|\(opened?.path ?? "-")"
@@ -182,7 +183,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 // No access to the folder (a file opened on its own, even
                 // when its parent happens to list): images can't load, so
                 // a hint instead of empty boxes.
-                body = PreviewImageAccess.hideUnreadable(body, folder: folder, openedRoot: opened, folderReadable: readable, hint: hint).html
+                body = PreviewImageAccess.hideUnreadable(body, folder: folder, openedRoot: opened, folderReadable: readable, hint: hint, vault: vault).html
             }
             let page = PreviewHTML.page(body: body, palette: palette, csp: Self.csp, viewport: true)
             DispatchQueue.main.async {

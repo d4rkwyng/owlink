@@ -86,10 +86,22 @@ extension PreviewFolder {
     /// with `scriptOn` images, fonts and CSS only, no dotfiles) judged
     /// against the root it was found under.
     /// `vaultRoot`: the Obsidian vault's folder, for `![[embeds]]` found there.
-    public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool) -> URL? {
-        if let f = file(for: url, in: folder, scriptOn: scriptOn) { return f }
-        for root in [openedRoot, vaultRoot].compactMap({ $0 }) {
-            if let f = file(for: url, in: root, scriptOn: scriptOn) { return f }
+    public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
+                            vault: WikiVault? = nil) -> URL? {
+        func containsFolder(_ root: URL) -> Bool {
+            let base = resolved(root).path
+            let path = resolved(folder).path
+            return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        }
+        if let f = file(for: url, in: folder, scriptOn: scriptOn), isExistingFile(f, .default) { return f }
+        if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+            let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
+            if resolver.documentFolder == folder.standardizedFileURL, containsFolder(resolver.root),
+               let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
+               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return safe }
+        }
+        for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
+            if let f = file(for: url, in: root, scriptOn: scriptOn), isExistingFile(f, .default) { return f }
         }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
@@ -109,9 +121,10 @@ extension PreviewFolder {
     public static func linkTarget(_ url: URL, folder: URL, openedRoot: URL?, vaultRoot: URL? = nil,
                                   fileManager fm: FileManager = .default) -> URL? {
         guard url.scheme == scheme else { return nil }
-        if let file = file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: false),
-           isExistingFile(file, fm) {
-            return file
+        for root in [folder, openedRoot, vaultRoot].compactMap({ $0 }) {
+            if let file = file(for: url, in: root, scriptOn: false), isExistingFile(file, fm) {
+                return file
+            }
         }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot, pages: true, fileManager: fm),
@@ -161,20 +174,30 @@ public enum PreviewImageAccess {
     }
 
     /// Whether the preview can read `src`, for a document in `folder`.
-    public static func readable(_ src: String, folder: URL, openedRoot: URL?, fileManager fm: FileManager = .default) -> Bool {
+    public static func readable(_ src: String, folder: URL, openedRoot: URL?, vault: WikiVault? = nil,
+                                fileManager fm: FileManager = .default) -> Bool {
+        let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
         if src.lowercased().hasPrefix(PreviewFolder.scheme + ":") || src.lowercased().hasPrefix("file:") {
             guard let u = URL(string: src) else { return false }
-            let path = u.isFileURL ? u.path : (PreviewFolder.fileURL(for: u)?.path ?? "")
-            return fm.isReadableFile(atPath: path)
+            let page = u.isFileURL ? PreviewFolder.pageURL(forFile: u) : u
+            guard let page, let f = PreviewFolder.file(for: page, in: resolver.root, scriptOn: false) else { return false }
+            return fm.isReadableFile(atPath: f.path)
         }
         if src.hasPrefix("/") {
             guard let hit = PreviewRoot.resolve(src, from: folder, openedRoot: openedRoot, fileManager: fm) else { return false }
-            return fm.isReadableFile(atPath: hit.file.path)
+            guard let page = PreviewFolder.pageURL(forFile: hit.file),
+                  let file = PreviewFolder.file(for: page, in: hit.root, scriptOn: false) else { return false }
+            return fm.isReadableFile(atPath: file.path)
         }
         var p = src
         if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
         p = p.removingPercentEncoding ?? p
-        return fm.isReadableFile(atPath: folder.appendingPathComponent(p).standardizedFileURL.path)
+        guard !p.hasPrefix("/"), !p.split(separator: "/").contains("..") else { return false }
+        let relative = folder.appendingPathComponent(p).standardizedFileURL
+        guard let page = PreviewFolder.pageURL(forFile: relative),
+              let file = PreviewFolder.file(for: page, in: folder, openedRoot: openedRoot, vaultRoot: resolver.root,
+                                            scriptOn: false, vault: resolver) else { return false }
+        return fm.isReadableFile(atPath: file.path)
     }
 
     /// `html` with the images it can't read taken out and `hint` (HTML) put
@@ -182,15 +205,17 @@ public enum PreviewImageAccess {
     /// document's folder); unchanged otherwise, so a genuinely missing
     /// image still shows its alt text as it would on the site.
     public static func hideUnreadable(_ html: String, folder: URL, openedRoot: URL?, folderReadable: Bool, hint: String,
+                                      vault: WikiVault? = nil,
                                       fileManager fm: FileManager = .default) -> (html: String, hidden: Int) {
         guard !folderReadable, html.range(of: "<img", options: .caseInsensitive) != nil else { return (html, 0) }
+        let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
         let ns = html as NSString
         var out = ""
         var last = 0
         var hidden = 0
         for m in img.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
             let v = unquote(ns.substring(with: m.range(at: 1)))
-            guard isLocal(v), !readable(v, folder: folder, openedRoot: openedRoot, fileManager: fm) else { continue }
+            guard isLocal(v), !readable(v, folder: folder, openedRoot: openedRoot, vault: resolver, fileManager: fm) else { continue }
             out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
             last = m.range.location + m.range.length
             hidden += 1

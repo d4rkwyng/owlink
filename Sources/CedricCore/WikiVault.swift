@@ -19,12 +19,16 @@ public final class WikiVault: @unchecked Sendable {
     private let fm: FileManager
     private let lock = NSLock()
     private var index: [String: [URL]] = [:]
+    private var attachmentFolder: URL?
     private var built: Date?
 
     public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default) {
         self.fm = fileManager
         self.documentFolder = documentFolder.standardizedFileURL
-        self.root = (openedRoot ?? Self.obsidianRoot(above: documentFolder, fileManager: fileManager) ?? documentFolder).standardizedFileURL
+        let folder = documentFolder.standardizedFileURL
+        let opened = openedRoot?.standardizedFileURL
+        let validRoot = opened.flatMap { Self.contains(folder, in: $0) ? $0 : nil }
+        self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager) ?? folder).standardizedFileURL
     }
 
     /// The nearest folder at or above `folder` that holds `.obsidian/`.
@@ -50,26 +54,32 @@ public final class WikiVault: @unchecked Sendable {
     public func resolve(_ name: String) -> URL? {
         var n = name.trimmingCharacters(in: .whitespaces)
         guard !n.isEmpty, !n.contains("\0") else { return nil }
-        if n.hasPrefix("/") { n.removeFirst() }
+        // A leading slash is a path from the vault root (Obsidian), not a refusal.
+        let fromVaultRoot = n.hasPrefix("/")
+        if fromVaultRoot { n.removeFirst() }
         let parts = n.split(separator: "/").map(String.init)
         guard !parts.contains(".."), !parts.isEmpty else { return nil }
         let hasExt = !(n as NSString).pathExtension.isEmpty
         let names = hasExt ? [n, n + ".md"] : [n + ".md", n]
-        // A path: relative to the document, then to the vault.
-        if parts.count > 1 {
-            for base in [documentFolder, root] {
+        // A path: from the vault root when the link is root-absolute,
+        // otherwise relative to the document, then the vault.
+        if parts.count > 1 || fromVaultRoot {
+            let bases = fromVaultRoot ? [root] : [documentFolder, root]
+            for base in bases {
                 for t in names {
                     let f = base.appendingPathComponent(t).standardizedFileURL
                     if isFile(f) { return f }
                 }
             }
+            if fromVaultRoot { return nil }
         }
         // A name: the document's own folder first, then anywhere in the vault.
         for t in names where parts.count == 1 {
             let f = documentFolder.appendingPathComponent(t)
             if isFile(f) { return f }
         }
-        let idx = currentIndex()
+
+        let (idx, _) = currentIndex()
         for t in names {
             let key = (t as NSString).lastPathComponent.lowercased()
             guard var hits = idx[key] else { continue }
@@ -77,22 +87,65 @@ public final class WikiVault: @unchecked Sendable {
                 let suffix = "/" + t.lowercased()
                 hits = hits.filter { $0.path.lowercased().hasSuffix(suffix) }
             }
-            if let best = hits.min(by: { ($0.pathComponents.count, $0.path) < ($1.pathComponents.count, $1.path) }) { return best }
+            if let best = hits.filter({ isFile($0) }).min(by: { ($0.pathComponents.count, $0.path) < ($1.pathComponents.count, $1.path) }) { return best }
         }
         return nil
     }
 
     private func isFile(_ url: URL) -> Bool {
         var isDir: ObjCBool = false
-        return fm.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
+        return Self.contains(url, in: root) && fm.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
     }
 
-    private func currentIndex() -> [String: [URL]] {
+    private static func contains(_ url: URL, in root: URL) -> Bool {
+        let base = PreviewFolder.resolved(root).path
+        let path = PreviewFolder.resolved(url).path
+        return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+    }
+
+    /// Resolve an exact, bare image name, preferring the note's folder and
+    /// then Obsidian's configured attachment folder.
+    public func resolveImage(_ name: String) -> URL? {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
+              !name.contains("\\"), !name.contains("\0"), !name.contains(":"),
+              Self.imageExtensions.contains((name as NSString).pathExtension.lowercased()) else { return nil }
+        let local = documentFolder.appendingPathComponent(name)
+        if isFile(local) { return local }
+        let (idx, attachments) = currentIndex()
+        let hits = (idx[name.lowercased()] ?? []).filter { isFile($0) }
+        return hits.min { a, b in
+            let aLocal = a.deletingLastPathComponent().standardizedFileURL == documentFolder
+            let bLocal = b.deletingLastPathComponent().standardizedFileURL == documentFolder
+            if aLocal != bLocal { return aLocal }
+            let aPreferred = attachments.map { Self.contains(a, in: $0) } ?? false
+            let bPreferred = attachments.map { Self.contains(b, in: $0) } ?? false
+            if aPreferred != bPreferred { return aPreferred }
+            return (a.pathComponents.count, a.path) < (b.pathComponents.count, b.path)
+        }
+    }
+
+    private func currentIndex() -> ([String: [URL]], URL?) {
         lock.lock(); defer { lock.unlock() }
-        if let built, Date().timeIntervalSince(built) < Self.refreshSeconds { return index }
+        if let built, Date().timeIntervalSince(built) < Self.refreshSeconds { return (index, attachmentFolder) }
         index = Self.buildIndex(root, fm)
+        attachmentFolder = nil
+        let config = root.appendingPathComponent(".obsidian/app.json")
+        if Self.contains(config, in: root),
+           let attrs = try? fm.attributesOfItem(atPath: config.path), let size = attrs[.size] as? Int, size <= 256 * 1024,
+           let data = fm.contents(atPath: config.path),
+           let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           let path = json["attachmentFolderPath"] as? String {
+            let parts = path.split(separator: "/")
+            if path.isEmpty || path == "current" {
+                attachmentFolder = documentFolder
+            } else if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\"),
+                      !path.contains("\0"), !path.contains(":") {
+                let folder = root.appendingPathComponent(path).standardizedFileURL
+                if Self.contains(folder, in: root) { attachmentFolder = folder }
+            }
+        }
         built = Date()
-        return index
+        return (index, attachmentFolder)
     }
 
     /// Builds the note-name index when it is older than `refreshSeconds`.
@@ -114,7 +167,7 @@ public final class WikiVault: @unchecked Sendable {
         var idx: [String: [URL]] = [:]
         var count = 0
         var queue: [(URL, Int)] = [(root, 0)]
-        let keys: [URLResourceKey] = [.isDirectoryKey]
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey]
         while !queue.isEmpty, count < maxEntries {
             let (dir, depth) = queue.removeFirst()
             guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) else { continue }
@@ -122,7 +175,15 @@ public final class WikiVault: @unchecked Sendable {
                 count += 1
                 if count >= maxEntries { break }
                 let name = item.lastPathComponent
-                if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+                let values = try? item.resourceValues(forKeys: Set(keys))
+                if values?.isSymbolicLink == true {
+                    var isDir: ObjCBool = false
+                    if contains(item, in: root), fm.fileExists(atPath: item.path, isDirectory: &isDir), !isDir.boolValue {
+                        idx[name.lowercased(), default: []].append(item.standardizedFileURL)
+                    }
+                    continue
+                }
+                if values?.isDirectory == true {
                     if depth + 1 < maxDepth, name != "node_modules" { queue.append((item, depth + 1)) }
                 } else {
                     idx[name.lowercased(), default: []].append(item.standardizedFileURL)

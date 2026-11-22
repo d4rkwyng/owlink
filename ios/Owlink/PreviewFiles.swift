@@ -13,6 +13,7 @@ final class PreviewFiles: NSObject, WKURLSchemeHandler {
     var folder: URL?
     var openedRoot: URL?
     var vaultRoot: URL?
+    var vault: WikiVault?
     /// The rendered page, served at `pageURL` so the document's origin is
     /// `cedric-doc` (see `PreviewScheme`). Nil until a preview has rendered.
     var pageHTML: String?
@@ -37,8 +38,7 @@ final class PreviewFiles: NSObject, WKURLSchemeHandler {
             task.didFinish()
             return
         }
-        guard let folder,
-              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: false) else {
+        guard let file = file(for: url) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
@@ -75,6 +75,11 @@ final class PreviewFiles: NSObject, WKURLSchemeHandler {
     }
 
     func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) { stopped.insert(ObjectIdentifier(task)) }
+
+    func file(for url: URL) -> URL? {
+        guard let folder else { return nil }
+        return PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: false, vault: vault)
+    }
 
     /// A clicked link's file, when its resolved path sits under the
     /// document's folder, a granted folder, the vault or the site root
