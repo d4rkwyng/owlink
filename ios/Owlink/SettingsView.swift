@@ -55,6 +55,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.fontSize) private var fontSize = AppSettings.defaultFontSize
     @AppStorage(AppSettings.Key.wrap) private var wrap = true
     @AppStorage(AppSettings.Key.lineNumbers) private var lineNumbers = true
+    @AppStorage(AppSettings.Key.showInvisibles) private var showInvisibles = MenuToggleSetting.showInvisibles.defaultValue
     @AppStorage(AppSettings.Key.showContextBar) private var showContextBar = true
     @AppStorage(AppSettings.Key.autoCloseBrackets) private var autoCloseBrackets = true
     @AppStorage(AppSettings.Key.highlightOccurrences) private var highlightOccurrences = true
@@ -95,6 +96,8 @@ struct SettingsView: View {
                     Toggle(String(localized: "Wrap Lines"), isOn: $wrap)
                     Toggle(String(localized: "Show Line Numbers"), isOn: $lineNumbers)
                         .accessibilityIdentifier("settings.lineNumbers")
+                    Toggle(String(localized: "Show invisibles"), isOn: $showInvisibles)
+                        .accessibilityIdentifier("settings.showInvisibles")
                     Toggle(String(localized: "Show Context Bar"), isOn: $showContextBar)
                         .accessibilityIdentifier("settings.contextBar")
                     Toggle(String(localized: "Auto-close brackets and quotes"), isOn: $autoCloseBrackets)
@@ -106,6 +109,7 @@ struct SettingsView: View {
                 .onChange(of: fontSize) { AppSettings.post() }
                 .onChange(of: wrap) { AppSettings.post() }
                 .onChange(of: lineNumbers) { AppSettings.post() }
+                .onChange(of: showInvisibles) { AppSettings.post() }
                 .onChange(of: showContextBar) { AppSettings.post() }
                 .onChange(of: autoCloseBrackets) { AppSettings.post() }
                 .onChange(of: highlightOccurrences) { AppSettings.post() }

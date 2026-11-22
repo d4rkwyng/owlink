@@ -13,7 +13,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let copies = SaveSafetyStores.copies
         DispatchQueue.global(qos: .utility).async { copies.prune() }
         if ProcessInfo.processInfo.arguments.contains("-OwlinkResetSettings") {
-            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.showContextBar, AppSettings.Key.owlHints, AppSettings.Key.theme,
+            for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.showInvisibles, AppSettings.Key.showContextBar, AppSettings.Key.owlHints, AppSettings.Key.theme,
                       AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly,
                       AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement, AppSettings.Key.focusUnit] {
                 UserDefaults.standard.removeObject(forKey: k)
@@ -85,8 +85,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                action: #selector(EditorViewController.openPreviewInNewWindow))
         let contextBar = UICommand(title: AppSettings.showContextBar ? String(localized: "Hide Context Bar") : String(localized: "Show Context Bar"),
                                    action: #selector(EditorViewController.toggleContextBarMenu))
+        let invisibles = UICommand(title: String(localized: "Show Invisibles"), action: #selector(EditorViewController.toggleInvisibles))
         let statistics = UICommand(title: String(localized: "Show Statistics"), action: #selector(EditorViewController.showStatistics))
-        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, contextBar, statistics]), atStartOfMenu: .view)
+        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, invisibles, contextBar, statistics]), atStartOfMenu: .view)
         let writing = UIMenu(title: String(localized: "Writing Mode"), children: [
             UICommand(title: String(localized: "Typewriter Scrolling"), action: #selector(EditorViewController.toggleTypewriter)),
             UICommand(title: String(localized: "Focus"), action: #selector(EditorViewController.toggleWritingFocus)),

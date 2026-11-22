@@ -726,9 +726,9 @@ final class EditorTextView: NSTextView {
         guard let start = firstVisibleLocation else { return }
         let font = self.font ?? Settings.shared.font
         let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor(hex: palette.invisibles)]
-        let dot = NSAttributedString(string: "·", attributes: attrs)
-        let arrow = NSAttributedString(string: "→", attributes: attrs)
-        let pilcrow = NSAttributedString(string: "¬", attributes: attrs)
+        let glyphs = Dictionary(uniqueKeysWithValues: [UInt16(32), 9, 10].compactMap { unit in
+            InvisibleGlyph.forUTF16(unit).map { (unit, NSAttributedString(string: $0, attributes: attrs)) }
+        })
         let origin = textContainerOrigin
         tlm.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { frag in
             let frame = frag.layoutFragmentFrame
@@ -743,9 +743,8 @@ final class EditorTextView: NSTextView {
                 var i = r.location
                 while i < r.location + r.length {
                     let c = units.character(at: i)
-                    if c == 32 || c == 9 || c == 10 {
+                    if let glyph = glyphs[c] {
                         let p = line.locationForCharacter(at: i)
-                        let glyph = c == 32 ? dot : c == 9 ? arrow : pilcrow
                         glyph.draw(at: CGPoint(x: lineOrigin.x + p.x, y: lineOrigin.y))
                     }
                     i += 1

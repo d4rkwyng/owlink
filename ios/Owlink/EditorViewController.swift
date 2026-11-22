@@ -38,6 +38,7 @@ private final class GoToLineAlertController: UIAlertController {
 final class EditorViewController: UIViewController, UITextViewDelegate, UIGestureRecognizerDelegate {
     let document: TextDocument
     let textView = EditorDocumentTextView(usingTextLayoutManager: true)
+    let invisiblesOverlay = InvisiblesOverlay()
     lazy var regexFind = RegexFind(editor: self)
     var contextBar: MarkdownContextBar?
     private(set) var lineIndex = LineIndex()
@@ -312,6 +313,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     private func setUpTextView() {
         textView.delegate = self
+        invisiblesOverlay.textView = textView
+        textView.invisiblesOverlay = invisiblesOverlay
+        textView.addSubview(invisiblesOverlay)
         disableAutomaticSubstitutions(textView)
         textView.isFindInteractionEnabled = true
         textView.regexFind = regexFind
@@ -676,7 +680,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    private func moreMenuItems() -> [UIMenuElement] {
+    func moreMenuItems() -> [UIMenuElement] {
         let save = UIAction(title: String(localized: "Save"), image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in
             self?.saveDocument()
         }
@@ -705,6 +709,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         wrap.state = AppSettings.wrap ? .on : .off
         wrap.accessibilityIdentifier = "editor.menu.wrapLines"
+        let invisibles = UIAction(title: String(localized: "Show Invisibles"), state: AppSettings.showInvisibles ? .on : .off) { [weak self] _ in
+            self?.toggleInvisibles()
+        }
+        invisibles.accessibilityIdentifier = "editor.menu.showInvisibles"
+        invisibles.accessibilityLabel = String(localized: "Show Invisibles")
         let readable = UIAction(title: String(localized: "Readable Width"), image: UIImage(systemName: "text.aligncenter")) { [weak self] _ in
             self?.toggleReadableWidth()
         }
@@ -736,7 +745,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, readable, ask, check]
+        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
         if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -796,6 +805,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         loading = true
         let sel = textView.selectedRange
         textView.text = document.text
+        invisiblesOverlay.refresh()
         let font = AppSettings.font(for: document.language.language, traits: traitCollection)
         textView.font = font
         textView.textColor = UIColor(hex: palette.foreground)
@@ -832,6 +842,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let textStorage = textView.textStorage
         let edited = textStorage.editedRange, delta = textStorage.changeInLength
         guard textStorage.editedMask.contains(.editedCharacters), !loading else { return }
+        invisiblesOverlay.refresh()
         clearEditorHighlights()
         editCount += 1
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
@@ -1243,6 +1254,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
         if scrollView === textView {
+            invisiblesOverlay.refresh()
             if writing.focus { scheduleWritingUpdate(center: false) }
             scheduleEditorHighlights(selectionChanged: false)
         }
@@ -1648,6 +1660,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func applySettings() {
         let dark = traitCollection.userInterfaceStyle == .dark
         palette = AppSettings.theme.palette(systemIsDark: dark)
+        invisiblesOverlay.color = UIColor(hex: palette.invisibles)
+        invisiblesOverlay.isHidden = !AppSettings.showInvisibles
+        invisiblesOverlay.refresh()
         updateContextBar()
         contextBar?.applyPalette(palette)
         applyBarStyle()
@@ -1711,6 +1726,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         switch command.action {
         case #selector(toggleTypewriter): command.state = writing.typewriter ? .on : .off
         case #selector(toggleWritingFocus): command.state = writing.focus ? .on : .off
+        case #selector(toggleInvisibles): command.state = AppSettings.showInvisibles ? .on : .off
         case #selector(focusParagraph): command.state = AppSettings.focusUnit == .paragraph ? .on : .off
         case #selector(focusSentence): command.state = AppSettings.focusUnit == .sentence ? .on : .off
         default: break
@@ -3297,6 +3313,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     @objc func smallerFont() { if focusOn { preview?.smaller() } else { AppSettings.fontSize -= 1 } }
     @objc func actualSizeFont() { if focusOn { preview?.actualSize() } else { AppSettings.resetFontSize() } }
     @objc func toggleWrap() { AppSettings.wrap.toggle() }
+    @objc func toggleInvisibles() { AppSettings.showInvisibles.toggle() }
 
     /// The document menu's switch for this file. Lines must wrap.
     @objc func toggleReadableWidth() {
@@ -4045,6 +4062,11 @@ final class PaddingLabel: UILabel {
 /// TextKit 2's UITextView reports a viewport-wide contentSize when wrapping
 /// is off. Keep the width we measured so later layout passes cannot shrink it.
 final class EditorDocumentTextView: UITextView {
+    weak var invisiblesOverlay: InvisiblesOverlay?
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        invisiblesOverlay?.refresh()
+    }
     weak var regexFind: RegexFind?
     override func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
         guard let regexFind else { return super.findInteraction(interaction, sessionFor: view) }

@@ -12,6 +12,7 @@ enum AppSettings {
         static let wrap = "ios.wrap"
         static let owlHints = "ios.owlHints"
         static let lineNumbers = "ios.lineNumbers"
+        static let showInvisibles = MenuToggleSetting.showInvisibles.defaultsKey
         static let showContextBar = "showContextBar"
         static let owlPlacement = "ios.owlPlacement"
         static let owlManualPlacement = "ios.owlManualPlacement"
@@ -77,6 +78,11 @@ enum AppSettings {
     static var lineNumbers: Bool {
         get { defaults.object(forKey: Key.lineNumbers) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.lineNumbers); post() }
+    }
+
+    static var showInvisibles: Bool {
+        get { defaults.object(forKey: Key.showInvisibles) as? Bool ?? MenuToggleSetting.showInvisibles.defaultValue }
+        set { defaults.set(newValue, forKey: Key.showInvisibles); post() }
     }
 
     static var showContextBar: Bool {
