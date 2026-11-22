@@ -11,6 +11,14 @@ struct IndentationChange {
 // quote, tables) refuse inside fenced code; inline styles, links, Checkbox
 // and Code Block don't.
 extension EditorViewController {
+    /// An immutable copy of the text for work off the main thread or for a
+    /// later "did it change?" comparison. On iOS, NSTextStorage.string can
+    /// hand back the live mutable backing string (bridging doesn't copy it),
+    /// so a background reader could see it change under it.
+    nonisolated static func immutableCopy(_ storage: NSTextStorage) -> NSString {
+        NSString(string: storage.string)
+    }
+
     var markdownEditable: Bool {
         document.language.language == .markdown && editGate.isEditable && textView.isEditable && textView.markedTextRange == nil
     }

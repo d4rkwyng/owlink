@@ -1272,7 +1272,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         wordsTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let text = self.textView.textStorage.string
+                let text = Self.immutableCopy(self.textView.textStorage) as String
                 let generation = self.generation
                 Task { @MainActor [weak self] in
                     let count = await Task.detached(priority: .utility) {
@@ -1322,7 +1322,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if baseline && storage.length > Self.dailyImmediateLimit {
             // A long text is counted off the main thread, from a copy.
-            let text = storage.string as NSString
+            let text = Self.immutableCopy(storage)
             let arm = dailyBaselineArm
             let counter = dailyWords
             dailyQueue.async { [weak self] in

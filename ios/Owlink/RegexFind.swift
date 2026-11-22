@@ -111,7 +111,7 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
             view.performTextSearch(queryString: queryString, options: options, resultAggregator: resultAggregator)
             return
         }
-        let text = view.textStorage.string
+        let text = EditorViewController.immutableCopy(view.textStorage) as String
         let aggregator = FindAggregator(value: resultAggregator)
         let findOptions = Self.findOptions(options)
         let limit = timeLimitOverride ?? FindEngine.timeLimit(forLength: (text as NSString).length)
@@ -241,7 +241,7 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         keepsMatches = false
         if applied {
             matches = remaining
-            snapshot = view.textStorage.string
+            snapshot = EditorViewController.immutableCopy(view.textStorage) as String
         }
     }
 
@@ -258,7 +258,7 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
 
     private func runReplaceAll(query: String, findOptions: FindOptions, template: String, attempt: Int) {
         guard let editor else { return }
-        let text = editor.textView.textStorage.string
+        let text = EditorViewController.immutableCopy(editor.textView.textStorage) as String
         let generation = lifecycle
         let limit = timeLimitOverride ?? FindEngine.timeLimit(forLength: (text as NSString).length, interactive: false)
         let job = FindJob()

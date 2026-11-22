@@ -31,7 +31,8 @@ final class CopyMarkdownTests: XCTestCase {
 
         let range = (doc.text as NSString).range(of: "**bold**")
         let menu = try XCTUnwrap(editor.textView(editor.textView, editMenuForTextIn: range, suggestedActions: []))
-        let group = try XCTUnwrap(menu.children.first as? UIMenu)
+        // The Line submenu comes first; the copy items are in the trailing group.
+        let group = try XCTUnwrap(menu.children.compactMap { $0 as? UIMenu }.first { $0.title == "Cedric" })
         XCTAssertTrue(group.children.contains { $0.title == "Copy as HTML" })
         XCTAssertTrue(group.children.contains { $0.title == "Copy as Rich Text" })
         await withCheckedContinuation { continuation in

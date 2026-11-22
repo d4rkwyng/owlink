@@ -114,7 +114,7 @@ extension EditorViewController {
 
     func filterLines(pattern: String, regex: Bool, caseSensitive: Bool, keep: Bool) async throws -> FilterOutcome {
         guard lineEditable else { return .notEditable }
-        let snapshot = textView.textStorage.string
+        let snapshot = EditorViewController.immutableCopy(textView.textStorage) as String
         let originalGeneration = generation
         let task = Task.detached(priority: .userInitiated) {
             try LineFilter.filter(snapshot as NSString, pattern: pattern, regex: regex,
