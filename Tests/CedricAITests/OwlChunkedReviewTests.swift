@@ -183,6 +183,8 @@ import CedricCore
                                                       describeError: { String(describing: $0) }) { _, _ in }
         #expect(engine.calls == plan.parts.count)
         #expect(result.outcome.answer.contains("summary"))
+        #expect(result.outcome.answer.contains("The reviewed answers are shown separately."))
+        #expect(!result.stopped && result.error == nil)
         #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == plan.parts.count)
         #expect(!result.outcome.answer.contains("Part 1 (lines"))
         #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
@@ -312,6 +314,23 @@ import CedricCore
         #expect(result.outcome.answer == "The file defines three behaviors, each with its own purpose.")
         #expect(!result.outcome.answer.contains("Part 1"))
         #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
+    }
+
+    @Test func explainQuickActionIncludesItsRequestInCombinePrompt() async throws {
+        let engine = Engine(reply: "A brief explanation.")
+        var req = Self.request(Self.snapshot(), action: .explain, question: "")
+        req.context = OwlChatContext.reviewPart(req.snapshot, first: 1, last: 10)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        _ = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
+                                             describeError: { String(describing: $0) }) { _, _ in }
+        #expect(engine.calls == plan.parts.count + 1)
+        guard case .user(let prompt)? = engine.messages.last?.last else {
+            Issue.record("Missing combine prompt")
+            return
+        }
+        #expect(prompt.contains("User's request: Explain what this code"))
+        #expect(prompt.contains("lines 1-\(req.snapshot.countedLines)"))
+        #expect(!prompt.contains("User's request: \n"))
     }
 
     @Test func chunkingOnlyWhenWholeDocumentExceedsBudget() throws {

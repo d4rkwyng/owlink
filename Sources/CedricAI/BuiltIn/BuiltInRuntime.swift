@@ -212,6 +212,17 @@ public actor BuiltInModelHost {
     }
 }
 
+/// The device runtime is compiled in the iOS app rather than this package.
+#if !CEDRIC_BUILTIN
+public enum LlamaRuntime {
+    #if os(iOS)
+    public static let contextTokens: Int32 = 8192
+    #else
+    public static let contextTokens: Int32 = 16384
+    #endif
+}
+#endif
+
 /// iOS kills an app (jetsam) that goes past its memory limit, which is far
 /// below the device's RAM. Before loading a model the iOS app asks how much
 /// it may still use (`os_proc_available_memory`) and refuses with a clear
@@ -219,13 +230,13 @@ public actor BuiltInModelHost {
 public enum ModelMemoryGate {
     /// Weights, plus KV/compute buffers estimated for a 4K context (at least
     /// 400 MB), scaled with contextTokens, plus 256 MB slack.
-    public static func bytesNeeded(forModelOfSize size: Int64, contextTokens: Int32 = 4096) -> Int64 {
-        let contextScale = Int64(contextTokens) / 4096
+    public static func bytesNeeded(forModelOfSize size: Int64, contextTokens: Int32 = LlamaRuntime.contextTokens) -> Int64 {
+        let contextScale = max(1, Int64(contextTokens) / 4096)
         return size + max(400 * 1_048_576, size / 4) * contextScale + 256 * 1_048_576
     }
 
     /// Nil when `available` bytes are enough for `model`, else why not.
-    public static func refusal(for model: BuiltInModel, available: Int64, contextTokens: Int32 = 4096) -> String? {
+    public static func refusal(for model: BuiltInModel, available: Int64, contextTokens: Int32 = LlamaRuntime.contextTokens) -> String? {
         let need = bytesNeeded(forModelOfSize: model.sizeBytes, contextTokens: contextTokens)
         guard available < need else { return nil }
         let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1_073_741_824) }

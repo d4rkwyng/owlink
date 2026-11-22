@@ -162,6 +162,7 @@ hint is asked for an empty or near-empty document (`HintPrompt.hasEnoughText`).
   `-OwlinkShowLicence <id|first>` shows the sheet in Debug builds), are checked against their SHA-256, and are kept out of iCloud
   backups. Before loading, the app checks `os_proc_available_memory()` and
   refuses with a message rather than being killed for using too much memory.
+  The built-in model uses an 8K-token context window on iOS.
 - **A server on your network** (LM Studio, Ollama, another Mac): local
   addresses only.
 

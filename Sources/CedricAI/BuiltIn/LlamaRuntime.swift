@@ -17,7 +17,7 @@ import CLlamaLoader
 /// test or rely on), which works but is slow.
 public struct LlamaRuntime: BuiltInRuntime {
     #if os(iOS)
-    public static let contextTokens: Int32 = 8192
+    public static let contextTokens: Int32 = CedricAI.LlamaRuntime.contextTokens
     #else
     public static let contextTokens: Int32 = 16384
     #endif

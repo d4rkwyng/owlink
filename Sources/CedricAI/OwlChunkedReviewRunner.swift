@@ -115,9 +115,15 @@ public enum OwlChunkedReviewRunner {
         }
 
         if !findings, !stopped, errorMessage == nil, !answers.isEmpty {
+            let userRequest = request.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? request.action.map {
+                    OwlPrompts.quickInstruction($0, prose: request.prose, toolsOn: false,
+                                                context: OwlChatContext.reviewPart(request.snapshot, first: 1, last: plan.totalLines))
+                } ?? request.question
+                : request.question
             let instruction = "Answer the user's request with one brief response based only on these reviewed answers. "
                 + "Keep real file line numbers. Do not invent details from lines not reviewed or mention the review process.\n\n"
-                + "User's request: \(request.question)\n\nReviewed answers:\n" + text
+                + "User's request: \(userRequest)\n\nReviewed answers:\n" + text
             let system = OwlPrompts.chatSystem(toolsOn: false, server: engine.usesServer, partial: !complete)
             let room = OwlInlineAssist.documentBudget(engineBudget: engine.contextBudget, instructionWrapper: instruction,
                                                        systemPrompt: system, history: request.history)
@@ -146,6 +152,8 @@ public enum OwlChunkedReviewRunner {
                         errorMessage = errorMessage ?? String(localized: "The review could not combine the answers: \(describeError(error))")
                     }
                 }
+            } else {
+                text = String(localized: "The reviewed answers are shown separately.") + "\n\n" + text
             }
         }
         if !skipped.isEmpty {
