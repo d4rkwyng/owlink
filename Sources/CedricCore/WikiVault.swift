@@ -138,9 +138,12 @@ public final class WikiVault: @unchecked Sendable {
             let parts = path.split(separator: "/")
             if path.isEmpty || path == "current" {
                 attachmentFolder = documentFolder
+            } else if path == "/" {
+                attachmentFolder = root
             } else if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\"),
                       !path.contains("\0"), !path.contains(":") {
-                let folder = root.appendingPathComponent(path).standardizedFileURL
+                let base = path.hasPrefix("./") ? documentFolder : root
+                let folder = base.appendingPathComponent(path).standardizedFileURL
                 if Self.contains(folder, in: root) { attachmentFolder = folder }
             }
         }

@@ -120,6 +120,20 @@ func makeTree(_ files: [String]) throws -> URL {
         #expect(gone.hidden == 2 && gone.html.hasPrefix("H") && !gone.html.contains("<img"))
     }
 
+    @Test func parentRelativeImagesStayWithinGrantedRoots() throws {
+        let t = try makeTree(["vault/notes/doc.md", "vault/assets/a.webp", "outside.webp"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("vault"), folder = root.appendingPathComponent("notes")
+        let vault = WikiVault(documentFolder: folder, openedRoot: root)
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("assets/escape.webp"),
+                                                   withDestinationURL: t.appendingPathComponent("outside.webp"))
+        #expect(PreviewImageAccess.readable("../assets/a.webp", folder: folder, openedRoot: root))
+        #expect(PreviewImageAccess.readable("../assets/a.webp", folder: folder, openedRoot: nil, vault: vault))
+        #expect(!PreviewImageAccess.readable("../assets/a.webp", folder: folder, openedRoot: nil))
+        #expect(!PreviewImageAccess.readable("../../outside.webp", folder: folder, openedRoot: root, vault: vault))
+        #expect(!PreviewImageAccess.readable("../assets/escape.webp", folder: folder, openedRoot: root, vault: vault))
+    }
+
     @Test func folderAccessNeedsARealOpen() throws {
         let denied = PreviewFolderAccess.Facts(listingFailed: false, siblingCount: 3, anySiblingReadable: false, documentReadableAtPath: true)
         #expect(!PreviewFolderAccess.canRead(denied), "a listing plus the open file is not folder access")

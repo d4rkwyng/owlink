@@ -80,7 +80,7 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(html.components(separatedBy: #"src="\#(name)""#).count == 3)
         #expect(html.contains("/Images/\(name)"))
         #expect(html.contains(#"alt="Sierra Vault" width="200" style="float: right; margin: 0 0 10px 10px;""#))
-        #expect(PreviewImageAccess.readable(name, folder: vault.documentFolder, openedRoot: nil))
+        #expect(PreviewImageAccess.readable(name, folder: vault.documentFolder, openedRoot: nil, vault: vault))
         let page = try #require(PreviewFolder.pageURL(for: vault.documentFolder))
         let src = try #require(URL(string: name, relativeTo: page)?.absoluteURL)
         #expect(PreviewFolder.file(for: src, in: vault.documentFolder, openedRoot: nil, vaultRoot: vault.root, scriptOn: true, vault: vault)?.path == t.appendingPathComponent("v/Images/\(name)").path)
@@ -89,6 +89,37 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
             #expect(PreviewFolder.file(for: url, in: vault.documentFolder, openedRoot: nil, vaultRoot: vault.root, scriptOn: true, vault: vault)?.path == t.appendingPathComponent("v/Images/\(name)").path)
         }
         #expect(ob("![missing](missing.webp)", vault: vault).contains(#"src="missing.webp""#))
+    }
+
+    @Test func previewUsesTheSuppliedVaultIndex() throws {
+        let t = try makeTree(["v/notes/doc.md", "v/images/pic.webp"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
+        let vault = WikiVault(documentFolder: folder, openedRoot: root)
+        let page = try #require(PreviewFolder.pageURL(for: folder))
+        let src = try #require(URL(string: "pic.webp", relativeTo: page)?.absoluteURL)
+        #expect(!vault.indexIsFresh)
+        #expect(PreviewFolder.file(for: src, in: folder, openedRoot: root, scriptOn: false, vault: vault)?.path ==
+                root.appendingPathComponent("images/pic.webp").path)
+        #expect(vault.indexIsFresh)
+        let other = WikiVault(documentFolder: folder, openedRoot: root)
+        #expect(PreviewImageAccess.readable("pic.webp", folder: folder, openedRoot: root, vault: other))
+        #expect(other.indexIsFresh)
+        #expect(!PreviewImageAccess.readable("pic.webp", folder: folder, openedRoot: root))
+    }
+
+    @Test func attachmentFolderRootAndNoteRelative() throws {
+        let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/a/pic.webp",
+                              "v/notes/sub/deep/pic.webp"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
+        let config = root.appendingPathComponent(".obsidian/app.json")
+        for (path, expected) in [("/", "a/pic.webp"), ("./sub", "notes/sub/deep/pic.webp")] {
+            let data = try JSONSerialization.data(withJSONObject: ["attachmentFolderPath": path])
+            try data.write(to: config)
+            let vault = WikiVault(documentFolder: folder)
+            #expect(vault.resolveImage("pic.webp")?.path == root.appendingPathComponent(expected).path)
+        }
     }
 
     @Test func bareImagePreferenceAndConfinement() throws {

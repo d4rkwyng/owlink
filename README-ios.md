@@ -67,8 +67,8 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   shows the preview alone on any screen; back with Edit, Esc, `⇧⌘P`, a
   swipe down at the top of the page or a swipe in from the leading edge.
   Print documents, or export Markdown as HTML or a rendered PDF, from the
-  document menu.
-  Bare image names (`<img>`, `![]()`, `![[ ]]`) are found in the vault, including `Images/`, with width and float kept.
+  document menu. Bare image names (`<img>`, `![]()`, `![[ ]]`) are found
+  in the vault, including `Images/`, with width and float kept.
   Text and preview open at the same place both ways (`ScrollSync`). Side
   by side, the handle between them drags (44 pt wide) and snaps to 1/3,
   1/2, 2/3 and the fold (the default, a strong snap); double-tap resets
