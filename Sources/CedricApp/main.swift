@@ -78,6 +78,8 @@ func textToolItems() -> [NSMenuItem] {
 func cedricMenu() -> NSMenuItem {
     submenu(String(localized: "Cedric"), [
         item(String(localized: "Ask Cedric…"), #selector(AppDelegate.askCedricMenu(_:)), "/", [.command, .option]),
+        item(String(localized: "Explain Selection"), #selector(AppDelegate.explainSelectionMenu(_:)), "e", [.command, .option]),
+        item(String(localized: "Rewrite Selection"), #selector(AppDelegate.rewriteSelectionMenu(_:)), "e", [.command, .option, .shift]),
         item(String(localized: "Check Grammar with Cedric"), #selector(AppDelegate.checkGrammarWithAIMenu(_:))),
         item(String(localized: "Check Script for Risks…"), #selector(AppDelegate.scriptSafetyMenu(_:))),
         .separator(),

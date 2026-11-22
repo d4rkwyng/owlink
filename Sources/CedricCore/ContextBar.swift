@@ -60,6 +60,8 @@ public enum ContextBarSet {
         ContextBarItem("image", "photo", "markdownImageMenu:"),
         // An eye, not "sidebar.right" (read as a sidebar toggle, UX review #21).
         ContextBarItem("preview", "eye", "togglePreview:", trailing: true, toggle: true),
+        ContextBarItem("explain", "text.magnifyingglass", "explainSelectionMenu:", trailing: true),
+        ContextBarItem("rewrite", "pencil.line", "rewriteSelectionMenu:", trailing: true),
     ]
 
     /// The bar's items for `language`; empty: no bar (general code, plain

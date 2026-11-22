@@ -867,6 +867,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func toggleGrammar(_ sender: Any?) { Settings.shared.checkGrammar.toggle() }
     @objc func toggleOwl(_ sender: Any?) { Settings.shared.showOwl.toggle() }
     @objc func askCedricMenu(_ sender: Any?) { currentTab?.openAskCedric() }
+    @objc func explainSelectionMenu(_ sender: Any?) { currentTab?.inlineAssist(.explain) }
+    @objc func rewriteSelectionMenu(_ sender: Any?) { currentTab?.inlineAssist(.rewrite) }
     @objc func checkGrammarWithAIMenu(_ sender: Any?) { currentTab?.checkGrammarWithAI() }
     @objc func scriptSafetyMenu(_ sender: Any?) { currentTab?.checkScriptSafety() }
     @objc func pickOwlHintSource(_ sender: NSMenuItem) {
@@ -917,6 +919,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleContextBarMenu(_:)):
             setShowHide(item, shown: s.showContextBar, show: String(localized: "Show Context Bar"), hide: String(localized: "Hide Context Bar"))
         case #selector(askCedricMenu(_:)): return s.owlChat && tab?.canAskCedric == true
+        case #selector(explainSelectionMenu(_:)): return tab?.canInlineAssist(.explain) == true
+        case #selector(rewriteSelectionMenu(_:)): return tab?.canInlineAssist(.rewrite) == true
         case #selector(checkGrammarWithAIMenu(_:)): return s.owlChat && tab?.canCheckGrammarWithAI == true
         case #selector(scriptSafetyMenu(_:)): return tab?.canCheckScriptSafety == true
         case #selector(pickOwlHintSource(_:)):

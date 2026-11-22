@@ -620,6 +620,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // An edit in one pane moves the other's selection too: the status
         // bar and the highlights follow the active pane only.
         guard tv === textView else { (tv.enclosingScrollView?.superview as? EditorContainer)?.gutter.needsDisplay = true; return }
+        contextBar?.refreshInlineSelectionStates()
         updateStatus()
         gutter.needsDisplay = true
         owl?.caretMoved(byUser: true)

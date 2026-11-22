@@ -16,6 +16,7 @@ final class OwlChatStore {
     static let shared = OwlChatStore()
     private(set) var histories: [UUID: [OwlChatEntry]] = [:]
     private var cached: (settings: LocalAISettings, engine: any OwlChatEngine)?
+    private var scoreKeyCache: (settings: LocalAISettings, key: String?)?
     /// The last engine's context budget, for the scopes offered before the
     /// engine is made; till then the smallest (Apple Intelligence's).
     private(set) var contextBudget = 5_000
@@ -57,6 +58,19 @@ final class OwlChatStore {
     func useTools(_ engine: any OwlChatEngine) -> Bool {
         if let v = DevEnvironment.values["CEDRIC_OWL_TOOLS"] { return v == "1" }
         return gate.allowsTools(engine.scoreKey)
+    }
+
+    func invalidateScoreKey() { scoreKeyCache = nil }
+
+    var inlineAllowsTools: Bool {
+        if AskCedricEngine.fakeDelay != nil { return gate.allowsTools(FakeChatEngine(delay: 0).scoreKey) }
+        guard let settings = AskCedricEngine.settings() else { return false }
+        if let cached, cached.settings == settings { return gate.allowsTools(cached.engine.scoreKey) && useTools(cached.engine) }
+        if scoreKeyCache?.settings != settings {
+            scoreKeyCache = (settings, OwlChatEngines.configuredScoreKey(settings: settings))
+        }
+        guard let key = scoreKeyCache?.key, gate.allowsTools(key) else { return false }
+        return DevEnvironment.values["CEDRIC_OWL_TOOLS"] != "0"
     }
 }
 
@@ -111,7 +125,10 @@ enum AskCedricEngine {
         return AIPrivacyWording(engine: engine, autoGrammar: autoGrammar)
     }
 
-    static func invalidate() { cache = nil }
+    static func invalidate() {
+        cache = nil
+        OwlChatStore.shared.invalidateScoreKey()
+    }
 }
 
 @MainActor
@@ -136,7 +153,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// The first card's proposal (checks).
     var pending: OwlEditProposal? { cards.first?.proposal }
     var hasProposals: Bool { !cards.isEmpty }
-    private var lastRequest: (question: String, action: OwlQuickAction?)?
+    private var lastRequest: (question: String, action: OwlQuickAction?, inline: Bool)?
     /// Streamed text not yet shown (flushed at ~30 Hz).
     private var pendingText = ""
     private var flushTimer: Timer?
@@ -633,10 +650,11 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// `selection` and `scope` override the document's and the chip's;
     /// `scan` is the script check's findings.
     func ask(question: String, action: OwlQuickAction?, selection: NSRange? = nil, scope forced: OwlChatScope? = nil,
-             scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true) {
+             scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true,
+             inline: Bool = false) {
         guard !running, let tab, let id = docID else { return }
         discardProposal(nil)
-        lastRequest = (question, action)
+        lastRequest = (question, action, inline)
         forcedVerdict = nil
         verdictStream = nil
         safeClaimGuard = nil
@@ -656,6 +674,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         OwlChatStore.shared.append(OwlChatEntry(role: .owl, text: ""), to: id)
         render()
         running = true
+        tab.contextBar?.refreshStates()
         asks += 1
         streamed = ""
         flushes = 0
@@ -670,13 +689,18 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             let ctx = OwlChatContext.build(snap, scope: scope, budget: engine.contextBudget)
                 ?? OwlChatContext.build(snap, scope: .visible, budget: engine.contextBudget)!
             let tools = OwlChatStore.shared.useTools(engine)
+            if inline, action == .rewrite, (!tools || !OwlChatStore.shared.gate.allowsTools(engine.scoreKey)) {
+                self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
+                return
+            }
             self.lastUsedTools = tools
             // An SVG: describe_image can render it (only if the model calls it).
             let picture = OwlPicture.isPicture(fileName: snap.fileName)
                 ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
             let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
                                      history: history, useTools: tools, prose: prose, scan: scan,
-                                     scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture)
+                                     scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture,
+                                     inlineSelection: inline ? snap.substring(snap.selection) : nil)
             self.forcedVerdict = req.forcedVerdict
             // Any answer about a script: clamped before it shows (ScriptVerdictStream).
             self.safeClaimGuard = req.safeClaimGuard
@@ -781,6 +805,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         guard running else { return }
         flush()
         running = false
+        tab?.contextBar?.refreshStates()
         tab?.owl?.chatCue(outcome != nil ? .answered : task?.isCancelled == true ? .stopped : .failed)
         task = nil
         lastOutcome = outcome
@@ -951,6 +976,12 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     @objc func askAgain(_ sender: Any?) {
         guard let r = lastRequest else { return }
+        if r.inline {
+            guard let tab, let action = r.action, tab.canInlineAssist(action) else { NSSound.beep(); return }
+            discardProposal(nil)
+            ask(question: r.question, action: action, selection: tab.textView.selectedRange(), scope: .selection, inline: true)
+            return
+        }
         discardProposal(nil)
         ask(question: r.question, action: r.action)
     }
@@ -1016,6 +1047,28 @@ extension EditorWindowController {
     func openAskCedric() {
         guard canAskCedric else { NSSound.beep(); return }
         chatPanel().show()
+    }
+
+    func canInlineAssist(_ action: OwlQuickAction) -> Bool {
+        let selected = textView.selectedRange().length > 0
+        guard selected else { return false }
+        let enabled = canAskCedric && owlChat?.running != true
+        guard enabled else { return false }
+        let ready = AskCedricEngine.isAvailable
+        if action == .rewrite {
+            return OwlInlineAssist.canRewrite(askEnabled: enabled, engineReady: ready, hasSelection: selected,
+                                              allowsTools: ready && selected && OwlChatStore.shared.inlineAllowsTools)
+        }
+        return OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: ready, hasSelection: selected)
+    }
+
+    func inlineAssist(_ action: OwlQuickAction) {
+        guard canInlineAssist(action) else { NSSound.beep(); return }
+        let selection = textView.selectedRange()
+        let panel = chatPanel()
+        panel.show()
+        panel.ask(question: action == .explain ? String(localized: "Explain Selection") : String(localized: "Rewrite Selection"),
+                  action: action, selection: selection, scope: .selection, inline: true)
     }
 
     /// Cedric › Check Script for Risks…: a script (shell, PowerShell,
