@@ -155,6 +155,8 @@ enum SelfCheck {
         let continued = !editor.textView(editor.textView, shouldChangeTextIn: editor.textView.selectedRange, replacementText: "\n")
             && editor.textView.text == "- item\n- "
         check(continued, "Markdown list continues on Return")
+        editor.textView.undoManager?.undo()
+        check(editor.textView.text == "- item", "one Undo restores the Markdown list")
         editor.textView.text = original
         editor.textView.selectedRange = NSRange(location: 0, length: 0)
     }

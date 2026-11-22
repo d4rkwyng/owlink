@@ -29,6 +29,21 @@ extension EditorViewController {
               let end = textView.position(from: start, offset: edit.range.length),
               let range = textView.textRange(from: start, to: end) else { return false }
         let undo = textView.undoManager
+        // Close the system's open typing group first, so the edit is its own
+        // undo step. groupsByEvent is off until the next turn (the run loop
+        // would otherwise end the group closed here); one restore is pending
+        // at a time, keeping the original value even for two edits a turn.
+        if let undo, undo.groupingLevel > 0 {
+            if Self.pendingGroupsByEvent == nil {
+                Self.pendingGroupsByEvent = undo.groupsByEvent
+                DispatchQueue.main.async {
+                    if let restore = Self.pendingGroupsByEvent { undo.groupsByEvent = restore }
+                    Self.pendingGroupsByEvent = nil
+                }
+            }
+            undo.groupsByEvent = false
+            undo.endUndoGrouping()
+        }
         undo?.beginUndoGrouping()
         textView.replace(range, withText: edit.replacement)
         undo?.setActionName(actionName)
@@ -39,9 +54,11 @@ extension EditorViewController {
         return true
     }
 
+    /// groupsByEvent to put back after applyTextEdit closed a typing group.
+    static var pendingGroupsByEvent: Bool?
+
     func isInMarkdownFence(at offset: Int, in text: NSString) -> Bool {
-        let index = LineIndex(text)
-        return FenceIndex().isInFence(text, index: index, line: index.line(containing: offset))
+        markdownFenceIndex.isInFence(text, index: lineIndex, line: lineIndex.line(containing: offset))
     }
 
     private func markdownEdit(_ name: String, allowFence: Bool = true, _ transform: (NSString, NSRange) -> TextEdit?) {

@@ -39,6 +39,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     let textView = EditorDocumentTextView(usingTextLayoutManager: true)
     var contextBar: MarkdownContextBar?
     private(set) var lineIndex = LineIndex()
+    let markdownFenceIndex = FenceIndex()
     /// Left inset of the text before line numbers claim any of it.
     private let editorTextInsetLeft: CGFloat = 8
     /// This file's Readable Width choice. Nil follows Settings, which is off.
@@ -71,6 +72,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private(set) var preview: PreviewController?
     private(set) var previewOn = false
     private(set) var generation = 0
+    var markdownPasteboardReader: () -> (urls: [URL], string: String?) = {
+        let pasteboard = UIPasteboard.general
+        return (pasteboard.urls ?? [], pasteboard.string)
+    }
+    private var cachedMarkdownIndentation: (generation: Int, value: Indentation)?
     private var loading = false
     private(set) var palette = EditorPalettes.light
     private var previewTimer: Timer?
@@ -687,6 +693,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.textColor = UIColor(hex: palette.foreground)
         textView.typingAttributes = [.font: AppSettings.font(for: traitCollection), .foregroundColor: UIColor(hex: palette.foreground)]
         lineIndex = LineIndex(textView.textStorage.string as NSString)
+        markdownFenceIndex.invalidateAll()
+        cachedMarkdownIndentation = nil
         if NSMaxRange(sel) <= (textView.text as NSString).length { textView.selectedRange = sel }
         loading = false
         // The text was replaced from disk: the old undo steps' ranges no
@@ -710,6 +718,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         let oldLines = lineIndex.lineCount
         let first = lineIndex.replace(oldRange, newLength: edited.length, in: textStorage.string as NSString)
+        markdownFenceIndex.invalidate(fromLine: first)
         colorizer?.textDidChange(firstLine: first, lastLine: lineIndex.line(containing: NSMaxRange(edited)),
                                  lineDelta: lineIndex.lineCount - oldLines)
     }
@@ -752,7 +761,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if let edit = MarkdownTable.newline(in: text, selection: range) {
             return !applyTextEdit(edit, actionName: String(localized: "Add Table Row"))
         }
-        if let edit = MarkdownLists.newline(in: text, selection: range, language: .markdown, tabWidth: 4, useTabs: false) {
+        let indentation = markdownIndentation(for: text)
+        if let edit = MarkdownLists.newline(in: text, selection: range, language: .markdown,
+                                            tabWidth: indentation.width, useTabs: indentation.usesTabs) {
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
         return true
@@ -763,36 +774,49 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let text = textView.textStorage.string as NSString
         let selection = textView.selectedRange
         guard selection.location != NSNotFound, selection.location >= 0, selection.length >= 0,
-              NSMaxRange(selection) <= text.length,
-              selection.length == 0 || text.rangeOfCharacter(from: .newlines, options: [], range: selection).location == NSNotFound else {
+              NSMaxRange(selection) <= text.length else {
             return
         }
-        if !isInMarkdownFence(at: selection.location, in: text) {
+        let singleLine = selection.length == 0
+            || text.rangeOfCharacter(from: .newlines, options: [], range: selection).location == NSNotFound
+        if singleLine, !isInMarkdownFence(at: selection.location, in: text) {
             if let edit = MarkdownTable.tab(in: text, selection: selection, forward: forward),
                applyTextEdit(edit, actionName: String(localized: "Format Table")) { return }
-            if let edit = MarkdownLists.shiftItem(in: text, selection: selection, right: forward, tabWidth: 4),
+            let indentation = markdownIndentation(for: text)
+            if let edit = MarkdownLists.shiftItem(in: text, selection: selection, right: forward,
+                                                  useTabs: indentation.usesTabs, tabWidth: indentation.width),
                applyTextEdit(edit, actionName: forward ? String(localized: "Indent") : String(localized: "Outdent")) { return }
         }
-        if forward { textView.insertText("    ") }
+        if forward { textView.insertText("\t") }
     }
 
-    private func handleMarkdownPaste() -> Bool {
+    func handleMarkdownPaste() -> Bool {
         guard markdownEditable else { return false }
         let text = textView.textStorage.string as NSString
         let selection = textView.selectedRange
         guard selection.length > 0, !isInMarkdownFence(at: selection.location, in: text) else { return false }
-        let pasteboard = UIPasteboard.general
+        let pasteboard = markdownPasteboardReader()
         let pasted: String?
-        if pasteboard.hasURLs {
-            guard let urls = pasteboard.urls, urls.count == 1 else { return false }
+        if !pasteboard.urls.isEmpty {
+            guard pasteboard.urls.count == 1 else { return false }
+            let urls = pasteboard.urls
             pasted = urls[0].absoluteString
-        } else if pasteboard.hasStrings, let string = pasteboard.string, MarkdownFormat.isURL(string) {
+        } else if let string = pasteboard.string, MarkdownFormat.isURL(string) {
             pasted = string
         } else {
             return false
         }
         guard let pasted else { return false }
         return markdownLinkPaste(pasted)
+    }
+
+    private func markdownIndentation(for text: NSString) -> Indentation {
+        if let cachedMarkdownIndentation, cachedMarkdownIndentation.generation == generation {
+            return cachedMarkdownIndentation.value
+        }
+        let value = Indentation.detect(text) ?? Indentation(usesTabs: false, width: 4)
+        cachedMarkdownIndentation = (generation, value)
+        return value
     }
 
     /// A URL pasted over a selection in Markdown becomes [selection](url),
