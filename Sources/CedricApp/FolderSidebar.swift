@@ -269,6 +269,8 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     private var renamingNode: FolderNode?
     /// Selected when the root is first listed (Open Enclosing Folder).
     var pendingReveal: URL?
+    /// Hidden items shown after being created or renamed here.
+    private var revealedHiddenURLs = Set<URL>()
 
     init(root url: URL, state: SessionFolder? = nil) {
         rootURL = url
@@ -481,11 +483,14 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         }
         node.isLoading = true
         let url = node.url, hidden = showHidden, ignore = ignore
+        let revealed = Set(revealedHiddenURLs
+            .filter { $0.deletingLastPathComponent().standardizedFileURL == url.standardizedFileURL }
+            .map(\.lastPathComponent))
         let ref = WeakRef(self), box = MainBox(value: node)
         DispatchQueue.global(qos: .userInitiated).async {
             var entries: [FolderEntry] = []
             var failure: String?
-            do { entries = try FolderTree.list(url, showHidden: hidden, ignore: ignore) } catch { failure = error.localizedDescription }
+            do { entries = try FolderTree.list(url, showHidden: hidden, ignore: ignore, revealed: revealed) } catch { failure = error.localizedDescription }
             let result = MainBox(value: (entries, failure))
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -719,10 +724,9 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func newFolder(_ sender: Any?) { createItem(sender, directory: true) }
 
     private func revealAfterChange(_ url: URL, in parent: FolderNode) {
-        if url.lastPathComponent.hasPrefix("."), !showHidden {
-            showHidden = true
-            for folder in root.loadedFolders where folder !== parent { load(folder) }
-            onChange?()
+        if url.lastPathComponent.hasPrefix("."), !showHidden,
+           !FolderTree.alwaysHidden.contains(url.lastPathComponent) {
+            revealedHiddenURLs.insert(url.standardizedFileURL)
         }
         pendingReveal = url
         if parent !== root { outline.expandItem(parent) }
@@ -739,6 +743,8 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         field.isEditable = true
         field.isSelectable = true
         field.selectText(nil)
+        if field.currentEditor() == nil { field.window?.makeFirstResponder(field) }
+        field.currentEditor()?.selectedRange = FolderActions.renameSelection(name: node.name, isDirectory: node.isDirectory)
     }
 
     func controlTextDidEndEditing(_ notification: Notification) {
@@ -754,6 +760,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             onPrepareFileOperation?()
             let new = try FolderActions.rename(node.url, name: field.stringValue)
             guard new.path != node.url.path else { return }
+            revealedHiddenURLs.remove(node.url.standardizedFileURL)
             onRename?(node.url, new, node.isDirectory)
             revealAfterChange(new, in: parent)
         } catch { showError(error) }
@@ -810,6 +817,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     @objc func toggleHidden(_ sender: Any?) {
         showHidden.toggle()
+        if showHidden { revealedHiddenURLs.removeAll() }
         for n in root.loadedFolders { load(n) }
         onChange?()
     }

@@ -114,10 +114,11 @@ shows the file in Finder. Both are off for an untitled tab.
   and hidden files don't show; what the folder's `.gitignore` files
   ignore is shown dimmed.
 - The tree follows files created, deleted and renamed on disk.
+- A newly created or renamed hidden file is shown so you can see it, without turning on Show Hidden Files.
 - Right-click a folder or file for New File, New Folder, Rename, Move to
   Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
   on that folder). New items go inside the folder, or beside the file;
-  a new file opens in a tab. Rename edits the name in the tree and open
+  a new file opens in a tab. Rename edits the name in the tree (the extension is left unselected) and open
   tabs follow a renamed file or folder without losing edits. Move to Trash
   asks first and puts the item in the Trash, not permanently deleting it.
   An open text tab for a trashed file keeps its text unsaved and shows

@@ -8,6 +8,7 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Added
 - **Folder sidebar actions.** Right-click to create files and folders, rename inline, or move to Trash after confirmation. Open tabs follow renames; trashed text stays unsaved in its tab.
+- **Hidden files created or renamed in the folder sidebar are shown without turning on Show Hidden Files.**
 - **Explain and Rewrite Selection.** Select text and use the Cedric menu, editor context menu, Markdown Context Bar, or ⌥⌘E / ⌥⇧⌘E. Explain works with any ready local engine; Rewrite requires a model that passes the existing tool gate and offers Apply / Skip edit cards. Engines run on this Mac or a configured private LAN server only.
 - **Built-in model licences before download.** Download opens a confirmation with the full bundled licence text; non-commercial terms are flagged. Showing the text does not fetch a URL; the model download starts only after Confirm.
 - **Automatic checks on servers.** Automatic checks (and automatic AI grammar) are off by default for LM Studio, Ollama and custom servers. The first time you enable them, Cedric explains that visible text goes to the named server on your local network, not the cloud. If they were already on for a server, they stay off until that notice is confirmed. Existing Intel defaults and on-device behavior are unchanged.
@@ -17,6 +18,7 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Ask Cedric's document scope.** With no selection, Whole document is the default even when it needs trimming. Cedric sends whole lines centred on the caret or selection, and the chip names the lines sent; Visible text remains a choice. Check for Risks no longer claims a complete review was partial.
 
 ### Fixed
+- **Inline Rename selects the base name.** In the folder sidebar, Rename leaves the file extension unselected.
 - **The folder sidebar follows viewer tabs.** Opening a PDF, image, Office file or certificate from the tree keeps the sidebar beside it.
 - **No AI hint on an empty document.** Cedric no longer asks Apple Intelligence, the built-in model or a local server for a hint when the document is empty or has fewer than 20 characters of text (spaces don't count). A new blank Plain Text document was being told it had an "Empty code block".
 

@@ -466,6 +466,10 @@ extension DevChecks {
                 guard let cell = sidebar.outline.view(atColumn: 0, row: sidebar.outline.row(forItem: n), makeIfNecessary: true) as? NSTableCellView,
                       let field = cell.textField else { expect(false, "rename field exists"); return }
                 expect(field.isEditable, "rename edits the outline row")
+                let selected = field.currentEditor()?.selectedRange
+                expect(selected == FolderActions.renameSelection(name: "sidebar-test.tiff", isDirectory: false)
+                       && selected?.length == ("sidebar-test" as NSString).length,
+                       "rename selects the base name, not the extension", "\(String(describing: selected))")
                 field.stringValue = "renamed.tiff"
                 sidebar.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
                 expect(viewer.fileURL.lastPathComponent == "renamed.tiff" && viewer.window?.title == "renamed.tiff",
@@ -485,6 +489,10 @@ extension DevChecks {
                     expect(app.tabs.contains { $0.doc.fileURL == created } && sidebar.window === app.tabs.last?.window,
                            "creating a file opens it with the sidebar")
                     try sidebar.createItem(named: "created-folder", in: sidebar.root, directory: true)
+                    let hiddenBefore = sidebar.showHidden
+                    try sidebar.createItem(named: ".created-hidden", in: sidebar.root, directory: false)
+                    expect(sidebar.showHidden == hiddenBefore, "creating a hidden file does not turn on Show Hidden Files")
+                    until("the new hidden file is still shown in the tree", timeout: 5) { node(".created-hidden") != nil }
                     let parent = try FolderActions.create(in: sidebar.rootURL, name: "explorer", directory: true)
                     let file = try FolderActions.create(in: parent, name: "note.txt", directory: false)
                     let emptyPDF = try FolderActions.create(in: parent, name: "empty.pdf", directory: false)

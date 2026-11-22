@@ -2,6 +2,17 @@ import Foundation
 import Darwin
 
 public enum FolderActions {
+    /// Finder-style: the last extension is left out for a file, the whole
+    /// name is selected for a folder or a leading-dot name with no other "extension".
+    public static func renameSelection(name: String, isDirectory: Bool) -> NSRange {
+        let value = name as NSString
+        guard !isDirectory, !value.pathExtension.isEmpty else {
+            return NSRange(location: 0, length: value.length)
+        }
+        let base = value.deletingPathExtension as NSString
+        return NSRange(location: 0, length: base.length == 0 ? value.length : base.length)
+    }
+
     public static func destination(in parent: URL, name: String) throws -> URL {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
