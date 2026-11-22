@@ -57,6 +57,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     let hintBar = OwlHintBar()
     private let statusBar = UIView()
     private let statusLabel = UILabel()
+    private let wordsButton = UIButton(type: .system)
+    private var wordsTimer: Timer?
+    private var wordCount: Int?
+    private var toolStatesCache: (generation: Int, selection: NSRange, explain: Bool, decode: Bool)?
+    private weak var statisticsSheet: StatisticsViewController?
+    private var statisticsTimer: Timer?
     private let languageButton = UIButton(type: .system)
     private let formatButton = UIButton(type: .system)
     /// In the bar that rides on the keyboard, only while it is up.
@@ -259,10 +265,20 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         statusLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         statusLabel.textColor = .secondaryLabel
         statusLabel.accessibilityIdentifier = "editor.status"
+        wordsButton.titleLabel?.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        wordsButton.titleLabel?.lineBreakMode = .byTruncatingTail
+        wordsButton.clipsToBounds = true
+        wordsButton.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        wordsButton.setContentHuggingPriority(.init(249), for: .horizontal)
+        wordsButton.accessibilityIdentifier = "status.words"
+        wordsButton.isHidden = true
+        wordsButton.addAction(UIAction { [weak self] _ in self?.showStatistics() }, for: .primaryActionTriggered)
         for b in [languageButton, formatButton] {
             b.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
             b.showsMenuAsPrimaryAction = true
+            b.setContentCompressionResistancePriority(.init(999), for: .horizontal)
         }
+        statusLabel.setContentCompressionResistancePriority(.init(999), for: .horizontal)
         languageButton.accessibilityIdentifier = "editor.language"
         formatButton.accessibilityIdentifier = "editor.format"
         hideKeyboardButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down"), for: .normal)
@@ -274,8 +290,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             hideKeyboardButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
             hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
         ])
-        let row = UIStackView(arrangedSubviews: [languageButton, formatButton, UIView(), statusLabel, hideKeyboardButton])
-        row.spacing = 14
+        let spacer = UIView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        let row = UIStackView(arrangedSubviews: [languageButton, formatButton, spacer, wordsButton, statusLabel, hideKeyboardButton])
+        row.spacing = 10
+        row.setCustomSpacing(0, after: spacer)
         row.alignment = .center
         row.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(row)
@@ -352,6 +371,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         updateStatusBarPin()
+        updateWordsVisibility()
         updateSplit()
         updateAskPanelWidth()
         layoutOwl()
@@ -571,6 +591,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let quickly = UIAction(title: String(localized: "Open Quickly…"), image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
             self?.openQuickly()
         }
+        let todos = UIAction(title: String(localized: "Find TODOs"), image: UIImage(systemName: "checklist")) { [weak self] _ in
+            self?.findTodos()
+        }
+        todos.accessibilityIdentifier = "tools.menu.todos"
+        if !canFindTodos { todos.attributes = .disabled }
+        let statistics = UIAction(title: String(localized: "Statistics…"), image: UIImage(systemName: "chart.bar")) { [weak self] _ in
+            self?.showStatistics()
+        }
+        statistics.accessibilityIdentifier = "stats.menu"
         quickly.accessibilityIdentifier = "editor.menu.quickOpen"
         let wrap = UIAction(title: String(localized: "Wrap Lines"), image: UIImage(systemName: "text.word.spacing")) { [weak self] _ in
             self?.toggleWrap()
@@ -592,7 +621,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let settings = UIAction(title: String(localized: "Settings"), image: UIImage(systemName: "gear")) { [weak self] _ in
             self?.showSettings()
         }
-        var first: [UIMenuElement] = [save, replace, goTo, quickly, wrap, readable, ask, check]
+        var first: [UIMenuElement] = [save, replace, goTo, quickly, todos, statistics, wrap, readable, ask, check]
         if document.language.language == .markdown {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -662,6 +691,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.undoManager?.removeAllActions()
         colorizer.setLanguage(document.language.language)
         generation += 1
+        scheduleWordCount()
+        scheduleStatisticsUpdate()
         updateStatus()
         updateBarButtons()
         scheduleOwl()
@@ -682,6 +713,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChange(_ textView: UITextView) {
         generation += 1
+        scheduleWordCount()
+        scheduleStatisticsUpdate()
         updateDocumentChangeCount()
         recoveryWriter.textChanged()
         updateUndoItems()
@@ -736,6 +769,28 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             rewrite.accessibilityIdentifier = "ask.rewriteSelection"
             actions.append(rewrite)
         }
+        let states = textToolStates(selection: range)
+        if states.explain {
+            let action = UIAction(title: String(localized: "Explain Regex")) { [weak self] _ in
+                guard let self, self.textView.selectedRange == range else { return }
+                self.explainRegex()
+            }
+            action.accessibilityIdentifier = "tools.explainRegex"
+            actions.append(action)
+        }
+        if states.decode {
+            let action = UIAction(title: String(localized: "Decode Selection")) { [weak self] _ in
+                guard let self, self.textView.selectedRange == range else { return }
+                self.decodeSelection()
+            }
+            action.accessibilityIdentifier = "tools.decode"
+            actions.append(action)
+        }
+        if canFindTodos {
+            let action = UIAction(title: String(localized: "Find TODOs")) { [weak self] _ in self?.findTodos() }
+            action.accessibilityIdentifier = "tools.findTodos"
+            actions.append(action)
+        }
         guard !actions.isEmpty else { return UIMenu(children: suggestedActions) }
         return UIMenu(children: suggestedActions + [UIMenu(title: String(localized: "Cedric"), options: .displayInline, children: actions)])
     }
@@ -764,6 +819,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChangeSelection(_ textView: UITextView) {
         contextBar?.refreshInlineSelectionStates()
+        scheduleStatisticsUpdate()
         updateStatus()
         fadeOwlNearCaret()
         askModel?.scheduleScopeRefresh()
@@ -810,6 +866,170 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let ending = document.mixedLineEndings ? String(localized: "\(document.lineEnding.displayName) (mixed)") : document.lineEnding.displayName
         formatButton.setTitle("\(document.encoding.displayName) · \(ending)", for: .normal)
         formatButton.menu = formatMenu()
+        view.setNeedsLayout()
+    }
+
+    private func scheduleWordCount() {
+        wordsTimer?.invalidate()
+        guard textView.textStorage.length <= TextStats.maxCounted else {
+            wordCount = nil
+            wordsButton.isHidden = true
+            return
+        }
+        wordsTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let text = self.textView.textStorage.string
+                let generation = self.generation
+                Task { @MainActor [weak self] in
+                    let count = await Task.detached(priority: .utility) {
+                        let ns = text as NSString
+                        return TextStats.count(ns, range: NSRange(location: 0, length: ns.length))
+                    }.value
+                    guard let self else { return }
+                    guard self.generation == generation else {
+                        self.scheduleWordCount()
+                        return
+                    }
+                    self.wordCount = count?.words
+                    if let words = count?.words {
+                        self.wordsButton.setTitle(localizedWordCount(words), for: .normal)
+                    }
+                    self.wordsButton.isHidden = count == nil
+                    self.view.setNeedsLayout()
+                }
+            }
+        }
+    }
+
+    private func updateWordsVisibility() {
+        let fits = wordCount != nil && wordsButton.bounds.width > 1
+        wordsButton.alpha = fits ? 1 : 0
+        wordsButton.accessibilityElementsHidden = !fits
+        wordsButton.isUserInteractionEnabled = fits
+    }
+
+    func textToolStates(selection: NSRange) -> (explain: Bool, decode: Bool) {
+        if let cache = toolStatesCache, cache.generation == generation, cache.selection == selection {
+            return (cache.explain, cache.decode)
+        }
+        let states: (explain: Bool, decode: Bool)
+        if let text = selectedTextForTools(selection) {
+            states = (RegexExplain.looksLikeRegex(text), Decode.decode(text) != nil)
+        } else {
+            states = (false, false)
+        }
+        toolStatesCache = (generation, selection, states.explain, states.decode)
+        return states
+    }
+
+    private func selectedTextForTools(_ range: NSRange) -> String? {
+        let length = textView.textStorage.length
+        guard range.location != NSNotFound, range.location >= 0, range.length > 0, range.length <= 64 * 1024,
+              range.location <= length, range.length <= length - range.location else { return nil }
+        return (textView.textStorage.string as NSString).substring(with: range)
+    }
+
+    private var canFindTodos: Bool { (1...4_000_000).contains(textView.textStorage.length) }
+
+    @objc func explainRegex() {
+        guard let text = selectedTextForTools(textView.selectedRange), RegexExplain.looksLikeRegex(text) else { return }
+        presentTool(ToolResultViewController(title: String(localized: "Regex, explained"), body: RegexExplain.explain(text).text), bySelection: true)
+    }
+
+    @objc func decodeSelection() {
+        guard let text = selectedTextForTools(textView.selectedRange), let result = Decode.decode(text) else { return }
+        presentTool(ToolResultViewController(title: result.title, body: result.body), bySelection: true)
+    }
+
+    @objc func findTodos() {
+        guard canFindTodos else { return }
+        let text = textView.textStorage.string
+        let language = document.language.language.rawValue
+        let generation = generation
+        Task { @MainActor [weak self] in
+            let items = await Task.detached(priority: .userInitiated) { Todos.find(text, language: language) }.value
+            guard let self, self.generation == generation else { return }
+            self.presentTool(TodoListViewController(items: items) { [weak self] line in
+                self?.revealLine(line)
+            }, waitForPresentation: true, isValid: { [weak self] in
+                self?.generation == generation
+            })
+        }
+    }
+
+    @objc func showStatistics() {
+        let vc = StatisticsViewController(text: textView.textStorage.string, selection: textView.selectedRange,
+                                          filePath: document.fileURL.path, documentLines: lineIndex.lineCount)
+        presentTool(vc, anchor: wordsButton.isHidden || wordsButton.alpha == 0 ? nil : wordsButton)
+    }
+
+    private func scheduleStatisticsUpdate() {
+        guard statisticsSheet != nil else { return }
+        statisticsTimer?.invalidate()
+        statisticsTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let statistics = self.statisticsSheet else { return }
+                statistics.update(text: self.textView.textStorage.string, selection: self.textView.selectedRange,
+                                  documentLines: self.lineIndex.lineCount)
+            }
+        }
+    }
+
+    private func presentTool(_ content: UIViewController, bySelection: Bool = false, anchor: UIView? = nil,
+                             waitForPresentation: Bool = false, isValid: @escaping () -> Bool = { true }) {
+        let nav = UINavigationController(rootViewController: content)
+        nav.preferredContentSize = CGSize(width: 440, height: 420)
+        if traitCollection.userInterfaceIdiom == .pad && traitCollection.horizontalSizeClass == .regular {
+            nav.modalPresentationStyle = .popover
+            if let popover = nav.popoverPresentationController {
+                let source = anchor ?? textView
+                popover.sourceView = source
+                if bySelection, let range = textView.selectedTextRange {
+                    let rect = textView.firstRect(for: range).intersection(textView.bounds)
+                    popover.sourceRect = rect.isNull || rect.isEmpty ? textView.bounds : rect
+                } else {
+                    popover.sourceRect = source.bounds
+                }
+            }
+        } else {
+            nav.modalPresentationStyle = .pageSheet
+            nav.sheetPresentationController?.detents = content is ToolResultViewController ? [.medium()] : [.medium(), .large()]
+        }
+        Task { @MainActor [weak self] in
+            // Waiting behind another sheet (Settings, Ask Cedric) gives up
+            // after about 5 s, so a late list doesn't pop up much later.
+            var waits = 0
+            while let self, isValid(), waits < 50,
+                  self.viewIfLoaded?.window != nil || self.presentedViewController?.viewIfLoaded?.window != nil {
+                if let presented = self.presentedViewController {
+                    if presented.isBeingPresented || presented.isBeingDismissed {
+                        try? await Task.sleep(for: .milliseconds(100))
+                        continue
+                    }
+                    if let previous = presented as? UINavigationController,
+                       previous.viewControllers.first is ToolResultViewController ||
+                       previous.viewControllers.first is TodoListViewController ||
+                       previous.viewControllers.first is StatisticsViewController {
+                        await withCheckedContinuation { continuation in
+                            presented.dismiss(animated: true) { continuation.resume() }
+                        }
+                        continue
+                    }
+                    guard waitForPresentation else { return }
+                    waits += 1
+                    try? await Task.sleep(for: .milliseconds(100))
+                    continue
+                }
+                if let statistics = content as? StatisticsViewController {
+                    statistics.update(text: self.textView.textStorage.string, selection: self.textView.selectedRange,
+                                      documentLines: self.lineIndex.lineCount)
+                    self.statisticsSheet = statistics
+                }
+                self.present(nav, animated: true)
+                return
+            }
+        }
     }
 
     private func languageMenu() -> UIMenu {
@@ -2212,6 +2432,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if Self.markdownActions.contains(action) { return markdownEditable }
+        if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
+        if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }
+        if action == #selector(findTodos) { return canFindTodos }
+        if action == #selector(showStatistics) { return true }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)
         }

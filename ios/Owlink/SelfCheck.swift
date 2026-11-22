@@ -108,6 +108,25 @@ enum SelfCheck {
         check(saved, "saved")
         let back = (try? String(contentsOf: doc.fileURL, encoding: .utf8)) ?? ""
         check(back.hasSuffix("// typed by the self-check\n") && !back.contains("struct Owl {   "), "file on disk has the edit and the fix")
+        let pattern = "^[a-z]+$"
+        editor.textView.insertText(pattern)
+        let full = editor.textView.text as NSString
+        let regexRange = full.range(of: pattern, options: .backwards)
+        check(editor.textToolStates(selection: regexRange).explain, "Explain Regex available for a regex selection")
+        let stats = StatisticsViewController(text: "one two\nthree", selection: NSRange(location: 0, length: 7), filePath: doc.fileURL.path)
+        stats.loadViewIfNeeded()
+        func labels(_ view: UIView) -> [String] {
+            [view.accessibilityLabel].compactMap { $0 } + view.subviews.flatMap { labels($0) }
+        }
+        for _ in 0..<30 {
+            if labels(stats.view).contains(where: { $0.contains("Document") && $0.contains("Words") && $0.contains("3") }) { break }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        let figures = labels(stats.view)
+        check(figures.contains { $0.contains("Document") && $0.contains("Words") && $0.contains("3") }
+              && figures.contains { $0.contains("Selection") && $0.contains("Words") && $0.contains("2") },
+              "statistics count document and selection words")
+        editor.textView.undoManager?.undo()
         editor.setLanguage(.python)
         check(doc.language.isManual && doc.language.language == .python, "language menu: manual choice")
         editor.setLanguage(.swift)

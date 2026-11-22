@@ -53,6 +53,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)
         builder.insertChild(UIMenu(options: .displayInline, children: [goTo]), atEndOfMenu: .edit)
+        let tools = UIMenu(title: String(localized: "Text Tools"), children: [
+            UICommand(title: String(localized: "Explain Regex"), action: #selector(EditorViewController.explainRegex)),
+            UICommand(title: String(localized: "Decode Selection"), action: #selector(EditorViewController.decodeSelection)),
+            UICommand(title: String(localized: "Find TODOs"), action: #selector(EditorViewController.findTodos)),
+        ])
+        builder.insertChild(tools, atEndOfMenu: .edit)
 
         let preview = UIKeyCommand(title: String(localized: "Markdown Preview"), action: #selector(EditorViewController.togglePreview),
                                    input: "p", modifierFlags: [.command, .shift])
@@ -73,7 +79,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                action: #selector(EditorViewController.openPreviewInNewWindow))
         let contextBar = UICommand(title: AppSettings.showContextBar ? String(localized: "Hide Context Bar") : String(localized: "Show Context Bar"),
                                    action: #selector(EditorViewController.toggleContextBarMenu))
-        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, contextBar]), atStartOfMenu: .view)
+        let statistics = UICommand(title: String(localized: "Show Statistics"), action: #selector(EditorViewController.showStatistics))
+        builder.insertChild(UIMenu(options: .displayInline, children: [preview, focus, detach, bigger, bigger2, smaller, actual, wrap, contextBar, statistics]), atStartOfMenu: .view)
 
         func key(_ title: String, _ action: Selector, _ input: String, _ modifiers: UIKeyModifierFlags = .command) -> UIKeyCommand {
             UIKeyCommand(title: title, action: action, input: input, modifierFlags: modifiers)
