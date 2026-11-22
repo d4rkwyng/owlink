@@ -26,7 +26,9 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     let container = NSView()
     private enum Entry {
         case home
-        case local(URL, URL)
+        /// A linked document, the folder it may read, and the heading
+        /// (`#fragment`) to scroll to once it has loaded.
+        case local(URL, URL, String?)
         case web(URL)
     }
     private var history: [Entry] = [.home]
@@ -42,7 +44,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     var navigationTitle: String {
         switch history[historyIndex] {
         case .home: return String(localized: "Preview")
-        case .local(let url, _): return url.lastPathComponent
+        case .local(let url, _, _): return url.lastPathComponent
         case .web(let url): return "Web: \(url.host ?? "")"
         }
     }
@@ -71,6 +73,11 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     private var pendingBody: String?
     private var expectedPageURL: URL?
     private var shellNavigation: WKNavigation?
+    /// The heading the page being loaded scrolls to when it has finished
+    /// (a local entry's fragment; set by displayEntry, used once).
+    private var pendingAnchor: String?
+    /// The anchor scrolled to last and whether it was found (for checks).
+    private(set) var lastAnchor: (fragment: String, found: Bool)?
     /// Bumped by each render; a result for an older one is dropped.
     private var generation = 0
     private let latest = RenderTicket()
@@ -201,12 +208,13 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         pendingBody = nil
         loadingShell = false
         browserView.stopLoading()
+        pendingAnchor = nil
         switch history[historyIndex] {
         case .home:
             browserView.isHidden = true
             webView.isHidden = false
             if let home { show(text: home.0, language: home.1, palette: home.2, baseURL: home.3) }
-        case .local(let url, let root):
+        case .local(let url, let root, let fragment):
             browserView.isHidden = true
             webView.isHidden = false
             guard case .openInPreview = PreviewLinkAction.previewAction(for: url, folder: root, command: false, isText: Self.opensInCedric),
@@ -216,6 +224,8 @@ final class PreviewController: NSObject, WKNavigationDelegate {
                 return
             }
             let language = LanguageDetector.language(forFileName: url.lastPathComponent) ?? .markdown
+            // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
+            pendingAnchor = fragment
             show(text: text, language: language, palette: home.2, baseURL: url.deletingLastPathComponent(), rootOverride: root)
         case .web(let url):
             webView.stopLoading()
@@ -502,6 +512,22 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         window.__cedricSetY = Math.max(0, Math.min(y - 8, document.documentElement.scrollHeight - window.innerHeight));
         window.scrollTo(0, Math.max(0, y - 8));
       };
+      // Scrolls to the first of `ids` that is an element's id (or an
+      // anchor's name), its top at the top of the view (as WebKit's own
+      // fragment scroll), and pins that place. `follow`: the editor is told
+      // now, rather than by a scroll event an occluded page may deliver late.
+      window.__cedricScrollToAnchor = function(ids, follow) {
+        let e = null;
+        for (const id of ids) { e = document.getElementById(id) || document.getElementsByName(id)[0]; if (e) break; }
+        if (!e) return false;
+        const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+        const y = Math.max(0, Math.min(Math.round(e.getBoundingClientRect().top + window.scrollY), max));
+        quiet();
+        window.__cedricSetY = y;
+        window.scrollTo(0, y);
+        if (follow) window.webkit.messageHandlers.cedricScroll.postMessage(window.__cedricLineAt(y + 8));
+        return true;
+      };
       window.addEventListener('scroll', function() {
         // Not the scrolls Cedric makes (sync, or keeping the place after an edit).
         if (Date.now() < (window.__cedricQuietUntil || 0) || Math.abs(window.scrollY - (window.__cedricSetY ?? -1e9)) < 2) return;
@@ -539,12 +565,16 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         shellNavigation = nil
         loadingShell = false
         expectedPageURL = nil
+        let anchor = pendingAnchor
+        pendingAnchor = nil
         if let body = pendingBody {
             pendingBody = nil
             bodySwaps += 1
             webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
                                         arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
         }
+        // (Evaluated after the patch above: one content world, in order.)
+        if let anchor { scroll(toAnchor: anchor, follow: false) }
         if isHome { onLoaded?() }
     }
 
@@ -592,13 +622,21 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         if action.navigationType == .linkActivated, let url = action.request.url {
             // In-page anchors stay in the page, including ⌘-click (which would
             // otherwise treat the preview's folder URL as a file to reveal).
-            if url.fragment != nil, Self.samePage(url, webView.url) { decisionHandler(.allow); return }
+            // WebKit scrolls to an exact id; Cedric's own scroll then finds a
+            // heading by its text too (`#Part` → `id="part"`), and pins the
+            // place so the editor follows once instead of bouncing it back.
+            if url.fragment != nil, Self.samePage(url, webView.url) {
+                decisionHandler(.allow)
+                if let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment, follow: isHome) }
+                return
+            }
             decisionHandler(.cancel)
             let root = folderFiles.linkFolder(url)
             let act = PreviewLinkAction.previewAction(for: folderFiles.linkTarget(url), folder: root, command: action.modifierFlags.contains(.command), isText: Self.opensInCedric)
             lastLinkAction = act
             switch act {
-            case .openInPreview(let file): if let root { push(.local(file, root)) }
+            // The file's path came through without its `#fragment`: carry it along.
+            case .openInPreview(let file): if let root { push(.local(file, root, PreviewAnchor.fragment(of: url))) }
             case .openWebInPreview(let url): push(.web(url))
             default: onLink?(act)
             }
@@ -606,6 +644,24 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         }
         let allowed = loadingShell && action.targetFrame?.isMainFrame != false && action.request.url == expectedPageURL
         decisionHandler(allowed ? .allow : .cancel)
+    }
+
+    /// Scrolls the local page to the heading `fragment` names (an exact
+    /// `id` or `name`, else the heading slug of that text), in Cedric's own
+    /// content world: no page script runs. `follow`: the editor follows (the
+    /// live document), as for a scroll by the user.
+    private func scroll(toAnchor fragment: String, follow: Bool) {
+        let candidates = PreviewAnchor.candidates(for: fragment)
+        guard !candidates.isEmpty else { return }
+        let gen = generation
+        webView.callAsyncJavaScript("return window.__cedricScrollToAnchor ? window.__cedricScrollToAnchor(ids, follow) : false",
+                                    arguments: ["ids": candidates, "follow": follow], in: nil, in: .defaultClient) { [weak self] result in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == gen else { return }
+                let found = (try? result.get()).flatMap { ($0 as? NSNumber)?.boolValue } ?? false
+                self.lastAnchor = (fragment, found)
+            }
+        }
     }
 
     /// Whether `url` is the page itself plus a fragment (an in-page link).

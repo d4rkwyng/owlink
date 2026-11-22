@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **Preview links to a heading.** A link such as `other.md#part`, `page.html#section` or `[[other#Part]]` opens the document in the preview at that heading, and Back and Forward return to it. A fragment may also be the heading's text (`#Part`). Same-page `#` links scroll in place reliably, including with ⌘-click.
+
 ## [0.5.1]
 
 ### Added

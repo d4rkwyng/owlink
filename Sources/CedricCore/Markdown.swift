@@ -989,8 +989,8 @@ final class MarkdownRenderer {
         let vault = options.vault
         let file = name.isEmpty ? nil : (embed ? (vault?.resolveImage(name) ?? vault?.resolve(name)) : vault?.resolve(name))
         let exporting = options.exportLinks
-        func href(_ file: URL) -> String? {
-            guard exporting else { return WikiVault.href(file) }
+        func href(_ file: URL, heading: String? = nil) -> String? {
+            guard exporting else { return WikiVault.href(file, heading: heading) }
             return vault.map { WikiVault.relativeHref(file, from: $0.documentFolder) }
         }
         if embed {
@@ -1007,7 +1007,7 @@ final class MarkdownRenderer {
                 return "<img class=\"embed\" src=\"\(escape(src))\" alt=\"\(escape(alt))\"\(size)>"
             }
             guard ext == "md" || ext == "markdown" else { return nil }
-            let link = href(file).map { " href=\"\(escape($0))\"" } ?? ""
+            let link = href(file, heading: fragment).map { " href=\"\(escape($0))\"" } ?? ""
             let label = escape(name + (fragment.flatMap { $0.hasPrefix("^") ? nil : " › " + $0 } ?? ""))
             // Inside an embedded note, or too big: a link, not a second copy.
             guard options.embedDepth == 0, let text = vault.embedText(file, fragment: fragment) else {
@@ -1021,7 +1021,7 @@ final class MarkdownRenderer {
         let shown = alias.flatMap { $0.isEmpty ? nil : $0 } ?? (fragment.map { name.isEmpty ? $0 : name + " › " + $0 } ?? name)
         guard !shown.isEmpty else { return nil }
         let text = emphasis(Array(shown))
-        if let file, let href = href(file) {
+        if let file, let href = href(file, heading: fragment) {
             return "<a class=\"wikilink\" href=\"\(escape(href))\">\(text)</a>"
         }
         // Exported: no link to nowhere, just the words.

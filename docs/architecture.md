@@ -599,6 +599,12 @@ first shown (no WebKit work at launch). Markdown goes through
 - Non-persistent website data store. Local Markdown and HTML links navigate
   inside the preview, with Back, Forward and This Document; editor renders
   resume on return. Other local files keep the text-open/reveal-only rules.
+  A link's `#fragment` stays with the history entry (`Entry.local`); after
+  the page's load finishes, Cedric's own script (app content world, page
+  JavaScript still off) scrolls to the element whose `id`/`name` is the
+  fragment, else its heading slug (`PreviewAnchor.candidates`). Same-page
+  `#` links go through WebKit and the same script, which pins the scroll
+  so a late scroll event or the editor sync can't move it back.
 - HTTP(S) pages use a separate web view with a non-persistent store, no
   app scripts, message handlers or document scheme, and no local-file
   navigation. Open in Browser and ⌘-click retain the full-URL confirmation.

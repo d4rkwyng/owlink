@@ -67,3 +67,43 @@ import Testing
         #expect(route(try #require(URL(string: "smb://host/share"))) == .ignore("smb"))
     }
 }
+
+/// Links to a heading (`other.md#part`): the fragment the preview carries
+/// with a local document, and the ids it looks for.
+@Suite struct PreviewAnchorTests {
+    @Test func fragmentIsKeptAndDecoded() {
+        let u = URL(string: "cedric-doc://doc/tmp/notes/other.md#part")!
+        #expect(PreviewAnchor.fragment(of: u) == "part")
+        #expect(PreviewFolder.fileURL(for: u)?.path == "/tmp/notes/other.md", "the file is the path alone")
+        #expect(PreviewAnchor.fragment(of: URL(string: "cedric-doc://doc/tmp/notes/other.md#The%20Part")!) == "The Part")
+        #expect(PreviewAnchor.fragment(of: URL(string: "cedric-doc://doc/tmp/notes/other.md")!) == nil)
+        #expect(PreviewAnchor.fragment(of: URL(string: "cedric-doc://doc/tmp/notes/other.md#")!) == nil)
+    }
+
+    @Test func candidatesPreferTheExactIdThenTheSlug() {
+        #expect(PreviewAnchor.candidates(for: "part") == ["part"])
+        #expect(PreviewAnchor.candidates(for: "Part") == ["Part", "part"])
+        #expect(PreviewAnchor.candidates(for: "The Part") == ["The Part", "the-part"])
+        #expect(PreviewAnchor.candidates(for: "sec") == ["sec"])
+        #expect(PreviewAnchor.candidates(for: "") == [])
+        #expect(PreviewAnchor.candidates(for: "?!") == ["?!"], "no empty slug")
+    }
+
+    @Test func headingIdsMatchTheRenderedHeadings() {
+        for (heading, fragment) in [("Part", "part"), ("The *Big* Part", "The Big Part"), ("Setup & Run", "Setup & Run")] {
+            let html = Markdown.render("## \(heading)\n")
+            let id = PreviewAnchor.headingID(fragment)
+            #expect(html.contains("id=\"\(id)\""), "\(heading) → #\(id) in \(html)")
+            #expect(PreviewAnchor.candidates(for: fragment).contains(id))
+        }
+    }
+
+    @Test func wikilinkHeadingHref() {
+        let file = URL(fileURLWithPath: "/tmp/v/Other Note.md")
+        #expect(WikiVault.href(file) == "cedric-doc://doc/tmp/v/Other%20Note.md")
+        #expect(WikiVault.href(file, heading: "The Part") == "cedric-doc://doc/tmp/v/Other%20Note.md#the-part")
+        #expect(WikiVault.href(file, heading: "^abc123") == "cedric-doc://doc/tmp/v/Other%20Note.md", "a block reference: the note")
+        let link = URL(string: WikiVault.href(file, heading: "The Part")!)!
+        #expect(PreviewAnchor.fragment(of: link) == "the-part" && PreviewFolder.fileURL(for: link)?.path == file.path)
+    }
+}

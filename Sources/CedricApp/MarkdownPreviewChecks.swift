@@ -6,12 +6,13 @@ import WebKit
 /// In-process checks of the Markdown preview and tools, run by
 /// Scripts/tools-check.sh like the other DevChecks.
 ///
-///   CEDRIC_CHECK=mdpreview|outline|mdexport
+///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport
 @MainActor
 extension DevChecks {
     static func markdownPreviewCheck(_ name: String, _ app: AppDelegate) -> Bool {
         switch name {
         case "mdpreview": markdownPreview(app)
+        case "previewanchor": previewAnchorCheck(app)
         case "outline": outlineCheck(app)
         case "mdexport": exportCheck(app)
         case "previewbar": previewBarCheck(app)
@@ -603,6 +604,138 @@ extension DevChecks {
                 expect(!tab.previewDetached && tab.previewVisible, "and docks again")
             },
             { next in perfBigMarkdown(app, tab, next) },
+            sync { for t in app.tabs { t.doc.markSaved() } },
+        ])
+    }
+
+    /// Waits (polling, up to `seconds`) until the element with `id` is in
+    /// the preview's view, scrolled to (its top inside the viewport and the
+    /// page scrolled down: every target here starts well below the fold),
+    /// and `when` holds. Then, a moment later, that it is still there (no
+    /// late scroll event or editor sync moved it away).
+    static func waitForAnchor(_ tab: EditorWindowController, id: String, _ name: String, seconds: Double = 5,
+                              when: @escaping @MainActor () -> Bool = { true }) -> (@escaping () -> Void) -> Void {
+        { next in
+            let js = "(() => { const e = document.getElementById('\(id)'); if (!e) return 'none|-|' + Math.round(window.scrollY);"
+                + " const t = e.getBoundingClientRect().top;"
+                + " return ((t > -4 && t < window.innerHeight - 30 && window.scrollY > 40) ? 'in' : 'out') + '|' + Math.round(t) + '|' + Math.round(window.scrollY) })()"
+            let deadline = Date().addingTimeInterval(seconds)
+            @MainActor func poll() {
+                previewJS(tab, js) { v in
+                    let r = v as? String ?? "\(v ?? "nil")"
+                    if when(), r.hasPrefix("in|") {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            previewJS(tab, js) { again in
+                                let r2 = again as? String ?? "nil"
+                                expect(r2.hasPrefix("in|"), name, "first \(r), then \(r2)")
+                                next()
+                            }
+                        }
+                    } else if Date() > deadline {
+                        expect(false, name, "heading #\(id): \(r) (in|top|scrollY); condition \(when())")
+                        next()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } }
+                    }
+                }
+            }
+            poll()
+        }
+    }
+
+    /// Links to headings: a same-page `#anchor` (plain, by heading text, and
+    /// ⌘-click) scrolls the live document in place; `other.md#part`, a
+    /// heading-text fragment, a `[[other#Part]]` wikilink and `page.html#sec`
+    /// open in the preview at that heading, and Back/Forward come back to it.
+    static func previewAnchorCheck(_ app: AppDelegate) {
+        var filler = ""
+        for k in 1...40 { filler += "Filler paragraph \(k) with enough words in it to take up a line or two of the preview.\n\n" }
+        _ = write("anchors/other.md", "# Other\n\n" + filler + "## Part\n\nthe part of the other file\n\n" + filler)
+        var html = "<!doctype html><html><body><h1>Page</h1>"
+        for k in 1...40 { html += "<p>html filler \(k), a line or two of words to fill the page out.</p>" }
+        html += "<h2 id=\"sec\">Sec</h2><p>the html section</p>"
+        for k in 1...40 { html += "<p>more html \(k)</p>" }
+        _ = write("anchors/page.html", html + "</body></html>")
+        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec)"
+        src += " [jump](#unique-section) [jump text](#Unique%20Section)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
+        let tab = app.open(write("anchors/notes.md", src))!
+        sized(tab)
+        let tabs = app.tabs.count
+        let p = { tab.preview }
+        @MainActor func onSource() -> Bool { tab.doc.fileURL?.lastPathComponent == "notes.md" && tab.text.hasPrefix("# Anchors") }
+        @MainActor func noTab() -> Bool { app.tabs.count == tabs }
+        func click(_ text: String, command: Bool = false) -> (@escaping () -> Void) -> Void {
+            { next in
+                let fire = command
+                    ? "a.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, metaKey: true}))"
+                    : "a.click()"
+                previewJS(tab, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === '\(text)'); if (!a) return 'no link'; \(fire); return a.getAttribute('href') })()") { v in
+                    print("check: note: clicked \(text) → \(v ?? "nil")")
+                    next()
+                }
+            }
+        }
+        let toTop: (@escaping () -> Void) -> Void = { next in
+            previewJS(tab, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in next() }
+        }
+        let home: (@escaping () -> Void) -> Void = { next in
+            tab.previewBarAction(.home)
+            waitForPreview(tab, contains: "jump text", "This Document returns to the live document")(next)
+        }
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "the unique section", "the preview shows the document"),
+            // Same page: stays on the live document, no tab, heading in view.
+            click("jump"),
+            waitForAnchor(tab, id: "unique-section", "a same-page #anchor scrolls the live document to the heading",
+                          when: { p()?.isHome == true && noTab() }),
+            sync {
+                expect(p()?.isHome == true && noTab() && onSource(), "and stays on the live document, no tab opened")
+                expect(p()?.lastAnchor?.found == true, "Cedric found the anchor", "\(String(describing: p()?.lastAnchor))")
+            },
+            toTop,
+            click("jump text"),
+            waitForAnchor(tab, id: "unique-section", "a same-page fragment by heading text finds the heading's slug",
+                          when: { p()?.isHome == true && noTab() }),
+            toTop,
+            click("jump", command: true),
+            waitForAnchor(tab, id: "unique-section", "⌘-click on a same-page #anchor stays in the page",
+                          when: { p()?.isHome == true && noTab() }),
+            sync { expect(p()?.isHome == true && noTab() && PreviewLinkLog.revealed.isEmpty, "and reveals or opens nothing") },
+            toTop,
+            // Another document's heading.
+            click("other part"),
+            waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "other.md" }),
+            sync {
+                expect(noTab() && onSource(), "no tab opened; the editor stays on the source document", "\(app.tabs.count) tabs, \(tab.doc.fileURL?.lastPathComponent ?? "-")")
+                expect(p()?.canGoBack == true && tab.previewAllowsJavaScript == false, "Back is enabled; no JavaScript trust carried over")
+                tab.previewBarAction(.back)
+            },
+            waitForPreview(tab, contains: "jump text", "Back returns to the source document"),
+            sync { expect(p()?.isHome == true && p()?.canGoForward == true, "on the live document, Forward enabled"); tab.previewBarAction(.forward) },
+            waitForAnchor(tab, id: "part", "Forward returns to the linked document at the heading again",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "other.md" }),
+            home,
+            click("text part"),
+            waitForAnchor(tab, id: "part", "other.md#Part (heading text) opens at the heading",
+                          when: { p()?.isHome == false && noTab() }),
+            home,
+            { next in
+                previewJS(tab, "document.querySelector('a.wikilink').getAttribute('href')") { v in
+                    expect((v as? String)?.hasSuffix("/anchors/other.md#part") == true, "[[other#Part]] links to the heading's slug", "\(v ?? "nil")")
+                    next()
+                }
+            },
+            click("wiki part"),
+            waitForAnchor(tab, id: "part", "a [[other#Part]] wikilink opens at the heading",
+                          when: { p()?.isHome == false && noTab() }),
+            home,
+            click("html part"),
+            waitForAnchor(tab, id: "sec", "page.html#sec opens in the preview at the element",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "page.html" && noTab() }),
+            sync { expect(onSource() && PreviewLinkLog.revealed.isEmpty && PreviewLinkLog.opened.isEmpty, "nothing revealed or opened outside the preview") },
+            home,
             sync { for t in app.tabs { t.doc.markSaved() } },
         ])
     }
