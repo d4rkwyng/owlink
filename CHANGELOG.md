@@ -4,12 +4,12 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
+## [0.5.1]
 
 ### Added
 - **Folder sidebar actions menu.** An ellipsis in the sidebar header offers the context menu's folder actions, plus Refresh and Collapse All.
 - **Browse in preview.** Follow Markdown, HTML and web links in the preview with Back, Forward and This Document; Open in Browser asks before opening a web page externally. ⌘-click keeps the external link prompt.
-- VoiceOver names for Find and Replace, Ask Cedric’s scope and question fields, Go to Line, and the New File/Folder name field.
+- **VoiceOver names.** Find and Replace, Ask Cedric’s scope and question fields, Go to Line, and the New File/Folder name field now have VoiceOver names.
 
 ### Changed
 - **The last session comes back.** Settings › General › Reopen files from last session is on by default and follows macOS's “Close windows when quitting an application” setting until you change it. Closing the last window, or quitting, restores those open tabs and their saved window state on the next launch. Opening a file from Finder still restores the rest of the session and focuses that file. With the setting off, files do not reopen; unsaved text stays in File › Reopen Closed Tab.
@@ -20,7 +20,7 @@ are its section below (`Scripts/changelog-section.sh`).
 ### Fixed
 - **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
 - **Obsidian image names.** Bare image names in Markdown, embeds and HTML `<img>` tags resolve in the vault, including `Images/` and the configured `attachmentFolderPath`.
-- Localized remaining settings units, the Go to Line placeholder, default-editor type checkboxes, and the Compare window title.
+- **Settings and dialog copy.** Remaining settings units, the Go to Line placeholder, default-editor type checkboxes, and the Compare window title are localized.
 
 ## [0.5.0] - 2026-11-22
 
@@ -263,6 +263,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
 [0.5.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.0
 [0.4.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.4.1
 [0.4.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.4.0

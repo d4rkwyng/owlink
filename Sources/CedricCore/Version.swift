@@ -6,7 +6,7 @@ import Foundation
 /// Info.plist, CEDRIC_VERSION or tag says anything else.
 public enum CedricVersion {
     /// This tree's version.
-    public static let source = "0.5.0"
+    public static let source = "0.5.1"
 
     /// Inside "Owlink.app", the bundle's CFBundleShortVersionString (what
     /// About shows); elsewhere (tests, `swift run`) `source`. A release's
