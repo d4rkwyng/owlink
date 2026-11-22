@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.4.4 (11), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.4.5 (13), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
