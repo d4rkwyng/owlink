@@ -492,7 +492,6 @@ extension DevChecks {
                     let hiddenBefore = sidebar.showHidden
                     try sidebar.createItem(named: ".created-hidden", in: sidebar.root, directory: false)
                     expect(sidebar.showHidden == hiddenBefore, "creating a hidden file does not turn on Show Hidden Files")
-                    until("the new hidden file is still shown in the tree", timeout: 5) { node(".created-hidden") != nil }
                     let parent = try FolderActions.create(in: sidebar.rootURL, name: "explorer", directory: true)
                     let file = try FolderActions.create(in: parent, name: "note.txt", directory: false)
                     let emptyPDF = try FolderActions.create(in: parent, name: "empty.pdf", directory: false)
@@ -526,6 +525,7 @@ extension DevChecks {
                            "moving away a folder shows a viewer notice")
                 } catch { expect(false, "explorer file operations", error.localizedDescription) }
             },
+            until("the new hidden file is still shown in the tree") { node(".created-hidden") != nil },
             until("new folder is revealed") {
                 guard let n = node("created-folder") else { return false }
                 return sidebar.outline.row(forItem: n) == sidebar.outline.selectedRow
