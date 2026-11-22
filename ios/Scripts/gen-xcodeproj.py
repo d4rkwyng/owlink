@@ -13,7 +13,7 @@ PROJ = os.path.join(HERE, '..', 'Owlink.xcodeproj')
 TEAM = 'V868MD2SHX'
 BUNDLE_ID = 'app.owlink.ios'
 VERSION = '0.4.5'
-BUILD = '12'
+BUILD = '13'
 IOS = '17.0'
 
 def oid(name):
