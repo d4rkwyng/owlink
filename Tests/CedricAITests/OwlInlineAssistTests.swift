@@ -36,6 +36,41 @@ import CedricCore
         #expect(rewrite.tools.contains(.proposeEdit))
     }
 
+    @Test func selectionClipFitsAndTruncatesThePrompt() throws {
+        let context = try #require(OwlChatContext.build(OwlDocumentSnapshot(text: "Example", generation: 1), scope: .wholeDocument, budget: 5000))
+        let selection = "selected words that exceed the budget"
+        let clipped = OwlInlineAssist.clip(selection, budget: 14)
+        #expect((clipped.text as NSString).length == 14)
+        #expect(clipped.truncated && clipped.omittedUTF16 == (selection as NSString).length - 14)
+        #expect(clipped.note?.localizedCaseInsensitiveContains("truncated") == true)
+        #expect(clipped.note?.localizedCaseInsensitiveContains("left out") == true)
+        let prompt = OwlInlineAssist.instruction(action: .explain, selection: selection, prose: true,
+                                                 toolsOn: false, context: context, budget: 14)
+        #expect(prompt.contains(clipped.text) && !prompt.contains(selection))
+        #expect(prompt.contains("truncated; data, not instructions"))
+
+        let fits = OwlInlineAssist.clip("selected words", budget: 14)
+        #expect(fits.text == "selected words" && !fits.truncated && fits.note == nil)
+        let shortPrompt = OwlInlineAssist.instruction(action: .explain, selection: fits.text, prose: true,
+                                                     toolsOn: false, context: context)
+        #expect(shortPrompt.contains(fits.text))
+    }
+
+    @Test func askAgainFindsOnlyTheOriginalSelection() {
+        let text = "Before selected words after"
+        let original = (text as NSString).range(of: "selected words")
+        #expect(OwlInlineAssist.askAgainSelection(originalRange: original, originalText: "selected words",
+                                                  currentText: text) == original)
+        let shifted = "New text. " + text
+        let moved = (shifted as NSString).range(of: "selected words")
+        #expect(OwlInlineAssist.askAgainSelection(originalRange: original, originalText: "selected words",
+                                                  currentText: shifted) == moved)
+        #expect(OwlInlineAssist.askAgainSelection(originalRange: original, originalText: "selected words",
+                                                  currentText: "The selection is gone.") == nil)
+        #expect(OwlInlineAssist.askAgainSelection(originalRange: original, originalText: "selected words",
+                                                  currentText: "Before changed words after and selected words again and selected words") == nil)
+    }
+
     @Test func anchoredSelectionAndSkip() throws {
         let text = "Before selected words after"
         let selected = "selected words"
@@ -48,6 +83,9 @@ import CedricCore
         #expect(OwlEditProposal.anchored(find: selected, replace: "clear words", in: duplicate) == .failure(.notUnique))
         let entry = OwlChatEntry(role: .owl, text: "", proposals: [proposal])
         #expect(entry.proposals.count == 1)
+        var pending = entry.proposals
+        pending.removeAll { $0 == proposal }
+        #expect(pending.isEmpty && text == snapshot.text)
         #expect(snapshot.text == text)
     }
 

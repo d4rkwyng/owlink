@@ -203,16 +203,19 @@ public struct OwlChatRequest: Sendable {
     public var imageSource: (any OwlImageSource)?
     /// An inline command targets this exact selection, rather than whole lines.
     public var inlineSelection: String?
+    /// Explains that an inline selection was clipped before it was sent.
+    public var inlineSelectionNote: String?
 
     public init(question: String, action: OwlQuickAction? = nil, context: OwlChatContext, snapshot: OwlDocumentSnapshot,
                 history: [OwlChatEntry] = [], useTools: Bool, prose: Bool, maxTokens: Int = 700, scan: String? = nil,
                 scanHasHigh: Bool = false, scanTruncated: Bool = false, imageSource: (any OwlImageSource)? = nil,
-                inlineSelection: String? = nil) {
+                inlineSelection: String? = nil, inlineSelectionNote: String? = nil) {
         self.question = question; self.action = action; self.context = context; self.snapshot = snapshot
         self.history = history; self.useTools = useTools; self.prose = prose; self.maxTokens = maxTokens
         self.scan = scan; self.scanHasHigh = scanHasHigh; self.scanTruncated = scanTruncated
         self.imageSource = imageSource
         self.inlineSelection = inlineSelection
+        self.inlineSelectionNote = inlineSelectionNote
     }
 
     /// The model saw only part of the document (trimmed to fit, or not
@@ -357,7 +360,8 @@ public struct OwlChatRequest: Sendable {
     public var prompt: String {
         if let action, let inlineSelection {
             return OwlInlineAssist.instruction(action: action, selection: inlineSelection, prose: prose,
-                                               toolsOn: useTools, context: context)
+                                               toolsOn: useTools, context: context,
+                                               truncationNote: inlineSelectionNote)
         }
         if let action { return OwlPrompts.quickInstruction(action, prose: prose, toolsOn: useTools, context: context, scan: scan) }
         return question

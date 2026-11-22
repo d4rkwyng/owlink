@@ -436,6 +436,7 @@ enum OwlChatCheck {
     /// them): a card each; Skip one, Apply another (the third, elsewhere,
     /// still applies); read-only, none applies; one ⌘Z undoes the edit.
     static func several(_ tab: EditorWindowController, _ chat: OwlChatPanel, out: String) {
+        let previousSelection = tab.textView.selectedRange()
         let selected = "for i in items"
         let selection = (tab.text as NSString).range(of: selected)
         if selection.location != NSNotFound {
@@ -450,6 +451,7 @@ enum OwlChatCheck {
                 } else { check(false, "selection proposal has a card") }
             } else { check(false, "selection anchors a proposal") }
         } else { check(false, "selection for the card check exists") }
+        tab.textView.setSelectedRange(previousSelection)
         let snap = chat.snapshot()
         let edits = [("for i in items", "for item in items", "clearer name"), ("return t", "return t // sum", "says what it returns"),
                      ("-> Int {", "-> Int { // total", "says what it is")]

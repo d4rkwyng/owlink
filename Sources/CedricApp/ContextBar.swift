@@ -30,7 +30,6 @@ final class ContextBarView: NSView {
     private(set) var runs = 0
     /// The theme's colours (icon tints), set by `applyPalette`.
     private(set) var palette: EditorPalette?
-    private var inlineHasSelection: Bool?
 
     init(language: Language, tab: EditorWindowController) {
         self.language = language
@@ -208,9 +207,6 @@ final class ContextBarView: NSView {
     }
 
     func refreshInlineSelectionStates() {
-        let selected = (tab?.textView.selectedRange().length ?? 0) > 0
-        guard selected != inlineHasSelection else { return }
-        inlineHasSelection = selected
         refreshStates()
     }
 

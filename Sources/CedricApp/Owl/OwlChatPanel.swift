@@ -153,11 +153,12 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// The first card's proposal (checks).
     var pending: OwlEditProposal? { cards.first?.proposal }
     var hasProposals: Bool { !cards.isEmpty }
-    private var lastRequest: (question: String, action: OwlQuickAction?, inline: Bool)?
+    private var lastRequest: (question: String, action: OwlQuickAction?, inline: Bool, selection: NSRange?, selectionText: String?)?
     /// Streamed text not yet shown (flushed at ~30 Hz).
     private var pendingText = ""
     private var flushTimer: Timer?
     private var streamed = ""
+    private var pendingInlineNote: String?
     private var scopes: [OwlChatScope] = []
     /// Requests asked (checks).
     private(set) var asks = 0
@@ -654,17 +655,20 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
              inline: Bool = false) {
         guard !running, let tab, let id = docID else { return }
         discardProposal(nil)
-        lastRequest = (question, action, inline)
         forcedVerdict = nil
         verdictStream = nil
         safeClaimGuard = nil
         shownAnswer = ""
         streamedRenders = []
+        pendingInlineNote = nil
         var snap = snapshot()
         if let selection {
             snap = OwlDocumentSnapshot(text: snap.text, generation: snap.generation, selection: selection, visible: snap.visible,
                                        fileName: snap.fileName, language: snap.language, facts: snap.facts, grammar: snap.grammar)
         }
+        let originalSelection = inline ? snap.selection : nil
+        let originalSelectionText = originalSelection.map(snap.substring)
+        lastRequest = (question, action, inline, originalSelection, originalSelectionText)
         let scope = forced ?? selectedScope
         let prose = isProse
         var history = OwlChatStore.shared.history(id)
@@ -693,14 +697,35 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
                 return
             }
+            var requestSnapshot = snap
+            var inlineClip: OwlInlineAssist.SelectionClip?
+            if inline, let action {
+                let wrapper = OwlInlineAssist.instruction(action: action, selection: "", prose: prose,
+                                                          toolsOn: tools, context: ctx)
+                let room = max(0, engine.contextBudget - (ctx.numbered as NSString).length
+                               - (wrapper as NSString).length - 256)
+                let clip = OwlInlineAssist.clip(snap.substring(snap.selection), budget: room)
+                inlineClip = clip
+                pendingInlineNote = clip.note
+                requestSnapshot = OwlDocumentSnapshot(text: snap.text, generation: snap.generation,
+                                                      selection: NSRange(location: snap.selection.location,
+                                                                         length: (clip.text as NSString).length),
+                                                      visible: snap.visible, fileName: snap.fileName, language: snap.language,
+                                                      facts: snap.facts, grammar: snap.grammar)
+                if clip.text.isEmpty {
+                    self.finish(nil, error: String(localized: "There isn’t enough room in this model’s context for the selected text."))
+                    return
+                }
+            }
             self.lastUsedTools = tools
             // An SVG: describe_image can render it (only if the model calls it).
             let picture = OwlPicture.isPicture(fileName: snap.fileName)
                 ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
-            let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
+            let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: requestSnapshot,
                                      history: history, useTools: tools, prose: prose, scan: scan,
                                      scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture,
-                                     inlineSelection: inline ? snap.substring(snap.selection) : nil)
+                                     inlineSelection: inline ? inlineClip?.text : nil,
+                                     inlineSelectionNote: inlineClip?.note)
             self.forcedVerdict = req.forcedVerdict
             // Any answer about a script: clamped before it shows (ScriptVerdictStream).
             self.safeClaimGuard = req.safeClaimGuard
@@ -820,6 +845,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                     ? OwlChatRunner.storedText(answer: "", streamed: streamed, guard: safeClaimGuard, forced: forcedVerdict) : streamed
                 let text = partial.isEmpty ? error : partial + " (" + error + ")"
                 OwlChatStore.shared.replaceLast(OwlChatEntry(role: .note, text: text), in: id)
+            }
+            if let note = pendingInlineNote {
+                OwlChatStore.shared.append(OwlChatEntry(role: .note, text: note), to: id)
+                pendingInlineNote = nil
             }
         }
         render()
@@ -977,9 +1006,28 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func askAgain(_ sender: Any?) {
         guard let r = lastRequest else { return }
         if r.inline {
-            guard let tab, let action = r.action, tab.canInlineAssist(action) else { NSSound.beep(); return }
+            guard let tab, let action = r.action else { NSSound.beep(); return }
+            guard let range = r.selection, let originalText = r.selectionText,
+                  let selection = OwlInlineAssist.askAgainSelection(originalRange: range, originalText: originalText,
+                                                                    currentText: tab.textView.string) else {
+                NSSound.beep()
+                if let id = docID {
+                    OwlChatStore.shared.append(OwlChatEntry(role: .note,
+                                                            text: String(localized: "The original selection is no longer in the document.")), to: id)
+                    render()
+                }
+                return
+            }
+            // Use the recovered original selection; do not require the caret to still be over it.
+            let enabled = tab.canAskCedric && running != true
+            let ready = AskCedricEngine.isAvailable
+            let allowed = action == .rewrite
+                ? OwlInlineAssist.canRewrite(askEnabled: enabled, engineReady: ready, hasSelection: true,
+                                             allowsTools: ready && OwlChatStore.shared.inlineAllowsTools)
+                : OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: ready, hasSelection: true)
+            guard allowed else { NSSound.beep(); return }
             discardProposal(nil)
-            ask(question: r.question, action: action, selection: tab.textView.selectedRange(), scope: .selection, inline: true)
+            ask(question: r.question, action: action, selection: selection, scope: .selection, inline: true)
             return
         }
         discardProposal(nil)
