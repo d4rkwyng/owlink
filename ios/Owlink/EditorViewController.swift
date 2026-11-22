@@ -252,11 +252,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         row.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(row)
         statusBar.backgroundColor = .secondarySystemBackground
-        // The background runs to the screen's edges; the labels stay inside
-        // the safe area and clear of the rounded corners (they were clipped
-        // at the bottom left on an iPhone Duo): the margins guide includes
-        // the safe area (insetsLayoutMarginsFromSafeArea), and on iOS 26+
-        // the corner-adapted one also keeps out of the display's corners.
+        // Horizontal margins keep labels inside the safe area and clear of
+        // rounded corners; vertically, use 4 pt padding and the home indicator.
         statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16)
         statusBar.insetsLayoutMarginsFromSafeArea = true
         var guide: UILayoutGuide = statusBar.layoutMarginsGuide
@@ -264,8 +261,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-            row.topAnchor.constraint(equalTo: guide.topAnchor),
-            row.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
+            row.topAnchor.constraint(equalTo: statusBar.topAnchor, constant: 4),
+            row.bottomAnchor.constraint(equalTo: statusBar.safeAreaLayoutGuide.bottomAnchor, constant: -4),
             statusBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
         ])
     }
