@@ -114,9 +114,18 @@ shows the file in Finder. Both are off for an untitled tab.
   and hidden files don't show; what the folder's `.gitignore` files
   ignore is shown dimmed.
 - The tree follows files created, deleted and renamed on disk.
-- Right-click: Reveal in Finder, Copy Path, Find in Folder… (Find in
-  Files on that folder), Show Hidden Files, Close Folder (or the × at
-  the top).
+- Right-click a folder or file for New File, New Folder, Rename, Move to
+  Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
+  on that folder). New items go inside the folder, or beside the file;
+  a new file opens in a tab. Rename edits the name in the tree and open
+  tabs follow a renamed file or folder without losing edits. Move to Trash
+  asks first and puts the item in the Trash, not permanently deleting it.
+  An open text tab for a trashed file keeps its text unsaved and shows
+  the deleted-or-moved bar below; viewer tabs show a notice. Names already
+  in use aren't overwritten. `.git` and `.DS_Store` remain hidden and
+  cannot be created or renamed from the sidebar.
+- Show Hidden Files and Close Folder are in the same menu (or use the ×
+  at the top to close).
 - Drag the divider to resize it. The folder, the folders you expanded
   and the width come back with the session.
 

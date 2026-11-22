@@ -153,7 +153,7 @@ final class PDFPagesView: NSView {
 @MainActor
 final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemValidation {
     let id: UUID
-    let fileURL: URL
+    var fileURL: URL
     private(set) var pdfDocument: PDFDocument?
     private(set) var pdfView: CedricPDFView?
     private(set) var thumbnails: PDFThumbnailView?
@@ -837,7 +837,10 @@ final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemVa
         window?.contentView = NSView()
     }
 
-    func windowDidBecomeKey(_ notification: Notification) { loadIfShown() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        loadIfShown()
+        (NSApp.delegate as? AppDelegate)?.folderSidebarFollow(self)
+    }
     func windowDidBecomeMain(_ notification: Notification) { loadIfShown() }
     func windowDidChangeOcclusionState(_ notification: Notification) { loadIfShown() }
 

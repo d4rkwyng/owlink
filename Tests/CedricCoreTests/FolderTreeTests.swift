@@ -20,6 +20,40 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
 }
 
 @Suite struct FolderTreeTests {
+    @Test func explorerCreateAndRenameNeverOverwrite() throws {
+        let root = try makeTree(["existing.txt"])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let created = try FolderActions.create(in: root, name: "new.txt", directory: false)
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: "existing.txt", directory: false) }
+        #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: "existing.txt", directory: true) }
+        #expect(throws: (any Error).self) { try FolderActions.rename(created, name: "existing.txt") }
+        #expect(try String(contentsOf: root.appendingPathComponent("existing.txt"), encoding: .utf8) == "existing.txt")
+        #expect(FileManager.default.fileExists(atPath: created.path))
+        let folder = try FolderActions.create(in: root, name: "folder", directory: true)
+        #expect(try FolderActions.rename(folder, name: "renamed").lastPathComponent == "renamed")
+        for invalid in ["", ".", "..", "a/b", "a\0b"] {
+            #expect(throws: (any Error).self) { try FolderActions.create(in: root, name: invalid, directory: false) }
+        }
+    }
+
+    @Test func explorerMovesOnlyTheRenamedPathAndDescendants() {
+        let old = URL(fileURLWithPath: "/p/dir")
+        let new = URL(fileURLWithPath: "/p/new")
+        #expect(FolderActions.movedURL(old, from: old, to: new, directory: false) == new)
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir/a.txt"), from: old, to: new, directory: true)?.path == "/p/new/a.txt")
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir/a.txt"), from: old, to: new, directory: false) == nil)
+        #expect(FolderActions.movedURL(URL(fileURLWithPath: "/p/dir2/a.txt"), from: old, to: new, directory: true) == nil)
+    }
+
+    @Test func textNamedPDFKeepsItsSessionKind() throws {
+        let tab = SessionTab(path: "/p/empty.pdf", explicitText: true)
+        let saved = try JSONEncoder().encode(tab)
+        #expect(try JSONDecoder().decode(SessionTab.self, from: saved).explicitText == true)
+        let old = try JSONEncoder().encode(SessionTab(path: "/p/old.pdf"))
+        #expect(try JSONDecoder().decode(SessionTab.self, from: old).explicitText == nil)
+    }
+
     @Test func foldersFirstThenFinderOrder() {
         let sorted = FolderTree.sorted([e("b.txt"), e("file10.txt"), e("Zed", dir: true), e("file2.txt"), e("alpha", dir: true), e("A.txt")])
         #expect(sorted.map(\.name) == ["alpha", "Zed", "A.txt", "b.txt", "file2.txt", "file10.txt"])

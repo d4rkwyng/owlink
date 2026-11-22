@@ -439,8 +439,90 @@ extension DevChecks {
                        "Open Enclosing Folder opens the file's folder in the sidebar", s.rootURL.path)
                 let sel = s.outline.selectedRow >= 0 ? (s.outline.item(atRow: s.outline.selectedRow) as? FolderNode)?.name : nil
                 expect(sel == "a.swift", "with the file selected", sel ?? "none")
-                app.closeFolder()
+                let image = NSImage(size: NSSize(width: 2, height: 2))
+                image.lockFocus()
+                NSColor.red.setFill()
+                NSRect(x: 0, y: 0, width: 2, height: 2).fill()
+                image.unlockFocus()
+                if let data = image.tiffRepresentation {
+                    try? data.write(to: proj.appendingPathComponent("src/sidebar-test.tiff"))
+                }
+                s.load(s.root)
             },
+            until("viewer file is listed") { node("sidebar-test.tiff") != nil },
+            sync {
+                guard let n = node("sidebar-test.tiff") else { expect(false, "viewer row exists"); return }
+                app.openFromFolder(n)
+                guard let viewer = app.viewerTab(for: n.url) else { expect(false, "viewer opens"); return }
+                expect(sidebar.window === viewer.window, "folder sidebar follows a file opened in a viewer")
+                viewer.window?.layoutIfNeeded()
+                let viewerSplit = viewer.sidebarHost?.split
+                expect(viewerSplit?.arrangedSubviews.count == 2 && sidebar.frame.width > 100 &&
+                       (viewerSplit?.arrangedSubviews.last?.frame.width ?? 0) > 100,
+                       "viewer and sidebar both have room")
+                let item = NSMenuItem()
+                item.representedObject = n
+                sidebar.renameItem(item)
+                guard let cell = sidebar.outline.view(atColumn: 0, row: sidebar.outline.row(forItem: n), makeIfNecessary: true) as? NSTableCellView,
+                      let field = cell.textField else { expect(false, "rename field exists"); return }
+                expect(field.isEditable, "rename edits the outline row")
+                field.stringValue = "renamed.tiff"
+                sidebar.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: field))
+                expect(viewer.fileURL.lastPathComponent == "renamed.tiff" && viewer.window?.title == "renamed.tiff",
+                       "an open viewer follows an inline rename")
+                let separate = app.makeTab(EditorDocument(untitledName: "Separate"), text: "", newWindow: true)
+                app.tabBecameKey(separate)
+                let renamedNode = FolderNode(url: viewer.fileURL, entry: FolderEntry(name: viewer.fileURL.lastPathComponent, isDirectory: false))
+                app.openFromFolder(renamedNode)
+                expect(sidebar.window === viewer.window, "opening a tree file in another window carries the sidebar")
+                if let unrelated = app.open(write("unrelated.txt", "elsewhere")) {
+                    app.tabBecameKey(unrelated)
+                    expect(sidebar.window === unrelated.window, "the app-wide sidebar follows an unrelated opened text tab")
+                } else { expect(false, "unrelated text opens") }
+                do {
+                    try sidebar.createItem(named: "created.pdf", in: sidebar.root, directory: false)
+                    let created = sidebar.rootURL.appendingPathComponent("created.pdf")
+                    expect(app.tabs.contains { $0.doc.fileURL == created } && sidebar.window === app.tabs.last?.window,
+                           "creating a file opens it with the sidebar")
+                    try sidebar.createItem(named: "created-folder", in: sidebar.root, directory: true)
+                    let parent = try FolderActions.create(in: sidebar.rootURL, name: "explorer", directory: true)
+                    let file = try FolderActions.create(in: parent, name: "note.txt", directory: false)
+                    let emptyPDF = try FolderActions.create(in: parent, name: "empty.pdf", directory: false)
+                    let newNode = FolderNode(url: emptyPDF, entry: FolderEntry(name: "empty.pdf", isDirectory: false))
+                    app.openFromFolder(newNode, asText: true)
+                    expect(app.tabs.contains { $0.doc.fileURL == emptyPDF }, "a new file opens as text even with a viewer extension")
+                    let newTab = app.tabs.first { $0.doc.fileURL == emptyPDF }
+                    expect(app.open(emptyPDF) === newTab, "opening that file again selects the existing text tab")
+                    try "unsaved text".write(to: file, atomically: true, encoding: .utf8)
+                    let image = parent.appendingPathComponent("picture.tiff")
+                    try Data(contentsOf: viewer.fileURL).write(to: image)
+                    guard let textTab = app.open(file), let imageTab = app.openImage(image) else {
+                        expect(false, "explorer fixture tabs open"); return
+                    }
+                    textTab.doc.markDirtyFromSession()
+                    let renamed = try FolderActions.rename(parent, name: "explorer-renamed")
+                    app.folderItemRenamed(parent, to: renamed, directory: true)
+                    expect(textTab.doc.fileURL?.path == renamed.appendingPathComponent("note.txt").path &&
+                           imageTab.fileURL.path == renamed.appendingPathComponent("picture.tiff").path,
+                           "open text and viewer tabs follow a folder rename")
+                    expect(textTab.text == "unsaved text" && textTab.doc.isDirty &&
+                           textTab.window?.title == "note.txt" && imageTab.window?.representedURL == imageTab.fileURL,
+                           "folder rename preserves unsaved text and updates window metadata")
+                    _ = try FolderActions.rename(renamed, name: "explorer-moved-away")
+                    app.folderItemTrashed(renamed, directory: true)
+                    expect(textTab.doc.missingOnDisk && textTab.doc.isDirty && textTab.text == "unsaved text" &&
+                           textTab.diskBar?.label.stringValue.contains("was deleted or moved") == true,
+                           "moving away a folder keeps text unsaved and shows the missing-file bar")
+                    let notice = imageTab.sidebarHost?.arrangedSubviews.compactMap { $0 as? NoticeBar }.first
+                    expect(notice?.isHidden == false && notice?.label.stringValue.contains("was deleted or moved") == true,
+                           "moving away a folder shows a viewer notice")
+                } catch { expect(false, "explorer file operations", error.localizedDescription) }
+            },
+            until("new folder is revealed") {
+                guard let n = node("created-folder") else { return false }
+                return sidebar.outline.row(forItem: n) == sidebar.outline.selectedRow
+            },
+            sync { app.closeFolder() },
         ])
     }
 }

@@ -54,6 +54,8 @@ public struct SessionTab: Codable, Equatable, Sendable {
     public var office: OfficeTabState?
     /// A binary (DER) certificate or PKCS#7 bundle in a certificate tab. Nil otherwise.
     public var certificate: OfficeTabState?
+    /// A text tab whose name looks like a PDF; older sessions omit this.
+    public var explicitText: Bool?
 
     /// View › Writing Mode's switches for this tab (nil: both off, and in
     /// sessions saved before 0.4.0).
@@ -74,7 +76,7 @@ public struct SessionTab: Codable, Equatable, Sendable {
                 bookmarks: [Int]? = nil, indentation: Indentation? = nil, previewDetached: Bool? = nil, previewFrame: String? = nil,
                 previewShown: Bool? = nil, previewWidth: Double? = nil, pdf: PDFTabState? = nil,
                 image: ImageTabState? = nil, office: OfficeTabState? = nil, certificate: OfficeTabState? = nil, folds: [Int]? = nil,
-                split: SplitEditorState? = nil, writing: WritingModeState? = nil, wordGoal: Int? = nil) {
+                split: SplitEditorState? = nil, writing: WritingModeState? = nil, wordGoal: Int? = nil, explicitText: Bool? = nil) {
         self.id = id
         self.path = path
         self.untitledName = untitledName
@@ -100,6 +102,7 @@ public struct SessionTab: Codable, Equatable, Sendable {
         self.split = split
         self.writing = writing
         self.wordGoal = wordGoal
+        self.explicitText = explicitText
     }
 }
 
