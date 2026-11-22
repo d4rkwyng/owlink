@@ -108,6 +108,38 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(!PreviewImageAccess.readable("pic.webp", folder: folder, openedRoot: root))
     }
 
+    /// The preview warms the index on its render queue and the scheme
+    /// handler resolves on a global queue: both off the main thread.
+    @Test func bareImageResolvesOffTheMainThread() async throws {
+        let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/images/pic.webp"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
+        let vault = WikiVault(documentFolder: folder)
+        let page = try #require(PreviewFolder.pageURL(for: folder))
+        let src = try #require(URL(string: "pic.webp", relativeTo: page)?.absoluteURL)
+        let expected = root.appendingPathComponent("images/pic.webp").path
+        #expect(!vault.indexIsFresh)
+        let (warm, direct, served, data): (Bool, String?, String?, Data?) = await withCheckedContinuation { done in
+            DispatchQueue(label: "owlink.preview.test", qos: .userInitiated).async {
+                precondition(!Thread.isMainThread)
+                vault.prepareIndex()
+                let warm = vault.indexIsFresh
+                let direct = vault.resolveImage("pic.webp")?.path
+                DispatchQueue.global(qos: .userInitiated).async {
+                    precondition(!Thread.isMainThread)
+                    let file = PreviewFolder.file(for: src, in: folder, openedRoot: nil, vaultRoot: vault.root,
+                                                  scriptOn: false, vault: vault)
+                    done.resume(returning: (warm, direct, file?.path, file.flatMap { try? Data(contentsOf: $0) }))
+                }
+            }
+        }
+        #expect(warm)
+        #expect(direct == expected)
+        #expect(served == expected)
+        #expect(data != nil)
+        #expect(vault.resolveImage("../pic.webp") == nil)
+    }
+
     @Test func attachmentFolderRootAndNoteRelative() throws {
         let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/a/pic.webp",
                               "v/notes/sub/deep/pic.webp"])

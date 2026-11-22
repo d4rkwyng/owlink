@@ -212,6 +212,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         let cachedAccess = folderAccess?.key == accessKey ? folderAccess?.readable : nil
         let hint = "<p class=\"preview-hint\"><a href=\"\(Self.grantURL)\">" + Markdown.escape(String(localized: "Open the folder to see its images")) + "</a></p>\n"
         queue.async { [weak self] in
+            // Warm the vault's name index here, off the main thread, so the
+            // page's bare-name images don't build it on first request.
+            vault?.prepareIndex()
             var body: String
             switch source {
             case .markdown(let markdown): body = HTMLScrub.noScriptNoRemote(Markdown.render(markdown, options: .preview(vault: vault)))

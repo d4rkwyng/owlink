@@ -38,20 +38,27 @@ final class PreviewFiles: NSObject, WKURLSchemeHandler {
             task.didFinish()
             return
         }
-        guard let file = file(for: url) else {
+        guard let folder else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
+        // Resolving can walk the vault (a bare-name image), so it runs off
+        // the main thread with the roots captured now; only the task calls
+        // and `stopped` stay on main.
+        let openedRoot = openedRoot, vaultRoot = vaultRoot, vault = vault
         let box = PreviewTaskBox(task)
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = try? Data(contentsOf: file, options: .mappedIfSafe)
-            let mime = PreviewScheme.mimeType(forExtension: file.pathExtension)
-                ?? UTType(filenameExtension: file.pathExtension)?.preferredMIMEType
+            let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: false, vault: vault)
+            let data = file.flatMap { try? Data(contentsOf: $0, options: .mappedIfSafe) }
+            let ext = file?.pathExtension ?? ""
+            let mime = PreviewScheme.mimeType(forExtension: ext)
+                ?? UTType(filenameExtension: ext)?.preferredMIMEType
                 ?? "application/octet-stream"
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let task = box.task
                     guard !self.stopped.contains(id) else { self.stopped.remove(id); return }
+                    guard file != nil else { task.didFailWithError(URLError(.noPermissionsToReadFile)); return }
                     guard let data else { task.didFailWithError(URLError(.fileDoesNotExist)); return }
                     task.didReceive(Self.response(url: url, data: data, mime: mime))
                     task.didReceive(data)
