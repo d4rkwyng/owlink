@@ -796,8 +796,8 @@ vault (the sidebar folder, else the folder holding `.obsidian/`) and open
 them in a tab, `![[image.png|300]]` shows the image, `![[note#Heading]]`
 quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 `%%comments%%` and `#tags` show as in Obsidian. Site-root images
-(`/images/logo.webp`, as Hugo or Quartz write them) load from the site's
-folder on disk (`static/`, `public/`, `content/` …), never the network. Fenced code blocks are
+(`/images/logo.webp`, as Hugo, Jekyll or Quartz write them) load from the site's
+folder on disk (`static/`, `public/`, `quartz/static/` and `content/`), never the network. Fenced code blocks are
 coloured by their language (```` ```swift ````, `py`, `js`, `bash`, …)
 both in the editor and in the preview, by Owlink's own tokenizers and
 the theme's colours (no JavaScript highlighter). **Detach Preview** (View menu, ⇧⌥⌘P,
@@ -1061,8 +1061,9 @@ type), waves once per launch, points at the lines a hint is about, nods
 when a fix is applied, thinks / searches / writes while the AI works,
 and falls asleep after 5 minutes without typing (a click wakes him).
 With Reduce Motion on (System Settings › Accessibility) he stays still:
-no gestures, a single still frame for each state. His rules need no AI and only ever look
-at the text in view (at most 8 KB):
+no gestures, a single still frame for each state. His rules need no AI.
+Most look at the text in view (at most 8 KB); some also check saved files
+or wait until the whole file fits:
 - warnings: merge-conflict markers left in the file; something that looks
   like a secret (a private key, an AWS key, a GitHub, Slack, Stripe or
   OpenAI/Anthropic token); JSON that doesn't parse (with the line; a
