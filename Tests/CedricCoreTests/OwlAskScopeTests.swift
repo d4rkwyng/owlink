@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import CedricCore
 
-/// Ask Cedric's scope (0.4.0): the whole document by default when it fits
+/// Ask Cedric's scope: the whole document by default
 /// the model's context, and get_outline's counts for "how many" questions
 /// about a file shown only in part.
 @Suite struct OwlAskScopeTests {
@@ -21,17 +21,20 @@ import Testing
                             fileName: "games.md", language: "markdown")
     }
 
-    @Test func defaultIsWholeDocumentWhenItFitsElseVisible() {
+    @Test func defaultIsWholeDocumentUnlessSelected() throws {
         #expect(OwlChatContext.defaultScope(for: snap(), budget: 5_000) == .wholeDocument)
-        #expect(OwlChatContext.defaultScope(for: snap(), budget: 50) == .visible)
+        #expect(OwlChatContext.defaultScope(for: snap(), budget: 50) == .wholeDocument)
         // A selection still wins.
         #expect(OwlChatContext.defaultScope(for: snap(sel: NSRange(location: 0, length: 5)), budget: 5_000) == .selection)
         // The default always builds at the same budget.
         let big = String(repeating: "a line of text\n", count: 600)
         let s = snap(big)
         let scope = OwlChatContext.defaultScope(for: s, budget: 5_000)
-        #expect(scope == .visible)
-        #expect(OwlChatContext.build(s, scope: scope, budget: 5_000) != nil)
+        #expect(scope == .wholeDocument)
+        let context = try #require(OwlChatContext.build(s, scope: scope, budget: 5_000))
+        #expect(context.truncated && context.firstLine == 1)
+        #expect(context.label == "Lines \(context.firstLine)–\(context.lastLine) of 600 (trimmed to fit)")
+        #expect(context.firstLine <= s.lineNumber(at: s.selection.location) && context.lastLine >= s.lineNumber(at: s.selection.location))
     }
 
     @Test func sectionCountsListItemsNestedAndTableRowsOutsideCode() {

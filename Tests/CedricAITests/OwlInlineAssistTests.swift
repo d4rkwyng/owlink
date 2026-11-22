@@ -77,6 +77,18 @@ import CedricCore
         #expect(budget(history: oldTurn + recent) == budget(history: recent))
     }
 
+    @Test func documentBudgetIncludesPromptHistoryAndDigest() {
+        func budget(system: String = "", history: [OwlChatEntry] = [], digest: Int = 0) -> Int {
+            OwlInlineAssist.documentBudget(engineBudget: 5_000, instructionWrapper: "question",
+                                           systemPrompt: system, history: history, digestReservation: digest)
+        }
+        let empty = budget()
+        #expect(budget(system: "😀") == empty - 2)
+        #expect(budget(history: [OwlChatEntry(role: .user, text: "prior")]) == empty - 5)
+        #expect(budget(digest: 500) == empty - 500)
+        #expect(empty == 5_000 - 8 - 256)
+    }
+
     @Test func askAgainFindsOnlyTheOriginalSelection() {
         let text = "Before selected words after"
         let original = (text as NSString).range(of: "selected words")

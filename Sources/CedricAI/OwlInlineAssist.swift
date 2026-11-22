@@ -32,6 +32,12 @@ public enum OwlInlineAssist {
                    - historyLength - max(0, digestReservation) - max(0, slack))
     }
 
+    public static func documentBudget(engineBudget: Int, instructionWrapper: String, systemPrompt: String,
+                                      history: [OwlChatEntry], digestReservation: Int = 0) -> Int {
+        remainingBudget(engineBudget: engineBudget, numberedContext: "", instructionWrapper: instructionWrapper,
+                        systemPrompt: systemPrompt, history: history, digestReservation: digestReservation)
+    }
+
     public static func clip(_ selection: String, budget: Int) -> SelectionClip {
         let source = selection as NSString
         var length = min(source.length, max(0, budget))

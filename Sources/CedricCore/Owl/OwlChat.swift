@@ -206,40 +206,71 @@ public struct OwlChatContext: Sendable, Equatable {
     public let range: NSRange
     public let firstLine: Int
     public let lastLine: Int
+    public let totalLines: Int
     public let numbered: String
     /// Some lines were left out to fit the budget.
     public let truncated: Bool
 
     /// "Selection (12 lines)", for the chip.
     public var label: String {
+        if scope == .wholeDocument, truncated {
+            return String(localized: "Lines \(firstLine)–\(lastLine) of \(totalLines) (trimmed to fit)")
+        }
         let n = lastLine - firstLine + 1
         let lines = n == 1 ? String(localized: "1 line") : String(localized: "\(n) lines")
         return "\(scope.title) (\(lines)\(truncated ? ", " + String(localized: "trimmed") : ""))"
     }
 
-    /// The scopes that can be offered: Selection only with a selection,
-    /// Whole document only when it fits `budget` (UTF-16 units).
+    /// Selection is offered only with a selection; the other scopes are always available.
     public static func scopes(for s: OwlDocumentSnapshot, budget: Int) -> [OwlChatScope] {
         var out: [OwlChatScope] = []
         if s.hasSelection { out.append(.selection) }
         out.append(.visible)
-        if s.length + s.lineCount * 6 <= budget { out.append(.wholeDocument) }
+        out.append(.wholeDocument)
         return out
     }
 
-    /// Selection if there is one; else the whole document when it fits
-    /// `budget` (the model's context), so a question about the file sees
-    /// all of it; else the visible text (and, for the rest, the tools or
-    /// the digest: `OwlChatRequest.digest` in CedricAI).
+    /// Selection if there is one; otherwise the whole document.
     public static func defaultScope(for s: OwlDocumentSnapshot, budget: Int) -> OwlChatScope {
         if s.hasSelection { return .selection }
-        return scopes(for: s, budget: budget).contains(.wholeDocument) ? .wholeDocument : .visible
+        return .wholeDocument
     }
 
     /// The context for `scope`, at most `budget` UTF-16 units of numbered
-    /// text (lines past it are dropped from the end, never split). nil
-    /// when the scope isn't available (no selection; doesn't fit).
+    /// text, without splitting lines. An oversized anchor line is kept.
+    /// nil only when a selection was requested without one.
     public static func build(_ s: OwlDocumentSnapshot, scope: OwlChatScope, budget: Int) -> OwlChatContext? {
+        func lineLength(_ line: Int) -> Int {
+            s.lines.contentRange(ofLine: line - 1).length + String(line).count + 2
+        }
+        if scope == .wholeDocument {
+            let total = s.countedLines
+            let wholeLength = (1...total).reduce(0) { $0 + lineLength($1) } + total - 1
+            var first = 1, last = total
+            if wholeLength > budget {
+                let midpoint = s.selection.location + s.selection.length / 2
+                let anchor = min(total, s.lineNumber(at: midpoint))
+                first = anchor
+                last = anchor
+                var used = lineLength(anchor)
+                var below = true, canAbove = first > 1, canBelow = last < total
+                while canAbove || canBelow {
+                    if below && canBelow {
+                        let length = lineLength(last + 1) + 1
+                        if used + length <= budget { last += 1; used += length; canBelow = last < total }
+                        else { canBelow = false }
+                    } else if !below && canAbove {
+                        let length = lineLength(first - 1) + 1
+                        if used + length <= budget { first -= 1; used += length; canAbove = first > 1 }
+                        else { canAbove = false }
+                    }
+                    below.toggle()
+                }
+            }
+            let range = s.range(lines: first, last) ?? NSRange(location: 0, length: 0)
+            return OwlChatContext(scope: scope, range: range, firstLine: first, lastLine: last, totalLines: total,
+                                  numbered: s.numbered(lines: first, last), truncated: first > 1 || last < total)
+        }
         let span: (range: NSRange, first: Int, last: Int)
         switch scope {
         case .selection:
@@ -248,18 +279,17 @@ public struct OwlChatContext: Sendable, Equatable {
         case .visible:
             span = s.lineSpan(s.visible)
         case .wholeDocument:
-            guard scopes(for: s, budget: budget).contains(.wholeDocument) else { return nil }
-            span = (s.range(lines: 1, s.lineCount) ?? NSRange(location: 0, length: 0), 1, s.lineCount)
+            preconditionFailure("Whole-document context is built above")
         }
         var last = span.last
         var used = 0
         for line in span.first...span.last {
-            let len = s.lines.contentRange(ofLine: line - 1).length + String(line).count + 3
+            let len = lineLength(line) + (line == span.first ? 0 : 1)
             if used + len > budget, line > span.first { last = line - 1; break }
             used += len
         }
         let range = s.range(lines: span.first, last) ?? span.range
-        return OwlChatContext(scope: scope, range: range, firstLine: span.first, lastLine: last,
+        return OwlChatContext(scope: scope, range: range, firstLine: span.first, lastLine: last, totalLines: s.countedLines,
                               numbered: s.numbered(lines: span.first, last), truncated: last < span.last)
     }
 }

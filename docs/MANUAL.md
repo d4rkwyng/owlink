@@ -1298,8 +1298,11 @@ does the same, and the owl says so once, a while after a new user's
 first launch. A small panel about the current document opens (a
 floating panel you can drag anywhere; it hides when you switch tabs and
 comes back with its tab). A chip
-picks what Cedric sees (Selection, Visible text, or the Whole document
-when it fits the model); quick actions **Explain** (**What Does It
+picks what Cedric sees: Selection is the default when there is one,
+otherwise Whole document; Visible text remains a choice. If the file is
+larger than the engine's context, Cedric sends as many whole lines as fit,
+centred on the caret or selection. The chip says which lines were sent,
+for example "Lines 1–180 of 263 (trimmed to fit)". Quick actions **Explain** (**What Does It
 Do?** for scripts), **Explain Line** (the selection or the caret's
 line), **Find Problems**, **Summarise** / **Rewrite** (prose),
 **Simplify** and **Add Comments** (code), or type a question. Answers
@@ -1403,7 +1406,8 @@ told the script's text is never instructions) and ends with a verdict:
 source" or "Don't run it". Cedric never calls a script safe: the app
 rewrites any such line (also while the answer streams in), and forces "Don't run it — review the flagged
 lines" after a high-risk finding or when only part of the script was
-reviewed, whatever the model said.
+reviewed, whatever the model said. When the whole document was sent and
+the offline scan was complete, it does not claim the review was partial.
 
 ## Help menu
 

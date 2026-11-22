@@ -131,4 +131,97 @@ import CedricCore
         #expect(o.answer == "Each has 60." && o.coverageNote == nil && o.modelAnswer == o.answer)
         #expect(probe.offered == [[]])
     }
+
+    @Test func promptsDescribeActualCoverage() throws {
+        let s = OwlDocumentSnapshot(text: "print('hello')\nprint('world')\n", generation: 1,
+                                    visible: NSRange(location: 0, length: 5), language: "python")
+        for scope in [OwlChatScope.wholeDocument, .visible] {
+            let ctx = try #require(OwlChatContext.build(s, scope: scope, budget: 5_000))
+            let partial = scope == .visible
+            let req = OwlChatRequest(question: "Check risks", action: .scriptSafety, context: ctx, snapshot: s,
+                                     useTools: true, prose: false)
+            let messages = OwlPrompts.chatMessages(question: req.prompt, context: ctx, language: "Python", fileName: nil,
+                                                   history: [], toolsOn: true, model: "", totalLines: s.countedLines)
+            guard case .system(let system)? = messages.first, case .user(let user)? = messages.last else {
+                Issue.record("Expected system and user messages"); return
+            }
+            #expect(system.contains("You usually see only part of the document") == partial)
+            #expect(req.prompt.contains("lines 1-1 of 2") == partial)
+            #expect(user.contains("You see lines 1-1 of 2") == partial)
+            #expect(user.contains(" of 2") == partial)
+            #expect(req.forcedVerdict == (partial ? .truncated : nil))
+            #expect(!OwlPrompts.envelopeInstructions(OwlTools.specs(req.tools)).contains("You were shown only some lines"))
+            if !partial {
+                #expect(!user.contains("(trimmed;"))
+                #expect(!req.contextIsPartial)
+                var scanTruncated = req
+                scanTruncated.scanTruncated = true
+                #expect(scanTruncated.forcedVerdict == .truncated)
+            }
+        }
+        let trimmed = try #require(OwlChatContext.build(s, scope: .wholeDocument, budget: 15))
+        let req = OwlChatRequest(question: "Check risks", action: .scriptSafety, context: trimmed, snapshot: s,
+                                 useTools: false, prose: false)
+        #expect(req.prompt.contains("lines 1-1 of 2"))
+        #expect(req.forcedVerdict == .truncated)
+    }
+
+    @Test func documentContextReservesTheActualPromptAndDigest() throws {
+        let s = Self.snap()
+        let history = [OwlChatEntry(role: .user, text: String(repeating: "h", count: 300))]
+        let question = "What is in the Genesis section?"
+        let ctx = try #require(OwlChatRequest.documentContext(s, scope: .wholeDocument, engineBudget: 5_000,
+                                                              history: history, question: question, action: nil,
+                                                              tools: false, server: false, prose: true))
+        let req = OwlChatRequest(question: question, context: ctx, snapshot: s, history: history, useTools: false, prose: true)
+        let additions = req.contextAdditions(engineBudget: 5_000)
+        #expect(ctx.truncated && additions.digest != nil && additions.digestReservation > 0)
+        #expect((ctx.numbered as NSString).length <= req.documentBudget(engineBudget: 5_000, server: false))
+
+        let preview = try #require(OwlChatRequest.documentContext(s, scope: .wholeDocument, engineBudget: 5_000,
+                                                                  history: history, question: question, action: nil,
+                                                                  tools: false, server: false, prose: true, preview: true))
+        #expect((preview.numbered as NSString).length >= (ctx.numbered as NSString).length)
+        let action = try #require(OwlChatRequest.documentContext(s, scope: .wholeDocument, engineBudget: 5_000,
+                                                                 history: history, question: "Check risks",
+                                                                 action: .scriptSafety, tools: false, server: false,
+                                                                 prose: false, scan: String(repeating: "finding ", count: 100)))
+        let actionReq = OwlChatRequest(question: "Check risks", action: .scriptSafety, context: action, snapshot: s,
+                                       history: history, useTools: false, prose: false,
+                                       scan: String(repeating: "finding ", count: 100))
+        #expect((action.numbered as NSString).length <= actionReq.documentBudget(engineBudget: 5_000, server: false))
+    }
+
+    @Test func largeScriptDocumentContextFitsTheRemainingBudget() throws {
+        let text = (1...263).map { i in
+            let prefix = "line-\(i) "
+            return prefix + String(repeating: "x", count: (i <= 52 ? 36 : 35) - prefix.count)
+        }.joined(separator: "\n")
+        #expect((text as NSString).length == 9_519)
+        let ns = text as NSString
+        let caret = ns.range(of: "line-132 ").location
+        let visibleEnd = ns.range(of: "line-53 ").location
+        let s = OwlDocumentSnapshot(text: text, generation: 1, selection: NSRange(location: caret, length: 0),
+                                    visible: NSRange(location: 0, length: visibleEnd), language: "python")
+        let typed = try #require(OwlChatRequest.documentContext(s, scope: .wholeDocument, engineBudget: 5_000,
+                                                                history: [], question: "What does this script do?",
+                                                                action: nil, tools: false, server: false, prose: false))
+        #expect(typed.truncated && typed.numbered.contains("line-132 "))
+        let typedReq = OwlChatRequest(question: "What does this script do?", context: typed, snapshot: s,
+                                      useTools: false, prose: false)
+        #expect((typed.numbered as NSString).length <= typedReq.documentBudget(engineBudget: 5_000, server: false))
+        #expect(typedReq.contextIsPartial && typedReq.forcedVerdict == nil)
+        #expect(typed.label.hasSuffix("of 263 (trimmed to fit)"))
+
+        let safety = try #require(OwlChatRequest.documentContext(s, scope: .wholeDocument, engineBudget: 5_000,
+                                                                 history: [], question: "Check risks",
+                                                                 action: .scriptSafety, tools: false, server: false,
+                                                                 prose: false))
+        #expect(safety.truncated && safety.numbered.contains("line-132 "))
+        let safetyReq = OwlChatRequest(question: "Check risks", action: .scriptSafety, context: safety, snapshot: s,
+                                       useTools: false, prose: false)
+        #expect((safety.numbered as NSString).length <= safetyReq.documentBudget(engineBudget: 5_000, server: false))
+        #expect(safetyReq.forcedVerdict == .truncated)
+        #expect(safety.lastLine - safety.firstLine + 1 > 0)
+    }
 }

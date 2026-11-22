@@ -62,6 +62,17 @@ final class OwlChatStore {
 
     func invalidateScoreKey() { scoreKeyCache = nil }
 
+    var previewUsesTools: Bool {
+        if let v = DevEnvironment.values["CEDRIC_OWL_TOOLS"] { return v == "1" }
+        if AskCedricEngine.fakeDelay != nil { return gate.allowsTools(FakeChatEngine(delay: 0).scoreKey) }
+        guard let settings = AskCedricEngine.settings() else { return false }
+        if let cached, cached.settings == settings { return gate.allowsTools(cached.engine.scoreKey) }
+        if scoreKeyCache?.settings != settings {
+            scoreKeyCache = (settings, OwlChatEngines.configuredScoreKey(settings: settings))
+        }
+        return scoreKeyCache?.key.map { gate.allowsTools($0) } ?? false
+    }
+
     var inlineAllowsTools: Bool {
         if AskCedricEngine.fakeDelay != nil { return gate.allowsTools(FakeChatEngine(delay: 0).scoreKey) }
         guard let settings = AskCedricEngine.settings() else { return false }
@@ -441,15 +452,24 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     func refresh() {
         guard let tab else { return }
         let s = snapshot()
-        // The engine's own budget: a scope offered here must fit when asked.
-        let budget = OwlChatStore.shared.contextBudget
+        let history = docID.map { OwlChatStore.shared.history($0) } ?? []
+        let tools = OwlChatStore.shared.previewUsesTools
+        let server = AskCedricEngine.fakeDelay == nil && (AskCedricEngine.settings()?.backend.usesServer ?? false)
+        let picture = OwlPicture.isPicture(fileName: s.fileName)
+            ? SVGPictureSource(text: s.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
+        let budget = OwlInlineAssist.documentBudget(engineBudget: OwlChatStore.shared.contextBudget, instructionWrapper: "",
+                                                    systemPrompt: OwlPrompts.chatSystem(toolsOn: tools, server: server),
+                                                    history: history)
         scopes = OwlChatContext.scopes(for: s, budget: budget)
         // The user's own pick stays while it's offered; else the default
-        // (the whole document when it fits), worked out again each time.
+        // is worked out again each time.
         let current = pickedScope.flatMap { scopes.contains($0) ? $0 : nil }
         scopePopup.removeAllItems()
         for sc in scopes {
-            let label = OwlChatContext.build(s, scope: sc, budget: budget)?.label ?? sc.title
+            let label = OwlChatRequest.documentContext(s, scope: sc, engineBudget: OwlChatStore.shared.contextBudget,
+                                                       history: history, question: "", action: nil, tools: tools,
+                                                       server: server, prose: isProse, imageSource: picture,
+                                                       preview: true)?.label ?? sc.title
             scopePopup.addItem(withTitle: label)
             scopePopup.lastItem?.representedObject = sc.rawValue
         }
@@ -493,7 +513,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     var selectedScope: OwlChatScope {
-        (scopePopup.selectedItem?.representedObject as? String).flatMap(OwlChatScope.init(rawValue:)) ?? .visible
+        (scopePopup.selectedItem?.representedObject as? String).flatMap(OwlChatScope.init(rawValue:)) ?? .wholeDocument
     }
 
     func selectScope(_ s: OwlChatScope) {
@@ -592,7 +612,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// Check for Risks: the offline scan first (no AI; works on any Mac),
     /// then, with Ask Cedric on and an engine ready, the model's review of
-    /// the whole script (or what's in view) with the findings attached.
+    /// the whole script (or a centred window) with the findings attached.
     /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run
     /// it" after a high finding or a partial review.
     func checkScriptSafety() {
@@ -690,8 +710,6 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 self.finish(nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
                 return
             }
-            let ctx = OwlChatContext.build(snap, scope: scope, budget: engine.contextBudget)
-                ?? OwlChatContext.build(snap, scope: .visible, budget: engine.contextBudget)!
             let tools = OwlChatStore.shared.useTools(engine)
             if inline, action == .rewrite, (!tools || !OwlChatStore.shared.gate.allowsTools(engine.scoreKey)) {
                 self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
@@ -703,6 +721,27 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             // otherwise has no tools.
             let picture = OwlPicture.isPicture(fileName: snap.fileName)
                 ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
+            func context(for scope: OwlChatScope) -> OwlChatContext? {
+                OwlChatRequest.documentContext(snap, scope: scope, engineBudget: engine.contextBudget,
+                                               history: history, question: question, action: action,
+                                               tools: tools, server: engine.usesServer, prose: prose,
+                                               imageSource: picture, scan: scan, inline: inline)
+            }
+            // The chip can still say Selection after the user has clicked away.
+            var usedScope = scope
+            var ctx = context(for: usedScope)
+            if ctx == nil, usedScope == .selection, !snap.hasSelection, !inline {
+                usedScope = .wholeDocument
+                ctx = context(for: usedScope)
+            }
+            guard let ctx else {
+                self.finish(nil, error: String(localized: "The selected text is no longer available."))
+                return
+            }
+            if let index = self.scopes.firstIndex(of: usedScope) {
+                self.scopePopup.item(at: index)?.title = ctx.label
+                self.scopePopup.selectItem(at: index)
+            }
             if inline, let action {
                 let budgetRequest = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
                                                    history: history, useTools: tools, prose: prose, scan: scan,
@@ -711,7 +750,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 let promptTools = !OwlTools.specs(budgetRequest.tools).isEmpty
                 let system = OwlPrompts.chatSystem(toolsOn: promptTools, server: engine.usesServer,
                                                    digest: additions.digest != nil, checks: additions.checks != nil,
-                                                   canEdit: budgetRequest.tools.contains(.proposeEdit))
+                                                   canEdit: budgetRequest.tools.contains(.proposeEdit),
+                                                   partial: budgetRequest.contextIsPartial)
                 let wrapper = OwlInlineAssist.instruction(action: action, selection: "", prose: prose,
                                                           toolsOn: tools, context: ctx)
                 let room = OwlInlineAssist.remainingBudget(engineBudget: engine.contextBudget,

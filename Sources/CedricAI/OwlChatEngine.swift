@@ -319,6 +319,56 @@ public struct OwlChatRequest: Sendable {
         return ContextAdditions(checks: checks, digest: digest, digestReservation: digest == nil ? 0 : reservation)
     }
 
+    /// Room for numbered document text, using the same additions as the runner.
+    public func documentBudget(engineBudget: Int, server: Bool, instructionWrapper: String? = nil) -> Int {
+        let additions = contextAdditions(engineBudget: engineBudget)
+        let system = OwlPrompts.chatSystem(toolsOn: !OwlTools.specs(tools).isEmpty, server: server,
+                                           digest: additions.digest != nil, checks: additions.checks != nil,
+                                           canEdit: tools.contains(.proposeEdit), partial: contextIsPartial)
+        let wrapper = (instructionWrapper ?? prompt) + (additions.checks ?? "")
+        return OwlInlineAssist.documentBudget(engineBudget: engineBudget, instructionWrapper: wrapper,
+                                              systemPrompt: system, history: history,
+                                              digestReservation: additions.digestReservation)
+    }
+
+    /// Build against the prompt and additions the runner will actually send.
+    public static func documentContext(_ snapshot: OwlDocumentSnapshot, scope: OwlChatScope, engineBudget: Int,
+                                       history: [OwlChatEntry], question: String, action: OwlQuickAction?, tools: Bool,
+                                       server: Bool, prose: Bool, imageSource: (any OwlImageSource)? = nil,
+                                       scan: String? = nil, inline: Bool = false, preview: Bool = false) -> OwlChatContext? {
+        var budget = OwlInlineAssist.documentBudget(engineBudget: engineBudget, instructionWrapper: "",
+                                                    systemPrompt: OwlPrompts.chatSystem(toolsOn: tools, server: server,
+                                                                                       partial: false),
+                                                    history: history)
+        // The chip only needs a label: don't build a real request, which would
+        // run the digest and outline on the main thread for every scope.
+        if preview {
+            guard var context = OwlChatContext.build(snapshot, scope: scope, budget: budget) else { return nil }
+            let partial = context.truncated || context.firstLine > 1 || context.lastLine < snapshot.countedLines
+            if partial, !tools, action == nil {
+                // Same cap as OwlChatRequest.contextAdditions, taken from the
+                // room before the window is filled, so the chip is close to a
+                // typed question that will attach a digest.
+                let reservation = min(2_000, max(0, budget))
+                if reservation > 0, let trimmed = OwlChatContext.build(snapshot, scope: scope,
+                                                                       budget: max(0, budget - reservation)) {
+                    context = trimmed
+                }
+            }
+            return context
+        }
+        while let context = OwlChatContext.build(snapshot, scope: scope, budget: budget) {
+            let request = OwlChatRequest(question: question, action: action, context: context, snapshot: snapshot,
+                                         history: history, useTools: tools, prose: prose, scan: scan,
+                                         imageSource: imageSource, inlineSelection: inline ? "" : nil)
+            let remaining = request.documentBudget(engineBudget: engineBudget, server: server,
+                                                   instructionWrapper: preview ? "" : nil)
+            if remaining >= budget { return context }
+            budget = remaining
+        }
+        return nil
+    }
+
     /// What Cedric says first when he has not seen all of the document:
     /// "I can see lines 1–52 of 210." (and what the tools added), so a
     /// partial answer never reads as a whole one. On unless the question
@@ -434,7 +484,7 @@ public enum OwlChatRunner {
                                                fileName: req.snapshot.fileName, history: req.history,
                                                toolsOn: !specs.isEmpty, model: model, server: engine.usesServer,
                                                canDescribeImage: req.tools.contains(.describeImage),
-                                               totalLines: req.snapshot.lineCount, digest: digest?.text, checks: checks,
+                                               totalLines: req.snapshot.countedLines, digest: digest?.text, checks: checks,
                                                canEdit: req.tools.contains(.proposeEdit))
         onEvent(.phase(.thinking))
         let wrote = Flag()
