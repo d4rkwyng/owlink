@@ -1,9 +1,9 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import doc_icons as icons
 
 
@@ -46,6 +46,62 @@ class DocumentIconTests(unittest.TestCase):
                     self.assertIn(icons.ci.WHITE, {color for _, color in image.getcolors(size * size)})
                     self.assertEqual(image.getpixel((0, 0))[3], 0)
 
+    def test_white_ink_stays_clear_of_fold(self):
+        for size in (16, 32, 64, 128):
+            if size == 16:
+                fold = [(9, 2), (9, 6), (13, 6)]
+                factor = 1
+            elif size == 32:
+                fold = [(18, 2), (18, 10), (26, 10)]
+                factor = 1
+            else:
+                factor = icons.ci.SS
+                n = size * factor
+                fold = [((icons.X1 - icons.F) * n, icons.Y0 * n),
+                        ((icons.X1 - icons.F) * n, (icons.Y0 + icons.F) * n),
+                        (icons.X1 * n, (icons.Y0 + icons.F) * n)]
+            mask = Image.new('L', (size * factor, size * factor))
+            ImageDraw.Draw(mask).polygon(fold, fill=255)
+            if factor > 1:
+                mask = mask.resize((size, size), Image.Resampling.BOX)
+            for text, _ in icons.TYPES:
+                with self.subTest(text=text, size=size):
+                    image = icons.doc_icon(text, size)
+                    for y in range(size):
+                        for x in range(size):
+                            if mask.getpixel((x, y)):
+                                self.assertNotEqual(image.getpixel((x, y)), icons.ci.WHITE,
+                                                    (text, size, x, y))
+
+    def test_small_glyph_ink_stays_inside_page(self):
+        for size, page in (
+            (16, [(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)]),
+            (32, [(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)]),
+        ):
+            mask = Image.new('L', (size, size))
+            ImageDraw.Draw(mask).polygon(page, fill=255)
+            for text, _ in icons.TYPES:
+                with self.subTest(text=text, size=size):
+                    image = icons.doc_icon(text, size)
+                    for y in range(size):
+                        for x in range(size):
+                            if image.getpixel((x, y)) == icons.ci.WHITE:
+                                self.assertNotEqual(mask.getpixel((x, y)), 0, (text, size, x, y))
+
+    def test_label_font_selects_bold_variation(self):
+        self.assertIn(icons.label_font(20).getname()[1], ('Bold', 'Heavy'))
+        font = Mock()
+        font.get_variation_names.return_value = [b'Regular', b'Heavy']
+        with patch.object(icons.ImageFont, 'truetype', return_value=font):
+            self.assertIs(icons.label_font(20), font)
+            font.set_variation_by_name.assert_called_once_with('Heavy')
+            font.get_variation_names.return_value = [b'Regular']
+            with self.assertRaisesRegex(RuntimeError, 'bold SFNS'):
+                icons.label_font(20)
+        with patch.object(icons.ImageFont, 'truetype', side_effect=OSError('font unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'bold SFNS'):
+                icons.label_font(20)
+
     def test_retina_small_icons_double_their_point_master(self):
         for text, _ in icons.TYPES:
             for size in (16, 32):
@@ -67,16 +123,17 @@ class DocumentIconTests(unittest.TestCase):
 
     def test_large_icons_render_lower_labels_without_a_mascot(self):
         for text, _ in icons.TYPES:
-            with self.subTest(text=text):
-                with patch.object(icons.ci, 'owl') as owl:
-                    image = icons.doc_icon(text, 64)
-                owl.assert_not_called()
-                bottom = image.crop((0, 46, 64, 57))
-                white = sum(count for count, color in bottom.getcolors(64 * 11) if color == icons.ci.WHITE)
-                if text:
-                    self.assertGreater(white, 0)
-                else:
-                    self.assertEqual(white, 0)
+            for size in (64, 128, 256):
+                with self.subTest(text=text, size=size):
+                    with patch.object(icons.ci, 'owl') as owl:
+                        image = icons.doc_icon(text, size)
+                    owl.assert_not_called()
+                    bottom = image.crop((0, round(46 * size / 64), size, round(57 * size / 64)))
+                    white = sum(count for count, color in bottom.getcolors(size * size) if color == icons.ci.WHITE)
+                    if text:
+                        self.assertGreater(white, 0)
+                    else:
+                        self.assertEqual(white, 0)
 
     def test_dark_pages_have_pale_rim(self):
         for text in icons.RIM_TYPES:

@@ -73,9 +73,9 @@ PIXELS = {
     'lambda':   ('1100000', '0010000', '0010000', '0101000', '1000100'),
     'parens':   ('0100010', '1000001', '1000001', '1000001', '0100010'),
     'generic':  ('0010100', '0100010', '1001001', '0100010', '0010100'),
-    'dollar':   ('0011100', '0110000', '0011100', '0000110', '0111000', '0001000'),
+    'dollar':   ('0011100', '0111000', '0011100', '0001110', '0111000'),
     'prompt':   ('1000000', '0100000', '0010000', '0100000', '1001111'),
-    'table':    ('1111111', '1001001', '1111111', '1001001', '1111111', '1001001'),
+    'table':    ('1111111', '1001001', '1111111', '1001001', '1111111'),
 }
 
 # Paths in a 0..1 glyph square. These correspond to the pixel masters but
@@ -114,11 +114,16 @@ def shade(color, target, amount):
 
 
 def label_font(px):
-    for path in ('/System/Library/Fonts/Supplemental/Arial Bold.ttf',
-                 '/System/Library/Fonts/HelveticaNeue.ttc'):
-        if os.path.exists(path):
-            return ImageFont.truetype(path, px)
-    raise RuntimeError('A bold system font is required to draw document labels')
+    try:
+        font = ImageFont.truetype('/System/Library/Fonts/SFNS.ttf', px)
+        names = font.get_variation_names()
+        for name in ('Bold', 'Heavy'):
+            if name.encode() in names:
+                font.set_variation_by_name(name)
+                return font
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Cannot select a bold SFNS font for document labels') from exc
+    raise RuntimeError('Cannot select a bold SFNS font for document labels')
 
 
 def page(c, text):
@@ -156,7 +161,7 @@ def small_icon(text):
     d.polygon([(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)], fill=color)
     d.polygon([(9, 2), (9, 6), (13, 6)], fill=fold)
     rows = PIXELS[STYLES[text][1]]
-    y0 = 7 if len(rows) == 5 else 6
+    y0 = 7
     for y, row in enumerate(rows):
         for x, bit in enumerate(row):
             if bit == '1':
@@ -169,6 +174,9 @@ def draw_glyph(image, glyph, size, labelled):
     # Keep ink clear of the lighter fold and above the lower-third label.
     x0, x1 = .30 * size, .70 * size
     y0, y1 = (.28, .62) if labelled else (.30, .68)
+    if size == 32:
+        y0 += 1 / size
+        y1 += 1 / size
     stroke = max(2 if size == 32 else 1, round(.045 * size))
     for path in PATHS[glyph]:
         pts = [(round(x0 + x * (x1 - x0)), round((y0 + y * (y1 - y0)) * size)) for x, y in path]
