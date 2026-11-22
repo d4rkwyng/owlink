@@ -6,8 +6,8 @@ public enum MarkdownExport {
     /// Remote images stay, as on the Mac's saved HTML file.
     public static let csp = "script-src 'none'; object-src 'none'; frame-src 'none'"
 
-    /// Print and PDF: nothing is loaded from the network (the Mac's PDF
-    /// goes through the preview, which uses this policy).
+    /// Print and PDF: the preview CSP, so the web view loads nothing from
+    /// the network. External links stay in the HTML, as on the Mac's PDF.
     public static let sandboxedCSP = "default-src 'none'; img-src data: \(PreviewFolder.scheme):; media-src data: \(PreviewFolder.scheme):; style-src 'unsafe-inline'; font-src data:; script-src 'none'; connect-src 'none'"
 
     public static func baseName(displayName: String) -> String {
@@ -23,10 +23,11 @@ public enum MarkdownExport {
         page(markdown: markdown, title: title, vault: vault, remote: true)
     }
 
-    /// `remote` false: also drop network URLs, for print and PDF.
+    /// `remote` false: print and PDF use the preview CSP. Scripts are still
+    /// scrubbed; https links are kept (the Mac's PDF does not use
+    /// `noScriptNoRemote`).
     public static func page(markdown: String, title: String, vault: WikiVault? = nil, remote: Bool) -> String {
-        let rendered = Markdown.render(markdown, options: .export(vault: vault))
-        let body = remote ? HTMLScrub.noScript(rendered) : HTMLScrub.noScriptNoRemote(rendered)
+        let body = HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault)))
         return PreviewHTML.page(body: body, palette: EditorPalettes.light, csp: remote ? csp : sandboxedCSP, title: title)
     }
 }

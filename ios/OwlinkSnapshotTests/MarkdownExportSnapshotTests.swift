@@ -60,8 +60,8 @@ final class MarkdownExportSnapshotTests: XCTestCase {
         }
         XCTAssertEqual(sandboxed, MarkdownExport.page(markdown: hostile, title: "Export", remote: false))
         XCTAssertFalse(sandboxed.localizedCaseInsensitiveContains("<script"))
-        XCTAssertFalse(sandboxed.contains("https://evil.example"))
         XCTAssertTrue(sandboxed.contains("default-src 'none'"))
+        XCTAssertTrue(sandboxed.contains("connect-src 'none'"))
 
         let result = await withCheckedContinuation { continuation in
             MarkdownExportIOS.makePDF(html: sandboxed, folder: nil, openedRoot: nil, vaultRoot: nil) { result in

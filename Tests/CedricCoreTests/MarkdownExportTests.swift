@@ -65,23 +65,17 @@ import Testing
         #expect(!html.localizedCaseInsensitiveContains("url=https://evil.example"))
     }
 
-    @Test func sandboxedPageDropsRemoteImages() {
-        let html = MarkdownExport.page(
-            markdown: #"<img src="https://evil.example/t.png"><img src="a.png">"#,
-            title: "x",
-            remote: false
-        )
+    @Test func sandboxedPageUsesPreviewCSPAndKeepsLinks() {
+        let markdown = #"[go](https://example.com)<img src="https://evil.example/t.png"><img src="a.png">"#
+        let html = MarkdownExport.page(markdown: markdown, title: "x", remote: false)
         #expect(html.contains("default-src 'none'"))
         #expect(html.contains("connect-src 'none'"))
-        #expect(!html.contains("https://evil.example"))
+        #expect(html.contains("https://example.com"))
         #expect(html.contains("a.png"))
-        let exported = MarkdownExport.page(
-            markdown: #"<img src="https://evil.example/t.png"><img src="a.png">"#,
-            title: "x"
-        )
+        let exported = MarkdownExport.page(markdown: markdown, title: "x")
         #expect(exported.contains("script-src 'none'"))
         #expect(!exported.contains("default-src 'none'"))
-        #expect(exported.contains("https://evil.example/t.png"))
+        #expect(exported.contains("https://example.com"))
         #expect(exported.contains("a.png"))
     }
 }
