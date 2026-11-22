@@ -89,6 +89,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let dailyKey = UUID().uuidString
     private let dailyQueue = DispatchQueue(label: "app.owlink.dailyWords", qos: .utility)
     private var dailyTimer: Timer?
+    var dailyIdleInterval: TimeInterval = 1
+    var dailyWordCountLimit = TextStats.maxCounted
+    private var wordCountGeneration: Int?
+    private var dailyBaselineArm = 0
+    private static let dailyImmediateLimit = 100_000
     var dailyWords = DailyWordCounter.shared
     var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
     private var toolStatesCache: (generation: Int, selection: NSRange, explain: Bool, decode: Bool)?
@@ -227,7 +232,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         recoveryWriter = RecoveryWriter(document: document) { [weak self] in self?.textView.text ?? "" }
         document.onSaved = { [weak self] in
             guard let self, !self.closing else { return }
-            self.commitDailyWords()
+            self.dailyWordsSaved()
             // Edits made while it saved keep their copy.
             if self.document.hasUnsavedChanges { self.recoveryWriter.textChanged() } else { self.recoveryWriter.clear() }
             self.saveErrorBanner.hide()
@@ -254,6 +259,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // recovery copy is written now rather than up to 3 s later.
         NotificationCenter.default.addObserver(self, selector: #selector(enteredBackground),
                                                name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(resignedActive),
+                                               name: UIApplication.willResignActiveNotification, object: nil)
         // A detached preview window of this document wants its text.
         NotificationCenter.default.addObserver(self, selector: #selector(detachedPreviewNeedsText(_:)),
                                                name: DetachedPreviews.needsText, object: nil)
@@ -832,7 +839,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         generation += 1
         if regexFind.enabled { regexFind.invalidate() }
         dailyTimer?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: dailyIdleInterval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.commitDailyWords() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -1275,6 +1282,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                         return
                     }
                     self.wordCount = count?.words
+                    self.wordCountGeneration = count == nil ? nil : generation
                     if let words = count?.words {
                         self.wordsButton.setTitle(localizedWordCount(words), for: .normal)
                     }
@@ -1291,19 +1299,58 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         countDailyWords(baseline: false)
     }
 
+    func dailyWordsSaved() {
+        commitDailyWords()
+    }
+
     private func countDailyWords(baseline: Bool, dropAfter: Bool = false) {
-        let text = textView.textStorage.string
         let key = dailyKey
-        let counter = dailyWords
-        dailyQueue.async {
-            let ns = text as NSString
-            let words = TextStats.count(ns, range: NSRange(location: 0, length: ns.length))?.words
-            DispatchQueue.main.async {
-                if baseline { counter.rebaseline(key: key, words: words) }
-                else { counter.note(key: key, words: words) }
-                if dropAfter { counter.drop(key) }
-            }
+        let storage = textView.textStorage
+        dailyBaselineArm &+= 1
+        guard storage.length <= dailyWordCountLimit else {
+            wordCount = nil
+            wordCountGeneration = nil
+            dailyWords.drop(key)
+            return
         }
+        if wordCountGeneration == generation, let cached = wordCount {
+            record(words: cached, baseline: baseline, dropAfter: dropAfter)
+            return
+        }
+        if baseline && storage.length > Self.dailyImmediateLimit {
+            // A long text is counted off the main thread, from a copy.
+            let text = storage.string as NSString
+            let arm = dailyBaselineArm
+            let counter = dailyWords
+            dailyQueue.async { [weak self] in
+                let words = TextStats.count(text, range: NSRange(location: 0, length: text.length))?.words
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let self, self.dailyBaselineArm == arm, counter === self.dailyWords else { return }
+                        self.record(words: words, baseline: true, dropAfter: dropAfter)
+                    }
+                }
+            }
+            return
+        }
+        let words = TextStats.count(storage.string as NSString, range: NSRange(location: 0, length: storage.length))?.words
+        record(words: words, baseline: baseline, dropAfter: dropAfter)
+    }
+
+    private func record(words: Int?, baseline: Bool, dropAfter: Bool) {
+        if baseline { dailyWords.rebaseline(key: dailyKey, words: words) }
+        else { dailyWords.note(key: dailyKey, words: words) }
+        if dropAfter { dailyWords.drop(dailyKey) }
+    }
+
+    func stopDailyWordTracking() {
+        dailyTimer?.invalidate()
+        dailyTimer = nil
+        countDailyWords(baseline: false, dropAfter: true)
+    }
+
+    deinit {
+        dailyTimer?.invalidate()
     }
 
     private func updateWordsVisibility() {
@@ -3055,8 +3102,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
-        dailyTimer?.invalidate()
-        countDailyWords(baseline: false, dropAfter: true)
+        stopDailyWordTracking()
         owl.cancel()
         textView.resignFirstResponder()
         document.close { [weak self] _ in
@@ -3468,7 +3514,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     @objc private func enteredBackground() {
+        commitDailyWords()
         recoveryWriter.writeNow()
+    }
+
+    /// iOS may end a suspended app: today's count is kept before that.
+    @objc private func resignedActive() {
+        commitDailyWords()
     }
 
     /// Replaces the whole text as one undoable edit (Undo brings it back).

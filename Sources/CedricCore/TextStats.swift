@@ -167,9 +167,26 @@ public enum WordGoal {
     /// A goal typed in the popover: digits (grouping separators and
     /// spaces allowed); nil or 0 clears it.
     public static func parse(_ s: String) -> Int? {
-        let digits = s.filter { !$0.isWhitespace && $0 != "," && $0 != "." && $0 != "\u{2019}" && $0 != "'" && $0 != "\u{202F}" && $0 != "\u{00A0}" }
-        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }), let n = Int(digits), range.contains(n) else { return nil }
+        guard let n = digitsValue(s), range.contains(n) else { return nil }
         return n
+    }
+
+    /// True when the text is a request to clear the goal: empty, or a
+    /// number that is 0 (what the Mac's field treats as "off").
+    public static func clears(_ s: String) -> Bool {
+        let digits = stripped(s)
+        if digits.isEmpty { return true }
+        return digits.allSatisfy { $0 == "0" }
+    }
+
+    private static func stripped(_ s: String) -> String {
+        s.filter { !$0.isWhitespace && $0 != "," && $0 != "." && $0 != "\u{2019}" && $0 != "'" && $0 != "\u{202F}" && $0 != "\u{00A0}" }
+    }
+
+    private static func digitsValue(_ s: String) -> Int? {
+        let digits = stripped(s)
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return Int(digits)
     }
 
     /// 0…1, for the ring.

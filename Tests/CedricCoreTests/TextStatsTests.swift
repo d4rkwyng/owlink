@@ -101,6 +101,16 @@ import Testing
         #expect(WordGoal.percent(words: 999, goal: 1000) == 99)
     }
 
+    @Test func wordGoalClearsOnEmptyOrZero() {
+        #expect(WordGoal.clears(""))
+        #expect(WordGoal.clears(" 0 "))
+        #expect(WordGoal.clears("000"))
+        #expect(!WordGoal.clears("5"))
+        #expect(!WordGoal.clears("abc"))
+        #expect(!WordGoal.clears("-0"))
+        #expect(!WordGoal.clears("10000001"))
+    }
+
     @Test func fileWordGoalsSetMoveRemoveAndCap() {
         var list: [FileWordGoal] = []
         list = FileWordGoals.setting(500, for: "/a.md", in: list)

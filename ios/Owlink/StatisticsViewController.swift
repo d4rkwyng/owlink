@@ -20,6 +20,16 @@ private final class DailyGoalRing: UIView {
         tintColor.setStroke()
         arc.stroke()
     }
+
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        setNeedsDisplay()
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        setNeedsDisplay()
+    }
 }
 
 func localizedWordCount(_ count: Int) -> String {
@@ -151,7 +161,7 @@ func localizedWordCount(_ count: Int) -> String {
         progressLabel.isAccessibilityElement = false
         stack.addArrangedSubview(progressLabel)
 
-        stack.addArrangedSubview(heading(String(localized: "Today")))
+        stack.addArrangedSubview(heading(String(localized: "Daily target")))
         dailyField.borderStyle = .roundedRect
         dailyField.keyboardType = .numberPad
         dailyField.font = .preferredFont(forTextStyle: .body)
@@ -168,6 +178,7 @@ func localizedWordCount(_ count: Int) -> String {
         dailyError.textColor = .systemRed
         dailyError.numberOfLines = 0
         dailyError.isHidden = true
+        dailyError.accessibilityIdentifier = "stats.dailyTargetError"
         stack.addArrangedSubview(dailyError)
         dailyProgress.isAccessibilityElement = true
         dailyProgress.accessibilityLabel = String(localized: "Daily target progress")
@@ -181,6 +192,7 @@ func localizedWordCount(_ count: Int) -> String {
         dailyLabel.adjustsFontForContentSizeCategory = true
         dailyLabel.numberOfLines = 0
         dailyLabel.accessibilityIdentifier = "stats.dailyLabel"
+        dailyLabel.isAccessibilityElement = false
         stack.addArrangedSubview(dailyLabel)
         NotificationCenter.default.addObserver(self, selector: #selector(refreshDaily), name: DailyWordCounter.changed, object: dailyWords)
         refreshDaily()
@@ -197,9 +209,10 @@ func localizedWordCount(_ count: Int) -> String {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        dailyRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        dailyRefreshTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshDaily() }
         }
+        if let dailyRefreshTimer { RunLoop.main.add(dailyRefreshTimer, forMode: .common) }
         refreshDaily()
     }
 
@@ -360,33 +373,43 @@ func localizedWordCount(_ count: Int) -> String {
 
     @objc func saveDailyTarget() {
         let input = dailyField.text ?? ""
-        if !input.isEmpty && WordGoal.parse(input) == nil {
+        let parsed = WordGoal.parse(input)
+        if parsed == nil && !WordGoal.clears(input) {
             let message = String(localized: "Enter a whole number from 1 to 10,000,000, or clear the field.")
             dailyError.text = message
             dailyError.isHidden = false
             dailyField.accessibilityValue = message
+            UIAccessibility.post(notification: .announcement, argument: message)
             return
         }
         dailyError.isHidden = true
         dailyField.accessibilityValue = nil
-        dailyWords.setTarget(WordGoal.parse(input))
+        dailyWords.setTarget(parsed)
+        dailyField.text = parsed.map(String.init) ?? ""
         refreshDaily()
     }
 
     @objc private func refreshDaily() {
+        dailyWords.roll()
         let written = dailyWords.wordsToday
         let ws = NumberFormatter.localizedString(from: NSNumber(value: written), number: .decimal)
+        if !dailyField.isFirstResponder {
+            let target = dailyWords.target.map(String.init) ?? ""
+            if dailyField.text != target { dailyField.text = target }
+        }
         guard let target = dailyWords.target else {
             dailyProgress.progress = 0
-            dailyLabel.text = String(localized: "\(ws) words today. Set a target for today.")
-            dailyProgress.accessibilityValue = dailyLabel.text
+            dailyLabel.text = String(localized: "Set a target for today.")
+            dailyProgress.accessibilityLabel = dailyLabel.text
+            dailyProgress.accessibilityValue = nil
             return
         }
         let gs = NumberFormatter.localizedString(from: NSNumber(value: target), number: .decimal)
         let pct = WordGoal.percent(words: written, goal: target)
         dailyProgress.progress = CGFloat(WordGoal.progress(words: written, goal: target))
-        dailyLabel.text = String(localized: "\(ws) of \(gs) words today (\(pct) %)")
-        dailyProgress.accessibilityValue = dailyLabel.text
+        dailyProgress.accessibilityLabel = String(localized: "\(ws) of \(gs) words today (\(pct) %)")
+        dailyProgress.accessibilityValue = String(localized: "\(pct) percent")
+        dailyLabel.text = dailyProgress.accessibilityLabel
     }
 
     @objc private func dismissSheet() { dismiss(animated: true) }
