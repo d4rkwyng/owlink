@@ -33,6 +33,8 @@ enum AppSettings {
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
+        /// Same key as the Mac (Settings › "Reopen files from last session").
+        static let reopenFilesFromLastSession = "reopenFilesFromLastSession"
         /// The Mac's find bar does not remember its Regex box; the phone does.
         static let findRegex = "ios.findRegex"
         static let theme = EditorTheme.defaultsKey
@@ -219,6 +221,20 @@ enum AppSettings {
     static var openReadOnly: Bool {
         get { defaults.object(forKey: Key.openReadOnly) as? Bool ?? openReadOnlyDefault }
         set { defaults.set(newValue, forKey: Key.openReadOnly); post() }
+    }
+
+    /// Settings › "Reopen files from last session": the last open document
+    /// opens again at launch. iOS has no "Close windows when quitting"
+    /// setting, so until explicitly set it is on. Never `bool(forKey:)`:
+    /// a missing key must read as unset, not as off.
+    static var reopenFilesFromLastSession: Bool {
+        get { reopenFilesFromLastSession(in: defaults) }
+        set { defaults.set(newValue, forKey: Key.reopenFilesFromLastSession); post() }
+    }
+
+    static func reopenFilesFromLastSession(in defaults: UserDefaults) -> Bool {
+        SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: Key.reopenFilesFromLastSession) as? Bool,
+                                         systemKeepsWindows: nil)
     }
 
     static var theme: EditorTheme {

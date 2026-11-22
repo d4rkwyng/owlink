@@ -155,6 +155,15 @@ public struct Session: Codable, Equatable, Sendable {
     public var allTabs: [SessionTab] { windows.flatMap(\.tabs) }
 }
 
+/// Whether the last session's open tabs should be restored at launch.
+public enum SessionReopenPolicy {
+    /// An explicit Owlink preference wins; otherwise follow the system's
+    /// "Close windows when quitting an application" setting.
+    public static func shouldReopen(explicit: Bool?, systemKeepsWindows: Bool?) -> Bool {
+        explicit ?? systemKeepsWindows ?? true
+    }
+}
+
 /// The folder sidebar as it was: its folder, whether it showed, its width
 /// and the folders expanded in it (paths relative to the folder, parents
 /// first, at most `expandedLimit`).

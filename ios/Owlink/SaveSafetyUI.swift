@@ -156,8 +156,24 @@ extension TextDocument {
     /// file opened still gets its own).
     static func skipLaunchOffer() { offeredAtLaunch = true }
 
+    /// The last document is being reopened at launch (it opens
+    /// asynchronously): the browser's offer waits so it doesn't pop up
+    /// over the opening document.
+    private(set) static var reopenInFlight = false
+
+    static func reopenStarted() { reopenInFlight = true }
+
+    /// Opened: the offer waits until the browser shows again (the editor
+    /// closed). Not opened: offered now if the browser is already showing.
+    static func reopenFinished(opened: Bool, browser: DocumentBrowserViewController) {
+        reopenInFlight = false
+        if !opened, browser.view.window != nil, browser.presentedViewController == nil {
+            offerLeftovers(from: browser)
+        }
+    }
+
     static func offerLeftovers(from browser: DocumentBrowserViewController) {
-        guard !offeredAtLaunch else { return }
+        guard !offeredAtLaunch, !reopenInFlight else { return }
         offeredAtLaunch = true
         let records = SaveSafetyStores.recovery.all().filter { !OpenDocuments.isOpen($0.documentPath) }
         offer(records[...], from: browser)

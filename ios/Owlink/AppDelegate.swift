@@ -14,7 +14,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         DispatchQueue.global(qos: .utility).async { copies.prune() }
         if ProcessInfo.processInfo.arguments.contains("-OwlinkResetSettings") {
             for k in [AppSettings.Key.fontSize, AppSettings.Key.wrap, AppSettings.Key.lineNumbers, AppSettings.Key.showInvisibles, AppSettings.Key.showContextBar, AppSettings.Key.owlHints, AppSettings.Key.theme,
-                      AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly,
+                      AppSettings.Key.saveAutomatically, AppSettings.Key.openReadOnly, AppSettings.Key.reopenFilesFromLastSession,
                       AppSettings.Key.owlPlacement, AppSettings.Key.owlManualPlacement, AppSettings.Key.focusUnit] {
                 UserDefaults.standard.removeObject(forKey: k)
             }

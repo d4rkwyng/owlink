@@ -33,6 +33,14 @@ func tempDir() -> URL {
         #expect(restored.allTabs.count == 3)
     }
 
+    @Test func reopenPolicyUsesExplicitPreferenceBeforeSystemSetting() {
+        #expect(SessionReopenPolicy.shouldReopen(explicit: true, systemKeepsWindows: false))
+        #expect(!SessionReopenPolicy.shouldReopen(explicit: false, systemKeepsWindows: true))
+        #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: true))
+        #expect(!SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: false))
+        #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: nil))
+    }
+
     @Test func pruneRemovesOrphanBuffers() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

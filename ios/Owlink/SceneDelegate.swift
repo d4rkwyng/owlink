@@ -66,13 +66,26 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         #endif
-        if !options.urlContexts.isEmpty || TestLaunch.active { RecoveryOffer.skipLaunchOffer() }
+        let openingExplicitFile = !options.urlContexts.isEmpty || TestLaunch.active
+        if openingExplicitFile { RecoveryOffer.skipLaunchOffer() }
         if let ctx = options.urlContexts.first {
             browser.open(ctx.url, importIfNeeded: !ctx.options.openInPlace)
         } else if let url = TestLaunch.documentToOpen() {
             browser.presentDocument(at: url)
+        } else if !Self.launchReopenConsidered {
+            // Once per launch, in the first window: windows opened later
+            // start at the browser.
+            Self.launchReopenConsidered = true
+            if LastOpenDocument.shouldReopenAtLaunch(openingExplicitFile: openingExplicitFile,
+                                                     reopenSetting: AppSettings.reopenFilesFromLastSession),
+               let url = LastOpenDocument.shared.resolve() {
+                browser.reopenLastDocument(at: url)
+            }
         }
     }
+
+    /// The last document was considered for reopening (this launch).
+    private static var launchReopenConsidered = false
 
     /// The window went away: its documents are no longer open in it.
     func sceneDidDisconnect(_ scene: UIScene) {
@@ -192,8 +205,21 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         return true
     }
 
-    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil) {
-        if bringForwardIfOpenElsewhere(url) { return }
+    /// Launch with "Reopen files from last session": opens the last
+    /// document quietly. If it can't be opened the record is forgotten and
+    /// the browser stays, with no alert.
+    func reopenLastDocument(at url: URL) {
+        RecoveryOffer.reopenStarted()
+        presentDocument(at: url, reopening: true)
+    }
+
+    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
+        let finishReopen: (Bool) -> Void = { [weak self] opened in
+            guard reopening, let self else { return }
+            if !opened { LastOpenDocument.shared.forget(url) }
+            RecoveryOffer.reopenFinished(opened: opened, browser: self)
+        }
+        if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
         let doc = TextDocument(fileURL: url)
         doc.openBinaryAnyway = binaryOK
         doc.open { [weak self] ok in
@@ -201,6 +227,11 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
             // Opened meanwhile in another window: that one keeps it.
             if ok, self.bringForwardIfOpenElsewhere(url) {
                 doc.close(completionHandler: nil)
+                finishReopen(false)
+                return
+            }
+            if !ok, reopening {
+                finishReopen(false)
                 return
             }
             guard ok else {
@@ -227,10 +258,13 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 recovery = .offer(r)
             }
             let editor = EditorViewController(document: doc, recovery: recovery, windowID: self.windowID)
+            // Open in an editor: reopened at the next launch until closed.
+            LastOpenDocument.shared.remember(doc.fileURL)
             let nav = EditorNavigationController(rootViewController: editor)
             nav.modalPresentationStyle = .fullScreen
             nav.navigationBar.prefersLargeTitles = false
             self.present(nav, animated: true)
+            finishReopen(true)
         }
     }
 

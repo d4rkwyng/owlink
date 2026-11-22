@@ -58,7 +58,10 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   changes only on Save (`⌘S` or the bar's Save) and closing asks Save /
   Don't Save / Cancel. Either way, unsaved text is copied every 3 s at most
   to Application Support/Owlink/Recovery (out of backups) and offered after
-  a crash or a forced quit. Rules and stores: `SavePolicy`, `RecoveryStore`,
+  a crash or a forced quit. Settings › Reopen files from last session (on
+  by default): the last open document opens again at launch if the file is
+  still there; closing it first, or turning this off, starts at the
+  document browser (`LastOpenDocument`). Rules and stores: `SavePolicy`, `RecoveryStore`,
   `RevertStore` in CedricCore (`SaveSafetyTests`). Debug builds:
   `-OwlinkSaveCheck <dir>` runs these in the app and writes `savecheck.txt`
   and PNGs.

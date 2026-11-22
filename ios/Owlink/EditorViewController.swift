@@ -3301,6 +3301,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self.recoveryWriter.stop(keepingCopy: !discarding && self.document.hasUnsavedChanges)
             self.document.discardOpenedCopy()
             OpenDocuments.registry.unregister(path: self.document.recoveryPath, window: self.windowID)
+            // Closed on purpose: the next launch starts at the browser.
+            LastOpenDocument.shared.forget(self.document.fileURL)
             // Its detached preview windows close with it.
             DetachedPreviews.documentClosed(path: self.document.recoveryPath)
             let after = self.afterClose
