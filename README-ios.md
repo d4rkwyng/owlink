@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.3.0 (1), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.4.4 (10), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -68,6 +68,19 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   position stays in the editor.
 - Ask Cedric is a sheet on a phone and a panel beside the text on a wide
   screen (iPad, an unfolded iPhone Duo).
+- Ask Cedric's scope chip, above the question field: Selection (with a
+  selection), Visible text or Whole document (the default without a
+  selection). A file too big for the model sends whole lines around the
+  caret and the chip names them ("Lines 40–160 of 900 (trimmed to fit)").
+  Explain, Find Problems and typed whole-document questions review a file
+  that doesn't fit in up to eight overlapping parts, with progress and a
+  note on any lines not reviewed (`OwlChunkedReviewRunner`). Check for
+  Risks stays Mac-only (iOS has no offline script scan yet).
+- **Explain Selection** and **Rewrite Selection** in the text's edit menu
+  and the Cedric menu (`⌥⌘E`, `⌥⇧⌘E`): the exact selection (clipped to
+  the model, with a note when it was), Rewrite only with a model that
+  passes the tool gate and not read-only, as Apply / Skip cards; Ask
+  Again re-asks the original selection or says it changed.
 
 ### iPhone Duo
 
@@ -100,6 +113,13 @@ commands.
 
 Off by default, as on the Mac. The offline hints never use the network.
 
+**Use Cedric AI** turns the engines on; **Check automatically when I
+pause typing** is separate. For a server on your network it is off by
+default, and turning it on first asks to confirm that the visible text
+(up to 8 KB) goes to that server (`CedricServerAutomaticChecksAcknowledged`,
+the Mac's key); unconfirmed, automatic checks stay off (`AIStore`). No AI
+hint is asked for an empty or near-empty document (`HintPrompt.hasEnoughText`).
+
 - **Apple Intelligence** (iOS 26 or later on a device that supports it,
   with Apple Intelligence turned on). Settings › Cedric AI shows whether it
   is available, or why not (device not eligible, turned off, model not
@@ -109,8 +129,9 @@ Off by default, as on the Mac. The offline hints never use the network.
   builds leave it out and Settings says "Built-in model: needs a real
   device". iPhones (and iPads without an M chip) are offered the small
   models (up to 2B parameters, about 1.1 GB); M-series iPads also the 3–4B
-  ones. Downloads come from huggingface.co only when asked, show the licence
-  first, are checked against their SHA-256, and are kept out of iCloud
+  ones. Downloads come from huggingface.co only when asked, show the full
+  bundled licence text first (Confirm once its end has been on screen;
+  `-OwlinkShowLicence <id|first>` shows the sheet in Debug builds), are checked against their SHA-256, and are kept out of iCloud
   backups. Before loading, the app checks `os_proc_available_memory()` and
   refuses with a message rather than being killed for using too much memory.
 - **A server on your network** (LM Studio, Ollama, another Mac): local

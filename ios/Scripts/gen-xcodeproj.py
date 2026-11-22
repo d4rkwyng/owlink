@@ -12,8 +12,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.join(HERE, '..', 'Owlink.xcodeproj')
 TEAM = 'V868MD2SHX'
 BUNDLE_ID = 'app.owlink.ios'
-VERSION = '0.4.3'
-BUILD = '9'
+VERSION = '0.4.4'
+BUILD = '10'
 IOS = '17.0'
 
 def oid(name):
@@ -59,12 +59,12 @@ objs[ai_s] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productName':
 objs[core_t2] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productName': 'CedricCore'}, 'CedricCore')
 
 # The package tests that exercise macOS-only parts (Process/git, the
-# Security certificate parser, XMLDocument): left out of the iOS test
+# Security certificate parser, XMLDocument, AppKit image tests): left out of the iOS test
 # targets. They still run on the Mac (Scripts/test.sh).
 MAC_ONLY_TESTS = {
     'CedricCoreTests': ['CertificateTests.swift', 'GitSafetyTests.swift', 'SecurityReviewTests.swift',
                         'ViewerFormatsTests.swift', 'ScriptTokenTests.swift'],
-    'CedricAITests': ['LiveBuiltInTests.swift'],
+    'CedricAITests': ['LiveBuiltInTests.swift', 'DescribeImageTests.swift'],
 }
 
 def sync(name, path, target_name=None):
