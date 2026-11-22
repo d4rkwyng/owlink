@@ -46,7 +46,9 @@ public enum Markdown {
     }
 
     public static func render(_ source: String, options: Options = Options()) -> String {
-        MarkdownRenderer(options: options).render(source)
+        let html = MarkdownRenderer(options: options).render(source)
+        guard let vault = options.vault else { return html }
+        return PreviewImageAccess.resolveBareNames(html, vault: vault, exportLinks: options.exportLinks)
     }
 
     /// One line of inline Markdown, for tests.
@@ -987,7 +989,7 @@ final class MarkdownRenderer {
         let alias = bar.map { String(body[body.index(after: $0)...]).trimmingCharacters(in: .whitespaces) }
         let (name, fragment) = WikiVault.split(target)
         let vault = options.vault
-        let file = name.isEmpty ? nil : vault?.resolve(name)
+        let file = name.isEmpty ? nil : (embed ? (vault?.resolveImage(name) ?? vault?.resolve(name)) : vault?.resolve(name))
         let exporting = options.exportLinks
         func href(_ file: URL) -> String? {
             guard exporting else { return WikiVault.href(file) }

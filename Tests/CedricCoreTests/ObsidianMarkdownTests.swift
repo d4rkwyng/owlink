@@ -63,6 +63,46 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(PreviewFolder.file(for: src, in: vault.documentFolder, openedRoot: nil, scriptOn: false) == nil)
     }
 
+    @Test func bareImagesUseVaultAndPreserveAttributes() throws {
+        let name = "sg-logo-roger-graham-400x400.webp"
+        let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/Images/\(name)"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        try #"{"attachmentFolderPath":"Images"}"#.write(to: t.appendingPathComponent("v/.obsidian/app.json"), atomically: true, encoding: .utf8)
+        let vault = WikiVault(documentFolder: t.appendingPathComponent("v/notes"))
+        let html = ob("""
+        <img src="\(name)" alt="Sierra Vault" width="200" style="float: right; margin: 0 0 10px 10px;">
+
+        ![md](\(name)) ![[\(name)]]
+        """, vault: vault)
+        #expect(html.components(separatedBy: "/Images/\(name)").count == 4)
+        #expect(html.contains(#"alt="Sierra Vault" width="200" style="float: right; margin: 0 0 10px 10px;""#))
+        #expect(PreviewImageAccess.readable(name, folder: vault.documentFolder, openedRoot: nil))
+        let page = try #require(PreviewFolder.pageURL(for: vault.documentFolder))
+        let src = try #require(URL(string: name, relativeTo: page)?.absoluteURL)
+        #expect(PreviewFolder.file(for: src, in: vault.documentFolder, openedRoot: nil, vaultRoot: vault.root, scriptOn: true, vault: vault)?.path == t.appendingPathComponent("v/Images/\(name)").path)
+        #expect(ob("![missing](missing.webp)", vault: vault).contains(#"src="missing.webp""#))
+    }
+
+    @Test func bareImagePreferenceAndConfinement() throws {
+        let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/a/pic.webp", "v/b/pic.webp",
+                              "v/preferred/deep/pic.webp", "outside.webp"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
+        try "{}".write(to: root.appendingPathComponent(".obsidian/app.json"), atomically: true, encoding: .utf8)
+        var vault = WikiVault(documentFolder: folder)
+        #expect(vault.resolveImage("pic.webp")?.path == root.appendingPathComponent("a/pic.webp").path)
+        try #"{"attachmentFolderPath":"preferred"}"#.write(to: root.appendingPathComponent(".obsidian/app.json"), atomically: true, encoding: .utf8)
+        vault = WikiVault(documentFolder: folder)
+        #expect(vault.resolveImage("pic.webp")?.path == root.appendingPathComponent("preferred/deep/pic.webp").path)
+        try "local".write(to: folder.appendingPathComponent("pic.webp"), atomically: true, encoding: .utf8)
+        #expect(vault.resolveImage("pic.webp")?.path == folder.appendingPathComponent("pic.webp").path)
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("escape.webp"), withDestinationURL: t.appendingPathComponent("outside.webp"))
+        #expect(vault.resolveImage("escape.webp") == nil)
+        #expect(vault.resolve("../outside.webp") == nil)
+        #expect(vault.resolve("/outside.webp") == nil)
+        #expect(!PreviewImageAccess.readable("../outside.webp", folder: folder, openedRoot: root))
+    }
+
     @Test func noteEmbedsAreOneLevelDeep() throws {
         let t = try makeTree(["n/doc.md"])
         defer { try? FileManager.default.removeItem(at: t) }

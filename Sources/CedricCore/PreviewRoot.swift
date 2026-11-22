@@ -86,10 +86,16 @@ extension PreviewFolder {
     /// with `scriptOn` images, fonts and CSS only, no dotfiles) judged
     /// against the root it was found under.
     /// `vaultRoot`: the Obsidian vault's folder, for `![[embeds]]` found there.
-    public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool) -> URL? {
-        if let f = file(for: url, in: folder, scriptOn: scriptOn) { return f }
+    public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
+                            vault: WikiVault? = nil) -> URL? {
+        if let f = file(for: url, in: folder, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
+        if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+            let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
+            if let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
+               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return safe }
+        }
         for root in [openedRoot, vaultRoot].compactMap({ $0 }) {
-            if let f = file(for: url, in: root, scriptOn: scriptOn) { return f }
+            if let f = file(for: url, in: root, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
         }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
@@ -130,21 +136,51 @@ public enum PreviewImageAccess {
         return true
     }
 
+    /// Change only the source attribute, leaving raw HTML attributes intact.
+    public static func resolveBareNames(_ html: String, vault: WikiVault, exportLinks: Bool = false) -> String {
+        let ns = html as NSString
+        let matches = img.matches(in: html, range: NSRange(location: 0, length: ns.length))
+        let out = NSMutableString(string: html)
+        for match in matches.reversed() {
+            let range = match.range(at: 1)
+            let source = unquote(ns.substring(with: range))
+            guard !source.contains("?"), !source.contains("#"),
+                  let decoded = source.removingPercentEncoding,
+                  let file = vault.resolveImage(decoded),
+                  file.standardizedFileURL != vault.documentFolder.appendingPathComponent(decoded).standardizedFileURL else { continue }
+            let href = exportLinks ? WikiVault.relativeHref(file, from: vault.documentFolder) : WikiVault.href(file)
+            guard let href else { continue }
+            out.replaceCharacters(in: range, with: "\"\(Markdown.escape(href))\"")
+        }
+        return out as String
+    }
+
     /// Whether the preview can read `src`, for a document in `folder`.
     public static func readable(_ src: String, folder: URL, openedRoot: URL?, fileManager fm: FileManager = .default) -> Bool {
         if src.lowercased().hasPrefix(PreviewFolder.scheme + ":") || src.lowercased().hasPrefix("file:") {
             guard let u = URL(string: src) else { return false }
-            let path = u.isFileURL ? u.path : (PreviewFolder.fileURL(for: u)?.path ?? "")
-            return fm.isReadableFile(atPath: path)
+            let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
+            let page = u.isFileURL ? PreviewFolder.pageURL(forFile: u) : u
+            guard let page, let f = PreviewFolder.file(for: page, in: vault.root, scriptOn: false) else { return false }
+            return fm.isReadableFile(atPath: f.path)
         }
         if src.hasPrefix("/") {
             guard let hit = PreviewRoot.resolve(src, from: folder, openedRoot: openedRoot, fileManager: fm) else { return false }
-            return fm.isReadableFile(atPath: hit.file.path)
+            guard let page = PreviewFolder.pageURL(forFile: hit.file),
+                  let file = PreviewFolder.file(for: page, in: hit.root, scriptOn: false) else { return false }
+            return fm.isReadableFile(atPath: file.path)
         }
         var p = src
         if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
         p = p.removingPercentEncoding ?? p
-        return fm.isReadableFile(atPath: folder.appendingPathComponent(p).standardizedFileURL.path)
+        let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
+        guard !p.hasPrefix("/"), !p.split(separator: "/").contains("..") else { return false }
+        let relative = folder.appendingPathComponent(p).standardizedFileURL
+        if let page = PreviewFolder.pageURL(forFile: relative),
+           let file = PreviewFolder.file(for: page, in: folder, openedRoot: openedRoot, vaultRoot: vault.root, scriptOn: false, vault: vault) {
+            return fm.isReadableFile(atPath: file.path)
+        }
+        return false
     }
 
     /// `html` with the images it can't read taken out and `hint` (HTML) put

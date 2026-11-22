@@ -140,6 +140,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
             vault = nil
         }
         folderFiles.vaultRoot = vault?.root
+        folderFiles.vault = vault
         let vault = self.vault
         let exportLinks = self.exportLinks
         let baseURL = folder.flatMap(DocumentFolderFiles.pageURL(for:))
@@ -150,7 +151,8 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         let key = "\(language.rawValue)|\(palette.name)|\(palette.isDark)|\(csp)|\(baseURL?.absoluteString ?? "-")|\(allowJavaScript)|\(allowNetwork)"
         guard language == .markdown else {
             shellKey = nil
-            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
+            let html = vault.map { PreviewImageAccess.resolveBareNames(text, vault: $0) } ?? text
+            load(Self.injectCSP(csp, into: html), key: nil, baseURL: baseURL)
             return
         }
         let ticket = latest
@@ -479,6 +481,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     var openedRoot: URL?
     /// The Obsidian vault wikilinks resolve in.
     var vaultRoot: URL?
+    var vault: WikiVault?
     /// The page may run JavaScript: serve only images, fonts and CSS.
     var scriptOn = false
     private var stopped: Set<ObjectIdentifier> = []
@@ -492,7 +495,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         // With JavaScript on, only images, fonts and CSS (no dotfiles):
         // page script must not be able to read the folder's other files.
         guard let url = task.request.url, let folder,
-              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn) else {
+              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
