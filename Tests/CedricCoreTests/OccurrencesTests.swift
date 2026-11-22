@@ -55,4 +55,13 @@ import Testing
         // Out-of-range input is safe.
         #expect(Occurrences.find(.init("ab", wholeWord: true), in: line, range: NSRange(location: line.length + 5, length: 10)).isEmpty)
     }
+
+    @Test func selectedFragmentFindsOnlyMatchesInTheRequestedViewport() throws {
+        let text = "prefix alpha middle alphabet alpha suffix" as NSString
+        let selection = NSRange(location: 7, length: 3)
+        let needle = try #require(Occurrences.needle(selection: selection, in: text))
+        #expect(!needle.wholeWord)
+        #expect(Occurrences.find(needle, in: text, range: NSRange(location: 13, length: 16))
+                == [NSRange(location: 20, length: 3)])
+    }
 }

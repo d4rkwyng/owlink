@@ -57,6 +57,7 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.lineNumbers) private var lineNumbers = true
     @AppStorage(AppSettings.Key.showContextBar) private var showContextBar = true
     @AppStorage(AppSettings.Key.autoCloseBrackets) private var autoCloseBrackets = true
+    @AppStorage(AppSettings.Key.highlightOccurrences) private var highlightOccurrences = true
     @AppStorage(AppSettings.Key.owlHints) private var owlHints = true
     @AppStorage(AppSettings.Key.theme) private var theme = EditorTheme.system.rawValue
     @AppStorage(AppSettings.Key.saveAutomatically) private var saveAutomatically = true
@@ -98,6 +99,8 @@ struct SettingsView: View {
                         .accessibilityIdentifier("settings.contextBar")
                     Toggle(String(localized: "Auto-close brackets and quotes"), isOn: $autoCloseBrackets)
                         .accessibilityIdentifier("settings.autoCloseBrackets")
+                    Toggle(String(localized: "Highlight occurrences"), isOn: $highlightOccurrences)
+                        .accessibilityIdentifier("settings.highlightOccurrences")
                     Toggle(String(localized: "Cedric’s Hints"), isOn: $owlHints)
                 }
                 .onChange(of: fontSize) { AppSettings.post() }
@@ -105,6 +108,7 @@ struct SettingsView: View {
                 .onChange(of: lineNumbers) { AppSettings.post() }
                 .onChange(of: showContextBar) { AppSettings.post() }
                 .onChange(of: autoCloseBrackets) { AppSettings.post() }
+                .onChange(of: highlightOccurrences) { AppSettings.post() }
                 .onChange(of: owlHints) { AppSettings.post() }
                 .onChange(of: theme) { AppSettings.post() }
 

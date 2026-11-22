@@ -77,7 +77,7 @@ final class WritingModeTests: XCTestCase {
         AppSettings.focusUnit = .sentence
         XCTAssertEqual(AppSettings.focusUnit, .sentence)
         XCTAssertEqual(editor.textView.selectedRange.location, 2)
-        XCTAssertGreaterThan((editor.writingVisibleRange()?.length ?? 0), 20,
+        XCTAssertGreaterThan((editor.editorVisibleRange()?.length ?? 0), 20,
                              "bounds \(editor.textView.bounds), content \(editor.textView.contentSize), text \(editor.textView.textStorage.length)")
         editor.updateWriting()
         let layout = try XCTUnwrap(editor.textView.textLayoutManager)

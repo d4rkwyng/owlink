@@ -97,6 +97,12 @@ import Testing
         #expect(AutoEdit.matchingBracket(in: far, caret: 1, limit: 100) != nil)
     }
 
+    @Test func matchingUsesUTF16OffsetsAroundUnicode() {
+        let text = "😀[a(b)c]" as NSString
+        #expect(AutoEdit.matchingBracket(in: text, caret: 3)! == (NSRange(location: 2, length: 1), NSRange(location: 8, length: 1)))
+        #expect(AutoEdit.matchingBracket(in: text, caret: 5)! == (NSRange(location: 4, length: 1), NSRange(location: 6, length: 1)))
+    }
+
     // Per-caret edits (multiple carets): the same decisions as `typing`, as edits.
 
     @Test func typingEditPairsSkipsAndWraps() {

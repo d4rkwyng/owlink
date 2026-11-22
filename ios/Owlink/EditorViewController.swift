@@ -49,6 +49,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var writingUpdatePending = false
     private var writingCenterPending = false
     private var writingLayoutSize = CGSize.zero
+    private var highlightTimer: Timer?
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
     private var lastTextScrollOffsetY: CGFloat?
     /// A jump forces numbers on for this tab without changing the setting.
@@ -397,6 +398,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if writingLayoutSize != textView.bounds.size {
             writingLayoutSize = textView.bounds.size
             scheduleWritingUpdate()
+            scheduleEditorHighlights()
         }
     }
 
@@ -747,6 +749,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleOwl()
         refreshPreview()
         askModel?.documentReplaced()
+        scheduleEditorHighlights()
     }
 
     @objc private func storageEdited() {
@@ -764,6 +767,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChange(_ textView: UITextView) {
         scheduleWritingUpdate()
+        scheduleEditorHighlights()
         generation += 1
         scheduleWordCount()
         scheduleStatisticsUpdate()
@@ -1091,6 +1095,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChangeSelection(_ textView: UITextView) {
         scheduleWritingUpdate()
+        scheduleEditorHighlights()
         contextBar?.refreshInlineSelectionStates()
         scheduleStatisticsUpdate()
         updateStatus()
@@ -1110,7 +1115,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
-        if scrollView === textView { scheduleWritingUpdate(center: false) }
+        if scrollView === textView {
+            scheduleWritingUpdate(center: false)
+            scheduleEditorHighlights()
+        }
         fadeOwlNearCaret()
         if scrollView === textView {
             let offsetY = scrollView.contentOffset.y
@@ -1431,6 +1439,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         applyWrap()
         colorizer?.setPalette(palette)
         scheduleWritingUpdate()
+        if !AppSettings.highlightOccurrences, let layout = textView.textLayoutManager {
+            layout.removeRenderingAttribute(.backgroundColor, for: layout.documentRange)
+        }
+        scheduleEditorHighlights()
         refreshPreview()
     }
 
@@ -1527,7 +1539,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         guard writing.focus, let layout = textView.textLayoutManager,
               let manager = layout.textContentManager,
-              let visible = writingVisibleRange() else { return }
+              let visible = editorVisibleRange() else { return }
         let text = textView.textStorage.string as NSString
         let focus = FocusRange.range(AppSettings.focusUnit, in: text, caret: textView.selectedRange.location)
         guard let start = manager.location(layout.documentRange.location, offsetBy: visible.location),
@@ -1543,13 +1555,60 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    func writingVisibleRange() -> NSRange? {
+    func editorVisibleRange() -> NSRange? {
         guard let layout = textView.textLayoutManager, let manager = layout.textContentManager else { return nil }
         if let visible = SyntaxColorizer.visibleRange(textView), visible.length > 0 { return visible }
         guard let viewport = layout.textViewportLayoutController.viewportRange else { return nil }
         let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
         let length = manager.offset(from: viewport.location, to: viewport.endLocation)
         return NSRange(location: start, length: length)
+    }
+
+    private func scheduleEditorHighlights() {
+        highlightTimer?.invalidate()
+        refreshEditorHighlights(includeOccurrences: false)
+        let timer = Timer(timeInterval: 0.12, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshEditorHighlights() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        highlightTimer = timer
+    }
+
+    func refreshEditorHighlights(includeOccurrences: Bool = true) {
+        guard let layout = textView.textLayoutManager, let manager = layout.textContentManager,
+              let visible = editorVisibleRange(),
+              let start = manager.location(layout.documentRange.location, offsetBy: visible.location),
+              let end = manager.location(start, offsetBy: visible.length),
+              let visibleRange = NSTextRange(location: start, end: end) else { return }
+        layout.removeRenderingAttribute(.backgroundColor, for: visibleRange)
+        guard textView.markedTextRange == nil else { return }
+        let text = textView.textStorage.string as NSString
+        let selection = textView.selectedRange
+        guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length else { return }
+
+        func paint(_ ranges: [NSRange], color: UIColor) {
+            for range in ranges {
+                let clipped = NSIntersectionRange(range, visible)
+                guard clipped.length > 0,
+                      let a = manager.location(start, offsetBy: clipped.location - visible.location),
+                      let b = manager.location(a, offsetBy: clipped.length),
+                      let r = NSTextRange(location: a, end: b) else { continue }
+                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
+            }
+        }
+
+        if includeOccurrences, AppSettings.highlightOccurrences,
+           let needle = Occurrences.needle(selection: selection, in: text) {
+            let occurrences = Occurrences.find(needle, in: text, range: visible)
+            let source = selection.length == 0 ? Occurrences.word(at: selection.location, in: text) : selection
+            if occurrences.count >= 2 || source.map({ !occurrences.contains($0) }) == true {
+                paint(occurrences.filter { $0 != selection }, color: UIColor(hex: palette.findMatch).withAlphaComponent(0.55))
+            }
+        }
+        if selection.length == 0, AutoEdit.pairs(in: document.language.language),
+           let (first, second) = AutoEdit.matchingBracket(in: text, caret: selection.location) {
+            paint([first, second], color: UIColor(hex: palette.caret).withAlphaComponent(0.3))
+        }
     }
 
     /// The window the theme overrode, so dismissing the editor can put the
