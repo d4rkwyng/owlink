@@ -26,12 +26,14 @@ public enum LineFilter {
     /// contentRange)` is true, and the removed line numbers (0-based).
     /// Nil if none is removed. An empty last line after a final newline
     /// isn't a line. The caret goes to where the first removed line was.
-    public static func removing(in text: NSString, where remove: (Int, NSRange) -> Bool) -> (edit: TextEdit, removed: [Int])? {
+    public static func removing(in text: NSString, where remove: (Int, NSRange) throws -> Bool) rethrows -> (edit: TextEdit, removed: [Int])? {
         let index = LineIndex(text)
         let count = index.lineCount > 1 && index.lineLength(index.lineCount - 1) == 0 ? index.lineCount - 1 : index.lineCount
         if text.length == 0 { return nil }
         var removed: [Int] = []
-        for line in 0..<count where remove(line, index.contentRange(ofLine: line)) { removed.append(line) }
+        for line in 0..<count {
+            if try remove(line, index.contentRange(ofLine: line)) { removed.append(line) }
+        }
         guard let first = removed.first, let last = removed.last else { return nil }
         let removedSet = Set(removed)
         let spanStart = index.starts[first]
@@ -60,10 +62,8 @@ public enum LineFilter {
                               keepMatching: Bool) throws -> (edit: TextEdit, removed: [Int])? {
         let matches = try matcher(pattern, regex: regex, caseSensitive: caseSensitive)
         // Long documents: stop early when the surrounding task is cancelled.
-        var cancelled = false
-        let result = removing(in: text) { line, r in
-            if cancelled { return false }
-            if line & 0xFF == 0, Task.isCancelled { cancelled = true; return false }
+        let result = try removing(in: text) { line, r in
+            if line & 0xFF == 0 { try Task.checkCancellation() }
             return matches(text, r) != keepMatching
         }
         try Task.checkCancellation()

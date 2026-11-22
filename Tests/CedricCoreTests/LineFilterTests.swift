@@ -79,4 +79,17 @@ import Testing
         task.cancel()
         #expect(await task.value)
     }
+
+    @Test func removingStopsImmediatelyWhenPredicateThrows() {
+        let text = String(repeating: "line\n", count: 10_000) as NSString
+        var visited = 0
+        #expect(throws: CancellationError.self) {
+            try LineFilter.removing(in: text) { _, _ in
+                visited += 1
+                if visited == 3 { throw CancellationError() }
+                return false
+            }
+        }
+        #expect(visited == 3)
+    }
 }
