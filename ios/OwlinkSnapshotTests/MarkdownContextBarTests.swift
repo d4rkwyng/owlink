@@ -33,6 +33,12 @@ final class MarkdownContextBarTests: XCTestCase {
         return editor
     }
 
+    /// TextKit 2 can leave `UITextView.text` stale after a storage edit;
+    /// the text storage is the document.
+    private func documentText(_ editor: EditorViewController) -> String {
+        editor.textView.textStorage.string
+    }
+
     func testBarFollowsLanguageAndSetting() throws {
         let markdown = editor(.markdown)
         let bar = try XCTUnwrap(markdown.contextBar)
@@ -57,24 +63,24 @@ final class MarkdownContextBarTests: XCTestCase {
         editor.textView.becomeFirstResponder()
         editor.textView.selectedRange = NSRange(location: 0, length: 1)
         editor.markdownBoldMenu(nil)
-        XCTAssertTrue(editor.textView.text.hasPrefix("**x**"))
+        XCTAssertTrue(documentText(editor).hasPrefix("**x**"))
         XCTAssertTrue(editor.document.hasUnsavedChanges)
-        XCTAssertEqual(editor.lineIndex.length, (editor.textView.text as NSString).length)
+        XCTAssertEqual(editor.lineIndex.length, (documentText(editor) as NSString).length)
         editor.textView.undoManager?.undo()
-        XCTAssertEqual(editor.textView.text, original)
+        XCTAssertEqual(documentText(editor), original)
         editor.textView.selectedRange = NSRange(location: 2, length: 0)
         editor.markdownHeading2Menu(nil)
-        XCTAssertTrue(editor.textView.text.contains("## line"))
+        XCTAssertTrue(documentText(editor).contains("## line"))
         editor.textView.undoManager?.undo()
-        XCTAssertEqual(editor.textView.text, original)
+        XCTAssertEqual(documentText(editor), original)
         editor.textView.selectedRange = (original as NSString).range(of: "task")
         editor.toggleCheckboxMenu(nil)
-        XCTAssertTrue(editor.textView.text.contains("- [ ] task"))
+        XCTAssertTrue(documentText(editor).contains("- [ ] task"))
         editor.textView.undoManager?.undo()
-        XCTAssertEqual(editor.textView.text, original)
+        XCTAssertEqual(documentText(editor), original)
         editor.textView.selectedRange = (original as NSString).range(of: "code")
         editor.markdownHeading2Menu(nil)
-        XCTAssertEqual(editor.textView.text, original)
+        XCTAssertEqual(documentText(editor), original)
     }
 
     func testReadModeAndReadOnlyRefuse() {

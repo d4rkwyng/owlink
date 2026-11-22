@@ -80,7 +80,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// turn after applyTextEdit closed an open typing group (per editor:
     /// each has its own undo manager).
     var pendingGroupsByEvent: Bool?
-    private var cachedMarkdownIndentation: (generation: Int, value: Indentation)?
+    private var cachedIndentation: (generation: Int, value: Indentation?)?
+    /// Offsets of closers inserted by pairing; quote overtype only skips these.
+    var autoClosers: [Int] = []
     private var loading = false
     private(set) var palette = EditorPalettes.light
     private var previewTimer: Timer?
@@ -256,13 +258,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     private func setUpTextView() {
         textView.delegate = self
-        textView.autocorrectionType = .no
-        textView.autocapitalizationType = .none
-        textView.spellCheckingType = .no
-        textView.smartQuotesType = .no
-        textView.smartDashesType = .no
-        textView.smartInsertDeleteType = .no
-        textView.inlinePredictionType = .no
+        disableAutomaticSubstitutions(textView)
         textView.isFindInteractionEnabled = true
         textView.alwaysBounceVertical = true
         textView.keyboardDismissMode = .interactive
@@ -698,7 +694,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.typingAttributes = [.font: AppSettings.font(for: traitCollection), .foregroundColor: UIColor(hex: palette.foreground)]
         lineIndex = LineIndex(textView.textStorage.string as NSString)
         markdownFenceIndex.invalidateAll()
-        cachedMarkdownIndentation = nil
+        cachedIndentation = nil
+        autoClosers = []
         if NSMaxRange(sel) <= (textView.text as NSString).length { textView.selectedRange = sel }
         loading = false
         // The text was replaced from disk: the old undo steps' ranges no
@@ -720,6 +717,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let edited = textStorage.editedRange, delta = textStorage.changeInLength
         guard textStorage.editedMask.contains(.editedCharacters), !loading else { return }
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
+        shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
         let first = lineIndex.replace(oldRange, newLength: edited.length, in: textStorage.string as NSString)
         markdownFenceIndex.invalidate(fromLine: first)
@@ -749,28 +747,114 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
-        guard textView === self.textView, replacement == "\n", textView.isEditable, editGate.isEditable,
+        guard textView === self.textView, textView.isEditable, editGate.isEditable,
               textView.markedTextRange == nil else { return true }
         let text = textView.textStorage.string as NSString
-        guard range.location != NSNotFound, range.location >= 0, range.length >= 0, NSMaxRange(range) <= text.length,
-              range.length == 0 || text.rangeOfCharacter(from: .newlines, options: [], range: range).location == NSNotFound else {
-            return true
-        }
+        guard range.location != NSNotFound, range.location >= 0, range.length >= 0,
+              NSMaxRange(range) <= text.length else { return true }
         let language = document.language.language
-        if language == .yaml {
-            guard let edit = MarkdownLists.newline(in: text, selection: range, language: .yaml) else { return true }
+
+        if replacement == "\n", !self.textView.isPasting {
+            let singleLineSelection = range.length == 0
+                || text.rangeOfCharacter(from: .newlines, options: [], range: range).location == NSNotFound
+            if singleLineSelection {
+                if language == .yaml,
+                   let edit = MarkdownLists.newline(in: text, selection: range, language: .yaml) {
+                    return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+                }
+                if language == .markdown, !isInMarkdownFence(at: range.location, in: text) {
+                    if let edit = MarkdownTable.newline(in: text, selection: range) {
+                        return !applyTextEdit(edit, actionName: String(localized: "Add Table Row"))
+                    }
+                    let indentation = markdownIndentation(for: text)
+                    if let edit = MarkdownLists.newline(in: text, selection: range, language: .markdown,
+                                                        tabWidth: indentation.width, useTabs: indentation.usesTabs) {
+                        return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+                    }
+                }
+            }
+            let line = lineIndex.line(containing: range.location)
+            let edit = AutoEdit.newlineEdit(in: text, lineStart: lineIndex.starts[line], selection: range,
+                                            language: language, unit: detectedIndentation(for: text)?.unit)
+            // Plain newline (no indent to keep): let the system insert it, as the Mac
+            // falls back to insertNewline, so it stays in the current typing undo group.
+            if edit.replacement == "\n", edit.selection == NSRange(location: range.location + 1, length: 0) {
+                return true
+            }
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
-        guard language == .markdown, !isInMarkdownFence(at: range.location, in: text) else { return true }
-        if let edit = MarkdownTable.newline(in: text, selection: range) {
-            return !applyTextEdit(edit, actionName: String(localized: "Add Table Row"))
+
+        // Backspace only: UITextView reports the deleted character (caret-1, 1).
+        // Forward delete is (caret, 1) and must not pair-delete, as on the Mac.
+        if replacement.isEmpty, !self.textView.isPasting, range.length == 1, textView.selectedRange.length == 0,
+           NSMaxRange(range) == textView.selectedRange.location,
+           AppSettings.autoCloseBrackets, AutoEdit.pairs(in: language),
+           AutoEdit.deletesPair(before: range.location < text.length ? text.character(at: range.location) : nil,
+                                after: NSMaxRange(range) < text.length ? text.character(at: NSMaxRange(range)) : nil,
+                                language: language) {
+            let edit = TextEdit(range: NSRange(location: range.location, length: 2), replacement: "",
+                                selection: NSRange(location: range.location, length: 0))
+            return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
-        let indentation = markdownIndentation(for: text)
-        if let edit = MarkdownLists.newline(in: text, selection: range, language: .markdown,
-                                            tabWidth: indentation.width, useTabs: indentation.usesTabs) {
+
+        guard !self.textView.isPasting, replacement.utf16.count == 1, let raw = replacement.utf16.first else { return true }
+        let typed = straightenedTyping(replacement) ?? replacement
+        let character = typed.utf16.first ?? raw
+
+        if typed == ":", language == .python,
+           let edit = pythonClauseEdit(in: text, selection: range) {
+            return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+        }
+
+        if AppSettings.autoCloseBrackets, AutoEdit.pairs(in: language) {
+            switch AutoEdit.typing(character, before: range.location > 0 ? text.character(at: range.location - 1) : nil,
+                                   after: NSMaxRange(range) < text.length ? text.character(at: NSMaxRange(range)) : nil,
+                                   hasSelection: range.length > 0, language: language,
+                                   afterIsAutoClosed: autoClosers.contains(NSMaxRange(range))) {
+            case .skip?:
+                autoClosers.removeAll { $0 == range.location }
+                textView.selectedRange = NSRange(location: range.location + 1, length: 0)
+                return false
+            case .pair(let pair)?:
+                let edit = TextEdit(range: range, replacement: pair,
+                                    selection: NSRange(location: range.location + 1, length: 0))
+                guard applyTextEdit(edit, actionName: String(localized: "Typing")) else { return true }
+                autoClosers.append(range.location + 1)
+                if autoClosers.count > 16 { autoClosers.removeFirst(autoClosers.count - 16) }
+                return false
+            case .wrap(let open, let close)?:
+                let inner = text.substring(with: range)
+                let edit = TextEdit(range: range, replacement: open + inner + close,
+                                    selection: NSRange(location: range.location + 1, length: range.length))
+                return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+            case nil:
+                break
+            }
+        }
+        // Quotes (and typographic dashes) are inserted exactly so UITextView
+        // cannot rewrite them into typographic forms.
+        if typed == "\"" || typed == "'" || typed != replacement {
+            let edit = TextEdit(range: range, replacement: typed,
+                                selection: NSRange(location: range.location + (typed as NSString).length, length: 0))
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
         return true
+    }
+
+    /// Straight quotes and dashes for typed punctuation; nil if `replacement`
+    /// needs no typography fix.
+    private func straightenedTyping(_ replacement: String) -> String? {
+        let map: [Character: Character] = [
+            "\u{201C}": "\"", "\u{201D}": "\"", "\u{201E}": "\"", "\u{201F}": "\"",
+            "\u{2018}": "'", "\u{2019}": "'", "\u{201A}": "'", "\u{201B}": "'",
+            "\u{2013}": "-", "\u{2014}": "-",
+        ]
+        var changed = false
+        let exact = String(replacement.map { ch in
+            if let straight = map[ch] { changed = true; return straight }
+            return ch
+        })
+        return changed ? exact : nil
     }
 
     func handleMarkdownTab(forward: Bool) {
@@ -814,13 +898,49 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return markdownLinkPaste(pasted)
     }
 
-    private func markdownIndentation(for text: NSString) -> Indentation {
-        if let cachedMarkdownIndentation, cachedMarkdownIndentation.generation == generation {
-            return cachedMarkdownIndentation.value
+    private func detectedIndentation(for text: NSString) -> Indentation? {
+        if let cachedIndentation, cachedIndentation.generation == generation {
+            return cachedIndentation.value
         }
-        let value = Indentation.detect(text) ?? Indentation(usesTabs: false, width: 4)
-        cachedMarkdownIndentation = (generation, value)
+        let value = Indentation.detect(text)
+        cachedIndentation = (generation, value)
         return value
+    }
+
+    private func markdownIndentation(for text: NSString) -> Indentation {
+        detectedIndentation(for: text) ?? Indentation(usesTabs: false, width: 4)
+    }
+
+    private func shiftAutoClosers(oldRange: NSRange, newLength: Int) {
+        guard !autoClosers.isEmpty else { return }
+        let end = NSMaxRange(oldRange)
+        let delta = newLength - oldRange.length
+        autoClosers = autoClosers.compactMap { offset in
+            if offset >= end { return offset + delta }
+            return offset < oldRange.location ? offset : nil
+        }
+    }
+
+    private func pythonClauseEdit(in text: NSString, selection: NSRange) -> TextEdit? {
+        guard selection.length == 0 else { return nil }
+        let line = lineIndex.line(containing: selection.location)
+        let start = lineIndex.starts[line]
+        guard selection.location - start <= 512 else { return nil }
+        let head = text.substring(with: NSRange(location: start, length: selection.location - start))
+        var above: [String] = []
+        var position = start
+        while position > 0, above.count < 300 {
+            let previous = lineIndex.line(containing: position - 1)
+            let lineRange = lineIndex.contentRange(ofLine: previous)
+            above.append(lineRange.length > 4096 ? "x" : text.substring(with: lineRange).trimmingCharacters(in: .newlines))
+            position = lineRange.location
+        }
+        let width = detectedIndentation(for: text)?.width ?? 4
+        guard let indent = LanguageIndent.pythonClauseIndent(head: head, above: above, tabWidth: width) else { return nil }
+        let body = head.drop { $0 == " " || $0 == "\t" }
+        let replacement = indent + body + ":"
+        return TextEdit(range: NSRange(location: start, length: selection.location - start), replacement: replacement,
+                        selection: NSRange(location: start + (replacement as NSString).length, length: 0))
     }
 
     /// A URL pasted over a selection in Markdown becomes [selection](url),
@@ -847,7 +967,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
+    private func disableAutomaticSubstitutions(_ textView: UITextView) {
+        textView.autocorrectionType = .no
+        textView.autocapitalizationType = .none
+        textView.spellCheckingType = .no
+        textView.smartQuotesType = .no
+        textView.smartDashesType = .no
+        textView.smartInsertDeleteType = .no
+        textView.inlinePredictionType = .no
+    }
+
     func textViewDidBeginEditing(_ textView: UITextView) {
+        disableAutomaticSubstitutions(textView)
         hideKeyboardButton.isHidden = false
         contextBar?.refreshStates()
     }
@@ -3034,6 +3165,7 @@ final class EditorDocumentTextView: UITextView {
     var markdownKeysEnabled: (() -> Bool)?
     var onMarkdownTab: ((Bool) -> Void)?
     var onMarkdownPaste: (() -> Bool)?
+    private(set) var isPasting = false
 
     override var keyCommands: [UIKeyCommand]? {
         guard markdownKeysEnabled?() == true else { return super.keyCommands }
@@ -3049,6 +3181,8 @@ final class EditorDocumentTextView: UITextView {
 
     override func paste(_ sender: Any?) {
         if onMarkdownPaste?() == true { return }
+        isPasting = true
+        defer { isPasting = false }
         super.paste(sender)
     }
 

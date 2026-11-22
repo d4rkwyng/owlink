@@ -65,6 +65,8 @@ import Testing
         // Never in prose.
         #expect(t("(", nil, nil, .plain) == nil)
         #expect(t("\"", " ", nil, .markdown) == nil)
+        #expect(t("(", nil, nil, .diff) == nil)
+        #expect(!AutoEdit.pairs(in: .diff))
     }
 
     @Test func pairedDelete() {

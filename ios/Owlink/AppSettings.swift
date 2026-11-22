@@ -21,6 +21,7 @@ enum AppSettings {
         static let styleCheckExceptions = "styleCheckExceptions"
         static let readableWidthDefault = "readableWidthDefault"
         static let readableColumns = "readableColumns"
+        static let autoCloseBrackets = "autoCloseBrackets"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
         static let theme = EditorTheme.defaultsKey
@@ -73,6 +74,12 @@ enum AppSettings {
     static var showContextBar: Bool {
         get { defaults.object(forKey: Key.showContextBar) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.showContextBar); post() }
+    }
+
+    /// Pair brackets and quotes while typing in code. On by default.
+    static var autoCloseBrackets: Bool {
+        get { defaults.object(forKey: Key.autoCloseBrackets) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.autoCloseBrackets); post() }
     }
 
     /// The owl's offline hints (rules): on by default, like the Mac.

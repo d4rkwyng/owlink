@@ -22,18 +22,20 @@ extension EditorViewController {
 
     @discardableResult
     func applyTextEdit(_ edit: TextEdit, actionName: String) -> Bool {
-        let length = textView.textStorage.length
+        let storage = textView.textStorage
+        let length = storage.length
         guard edit.range.location != NSNotFound, edit.range.location >= 0, edit.range.length >= 0,
-              NSMaxRange(edit.range) <= length,
-              let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
-              let end = textView.position(from: start, offset: edit.range.length),
-              let range = textView.textRange(from: start, to: end) else { return false }
+              NSMaxRange(edit.range) <= length else { return false }
+        let previousSelection = textView.selectedRange
+        let previousText = (storage.string as NSString).substring(with: edit.range)
+        let inverseRange = NSRange(location: edit.range.location, length: (edit.replacement as NSString).length)
         let undo = textView.undoManager
+        let grouping = undo.map { !$0.isUndoing && !$0.isRedoing } ?? false
         // Close the system's open typing group first, so the edit is its own
         // undo step. groupsByEvent is off until the next turn (the run loop
         // would otherwise end the group closed here); one restore is pending
         // at a time, keeping the original value even for two edits a turn.
-        if let undo, undo.groupingLevel > 0 {
+        if grouping, let undo, undo.groupingLevel > 0 {
             if pendingGroupsByEvent == nil {
                 pendingGroupsByEvent = undo.groupsByEvent
                 DispatchQueue.main.async { [weak self, undo] in
@@ -44,13 +46,25 @@ extension EditorViewController {
             undo.groupsByEvent = false
             undo.endUndoGrouping()
         }
-        undo?.beginUndoGrouping()
-        textView.replace(range, withText: edit.replacement)
-        undo?.setActionName(actionName)
-        undo?.endUndoGrouping()
+        // Insert through the storage so typographic smart quotes cannot rewrite
+        // the characters, and so UITextView.replace cannot close our undo group.
+        if grouping { undo?.beginUndoGrouping() }
+        undo?.disableUndoRegistration()
+        storage.replaceCharacters(in: edit.range, with: edit.replacement)
         textView.selectedRange = edit.selection
+        undo?.enableUndoRegistration()
+        undo?.registerUndo(withTarget: self) { target in
+            _ = target.applyTextEdit(TextEdit(range: inverseRange, replacement: previousText, selection: previousSelection),
+                                     actionName: actionName)
+        }
+        if grouping, let undo, undo.groupingLevel > 0 {
+            undo.setActionName(actionName)
+            undo.endUndoGrouping()
+        }
         revealRange(edit.selection)
         contextBar?.refreshStates()
+        // storage.replaceCharacters does not call the text-view delegate.
+        textViewDidChange(textView)
         return true
     }
 
