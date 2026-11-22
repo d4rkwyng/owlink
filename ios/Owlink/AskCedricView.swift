@@ -60,7 +60,8 @@ final class AskCedricModel: ObservableObject {
     var askIsVisible: () -> Bool = { false }
     var settingsProvider: () -> LocalAISettings? = { AskCedricModel.chatSettings() }
     var makeEngine: (LocalAISettings) async -> (any OwlChatEngine)? = { await OwlChatEngines.make(settings: $0) }
-    private var task: Task<Void, Never>?
+    /// The current check or answer (tests await it).
+    private(set) var task: Task<Void, Never>?
     private var recheck: Task<Void, Never>?
     private var scopeRefresh: Task<Void, Never>?
     private var lastQuestion = ""
@@ -103,6 +104,13 @@ final class AskCedricModel: ObservableObject {
     private(set) var lastScan: [ScriptSafety.Finding]?
     /// The last script check's scan stopped at `ScriptSafety.maxLines`.
     private(set) var lastScanTruncated = false
+    /// The offline scan (tests replace it with a slow one).
+    var scanScript: @Sendable (String, Language) -> ScriptSafety.Report = { ScriptSafety.check($0, language: $1) }
+    /// Bumped by each script check and by Stop: a scan or engine that
+    /// finishes for an older generation is ignored.
+    private var scriptCheckGeneration = 0
+    /// A script check is scanning or making its engine (before `begin`).
+    private var scriptCheckPending = false
     /// The answer being written is about a script: clamped as it streams in.
     private var verdictStream: ScriptVerdictStream?
     /// Every text a guarded answer showed while streaming (tests).
@@ -231,24 +239,26 @@ final class AskCedricModel: ObservableObject {
         lastInlineAnswer = nil
         verdictStream = nil
         streamedRenders = []
+        scriptCheckGeneration += 1
+        let generation = scriptCheckGeneration
+        scriptCheckPending = true
+        let scanner = scanScript
         task = Task { [weak self] in
-            let report = await Task.detached(priority: .userInitiated) { ScriptSafety.check(text, language: language) }.value
-            guard let self else { return }
+            // Not cancelled with the task: Stop ends the check at once
+            // (`stopScriptCheck`) and this result, when it comes, is dropped.
+            let report = await Task.detached(priority: .userInitiated) { scanner(text, language) }.value
+            guard let self, self.scriptCheckGeneration == generation else { return }
+            if Task.isCancelled { self.stopScriptCheck(); return }
             self.lastScan = report.findings
             self.lastScanTruncated = report.truncated
             let summary = ScriptSafety.summary(report)
             self.entries.append(Entry(role: .scan, text: summary))
-            if Task.isCancelled {
-                self.entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
-                self.running = false
-                return
-            }
-            if let s = self.settingsProvider(), let engine = await self.makeEngine(s) {
-                guard !Task.isCancelled else {
-                    self.entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
-                    self.running = false
-                    return
-                }
+            var engine: (any OwlChatEngine)?
+            if let s = self.settingsProvider() { engine = await self.makeEngine(s) }
+            guard self.scriptCheckGeneration == generation else { return }
+            if Task.isCancelled { self.stopScriptCheck(); return }
+            self.scriptCheckPending = false
+            if let engine {
                 self.unavailable = nil
                 self.rememberEngine(engine)
                 self.selectScope(.wholeDocument)
@@ -265,6 +275,16 @@ final class AskCedricModel: ObservableObject {
             self.entries.append(Entry(role: .note, text: note))
             self.running = false
         }
+    }
+
+    /// Stop while a script check is scanning or making its engine: it ends
+    /// now, and the scan's or engine's late result is ignored.
+    private func stopScriptCheck() {
+        guard scriptCheckPending else { return }
+        scriptCheckPending = false
+        scriptCheckGeneration += 1
+        entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
+        running = false
     }
 
     /// The answer: an empty Cedric entry, then the engine's reply into it.
@@ -435,7 +455,10 @@ final class AskCedricModel: ObservableObject {
         }
     }
 
-    func stop() { task?.cancel() }
+    func stop() {
+        stopScriptCheck()
+        task?.cancel()
+    }
 
     private static func cards(_ proposals: [OwlEditProposal]) -> [Card] {
         proposals.enumerated().map { i, p in

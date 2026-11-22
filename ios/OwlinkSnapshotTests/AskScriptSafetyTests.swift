@@ -171,4 +171,78 @@ final class AskScriptSafetyTests: XCTestCase {
             XCTAssertFalse(shown.localizedCaseInsensitiveContains("safe to run"), shown)
         }
     }
+
+    // MARK: Stop
+
+    private let stopped = String(localized: "Stopped.")
+
+    private func waitFor(_ condition: () -> Bool, timeout: TimeInterval = 10) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition(), Date() < deadline { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    func testStopDuringScanEndsAtOnceAndIgnoresTheLateScan() async {
+        let scanning = Flag(), release = Flag()
+        let m = model(curlScript, language: .shell)
+        m.scanScript = { text, language in
+            scanning.set()
+            while !release.isSet { usleep(1_000) }   // a slow scan, not cancellable
+            return ScriptSafety.check(text, language: language)
+        }
+        m.settingsProvider = { XCTFail("no settings read after Stop"); return .default }
+        m.makeEngine = { _ in XCTFail("no engine made after Stop"); return nil }
+        m.checkScriptSafety()
+        await waitFor { scanning.isSet }
+        XCTAssertTrue(scanning.isSet)
+        XCTAssertTrue(m.running)
+
+        m.stop()
+        // Ended now, though the scan is still running.
+        XCTAssertFalse(m.running)
+        XCTAssertEqual(m.entries.map(\.role), [.user, .note])
+        XCTAssertEqual(m.entries.last?.text, stopped)
+
+        release.set()
+        await m.task?.value
+        XCTAssertEqual(m.entries.map(\.role), [.user, .note], "the late scan is ignored")
+        XCTAssertNil(m.lastScan)
+        XCTAssertFalse(m.running)
+    }
+
+    func testStopDuringSlowEngineMakesNoAnswer() async {
+        let engine = FakeChatEngine(delay: 0.001, scriptAnswer: "Nothing to see.\nVerdict: safe to run.")
+        let m = model(harmlessScript, language: .shell)
+        m.settingsProvider = { .default }
+        var started = false
+        var sawCancel = false
+        m.makeEngine = { _ in
+            started = true
+            // Hangs until cancelled, then returns an engine anyway (late).
+            while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+            sawCancel = true
+            return engine
+        }
+        m.checkScriptSafety()
+        await waitFor { started }
+        XCTAssertTrue(started)
+        XCTAssertEqual(m.entries.map(\.role), [.user, .scan])
+
+        m.stop()
+        XCTAssertFalse(m.running)
+        XCTAssertEqual(m.entries.last?.text, stopped)
+
+        await m.task?.value
+        XCTAssertTrue(sawCancel)
+        XCTAssertEqual(m.entries.map(\.role), [.user, .scan, .note], "no Cedric answer after Stop")
+        XCTAssertEqual(m.entries.filter { $0.text == stopped }.count, 1)
+        XCTAssertFalse(m.running)
+    }
+}
+
+/// A flag set on one thread and polled on another.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }
