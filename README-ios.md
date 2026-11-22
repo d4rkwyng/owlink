@@ -28,6 +28,8 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   ending are detected and written back unchanged (the core's `TextCodec`).
 - Syntax colouring (the core's highlighter), the seven themes including
   Dracula, font size, wrap, and **Show Line Numbers** (on by default).
+  Settings can pick the monospaced editor font (SF Mono or another installed
+  monospaced family); the choice is remembered.
   Settings › Writing can use a prose font for Markdown and plain text; code
   keeps the monospaced editor font.
   Jumps show numbers for the open file even when the setting is off.

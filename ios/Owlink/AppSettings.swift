@@ -9,6 +9,8 @@ enum AppSettings {
 
     enum Key {
         static let fontSize = "ios.fontSize"
+        /// Same key as the Mac: the editor's PostScript face, nil for SF Mono.
+        static let fontName = "fontName"
         static let wrap = "ios.wrap"
         static let owlHints = "ios.owlHints"
         static let lineNumbers = "ios.lineNumbers"
@@ -244,14 +246,59 @@ enum AppSettings {
 
     static func post() { NotificationCenter.default.post(name: changed, object: nil) }
 
+    /// The editor's monospaced face (PostScript name), or nil for the
+    /// system's monospaced font (SF Mono). A name that no longer loads stays
+    /// stored; the editor falls back to SF Mono meanwhile.
+    static var fontName: String? {
+        get { defaults.string(forKey: Key.fontName).flatMap { $0.isEmpty ? nil : $0 } }
+        set {
+            if let newValue, !newValue.isEmpty { defaults.set(newValue, forKey: Key.fontName) }
+            else { defaults.removeObject(forKey: Key.fontName) }
+            post()
+        }
+    }
+
+    private static var cachedEditorFont: (name: String?, size: CGFloat, font: UIFont)?
+
+    /// The chosen editor face at `size`, else the monospaced system font.
+    static func editorFont(ofSize size: CGFloat) -> UIFont {
+        let name = fontName
+        if let cached = cachedEditorFont, cached.name == name, cached.size == size { return cached.font }
+        let font = name.flatMap { UIFont(name: $0, size: size) }
+            ?? UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        cachedEditorFont = (name, size, font)
+        return font
+    }
+
     @MainActor static func font(size: Double? = nil) -> UIFont {
-        UIFont.monospacedSystemFont(ofSize: CGFloat(size ?? fontSize), weight: .regular)
+        editorFont(ofSize: CGFloat(size ?? fontSize))
     }
 
     /// The editor's font for its own traits: unfolding a Duo goes from 13 to
     /// 15 pt unless the person chose a size.
     static func font(for traits: UITraitCollection) -> UIFont {
-        UIFont.monospacedSystemFont(ofSize: CGFloat(chosenFontSize ?? defaultFontSize(for: traits)), weight: .regular)
+        editorFont(ofSize: CGFloat(chosenFontSize ?? defaultFontSize(for: traits)))
+    }
+
+    /// One regular face per installed monospaced family, sorted by family.
+    private static let installedMonospacedFonts: [(title: String, name: String)] =
+        UIFont.familyNames.sorted().compactMap { family in
+            guard !family.hasPrefix("."), family != "SF Mono",
+                  let name = regularFontName(forFamily: family), !name.hasPrefix("."),
+                  let face = UIFont(name: name, size: 13),
+                  face.fontDescriptor.symbolicTraits.contains(.traitMonoSpace) else { return nil }
+            return (family, name)
+        }
+
+    /// Settings › Font: "SF Mono (System)" (empty name) first, then one
+    /// regular face per installed monospaced family, sorted by family, as
+    /// the Mac's popup. A stored name not in that list still shows, last.
+    static func editorFontChoices(current: String? = fontName) -> [(title: String, name: String)] {
+        var out: [(title: String, name: String)] = [(String(localized: "SF Mono (System)"), "")] + installedMonospacedFonts
+        if let current, !current.isEmpty, !out.contains(where: { $0.name == current }) {
+            out.append((UIFont(name: current, size: 13)?.familyName ?? current, current))
+        }
+        return out
     }
 
     private static var cachedProseFont: (name: String?, size: CGFloat, font: UIFont)?

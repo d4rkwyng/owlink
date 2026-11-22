@@ -53,6 +53,7 @@ enum AIStatus {
 struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage(AppSettings.Key.fontSize) private var fontSize = AppSettings.defaultFontSize
+    @AppStorage(AppSettings.Key.fontName) private var fontName = ""
     @AppStorage(AppSettings.Key.wrap) private var wrap = true
     @AppStorage(AppSettings.Key.lineNumbers) private var lineNumbers = true
     @AppStorage(AppSettings.Key.showInvisibles) private var showInvisibles = MenuToggleSetting.showInvisibles.defaultValue
@@ -95,6 +96,12 @@ struct SettingsView: View {
         NavigationStack {
             Form {
                 Section {
+                    Picker(String(localized: "Font"), selection: $fontName) {
+                        ForEach(AppSettings.editorFontChoices(current: fontName), id: \.name) { item in
+                            Text(item.title).tag(item.name)
+                        }
+                    }
+                    .accessibilityIdentifier("settings.font")
                     Stepper(value: $fontSize, in: AppSettings.fontSizes, step: 1) {
                         HStack {
                             Text(String(localized: "Font Size"))
@@ -144,6 +151,7 @@ struct SettingsView: View {
                 } footer: {
                     Text(String(localized: "For new files and files that don't indent yet; a file's own indentation wins."))
                 }
+                .onChange(of: fontName) { AppSettings.fontName = fontName.isEmpty ? nil : fontName }
                 .onChange(of: fontSize) { AppSettings.post() }
                 .onChange(of: wrap) { AppSettings.post() }
                 .onChange(of: lineNumbers) { AppSettings.post() }
