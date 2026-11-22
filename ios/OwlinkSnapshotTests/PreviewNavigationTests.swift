@@ -300,6 +300,44 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertTrue(preview.isHome)
         XCTAssertTrue(preview.canGoBack)
     }
+
+    /// A text note opens in an editor window (not in place, not in the
+    /// preview); Markdown and HTML still browse in the preview window.
+    func testDetachedPreviewOpensTextLinksInAnEditor() throws {
+        let (root, doc) = try tree()
+        let target = PreviewWindows.Target(documentPath: doc.path, editorWindow: "w", title: "doc.md")
+        let viewer = DetachedPreviewViewController(target: target)
+        var opened: [(URL, PreviewWindows.Target)] = []
+        var accepts = true
+        viewer.openFile = { url, t in opened.append((url, t)); return accepts }
+        host(UINavigationController(rootViewController: viewer))
+        viewer.show(DetachedPreviews.Snapshot(url: doc, markdown: "[n](notes.txt)", palette: EditorPalettes.light))
+        let preview = viewer.preview
+        preview.loadsWeb = false
+        XCTAssertNotNil(preview.onOpenFile)
+
+        preview.handleLink(try link("notes.txt", in: root), command: false)
+        XCTAssertEqual(opened.count, 1)
+        XCTAssertEqual(opened.first?.0.standardizedFileURL.path, root.appendingPathComponent("notes.txt").standardizedFileURL.path)
+        XCTAssertEqual(opened.first?.1, target)
+        XCTAssertTrue(preview.isHome, "a text note doesn't browse in the preview")
+        XCTAssertFalse(preview.canGoBack)
+        XCTAssertNil(preview.lastNotice)
+
+        // No editor could take it: the short note, still no navigation.
+        accepts = false
+        preview.handleLink(try link("notes.txt", in: root), command: false)
+        XCTAssertEqual(opened.count, 2)
+        XCTAssertTrue(preview.isHome)
+        XCTAssertEqual(preview.lastNotice, String(localized: "Open notes.txt in Owlink to edit it."))
+
+        for page in ["other.md", "page.html"] {
+            preview.goHome()
+            preview.handleLink(try link(page, in: root), command: false)
+            XCTAssertFalse(preview.isHome, "\(page) browses in the preview")
+        }
+        XCTAssertEqual(opened.count, 2, "Markdown and HTML don't go to an editor")
+    }
 }
 
 /// Waits for a web view's load to finish.

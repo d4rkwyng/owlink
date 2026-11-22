@@ -96,6 +96,31 @@ import CedricCore
         UIApplication.shared.openSessions.first { $0.persistentIdentifier == id }
     }
 
+    /// A note a preview window's link names (a `.txt`, say) opens in an
+    /// editor window, never in place of the followed document (closing it
+    /// would close this preview too). Already open somewhere: that window
+    /// comes forward. Else an idle browser opens it, the followed
+    /// document's window first. False when every window has an editor up.
+    static func openInEditor(_ url: URL, for target: PreviewWindows.Target) -> Bool {
+        if let s = OpenDocuments.otherWindow(having: url, than: "") {
+            UIApplication.shared.requestSceneSessionActivation(s, userActivity: nil, options: nil, errorHandler: nil)
+            return true
+        }
+        let browsers = UIApplication.shared.connectedScenes.compactMap { scene -> (String, DocumentBrowserViewController)? in
+            guard let ws = scene as? UIWindowScene,
+                  let b = ws.windows.lazy.compactMap({ $0.rootViewController as? DocumentBrowserViewController }).first
+            else { return nil }
+            return (ws.session.persistentIdentifier, b)
+        }
+        let idle = browsers.filter { $0.1.presentedViewController == nil }
+        guard let (id, browser) = idle.first(where: { $0.0 == target.editorWindow }) ?? idle.first else { return false }
+        browser.presentDocument(at: url)
+        if let s = session(id) {
+            UIApplication.shared.requestSceneSessionActivation(s, userActivity: nil, options: nil, errorHandler: nil)
+        }
+        return true
+    }
+
     // MARK: Preview window side
 
     static func attach(_ viewer: DetachedPreviewViewController, window id: String, target: PreviewWindows.Target) {
@@ -156,6 +181,9 @@ final class DetachedPreviewViewController: UIViewController {
     /// The same preview as the editor's (links browse here too, with
     /// Back, Forward and This Document).
     let preview = PreviewController()
+    /// Opens a linked note in an editor window; false when none can take
+    /// it. Replaceable for tests.
+    var openFile: @MainActor (URL, PreviewWindows.Target) -> Bool = { DetachedPreviews.openInEditor($0, for: $1) }
     private let blankLabel = UILabel()
     private var scrollFollow = PreviewScrollFollow()
     /// The editor's palette for this document, once a snapshot has arrived.
@@ -182,9 +210,12 @@ final class DetachedPreviewViewController: UIViewController {
         view.addSubview(preview.view)
         preview.didMove(toParent: self)
         preview.web.accessibilityIdentifier = "detachedPreview.web"
-        // A linked note opens in an editor window, not here (a short note
-        // says so); Markdown and HTML links still browse in this preview.
-        preview.onOpenFile = nil
+        // A linked note opens in an editor window (this one stays open);
+        // Markdown and HTML links still browse in this preview.
+        preview.onOpenFile = { [weak self] url in
+            guard let self else { return }
+            if !self.openFile(url, self.target) { self.preview.noticeCannotOpen(url) }
+        }
         blankLabel.text = String(localized: "\(target.title) isn’t open in Owlink. Open it to see its preview here.")
         blankLabel.numberOfLines = 0
         blankLabel.textAlignment = .center

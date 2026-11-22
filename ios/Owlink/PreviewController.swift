@@ -534,7 +534,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             if let onOpenFile {
                 onOpenFile(file)
             } else {
-                notice(String(localized: "Open \(file.lastPathComponent) in Owlink to edit it."))
+                noticeCannotOpen(file)
             }
         case .confirmExternal(let external):
             confirmOpen(external)
@@ -831,6 +831,11 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             noticeView.centerXAnchor.constraint(equalTo: g.centerXAnchor),
             noticeView.widthAnchor.constraint(lessThanOrEqualTo: g.widthAnchor, constant: -32),
         ])
+    }
+
+    /// A linked note that no editor could open from here.
+    func noticeCannotOpen(_ file: URL) {
+        notice(String(localized: "Open \(file.lastPathComponent) in Owlink to edit it."))
     }
 
     private func notice(_ text: String) {
