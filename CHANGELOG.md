@@ -7,10 +7,10 @@ are its section below (`Scripts/changelog-section.sh`).
 ## [Unreleased]
 
 ### Added
-- VoiceOver names for the folder sidebar, Find controls, Ask Cedric scope and input, and line entry.
+- VoiceOver names for Find and Replace, Ask Cedric’s scope and question fields, Go to Line, and the New File/Folder name field.
 
 ### Fixed
-- Localized remaining UI prompts, settings units, and dynamic action labels.
+- Localized remaining settings units, the Go to Line placeholder, default-editor type checkboxes, and the Compare window title.
 
 ## [0.5.0] - 2026-11-22
 

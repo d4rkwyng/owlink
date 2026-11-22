@@ -40,6 +40,8 @@ import Testing
             let contents = try String(contentsOf: file, encoding: .utf8)
             for (lineIndex, line) in contents.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let text = String(line)
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("//") { continue }
                 let range = NSRange(text.startIndex..<text.endIndex, in: text)
                 for (api, regex) in compiled {
                     for match in regex.matches(in: text, range: range) {
@@ -56,6 +58,11 @@ import Testing
                         if api == "toolTip",
                            value.hasPrefix("/")
                             || value.range(of: #"^\\\([A-Za-z_][A-Za-z0-9_.]*\.path\)$"#, options: .regularExpression) != nil { continue }
+                        // Source or document content with no surrounding words (TODO rows).
+                        if api == "buttonTitle" || api == "windowTitle" || api == "menuItemTitle" {
+                            let leftover = value.replacingOccurrences(of: #"\\\([^)]*\)"#, with: "", options: .regularExpression)
+                            if leftover.range(of: #"\p{L}"#, options: .regularExpression) == nil { continue }
+                        }
                         let relative = file.path.replacingOccurrences(of: Self.root.path + "/", with: "")
                         violations.append("\(relative):\(lineIndex + 1): \(text.trimmingCharacters(in: .whitespaces))")
                     }
@@ -63,7 +70,7 @@ import Testing
             }
         }
 
-        #expect(violations.isEmpty)
+        #expect(violations.isEmpty, "\(violations.joined(separator: "\n"))")
     }
 
     @Test func keyControlsHaveAccessibilityLabels() throws {

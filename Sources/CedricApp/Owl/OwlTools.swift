@@ -144,7 +144,7 @@ final class TodoListController: NSViewController {
         list.alignment = .leading
         list.spacing = 2
         for (k, item) in items.prefix(500).enumerated() {
-            let b = NSButton(title: String(localized: "\(item.line)  \(item.tag)  \(item.text)"), target: self, action: #selector(pick(_:)))
+            let b = NSButton(title: "\(item.line)  \(item.tag)  \(item.text)", target: self, action: #selector(pick(_:)))
             b.isBordered = false
             b.alignment = .left
             b.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
