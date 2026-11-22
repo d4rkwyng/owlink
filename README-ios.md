@@ -20,6 +20,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
 ## What it does
 
 - Text menu and touch line commands, indentation conversion, and cancellable keep/delete lines matching.
+- Settings › Editor sets the default indent for files without detected indentation.
 - Read-only CSV and TSV grid preview in the editor palette: pinned header, zoom, sortable columns (a third tap restores file order), VoiceOver sort state, and field navigation back into the text.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line

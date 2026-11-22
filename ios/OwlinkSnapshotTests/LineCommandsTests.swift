@@ -193,6 +193,84 @@ final class LineCommandsTests: XCTestCase {
         XCTAssertNil(editor.lineIndentation)
     }
 
+    private func withIndentDefaultsRestored(_ body: () -> Void) {
+        let defaults = AppSettings.defaults
+        let keys = [AppSettings.Key.indentWithTabs, AppSettings.Key.tabWidth]
+        let previous = keys.map { defaults.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, previous) {
+                if let value { defaults.set(value, forKey: key) }
+                else { defaults.removeObject(forKey: key) }
+            }
+            AppSettings.post()
+        }
+        body()
+    }
+
+    func testDefaultIndentationAndOpenEditorUpdates() {
+        withIndentDefaultsRestored {
+            AppSettings.defaults.removeObject(forKey: AppSettings.Key.indentWithTabs)
+            AppSettings.defaults.removeObject(forKey: AppSettings.Key.tabWidth)
+            let editor = editor("no indent")
+            let spaces = Indentation(usesTabs: false, width: 4)
+            XCTAssertEqual(AppSettings.defaultIndentation, spaces)
+            XCTAssertEqual(editor.currentLineIndentation(editor.textView.text as NSString), spaces)
+
+            AppSettings.defaultIndentation = Indentation(usesTabs: true, width: 8)
+            XCTAssertEqual(editor.currentLineIndentation(editor.textView.text as NSString), Indentation(usesTabs: true, width: 8))
+            editor.indentLines(nil)
+            XCTAssertEqual(editor.textView.text, "\tno indent")
+            editor.outdentLines(nil)
+            XCTAssertEqual(editor.textView.text, "no indent")
+
+            editor.textView.text = "        no indent"
+            editor.textView.selectedRange = NSRange(location: 0, length: 0)
+            editor.outdentLines(nil)
+            XCTAssertEqual(editor.textView.text, "no indent")
+        }
+    }
+
+    func testDefaultIndentationSettingsAndNotification() {
+        withIndentDefaultsRestored {
+            let changed = expectation(forNotification: AppSettings.changed, object: nil)
+            AppSettings.defaultIndentation = Indentation(usesTabs: true, width: 8)
+            wait(for: [changed], timeout: 1)
+            XCTAssertTrue(AppSettings.defaults.bool(forKey: "indentWithTabs"))
+            XCTAssertEqual(AppSettings.defaults.integer(forKey: "tabWidth"), 8)
+            XCTAssertEqual(AppSettings.defaultIndentation, Indentation(usesTabs: true, width: 8))
+
+            var invalid = Indentation(usesTabs: false, width: 4)
+            invalid.width = 99
+            AppSettings.defaultIndentation = invalid
+            XCTAssertEqual(AppSettings.defaults.integer(forKey: "tabWidth"), 16)
+            XCTAssertEqual(AppSettings.defaultIndentation.width, 16)
+            invalid.width = -2
+            AppSettings.defaultIndentation = invalid
+            XCTAssertEqual(AppSettings.defaultIndentation.width, 1)
+            AppSettings.defaults.set(99, forKey: AppSettings.Key.tabWidth)
+            XCTAssertEqual(AppSettings.defaultIndentation.width, 16)
+            AppSettings.defaults.set(0, forKey: AppSettings.Key.tabWidth)
+            XCTAssertEqual(AppSettings.defaultIndentation.width, 4)
+        }
+    }
+
+    func testChangedDefaultAppliesToTabAndReturn() {
+        withIndentDefaultsRestored {
+            AppSettings.defaultIndentation = Indentation(usesTabs: false, width: 2)
+            let editor = editor("if ready {")
+            let end = (editor.textView.text as NSString).length
+            editor.textView.selectedRange = NSRange(location: end, length: 0)
+            AppSettings.defaultIndentation = Indentation(usesTabs: true, width: 8)
+            XCTAssertFalse(editor.textView(editor.textView, shouldChangeTextIn: editor.textView.selectedRange, replacementText: "\n"))
+            XCTAssertEqual(editor.textView.text, "if ready {\n\t")
+            editor.textView.undoManager?.undo()
+            AppSettings.defaultIndentation = Indentation(usesTabs: false, width: 8)
+            editor.textView.selectedRange = NSRange(location: 0, length: 0)
+            XCTAssertFalse(editor.textView(editor.textView, shouldChangeTextIn: editor.textView.selectedRange, replacementText: "\t"))
+            XCTAssertTrue(editor.textView.text.hasPrefix("        if ready"))
+        }
+    }
+
     func testDetectedIndentationWinsOverSavedDefault() {
         let defaults = UserDefaults.standard
         let oldTabs = defaults.object(forKey: "indentWithTabs")

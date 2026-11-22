@@ -41,12 +41,9 @@ extension EditorViewController {
     }
 
     func resolvedLineIndentation(_ text: NSString) -> (indentation: Indentation, tabTypesSpaces: Bool) {
-        let defaults = UserDefaults.standard
-        let width = defaults.integer(forKey: "tabWidth")
-        let fallback = Indentation(usesTabs: defaults.bool(forKey: "indentWithTabs"), width: width > 0 ? width : 4)
         return LanguageIndent.resolve(language: document.language.language, manual: lineIndentation,
-                                      detected: detectedIndentation(for: text), default: fallback,
-                                      defaultSaved: defaults.object(forKey: "indentWithTabs") != nil)
+                                      detected: detectedIndentation(for: text), default: AppSettings.defaultIndentation,
+                                      defaultSaved: AppSettings.defaults.object(forKey: AppSettings.Key.indentWithTabs) != nil)
     }
 
     func currentLineIndentation(_ text: NSString) -> Indentation { resolvedLineIndentation(text).indentation }

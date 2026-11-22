@@ -27,6 +27,8 @@ enum AppSettings {
         static let proseFontName = "proseFontName"
         static let proseFontSize = "proseFontSize"
         static let autoCloseBrackets = "autoCloseBrackets"
+        static let tabWidth = "tabWidth"
+        static let indentWithTabs = "indentWithTabs"
         static let focusUnit = "focusUnit"
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
@@ -88,6 +90,19 @@ enum AppSettings {
     static var showContextBar: Bool {
         get { defaults.object(forKey: Key.showContextBar) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.showContextBar); post() }
+    }
+
+    static var defaultIndentation: Indentation {
+        get {
+            let width = defaults.integer(forKey: Key.tabWidth)
+            return Indentation(usesTabs: defaults.bool(forKey: Key.indentWithTabs), width: width > 0 ? width : 4)
+        }
+        set {
+            let indentation = Indentation(usesTabs: newValue.usesTabs, width: newValue.width)
+            defaults.set(indentation.width, forKey: Key.tabWidth)
+            defaults.set(indentation.usesTabs, forKey: Key.indentWithTabs)
+            post()
+        }
     }
 
     /// Pair brackets and quotes while typing in code. On by default.

@@ -58,6 +58,8 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.showInvisibles) private var showInvisibles = MenuToggleSetting.showInvisibles.defaultValue
     @AppStorage(AppSettings.Key.showContextBar) private var showContextBar = true
     @AppStorage(AppSettings.Key.autoCloseBrackets) private var autoCloseBrackets = true
+    @AppStorage(AppSettings.Key.indentWithTabs) private var indentWithTabs = false
+    @AppStorage(AppSettings.Key.tabWidth) private var tabWidth = 4
     @AppStorage(AppSettings.Key.highlightOccurrences) private var highlightOccurrences = true
     @AppStorage(AppSettings.Key.owlHints) private var owlHints = true
     @AppStorage(AppSettings.Key.theme) private var theme = EditorTheme.system.rawValue
@@ -80,7 +82,7 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section(String(localized: "Editor")) {
+                Section {
                     Stepper(value: $fontSize, in: AppSettings.fontSizes, step: 1) {
                         HStack {
                             Text(String(localized: "Font Size"))
@@ -93,6 +95,27 @@ struct SettingsView: View {
                         ForEach(EditorTheme.allCases, id: \.rawValue) { t in Text(t.displayName).tag(t.rawValue) }
                     }
                     .accessibilityIdentifier("settings.theme")
+                    Picker(String(localized: "Default indent"), selection: Binding(
+                        get: { indentWithTabs },
+                        set: { usesTabs in
+                            AppSettings.defaultIndentation = Indentation(usesTabs: usesTabs, width: AppSettings.defaultIndentation.width)
+                        }
+                    )) {
+                        Text(String(localized: "Spaces")).tag(false)
+                        Text(String(localized: "Tabs")).tag(true)
+                    }
+                    .accessibilityLabel(String(localized: "Default indent"))
+                    .accessibilityIdentifier("settings.defaultIndent")
+                    Picker(String(localized: "width"), selection: Binding(
+                        get: { Indentation(usesTabs: indentWithTabs, width: tabWidth > 0 ? tabWidth : 4).width },
+                        set: { width in
+                            AppSettings.defaultIndentation = Indentation(usesTabs: AppSettings.defaultIndentation.usesTabs, width: width)
+                        }
+                    )) {
+                        ForEach(Indentation.widths, id: \.self) { width in Text("\(width)").tag(width) }
+                    }
+                    .accessibilityLabel(String(localized: "Indent width"))
+                    .accessibilityIdentifier("settings.indentWidth")
                     Toggle(String(localized: "Wrap Lines"), isOn: $wrap)
                     Toggle(String(localized: "Show Line Numbers"), isOn: $lineNumbers)
                         .accessibilityIdentifier("settings.lineNumbers")
@@ -105,6 +128,10 @@ struct SettingsView: View {
                     Toggle(String(localized: "Highlight occurrences"), isOn: $highlightOccurrences)
                         .accessibilityIdentifier("settings.highlightOccurrences")
                     Toggle(String(localized: "Cedric’s Hints"), isOn: $owlHints)
+                } header: {
+                    Text(String(localized: "Editor"))
+                } footer: {
+                    Text(String(localized: "For new files and files that don't indent yet; a file's own indentation wins."))
                 }
                 .onChange(of: fontSize) { AppSettings.post() }
                 .onChange(of: wrap) { AppSettings.post() }
