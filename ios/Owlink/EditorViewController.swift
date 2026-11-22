@@ -3,6 +3,33 @@ import SwiftUI
 import CedricCore
 import CedricAI
 
+// The field was too transparent on dark custom themes, letting the editor show
+// through. Restyle only this alert's field chrome; its private hierarchy keeps
+// the walk bounded, and both lifecycle hooks overwrite later UIKit restyles.
+private final class GoToLineAlertController: UIAlertController {
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        styleTextFieldBackgrounds()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        styleTextFieldBackgrounds()
+    }
+
+    private func styleTextFieldBackgrounds() {
+        guard let textField = textFields?.first else { return }
+        textField.backgroundColor = .systemBackground
+        guard textField.isDescendant(of: view) else { return }
+        var view = textField.superview
+        while let current = view, current !== self.view {
+            if current is UIVisualEffectView { break }
+            current.backgroundColor = .systemBackground
+            view = current.superview
+        }
+    }
+}
+
 /// One open document: a UITextView on an explicit TextKit 2 stack (as the
 /// Mac's NSTextView), coloured by the core's highlighter, with the system
 /// find and replace (⌘F, ⌥⌘F), a status line (language, encoding, line
@@ -1794,8 +1821,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     @objc func goToLine() {
-        let alert = UIAlertController(title: String(localized: "Go to Line"), message: nil, preferredStyle: .alert)
-        alert.addTextField { $0.keyboardType = .numberPad; $0.placeholder = "1–\(self.lineIndex.lineCount)" }
+        let alert = GoToLineAlertController(title: String(localized: "Go to Line"), message: nil, preferredStyle: .alert)
+        alert.addTextField {
+            $0.keyboardType = .numberPad
+            $0.placeholder = "1–\(self.lineIndex.lineCount)"
+            $0.backgroundColor = .systemBackground
+        }
         alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
         alert.addAction(UIAlertAction(title: String(localized: "Go"), style: .default) { [weak self, weak alert] _ in
             guard let self, let n = Int(alert?.textFields?.first?.text ?? ""), n >= 1 else { return }
