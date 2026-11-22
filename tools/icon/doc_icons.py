@@ -22,8 +22,16 @@ Sources/CedricCore/DocumentTypes.swift; Tests/CedricCoreTests checks that
 each type's icon file exists.
 
 Sizes: 16 to 512 px (no 1024: a document icon is never shown at 512 pt on
-a Retina screen in Finder, and the 1024 doubles the file). The 16 and 32 px
-icons are drawn directly on the pixel grid, not downsampled.
+a Retina screen in Finder, and the 1024 doubles the file).
+
+Cedric on the page is a palette-exact coverage downscale of ci.owl()
+(the official mascot), computed at build time with no PixelLab dependency.
+16 px is the page and badge only — the owl cannot carry his traits there.
+32 and 64 px use that downscale (32 also restores the 1 px monocle stem,
+which the shrink would otherwise drop). 128 px and up use the same
+algorithm at that size so large Finder views are not a chunky upscale.
+64 px badges keep the short pixel labels (JSN, YML, SW, …); 128 px and
+up use the full type name.
 """
 import argparse, os, subprocess, sys, tempfile
 from PIL import Image, ImageDraw, ImageFont
@@ -85,6 +93,13 @@ GLYPHS = {
 # Page geometry in the unit square (Apple's document shape is roughly 0.69 x 0.88).
 X0, X1, Y0, Y1 = 0.155, 0.845, 0.06, 0.94
 F = 0.19  # folded corner
+
+# Cedric's owl colours only (the coral plate is the app icon, not the mascot).
+OWL_PALETTE = (ci.NAVY, ci.WING, ci.CHEV, ci.WHITE, ci.YEL, ci.YEL_D)
+OWL_RGB = tuple(c[:3] for c in OWL_PALETTE)
+
+# Tight-crop padding used for the approved 32/64 preview masters.
+_SRC_PAD, _SRC_MARGIN = 2, 6
 
 
 def label_font(px):
@@ -152,15 +167,139 @@ def pixel_text(draw, text, y, sx, sy, width, ink=ci.WHITE):
         x += (len(GLYPHS[ch][0]) + 1) * sx
 
 
-def pixel_owl(draw):
-    # Hand-built on the 32 px grid: pointed tufts, round rimmed eyes, and beak.
-    draw.polygon([(9, 12), (9, 7), (14, 11), (16, 10), (18, 11),
-                  (23, 7), (23, 12), (25, 16), (24, 20), (21, 22),
-                  (11, 22), (8, 19), (7, 16)], fill=ci.NAVY)
-    for x in (10, 18):
-        draw.ellipse((x, 12, x + 5, 17), fill=ci.WHITE)
-        draw.ellipse((x + 2, 14, x + 4, 16), fill=ci.NAVY)
-    draw.polygon([(15, 17), (17, 17), (16, 19)], fill=ci.YEL)
+# ---------------------------------------------------------------- Cedric downscale
+
+def _trim(im, pad=0):
+    bbox = im.getbbox()
+    if not bbox:
+        return im
+    x0, y0, x1, y1 = bbox
+    return im.crop((max(0, x0 - pad), max(0, y0 - pad),
+                    min(im.width, x1 + pad), min(im.height, y1 + pad)))
+
+
+def _pad_square(im, margin=0):
+    w, h = im.size
+    side = max(w, h) + margin * 2
+    out = Image.new('RGBA', (side, side), (0, 0, 0, 0))
+    out.alpha_composite(im, ((side - w) // 2, (side - h) // 2))
+    return out
+
+
+def _palette_downscale(src, size, alpha_cut=40):
+    """Coverage-weighted shrink that snaps every opaque pixel to Cedric's palette."""
+    sw, sh = src.size
+    out = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    sp, op = src.load(), out.load()
+    for y in range(size):
+        y0, y1 = int(y * sh / size), max(int((y + 1) * sh / size), int(y * sh / size) + 1)
+        for x in range(size):
+            x0, x1 = int(x * sw / size), max(int((x + 1) * sw / size), int(x * sw / size) + 1)
+            scores = {c: 0 for c in OWL_RGB}
+            trans = n = 0
+            for yy in range(y0, min(y1, sh)):
+                for xx in range(x0, min(x1, sw)):
+                    r, g, b, a = sp[xx, yy]
+                    n += 1
+                    if a < alpha_cut:
+                        trans += 1
+                        continue
+                    col = min(OWL_RGB, key=lambda c, r=r, g=g, b=b: (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2)
+                    scores[col] += a
+            if n == 0 or trans > n * 0.55:
+                continue
+            col = max(scores, key=scores.get)
+            if scores[col] == 0:
+                continue
+            op[x, y] = col + (255,)
+    return out
+
+
+def _restore_monocle_stem_32(im):
+    """Paint back the 1 px yellow stem on the right cheek if the shrink dropped it.
+
+    The ring itself usually survives at 32 px; the hanging stem is a single
+    column and often disappears. This only overwrites navy body pixels.
+    """
+    im = im.copy()
+    w, h = im.size
+    ring = []
+    for y in range(h * 2 // 3):
+        for x in range(w // 2, w):
+            r, g, b, a = im.getpixel((x, y))
+            if a > 128 and (r, g, b) == ci.YEL[:3]:
+                ring.append((x, y))
+    if not ring:
+        return im
+    col = max(x for x, y in ring)
+    ring_bottom = max(y for x, y in ring if x == col)
+    bbox = im.getbbox() or (0, 0, w, h)
+    # bbox[3] is exclusive; leave four pixels for the feet and lower body.
+    stop = max(ring_bottom + 1, bbox[3] - 5)
+    for y in range(ring_bottom + 1, stop):
+        r, g, b, a = im.getpixel((col, y))
+        if a > 128 and (r, g, b) == ci.NAVY[:3]:
+            im.putpixel((col, y), ci.YEL)
+    return im
+
+
+_owl_source_cache = {}
+_cedric_cache = {}
+
+
+def _owl_source(render):
+    """Tight, square crop of a high-res ci.owl() render (Lanczos from 4× SS)."""
+    if render not in _owl_source_cache:
+        c = ci.Canvas(render, s=1.0, ox=0.5, oy=0.85)
+        ci.owl(c)
+        _owl_source_cache[render] = _pad_square(_trim(c.image(), pad=_SRC_PAD), margin=_SRC_MARGIN)
+    return _owl_source_cache[render]
+
+
+def cedric_pixel(size):
+    """Palette-exact coverage downscale of ci.owl() to a tight size×size sprite.
+
+    32 and 64 use a 512 px source so they match the approved preview masters.
+    Larger sizes use a 1024 px source so they are not an upscale of that crop.
+    """
+    if size not in _cedric_cache:
+        render = 512 if size <= 64 else 1024
+        im = _palette_downscale(_owl_source(render), size)
+        if size == 32:
+            im = _restore_monocle_stem_32(im)
+        _cedric_cache[size] = im
+    return _cedric_cache[size].copy()
+
+
+def _fit(im, box_w, box_h):
+    """Nearest-neighbour fit of a tight sprite into a box, centred."""
+    im = _trim(im)
+    if im.width == 0 or im.height == 0:
+        return Image.new('RGBA', (box_w, box_h), (0, 0, 0, 0))
+    scale = min(box_w / im.width, box_h / im.height)
+    nw, nh = max(1, int(round(im.width * scale))), max(1, int(round(im.height * scale)))
+    im = im.resize((nw, nh), Image.NEAREST)
+    out = Image.new('RGBA', (box_w, box_h), (0, 0, 0, 0))
+    out.alpha_composite(im, ((box_w - nw) // 2, (box_h - nh) // 2))
+    return out
+
+
+def place_owl(page_im, size, owl=None):
+    """Composite Cedric onto a document page, sitting above the badge."""
+    if owl is None:
+        owl = cedric_pixel(32 if size == 32 else 64 if size == 64 else size)
+    if size == 32:
+        # Inset badge is (7, 24, 24, 28); keep a 20×20 slot above it.
+        page_im.alpha_composite(_fit(owl, 20, 20), (6, 3))
+    elif size == 64:
+        page_im.alpha_composite(_fit(owl, 40, 42), (12, 4))
+    else:
+        box_w = round((X1 - X0 - 0.08) * size)
+        box_h = round(0.58 * size)
+        x = (size - box_w) // 2
+        y = round(0.10 * size)
+        page_im.alpha_composite(_fit(owl, box_w, box_h), (x, y))
+    return page_im
 
 
 def small_icon(text, size, include_owl=True):
@@ -178,7 +317,7 @@ def small_icon(text, size, include_owl=True):
         d.polygon([(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)], fill=PAGE)
         d.polygon([(18, 2), (18, 10), (26, 10)], fill=FOLD)
         if include_owl:
-            pixel_owl(d)
+            place_owl(im, 32)
         if text:
             d.rectangle((7, 24, 24, 28), fill=ci.CORAL)
             pixel_text(d, SHORT_LABELS.get(text, text), 24, 1, 1, size, ci.NAVY)
@@ -197,20 +336,18 @@ def small_band(im, text):
 
 def doc_icon(text, size):
     if size == 16:
-        return small_icon(text, size)
+        return small_icon(text, size, include_owl=False)
     if size == 32:
-        return small_icon(text, size)
+        return small_icon(text, size, include_owl=True)
     c = ci.Canvas(size, s=0.52, ox=0.5, oy=0.60)
     page(c)
-    ci.owl(c, chevron=size >= 64)
-    if text:
-        if size == 64:
-            image = c.image()
-            small_band(image, text)
-            return image
-        else:
-            band(c, text)
-    return c.image()
+    if text and size >= 128:
+        band(c, text)
+    image = c.image()
+    place_owl(image, size)
+    if text and size == 64:
+        small_band(image, text)
+    return image
 
 
 def build(out=OUT, sheet=None):
