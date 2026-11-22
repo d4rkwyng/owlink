@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owlink's document icons: one template (a white page with a folded corner,
-a simplified owl mark, a coral label with the type's name), one .icns
+Cedric the owl, a coral label with the type's name), one .icns
 per file type.
 
     python3 tools/icon/doc_icons.py            # writes Resources/DocIcons/*.icns
@@ -53,7 +53,7 @@ EDGE = ci.hx('c9cad6')
 FOLD = ci.hx('e4e5ee')
 LINE = ci.hx('d9dae6')
 
-# The 16 and 32 px badges use up to three compact glyphs.
+# Small badges use up to three compact glyphs.
 SHORT_LABELS = {'JSON': 'JSN', 'YAML': 'YML', 'SWIFT': 'SW',
                 'HTML': 'HTM', 'TOML': 'TML'}
 
@@ -140,7 +140,7 @@ def band(c, text):
     d.text((cx - (l + r) / 2, cy - (t + b) / 2), text, font=ft, fill=ci.WHITE)
 
 
-def pixel_text(draw, text, y, sx, sy, width):
+def pixel_text(draw, text, y, sx, sy, width, ink=ci.WHITE):
     w = (sum(len(GLYPHS[ch][0]) for ch in text) + len(text) - 1) * sx
     x = (width - w) // 2
     for ch in text:
@@ -148,54 +148,68 @@ def pixel_text(draw, text, y, sx, sy, width):
             for col, bit in enumerate(bits):
                 if bit == '1':
                     left, top = x + col * sx, y + row * sy
-                    draw.rectangle((left, top, left + sx - 1, top + sy - 1), fill=ci.WHITE)
+                    draw.rectangle((left, top, left + sx - 1, top + sy - 1), fill=ink)
         x += (len(GLYPHS[ch][0]) + 1) * sx
 
 
-def small_icon(text, size):
+def pixel_owl(draw):
+    # Hand-built on the 32 px grid: pointed tufts, round rimmed eyes, and beak.
+    draw.polygon([(9, 12), (9, 7), (14, 11), (16, 10), (18, 11),
+                  (23, 7), (23, 12), (25, 16), (24, 20), (21, 22),
+                  (11, 22), (8, 19), (7, 16)], fill=ci.NAVY)
+    for x in (10, 18):
+        draw.ellipse((x, 12, x + 5, 17), fill=ci.WHITE)
+        draw.ellipse((x + 2, 14, x + 4, 16), fill=ci.NAVY)
+    draw.polygon([(15, 17), (17, 17), (16, 19)], fill=ci.YEL)
+
+
+def small_icon(text, size, include_owl=True):
     im = Image.new('RGBA', (size, size))
     d = ImageDraw.Draw(im)
     if size == 16:
-        d.polygon([(2, 1), (10, 1), (13, 4), (13, 14), (2, 14)], fill=EDGE)
-        d.polygon([(3, 2), (9, 2), (12, 5), (12, 13), (3, 13)], fill=PAGE)
-        d.line([(10, 2), (10, 4), (12, 4)], fill=FOLD, width=1)
+        d.polygon([(1, 1), (10, 1), (14, 5), (14, 15), (1, 15)], fill=EDGE)
+        d.polygon([(2, 2), (9, 2), (13, 6), (13, 14), (2, 14)], fill=PAGE)
+        d.polygon([(9, 2), (9, 6), (13, 6)], fill=FOLD)
         if text:
             d.rectangle((1, 9, 14, 15), fill=ci.CORAL)
-            pixel_text(d, SHORT_LABELS.get(text, text), 10, 1, 1, size)
-        else:
-            d.rounded_rectangle((4, 6, 11, 12), radius=2, fill=ci.NAVY)
-            d.point([(6, 8), (9, 8)], fill=ci.WHITE)
-            d.point((7, 10), fill=ci.YEL)
+            pixel_text(d, SHORT_LABELS.get(text, text), 10, 1, 1, size, ci.NAVY)
     else:
-        d.polygon([(5, 1), (20, 1), (27, 8), (27, 30), (5, 30)], fill=EDGE)
-        d.polygon([(6, 2), (19, 2), (26, 9), (26, 29), (6, 29)], fill=PAGE)
-        d.polygon([(20, 2), (20, 8), (26, 8)], fill=FOLD)
-        d.rounded_rectangle((10, 7, 21, 18), radius=4, fill=ci.NAVY)
-        d.rectangle((12, 10, 13, 11), fill=ci.WHITE)
-        d.rectangle((18, 10, 19, 11), fill=ci.WHITE)
-        d.polygon([(15, 13), (17, 13), (16, 15)], fill=ci.YEL)
+        d.polygon([(4, 1), (19, 1), (27, 9), (27, 30), (4, 30)], fill=EDGE)
+        d.polygon([(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)], fill=PAGE)
+        d.polygon([(18, 2), (18, 10), (26, 10)], fill=FOLD)
+        if include_owl:
+            pixel_owl(d)
         if text:
-            d.rectangle((2, 19, 29, 30), fill=ci.CORAL)
-            pixel_text(d, SHORT_LABELS.get(text, text), 20, 2, 2, size)
+            d.rectangle((7, 24, 24, 28), fill=ci.CORAL)
+            pixel_text(d, SHORT_LABELS.get(text, text), 24, 1, 1, size, ci.NAVY)
     return im
 
 
-def simplified_owl(c):
-    c.rrect(0.35, 0.24, 0.65, 0.59, 0.12, ci.NAVY, owl=False)
-    for x in (0.425, 0.575):
-        c.circle(x, 0.385, 0.055, ci.WHITE, owl=False)
-        c.circle(x, 0.39, 0.022, ci.NAVY, owl=False)
-    c.poly([(0.466, 0.46), (0.534, 0.46), (0.5, 0.515)], ci.YEL, owl=False)
+def small_band(im, text):
+    size = im.width
+    y0, y1 = round(0.72 * size), round(0.91 * size)
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((round((X0 + 0.055) * size), y0,
+                         round((X1 - 0.055) * size), y1), radius=2, fill=ci.CORAL)
+    pixel_text(d, SHORT_LABELS.get(text, text), y0 + (y1 - y0 - 10) // 2,
+               2, 2, size, ci.NAVY)
 
 
 def doc_icon(text, size):
-    if size in (16, 32):
+    if size == 16:
         return small_icon(text, size)
-    c = ci.Canvas(size)
+    if size == 32:
+        return small_icon(text, size)
+    c = ci.Canvas(size, s=0.52, ox=0.5, oy=0.60)
     page(c)
-    simplified_owl(c)
+    ci.owl(c, chevron=size >= 64)
     if text:
-        band(c, text)
+        if size == 64:
+            image = c.image()
+            small_band(image, text)
+            return image
+        else:
+            band(c, text)
     return c.image()
 
 
@@ -227,29 +241,30 @@ def build(out=OUT, sheet=None):
 
 def preview(out):
     os.makedirs(out, exist_ok=True)
-    sizes = (16, 32, 64, 128, 256, 512)
+    sizes = (16, 32, 64, 128)
     backgrounds = {'light': (236, 236, 240, 255), 'dark': (42, 42, 46, 255)}
     images = {name: {s: doc_icon(text, s) for s in sizes} for text, name in TYPES}
     for theme, bg in backgrounds.items():
-        sheet = Image.new('RGBA', (480, 36 + len(TYPES) * 148), bg)
+        sheet = Image.new('RGBA', (610, 42 + len(TYPES) * 148), bg)
         draw = ImageDraw.Draw(sheet)
         font = label_font(13)
         ink = ci.NAVY if theme == 'light' else ci.WHITE
-        for x, label in ((10, 'Type'), (150, '16 px'), (210, '32 px'), (300, '128 px')):
+        for x, label in ((10, 'Type'), (160, '16 px'), (240, '32 px'),
+                         (330, '64 px'), (430, '128 px')):
             draw.text((x, 8), label, font=font, fill=ink)
         for row, (text, name) in enumerate(TYPES):
-            y = 36 + row * 148
+            y = 42 + row * 148
             draw.text((10, y + 5), name, font=font, fill=ink)
             for size in sizes:
                 image = images[name][size]
-                if size in (16, 32, 128):
-                    sheet.alpha_composite(image, ({16: 150, 32: 210, 128: 300}[size], y))
+                x = {16: 160, 32: 240, 64: 330, 128: 430}[size]
+                sheet.alpha_composite(image, (x, y))
                 composite = Image.new('RGBA', image.size, bg)
                 composite.alpha_composite(image)
                 composite.convert('RGB').save(os.path.join(out, f'{name}-{size}-{theme}.png'))
                 if size in (16, 32):
-                    composite.resize((size * 8, size * 8), Image.Resampling.NEAREST).convert('RGB').save(
-                        os.path.join(out, f'{name}-{size}-{theme}-x8.png'))
+                    composite.resize((size * 4, size * 4), Image.Resampling.NEAREST).convert('RGB').save(
+                        os.path.join(out, f'{name}-{size}-{theme}-x4.png'))
         sheet.convert('RGB').save(os.path.join(out, f'contact-{theme}.png'))
 
 
