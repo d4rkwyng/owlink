@@ -244,7 +244,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         hideKeyboardButton.addAction(UIAction { [weak self] _ in self?.hideKeyboard() }, for: .primaryActionTriggered)
         NSLayoutConstraint.activate([
             hideKeyboardButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
-            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
+            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 26),
         ])
         let row = UIStackView(arrangedSubviews: [languageButton, formatButton, UIView(), statusLabel, hideKeyboardButton])
         row.spacing = 14
@@ -252,18 +252,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         row.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(row)
         statusBar.backgroundColor = .secondarySystemBackground
-        // Horizontal margins keep labels inside the safe area and clear of
-        // rounded corners; vertically, use 4 pt padding and the home indicator.
-        statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16)
+        // Horizontal margins clear the safe area and rounded corners. The compact
+        // 26 pt row sits at the top, with only background in the safe area and no extra vertical padding.
+        statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
         statusBar.insetsLayoutMarginsFromSafeArea = true
         var guide: UILayoutGuide = statusBar.layoutMarginsGuide
         if #available(iOS 26.0, *) { guide = statusBar.layoutGuide(for: .margins(cornerAdaptation: .horizontal)) }
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-            row.topAnchor.constraint(equalTo: statusBar.topAnchor, constant: 4),
-            row.bottomAnchor.constraint(equalTo: statusBar.safeAreaLayoutGuide.bottomAnchor, constant: -4),
-            statusBar.heightAnchor.constraint(greaterThanOrEqualToConstant: 30),
+            row.topAnchor.constraint(equalTo: statusBar.topAnchor),
+            row.heightAnchor.constraint(equalToConstant: 26),
+            row.bottomAnchor.constraint(equalTo: statusBar.safeAreaLayoutGuide.bottomAnchor),
         ])
     }
 
