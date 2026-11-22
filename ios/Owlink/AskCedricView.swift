@@ -65,6 +65,8 @@ final class AskCedricModel: ObservableObject {
     private var scopeRefresh: Task<Void, Never>?
     private var lastQuestion = ""
     private var lastAction: OwlQuickAction?
+    private var lastInlineSelection: (range: NSRange, text: String)?
+    private(set) var lastInlineAnswer: UUID?
     private let gate = OwlToolGate.bundled()
     private static var lastContextBudget = 5_000
     private(set) var contextBudget = AskCedricModel.lastContextBudget
@@ -157,20 +159,31 @@ final class AskCedricModel: ObservableObject {
         rememberEngine(engine)
     }
 
-    func ask(_ q: String, action: OwlQuickAction? = nil) {
+    func ask(_ q: String, action: OwlQuickAction? = nil, inlineSelection: NSRange? = nil) {
         guard !running else { return }
-        let shown = action?.title(prose: prose) ?? q
+        let shown = inlineSelection != nil ? q : (action?.title(prose: prose) ?? q)
         guard !shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let snap = makeSnapshot()
+        var snap = makeSnapshot()
+        if let selection = inlineSelection {
+            snap = OwlDocumentSnapshot(text: snap.text, generation: snap.generation, selection: selection, visible: snap.visible,
+                                       fileName: snap.fileName, language: snap.language, facts: snap.facts, grammar: snap.grammar)
+            guard snap.selection == selection, snap.hasSelection else {
+                entries.append(Entry(role: .note, text: String(localized: "The original selection changed; select the text again.")))
+                return
+            }
+        }
         refreshScope(snap)
-        let scope = self.scope
+        let scope: OwlChatScope = inlineSelection == nil ? self.scope : .selection
         let history = self.history
         entries.append(Entry(role: .user, text: shown))
-        entries.append(Entry(role: .owl, text: ""))
+        let answer = Entry(role: .owl, text: "")
+        entries.append(answer)
         question = ""
         running = true
         lastQuestion = q
         lastAction = action
+        lastInlineSelection = inlineSelection.map { _ in (snap.selection, snap.substring(snap.selection)) }
+        lastInlineAnswer = inlineSelection == nil ? nil : answer.id
         let prose = self.prose
         task = Task { [weak self] in
             guard let self else { return }
@@ -186,14 +199,32 @@ final class AskCedricModel: ObservableObject {
             }
             self.rememberEngine(engine)
             let tools = self.gate.allowsTools(engine.scoreKey)
+            if inlineSelection != nil, action == .rewrite, !tools {
+                self.finish(error: String(localized: "This model is not enabled for proposed edits."))
+                return
+            }
             guard let ctx = OwlChatRequest.documentContext(snap, scope: scope, engineBudget: engine.contextBudget,
                                                            history: history, question: q, action: action, tools: tools,
-                                                           server: engine.usesServer, prose: prose) else {
+                                                           server: engine.usesServer, prose: prose,
+                                                           inline: inlineSelection != nil) else {
                 self.finish(error: String(localized: "Too much text for this model: select less and ask again."))
                 return
             }
-            var req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
+            var req: OwlChatRequest
+            if inlineSelection != nil, let action {
+                guard let request = Self.inlineRequest(question: q, action: action, snapshot: snap, context: ctx,
+                                                       history: history, engine: engine, tools: tools, prose: prose) else {
+                    self.finish(error: String(localized: "There isn’t enough room in this model’s context for the selected text."))
+                    return
+                }
+                req = request
+                if let note = request.inlineSelectionNote {
+                    self.entries.insert(Entry(role: .note, text: note), at: self.entries.count - 1)
+                }
+            } else {
+                req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
                                      useTools: tools, prose: prose)
+            }
             if await self.runChunkedReview(req, engine: engine) { return }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
             do {
@@ -215,6 +246,31 @@ final class AskCedricModel: ObservableObject {
                 self.finish(error: AIStatus.describe(error))
             }
         }
+    }
+
+    static func inlineRequest(question: String, action: OwlQuickAction, snapshot: OwlDocumentSnapshot,
+                              context: OwlChatContext, history: [OwlChatEntry], engine: any OwlChatEngine,
+                              tools: Bool, prose: Bool) -> OwlChatRequest? {
+        let budgetRequest = OwlChatRequest(question: question, action: action, context: context, snapshot: snapshot,
+                                           history: history, useTools: tools, prose: prose)
+        let additions = budgetRequest.contextAdditions(engineBudget: engine.contextBudget)
+        let system = OwlPrompts.chatSystem(toolsOn: !OwlTools.specs(budgetRequest.tools).isEmpty, server: engine.usesServer,
+                                           digest: additions.digest != nil, checks: additions.checks != nil,
+                                           canEdit: budgetRequest.tools.contains(.proposeEdit), partial: budgetRequest.contextIsPartial)
+        let wrapper = OwlInlineAssist.instruction(action: action, selection: "", prose: prose, toolsOn: tools, context: context)
+        let room = OwlInlineAssist.remainingBudget(engineBudget: engine.contextBudget, numberedContext: context.numbered,
+                                                   instructionWrapper: wrapper, systemPrompt: system, history: history,
+                                                   digestReservation: additions.digestReservation)
+        let clip = OwlInlineAssist.clip(snapshot.substring(snapshot.selection), budget: room)
+        guard !clip.text.isEmpty else { return nil }
+        let clippedSnapshot = OwlDocumentSnapshot(text: snapshot.text, generation: snapshot.generation,
+                                                  selection: NSRange(location: snapshot.selection.location,
+                                                                     length: (clip.text as NSString).length),
+                                                  visible: snapshot.visible, fileName: snapshot.fileName, language: snapshot.language,
+                                                  facts: snapshot.facts, grammar: snapshot.grammar)
+        return OwlChatRequest(question: question, action: action, context: context, snapshot: clippedSnapshot,
+                              history: history, useTools: tools, prose: prose, inlineSelection: clip.text,
+                              inlineSelectionNote: clip.note)
     }
 
     private func runChunkedReview(_ request: OwlChatRequest, engine: any OwlChatEngine) async -> Bool {
@@ -356,8 +412,30 @@ final class AskCedricModel: ObservableObject {
     }
 
     func askAgain() {
+        guard !running else { return }
         let q = lastQuestion
         let action = lastAction
+        if let original = lastInlineSelection {
+            let now = documentNow()
+            guard let selection = OwlInlineAssist.askAgainSelection(originalRange: original.range, originalText: original.text,
+                                                                     currentText: now.text as String) else {
+                entries.append(Entry(role: .note, text: String(localized: "The original selection changed; select the text again.")))
+                return
+            }
+            guard let action, !now.large, action != .rewrite || !now.readOnly,
+                  let settings = settingsProvider() else {
+                entries.append(Entry(role: .note, text: String(localized: "Ask Cedric is not available for this selection.")))
+                return
+            }
+            let allowsTools = OwlChatEngines.configuredScoreKey(settings: settings).map { gate.allowsTools($0) } ?? false
+            guard action != .rewrite || allowsTools else {
+                entries.append(Entry(role: .note, text: String(localized: "This model is not enabled for proposed edits.")))
+                return
+            }
+            for i in entries.indices { entries[i].cards = [] }
+            ask(q, action: action, inlineSelection: selection)
+            return
+        }
         for i in entries.indices { entries[i].cards = [] }
         guard !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || action != nil else { return }
         ask(action == nil ? q : "", action: action)
@@ -609,6 +687,11 @@ struct AskCedricView: View {
                                 showAll: { model.showAll(entry: e.id, card: card.id) },
                                 askAgain: { model.askAgain() },
                                 noteWidth: { model.noteWidth(entry: e.id, card: card.id, charsPerRow: $0) })
+                }
+                if model.lastInlineAnswer == e.id && !model.running && !e.cards.contains(where: { $0.state == .stale }) {
+                    Button(String(localized: "Ask Again")) { model.askAgain() }
+                        .font(.footnote)
+                        .accessibilityIdentifier("ask.again")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

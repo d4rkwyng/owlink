@@ -685,6 +685,28 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func textViewDidBeginEditing(_ textView: UITextView) { hideKeyboardButton.isHidden = false }
     func textViewDidEndEditing(_ textView: UITextView) { hideKeyboardButton.isHidden = true }
 
+    func textView(_ textView: UITextView, editMenuForTextIn range: NSRange,
+                  suggestedActions: [UIMenuElement]) -> UIMenu? {
+        guard textView === self.textView else { return UIMenu(children: suggestedActions) }
+        var actions: [UIMenuElement] = []
+        if canInlineAssist(.explain, selection: range) {
+            let explain = UIAction(title: String(localized: "Explain Selection"), image: UIImage(systemName: "questionmark.bubble")) { [weak self] _ in
+                self?.inlineAssist(.explain, selection: range)
+            }
+            explain.accessibilityIdentifier = "ask.explainSelection"
+            actions.append(explain)
+        }
+        if canInlineAssist(.rewrite, selection: range) {
+            let rewrite = UIAction(title: String(localized: "Rewrite Selection"), image: UIImage(systemName: "pencil.line")) { [weak self] _ in
+                self?.inlineAssist(.rewrite, selection: range)
+            }
+            rewrite.accessibilityIdentifier = "ask.rewriteSelection"
+            actions.append(rewrite)
+        }
+        guard !actions.isEmpty else { return UIMenu(children: suggestedActions) }
+        return UIMenu(children: suggestedActions + [UIMenu(title: String(localized: "Cedric"), options: .displayInline, children: actions)])
+    }
+
     /// The hide-keyboard button, Esc and ⌘. on a hardware keyboard (and
     /// still the interactive drag down).
     @objc func hideKeyboard() {
@@ -1261,6 +1283,31 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     // MARK: Ask Cedric
+
+    private func canInlineAssist(_ action: OwlQuickAction, selection: NSRange) -> Bool {
+        let now = currentDocument()
+        let settings = AskCedricModel.chatSettings()
+        let enabled = !now.large && askModel?.running != true
+        let hasSelection = selection.location != NSNotFound && selection.length > 0
+            && selection.location <= now.text.length && selection.length <= now.text.length - selection.location
+        if action == .rewrite {
+            let allowsTools = settings.flatMap { OwlChatEngines.configuredScoreKey(settings: $0) }
+                .map { OwlToolGate.bundled().allowsTools($0) } ?? false
+            return OwlInlineAssist.canRewrite(askEnabled: enabled && !now.readOnly, engineReady: settings != nil,
+                                              hasSelection: hasSelection, allowsTools: allowsTools)
+        }
+        return OwlInlineAssist.canExplain(askEnabled: enabled, engineReady: settings != nil, hasSelection: hasSelection)
+    }
+
+    @objc func explainSelection() { inlineAssist(.explain, selection: textView.selectedRange) }
+    @objc func rewriteSelection() { inlineAssist(.rewrite, selection: textView.selectedRange) }
+
+    private func inlineAssist(_ action: OwlQuickAction, selection: NSRange) {
+        guard selection == textView.selectedRange, canInlineAssist(action, selection: selection) else { return }
+        if askPanel == nil && askSheet == nil { askCedric() }
+        let title = action == .explain ? String(localized: "Explain Selection") : String(localized: "Rewrite Selection")
+        askModel?.ask(title, action: action, inlineSelection: selection)
+    }
 
     @objc func askCedric() {
         // Ask is about the text: Focus Preview ends.
@@ -2022,6 +2069,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
+            return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)
+        }
         if action == #selector(togglePreview) || action == #selector(toggleFocusPreview) {
             return document.language.language == .markdown
         }
