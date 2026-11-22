@@ -145,6 +145,13 @@ public enum ScriptVerdict {
 
     public static func isVerdictLine(_ line: String) -> Bool { has(verdictLine, line) }
 
+    /// How severe a verdict line is: 2 for don't-run, 1 for trust-the-source, 0 otherwise.
+    /// Matches both straight and curly apostrophes (`don['’]t run`).
+    public static func severity(ofVerdict line: String) -> Int {
+        if has(dontRunPhrase, line) { return 2 }
+        return line.localizedCaseInsensitiveContains("trust") ? 1 : 0
+    }
+
     private static let inlineVerdict = try! NSRegularExpression(pattern: #"[*_]*\bverdict\b[*_]*\s*:.*$"#, options: [.caseInsensitive])
 
     /// The answer as shown. `.verdict`: every claim of safety rewritten,

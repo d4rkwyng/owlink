@@ -211,6 +211,15 @@ public struct OwlChatContext: Sendable, Equatable {
     /// Some lines were left out to fit the budget.
     public let truncated: Bool
 
+    /// A line-aligned whole-document review part.
+    public static func reviewPart(_ s: OwlDocumentSnapshot, first: Int, last: Int) -> OwlChatContext {
+        precondition(first >= 1 && first <= last && last <= s.countedLines)
+        return OwlChatContext(scope: .wholeDocument, range: s.range(lines: first, last)!,
+                              firstLine: first, lastLine: last, totalLines: s.countedLines,
+                              numbered: s.numbered(lines: first, last),
+                              truncated: first > 1 || last < s.countedLines)
+    }
+
     /// "Selection (12 lines)", for the chip.
     public var label: String {
         if scope == .wholeDocument, truncated {
