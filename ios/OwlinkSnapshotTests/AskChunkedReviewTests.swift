@@ -5,6 +5,14 @@ import CedricAI
 
 @MainActor
 final class AskChunkedReviewTests: XCTestCase {
+    func testTypingDotsCycleThroughAllThree() {
+        let start = Date(timeIntervalSince1970: 0)
+        XCTAssertEqual(AskTypingDots.activeDot(at: start), 0)
+        XCTAssertEqual(AskTypingDots.activeDot(at: start.addingTimeInterval(0.35)), 1)
+        XCTAssertEqual(AskTypingDots.activeDot(at: start.addingTimeInterval(0.65)), 2)
+        XCTAssertEqual(AskTypingDots.activeDot(at: start.addingTimeInterval(0.95)), 0)
+    }
+
     func testWholeDocumentReviewShowsProgressAndMergedAnswer() async throws {
         let text = (1...2000).map { "Line \($0): some text in this document" }.joined(separator: "\n")
         let snap = OwlDocumentSnapshot(text: text, generation: 0)

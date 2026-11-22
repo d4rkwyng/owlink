@@ -674,7 +674,7 @@ struct AskCedricView: View {
         case .owl:
             VStack(alignment: .leading, spacing: 8) {
                 if e.text.isEmpty && model.running {
-                    ProgressView().accessibilityIdentifier("ask.thinking")
+                    AskTypingDots(color: c.secondary)
                 } else {
                     Text(.init(LineCitations.linked(e.text))).font(.body).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -785,6 +785,34 @@ struct AskCedricView: View {
 /// One proposed edit: the reason, the before/after lines, Apply and Skip.
 /// Apply stays off until the proposal matches the live document and a long
 /// replacement has been opened. Read-only never applies.
+struct AskTypingDots: View {
+    let color: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static func activeDot(at date: Date) -> Int {
+        let step = floor(date.timeIntervalSince1970 / 0.3)
+        return Int((step.truncatingRemainder(dividingBy: 3) + 3).truncatingRemainder(dividingBy: 3))
+    }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.3, paused: reduceMotion)) { context in
+            let active = Self.activeDot(at: context.date)
+            HStack(spacing: 5) {
+                ForEach(0..<3) { index in
+                    Circle()
+                        .fill(color)
+                        .frame(width: 6, height: 6)
+                        .opacity(reduceMotion || index == active ? 1 : 0.3)
+                }
+            }
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: active)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Cedric is writing"))
+            .accessibilityIdentifier("ask.thinking")
+        }
+    }
+}
+
 struct AskEditCard: View {
     let entry: UUID
     let card: AskCedricModel.Card
