@@ -460,16 +460,23 @@ extension DevChecks {
             // A relative .md link stays in this preview and Home resumes live rendering.
             { next in
                 let count = app.tabs.count
+                tab.previewAllowsJavaScript = true
                 previewJS(tab, "document.querySelector('a[href=\"other.md\"]').click(); 1") { _ in
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                         tab.renderPreview()
                         previewJS(tab, "document.body.innerText") { text in
                             expect((text as? String)?.contains("the other file") == true, "relative Markdown opens in the preview and survives an editor render", "\(text ?? "nil")")
                             expect(app.tabs.count == count && tab.preview?.canGoBack == true, "no tab opened; Back is enabled")
-                            tab.previewAllowsJavaScript = true
+                            expect(tab.previewAllowsJavaScript == false
+                                   && tab.preview?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                                   "a navigated document does not inherit JavaScript trust")
+                            tab.previewBarAction(.back)
+                            expect(tab.previewAllowsJavaScript, "Back to the live document restores JavaScript")
                             tab.previewAllowsJavaScript = false
                             expect(tab.preview?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
-                                   "turning JavaScript off applies to a navigated document")
+                                   "turning JavaScript off applies to the live document")
+                            tab.previewBarAction(.forward)
+                            expect(tab.previewAllowsJavaScript == false, "Forward to the linked document starts with JavaScript off")
                             tab.previewBarAction(.back)
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
                                 previewJS(tab, "document.body.innerText") { text in

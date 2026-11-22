@@ -52,27 +52,33 @@ public final class WikiVault: @unchecked Sendable {
 
     /// The file a link names (`name` without its `#…`), or nil.
     public func resolve(_ name: String) -> URL? {
-        let n = name.trimmingCharacters(in: .whitespaces)
+        var n = name.trimmingCharacters(in: .whitespaces)
         guard !n.isEmpty, !n.contains("\0") else { return nil }
-        guard !n.hasPrefix("/") else { return nil }
+        // A leading slash is a path from the vault root (Obsidian), not a refusal.
+        let fromVaultRoot = n.hasPrefix("/")
+        if fromVaultRoot { n.removeFirst() }
         let parts = n.split(separator: "/").map(String.init)
         guard !parts.contains(".."), !parts.isEmpty else { return nil }
         let hasExt = !(n as NSString).pathExtension.isEmpty
         let names = hasExt ? [n, n + ".md"] : [n + ".md", n]
-        // A path: relative to the document, then to the vault.
-        if parts.count > 1 {
-            for base in [documentFolder, root] {
+        // A path: from the vault root when the link is root-absolute,
+        // otherwise relative to the document, then the vault.
+        if parts.count > 1 || fromVaultRoot {
+            let bases = fromVaultRoot ? [root] : [documentFolder, root]
+            for base in bases {
                 for t in names {
                     let f = base.appendingPathComponent(t).standardizedFileURL
                     if isFile(f) { return f }
                 }
             }
+            if fromVaultRoot { return nil }
         }
         // A name: the document's own folder first, then anywhere in the vault.
         for t in names where parts.count == 1 {
             let f = documentFolder.appendingPathComponent(t)
             if isFile(f) { return f }
         }
+
         let (idx, _) = currentIndex()
         for t in names {
             let key = (t as NSString).lastPathComponent.lowercased()

@@ -23,6 +23,9 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(vault.resolve("a/b/Target")?.path == t.appendingPathComponent("v/deep/a/b/Target.md").path)
         #expect(vault.resolve("Nope") == nil)
         #expect(vault.resolve("../notes/doc") == nil)
+        #expect(vault.resolve("/x/Target")?.path == x, "a leading slash is a path from the vault root")
+        #expect(vault.resolve("/deep/a/b/Target")?.path == t.appendingPathComponent("v/deep/a/b/Target.md").path)
+        #expect(vault.resolve("/../secret") == nil)
 
         let html = ob("See [[Target|the target]], [[Other Note]] and [[Missing]].", vault: vault)
         #expect(html.contains(#"<a class="wikilink" href="cedric-doc://doc"#) && html.contains("/v/x/Target.md\">the target</a>"))

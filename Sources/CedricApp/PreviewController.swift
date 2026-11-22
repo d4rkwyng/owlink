@@ -49,10 +49,15 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     static func browserConfiguration() -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
+        config.processPool = WKProcessPool()
         return config
     }
-    var allowJavaScript = false
-    var allowNetwork = false
+    var allowJavaScript = false { didSet { if isHome { homeJavaScript = allowJavaScript } } }
+    var allowNetwork = false { didSet { if isHome { homeNetwork = allowNetwork } } }
+    /// The live document's JavaScript / Network setting, restored when
+    /// returning Home. A navigated-to local page starts with both off.
+    private var homeJavaScript = false
+    private var homeNetwork = false
     private static var blockRules: WKContentRuleList?
     private static var compiling = false
     private static var waiting: [() -> Void] = []
@@ -165,13 +170,29 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         history.removeSubrange((historyIndex + 1)..<history.count)
         history.append(entry)
         historyIndex += 1
+        applyTrust(for: entry)
         displayEntry()
     }
 
-    func goBack() { if canGoBack { historyIndex -= 1; displayEntry() } }
-    func goForward() { if canGoForward { historyIndex += 1; displayEntry() } }
+    func goBack() { if canGoBack { historyIndex -= 1; applyTrust(for: history[historyIndex]); displayEntry() } }
+    func goForward() { if canGoForward { historyIndex += 1; applyTrust(for: history[historyIndex]); displayEntry() } }
     func goHome() { if !isHome { push(.home) } }
     func trustChanged() { if case .local = history[historyIndex] { displayEntry() } }
+
+    /// A linked local document does not inherit JavaScript/Network trust
+    /// granted for the live document. Home restores the user's setting.
+    private func applyTrust(for entry: Entry) {
+        switch entry {
+        case .home:
+            allowJavaScript = homeJavaScript
+            allowNetwork = homeNetwork
+        case .local:
+            allowJavaScript = false
+            allowNetwork = false
+        case .web:
+            break
+        }
+    }
 
     private func displayEntry() {
         generation += 1
@@ -528,6 +549,12 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === browserView {
+            let ns = error as NSError
+            if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled { return }
+            onNavigationError?(String(localized: "The web page could not be loaded."))
+            return
+        }
         if webView === self.webView, navigation === shellNavigation {
             shellNavigation = nil
             loadingShell = false
@@ -563,7 +590,9 @@ final class PreviewController: NSObject, WKNavigationDelegate {
             return
         }
         if action.navigationType == .linkActivated, let url = action.request.url {
-            if !action.modifierFlags.contains(.command), url.fragment != nil, Self.samePage(url, webView.url) { decisionHandler(.allow); return }
+            // In-page anchors stay in the page, including ⌘-click (which would
+            // otherwise treat the preview's folder URL as a file to reveal).
+            if url.fragment != nil, Self.samePage(url, webView.url) { decisionHandler(.allow); return }
             decisionHandler(.cancel)
             let root = folderFiles.linkFolder(url)
             let act = PreviewLinkAction.previewAction(for: folderFiles.linkTarget(url), folder: root, command: action.modifierFlags.contains(.command), isText: Self.opensInCedric)
