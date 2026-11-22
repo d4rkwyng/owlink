@@ -47,6 +47,12 @@ enum AppSettings {
 
     static let defaults = UserDefaults.standard
 
+    /// Cleared at launch by `-OwlinkResetSettings` (UI tests, debug runs).
+    static let launchResetKeys = [Key.fontSize, Key.fontName, Key.wrap, Key.lineNumbers, Key.showInvisibles, Key.showContextBar, Key.owlHints, Key.theme,
+                                  Key.saveAutomatically, Key.openReadOnly, Key.reopenFilesFromLastSession,
+                                  Key.owlPlacement, Key.owlManualPlacement, Key.focusUnit,
+                                  Key.checkSpellingWhileTyping, Key.checkGrammarInProse]
+
     /// 15 pt on large screens (an iPad, an unfolded iPhone Duo), 13 on
     /// phone-sized ones: by size class, not device idiom (the Duo is a
     /// "phone" either way). Without traits: the frontmost window's.

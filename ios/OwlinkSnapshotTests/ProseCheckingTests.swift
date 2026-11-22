@@ -72,6 +72,12 @@ final class ProseCheckingTests: XCTestCase {
         XCTAssertTrue(AppSettings.checkGrammarInProse)
     }
 
+    /// `-OwlinkResetSettings` must bring both back to their default (on).
+    func testLaunchResetClearsProseChecking() {
+        XCTAssertTrue(AppSettings.launchResetKeys.contains("checkSpellingWhileTyping"))
+        XCTAssertTrue(AppSettings.launchResetKeys.contains("checkGrammarInProse"))
+    }
+
     // MARK: Which documents
 
     func testMarkdownAndPlainTextAreChecked() {

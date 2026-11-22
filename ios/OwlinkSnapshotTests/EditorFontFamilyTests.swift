@@ -58,6 +58,11 @@ final class EditorFontFamilyTests: XCTestCase {
         return font == UIFont.monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
+    /// `-OwlinkResetSettings` must bring the face back to SF Mono.
+    func testLaunchResetClearsFontName() {
+        XCTAssertTrue(AppSettings.launchResetKeys.contains("fontName"))
+    }
+
     func testUnsetIsMonospacedSystemFontAtCurrentSize() {
         XCTAssertNil(AppSettings.fontName)
         let size = CGFloat(AppSettings.defaultFontSize(for: traits))
