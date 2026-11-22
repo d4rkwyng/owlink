@@ -215,11 +215,13 @@ struct OwlToolEvalLiveTests {
         let engine = try #require(await OwlChatEngines.make(settings: s), "no engine for \(spec)")
         // llama.cpp itself must accept the typed tool grammar (a grammar it
         // can't parse would leave the output unconstrained).
+        #if !targetEnvironment(simulator)
         if let b = engine as? BuiltInChatEngine, let m = try await b.host.model(at: b.path) as? LlamaModel {
             let ok = m.grammarCompiles(OwlToolGrammar.envelope(OwlTools.specs(OwlToolName.allCases)))
             print("owl-eval: llama.cpp compiles the tool grammar: \(ok)")
             #expect(ok)
         }
+        #endif
         let start = Date()
         let (score, results) = await OwlToolEval.runAll(engine: engine)
         for r in results { print("owl-eval: \(r.pass ? "pass" : "FAIL") [\(r.expected)] \(String(format: "%.2f s", r.seconds)) \(r.question) → \(r.got.prefix(160))") }

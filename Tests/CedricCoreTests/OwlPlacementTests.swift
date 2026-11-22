@@ -89,7 +89,8 @@ import Testing
         let portraitSafe = CGRect(x: 0, y: 24, width: 466, height: 620)
         #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: portraitSafe, navigationBar: bar, statusTop: 644, statusBarShown: true, size: size) == nil)
         let verticalBar = CGRect(x: 411, y: 0, width: 55, height: 678)
-        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: verticalBar, statusTop: 644, statusBarShown: true, size: size) == nil)
+        #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: verticalBar,
+                                               statusTop: 644, statusBarShown: true, size: size) == slot)
         #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 531, statusBarShown: true, size: size) == nil)
         #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar, statusTop: 532, statusBarShown: true, size: size) != nil)
         let wide = CGRect(x: 0, y: 0, width: 1024, height: 720)
@@ -135,5 +136,24 @@ import Testing
                                               statusTop: 432, statusBarShown: true, size: size) == nil)
         #expect(OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: bar,
                                               statusTop: 381, statusBarShown: false, size: size) == nil)
+    }
+
+    @Test func railSlotRecomputesForChangedOrientation() throws {
+        let size = CGSize(width: 64, height: 64)
+        let portrait = CGRect(x: 0, y: 0, width: 466, height: 678)
+        let portraitSafe = CGRect(x: 0, y: 0, width: 382, height: 644)
+        let portraitBar = CGRect(x: 411, y: 0, width: 55, height: 678)
+        let first = try #require(OwlPlacement.RailOwlSlot.frame(screen: portrait, safe: portraitSafe,
+                                                               navigationBar: portraitBar, statusTop: 644,
+                                                               statusBarShown: true, size: size))
+
+        let landscape = CGRect(x: 0, y: 0, width: 678, height: 466)
+        let landscapeSafe = CGRect(x: 0, y: 0, width: 594, height: 432)
+        let landscapeBar = CGRect(x: 623, y: 0, width: 55, height: 466)
+        let second = try #require(OwlPlacement.RailOwlSlot.frame(screen: landscape, safe: landscapeSafe,
+                                                                navigationBar: landscapeBar, statusTop: 432,
+                                                                statusBarShown: false, size: size))
+        #expect(first == CGRect(x: 385.5, y: 576, width: 64, height: 64))
+        #expect(second == CGRect(x: 597.5, y: 364, width: 64, height: 64))
     }
 }

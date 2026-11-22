@@ -232,6 +232,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self.applySettings()
             self.layoutPreview()
             self.updateAskPanelForWidth()
+            self.view.setNeedsLayout()
         }
     }
 
@@ -391,6 +392,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutDivider()
         layoutGutter()
         updateUnwrappedContentSize()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            guard let self else { return }
+            self.view.setNeedsLayout()
+            self.view.layoutIfNeeded()
+        }
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -746,6 +756,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 MainActor.assumeIsolated { self?.refreshPreview() }
             }
         }
+        if textView.isFirstResponder { revealRange(textView.selectedRange) }
     }
 
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
@@ -968,7 +979,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let ending = document.mixedLineEndings ? String(localized: "\(document.lineEnding.displayName) (mixed)") : document.lineEnding.displayName
         formatButton.setTitle("\(document.encoding.displayName) · \(ending)", for: .normal)
         formatButton.menu = formatMenu()
-        view.setNeedsLayout()
     }
 
     private func scheduleWordCount() {
@@ -1304,6 +1314,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func applyWrap() {
+        preserveTextViewportDuringLayout {
+            applyWrapWithoutMovingTextViewport()
+        }
+        view.setNeedsLayout()
+    }
+
+    private func applyWrapWithoutMovingTextViewport() {
         let c = textView.textContainer
         if AppSettings.wrap {
             if !c.widthTracksTextView {
@@ -1324,7 +1341,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
         if showLineNumbers { layoutGutter() } else { layoutTextInsets() }
         updateUnwrappedContentSize()
-        view.setNeedsLayout()
     }
 
     /// TextKit 2 keeps a UITextView's contentSize.width at the viewport even
@@ -1332,6 +1348,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// laid-out text and from a font estimate of the longest line.
     private func updateUnwrappedContentSize() {
         guard !AppSettings.wrap else { return }
+        preserveTextViewportDuringLayout {
+            updateUnwrappedContentSizeWithoutViewportChange()
+        }
+    }
+
+    private func updateUnwrappedContentSizeWithoutViewportChange() {
         let insets = textView.textContainerInset
         var width = textView.bounds.width
         if let used = textView.textLayoutManager?.usageBoundsForTextContainer, used.width.isFinite {
@@ -1353,6 +1375,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if textView.contentSize.width + 0.5 < width {
             textView.contentSize = CGSize(width: width, height: textView.contentSize.height)
         }
+    }
+
+    private func preserveTextViewportDuringLayout(_ update: () -> Void) {
+        let offsetY = textView.contentOffset.y
+        update()
+        let inset = textView.adjustedContentInset
+        let minY = -inset.top
+        let maxY = max(minY, textView.contentSize.height + inset.bottom - textView.bounds.height)
+        let y = min(max(offsetY, minY), maxY)
+        guard abs(textView.contentOffset.y - y) > 0.5 else { return }
+        textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: y), animated: false)
     }
 
     // MARK: Owl
@@ -1519,8 +1552,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Only the default placement follows the rail; a dragged position stays
     /// in the pane. UIKit exposes the rail's safe inset, not its controls.
     private func railOwlFrame() -> CGRect? {
-        guard traitCollection.userInterfaceIdiom == .phone,
-              !traitCollection.preferredContentSizeCategory.isAccessibilityCategory,
+        guard !traitCollection.preferredContentSizeCategory.isAccessibilityCategory,
               let nav = navigationController, nav.topViewController === self,
               let window = view.window, !nav.isNavigationBarHidden else { return nil }
         let bar = nav.navigationBar
@@ -1539,20 +1571,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // this view, so a panel just opened still had the old text width
         // and he stayed where he was, on the panel.
         split.layoutIfNeeded()
+        let railSlot = owlPlacement == .default
+            && !AppSettings.defaults.bool(forKey: AppSettings.Key.owlManualPlacement)
+            ? railOwlFrame() : nil
+        if !owlSprite.isDragging, let railSlot {
+            setOwlFrame(railSlot, inRail: true)
+        } else if !owlSprite.isDragging, owlInRail {
+            setOwlFrame(owlFrame, inRail: false)
+        }
         let area = owlArea()
         guard area.width >= OwlSprite.size, area.height >= OwlSprite.size else {
-            if owlInRail, !owlSprite.isDragging { setOwlFrame(owlFrame, inRail: false) }
             if askPanel != nil { owlSprite.isHidden = true }
             return
         }
         let size = CGSize(width: OwlSprite.size, height: OwlSprite.size)
-        if !owlSprite.isDragging {
-            if owlPlacement == .default, !AppSettings.defaults.bool(forKey: AppSettings.Key.owlManualPlacement), let slot = railOwlFrame() {
-                setOwlFrame(slot, inRail: true)
-            } else {
-                let f = owlPlacement.frameYDown(in: area, size: size)
-                setOwlFrame(OwlPlacement.avoidingFolds(f, folds: folds(), in: area), inRail: false)
-            }
+        if !owlSprite.isDragging, railSlot == nil {
+            let f = owlPlacement.frameYDown(in: area, size: size)
+            setOwlFrame(OwlPlacement.avoidingFolds(f, folds: folds(), in: area), inRail: false)
         }
         applyOwlHidden()
         layoutBubble(area: area)
@@ -2527,7 +2562,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if abs(edge.left - insets.left) > 0.5 || abs(edge.right - insets.right) > 0.5 {
             edge.left = insets.left
             edge.right = insets.right
-            textView.textContainerInset = edge
+            preserveTextViewportDuringLayout {
+                textView.textContainerInset = edge
+            }
         }
         return (width, insets)
     }
