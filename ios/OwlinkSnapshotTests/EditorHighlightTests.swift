@@ -196,4 +196,19 @@ final class EditorHighlightTests: XCTestCase {
         XCTAssertTrue(NSLocationInRange(last, visible))
         XCTAssertNotNil(try background(at: last, in: editor))
     }
+
+    func testMovingBracketRestoresOverlappingOccurrence() throws {
+        let editor = editor("(x) (y)")
+        editor.textView.selectedRange = NSRange(location: 0, length: 1)
+        editor.refreshEditorHighlights()
+        let occurrence = try XCTUnwrap(background(at: 4, in: editor))
+        editor.textView.selectedRange = NSRange(location: 5, length: 0)
+        editor.refreshEditorHighlights(includeOccurrences: false)
+        let bracket = try XCTUnwrap(background(at: 4, in: editor))
+        XCTAssertNotEqual(bracket, occurrence)
+        editor.textView.selectedRange = NSRange(location: 2, length: 0)
+        editor.refreshEditorHighlights(includeOccurrences: false)
+        XCTAssertEqual(try background(at: 4, in: editor), occurrence)
+        XCTAssertNil(try background(at: 6, in: editor))
+    }
 }

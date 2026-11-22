@@ -225,4 +225,35 @@ final class WritingModeTests: XCTestCase {
         editor.replaceAllText(with: "short\ntext")
         XCTAssertNil(editor.writingLargeReason)
     }
+
+    func testDistantFocusRefreshLeavesMiddleRenderingAlone() throws {
+        let text = String(repeating: "A line of text.\n", count: 800)
+        let editor = editor(text)
+        editor.toggleWritingFocus()
+        editor.updateWriting()
+        let initialVisible = try XCTUnwrap(editor.editorVisibleRange())
+        let layout = try XCTUnwrap(editor.textView.textLayoutManager)
+        let manager = try XCTUnwrap(layout.textContentManager)
+        let middle = (text as NSString).length / 2
+        let location = try XCTUnwrap(manager.location(layout.documentRange.location, offsetBy: middle))
+        let end = try XCTUnwrap(manager.location(location, offsetBy: 1))
+        let marker = try XCTUnwrap(NSTextRange(location: location, end: end))
+        let color = UIColor.magenta
+        layout.addRenderingAttribute(.foregroundColor, value: color, for: marker)
+        editor.textView.selectedRange = NSRange(location: (text as NSString).length - 1, length: 0)
+        editor.textView.setContentOffset(CGPoint(x: 0, y: max(0, editor.textView.contentSize.height - editor.textView.bounds.height)), animated: false)
+        layout.textViewportLayoutController.layoutViewport()
+        editor.updateWriting(center: false)
+        let finalVisible = try XCTUnwrap(editor.editorVisibleRange())
+        XCTAssertLessThan(NSMaxRange(initialVisible), middle)
+        XCTAssertGreaterThan(finalVisible.location, middle)
+        var actual: UIColor?
+        layout.enumerateRenderingAttributes(from: layout.documentRange.location, reverse: false) { _, attributes, range in
+            let start = manager.offset(from: layout.documentRange.location, to: range.location)
+            let finish = manager.offset(from: layout.documentRange.location, to: range.endLocation)
+            if start <= middle && middle < finish { actual = attributes[.foregroundColor] as? UIColor }
+            return true
+        }
+        XCTAssertEqual(actual, color)
+    }
 }

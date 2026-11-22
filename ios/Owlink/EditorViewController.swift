@@ -335,7 +335,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.onMarkdownPaste = { [weak self] in self?.handleMarkdownPaste() ?? false }
         textView.onKeyboardCaretMove = { [weak self] in
             self?.scheduleWritingUpdate(center: true)
-            self?.scheduleEditorHighlights()
+            self?.scheduleEditorHighlights(selectionChanged: false)
         }
         textView.onTypewriterScroll = { [weak self] in
             guard let self, self.writing.typewriter, self.writingLargeReason == nil else { return false }
@@ -1748,18 +1748,22 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         defer { focusPaintedRange = nil; focusCache = nil; focusPalette = nil }
         guard let layout = textView.textLayoutManager, let manager = layout.textContentManager else { return }
         let length = textView.textStorage.length
-        let spans = [focusPaintedRange, current].compactMap { $0 }
+        var spans = [focusPaintedRange, current].compactMap { $0 }
             .map { NSIntersectionRange($0, NSRange(location: 0, length: length)) }.filter { $0.length > 0 }
-        guard !spans.isEmpty else { return }
-        var span = spans[0]
-        for other in spans.dropFirst() { span = NSUnionRange(span, other) }
+            .sorted { $0.location < $1.location }
+        if spans.count == 2, NSMaxRange(spans[0]) >= spans[1].location {
+            spans = [NSUnionRange(spans[0], spans[1])]
+        }
         let origin = layout.documentRange.location
-        if let a = manager.location(origin, offsetBy: span.location),
-           let b = manager.location(a, offsetBy: span.length),
-           let range = NSTextRange(location: a, end: b) {
-            layout.removeRenderingAttribute(.foregroundColor, for: range)
-        } else {
-            layout.removeRenderingAttribute(.foregroundColor, for: layout.documentRange)
+        for span in spans {
+            if let a = manager.location(origin, offsetBy: span.location),
+               let b = manager.location(a, offsetBy: span.length),
+               let range = NSTextRange(location: a, end: b) {
+                layout.removeRenderingAttribute(.foregroundColor, for: range)
+            } else {
+                layout.removeRenderingAttribute(.foregroundColor, for: layout.documentRange)
+                break
+            }
         }
     }
 
@@ -1917,7 +1921,36 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let wanted = occurrences.map { ($0, false) } + brackets.map { ($0, true) }
         let unchanged = highlightPainted.count == wanted.count
             && zip(highlightPainted, wanted).allSatisfy { $0.range == $1.0 && $0.bracket == $1.1 }
-        if !unchanged || !sameLook {
+        let previousKey = highlightKey
+        let canDiffBrackets = !includeOccurrences && sameLook && previousKey.map {
+            $0[2] == key[2] && $0[3] == key[3] && $0[4] == key[4] && $0[5] == key[5]
+        } == true
+        if !unchanged && canDiffBrackets {
+            let oldBrackets = highlightPainted.filter(\.bracket)
+            let removed = oldBrackets.filter { !brackets.contains($0.range) }
+            let added = brackets.filter { range in !oldBrackets.contains { $0.range == range } }
+            let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
+            func paint(_ range: NSRange, bracket: Bool) -> HighlightPaint? {
+                guard let a = manager.location(viewport.location, offsetBy: range.location - start),
+                      let b = manager.location(a, offsetBy: range.length),
+                      let r = NSTextRange(location: a, end: b) else { return nil }
+                let color = bracket ? UIColor(hex: palette.caret).withAlphaComponent(contrast ? 0.65 : 0.3)
+                    : UIColor(hex: palette.findMatch).withAlphaComponent(contrast ? 0.85 : 0.55)
+                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
+                return HighlightPaint(range: range, textRange: r, bracket: bracket)
+            }
+            for old in removed {
+                layout.removeRenderingAttribute(.backgroundColor, for: old.textRange)
+                for occurrence in occurrences {
+                    let overlap = NSIntersectionRange(old.range, occurrence)
+                    if overlap.length > 0 { _ = paint(overlap, bracket: false) }
+                }
+            }
+            highlightPainted.removeAll { paint in paint.bracket && removed.contains { $0.range == paint.range } }
+            for range in added {
+                if let painted = paint(range, bracket: true) { highlightPainted.append(painted) }
+            }
+        } else if !unchanged || !sameLook {
             // A handful of ranges: take all the paint off and put it back,
             // occurrences first so a bracket on top of one stays visible.
             for paint in highlightPainted { layout.removeRenderingAttribute(.backgroundColor, for: paint.textRange) }
