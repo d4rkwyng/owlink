@@ -48,7 +48,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                                  input: "w", modifierFlags: .command)
         let window = UIKeyCommand(title: String(localized: "New Window"), action: #selector(EditorViewController.newWindow),
                                   input: "n", modifierFlags: [.command, .alternate])
-        builder.insertChild(UIMenu(options: .displayInline, children: [save, close, window]), atEndOfMenu: .file)
+        let print = UICommand(title: String(localized: "Print…"), action: #selector(EditorViewController.printDocument))
+        let exportHTML = UICommand(title: String(localized: "Export as HTML…"), action: #selector(EditorViewController.exportHTMLDocument))
+        let exportPDF = UICommand(title: String(localized: "Export as PDF…"), action: #selector(EditorViewController.exportPDFDocument))
+        builder.insertChild(UIMenu(options: .displayInline, children: [save, print, exportHTML, exportPDF, close, window]), atEndOfMenu: .file)
 
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)

@@ -634,7 +634,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let settings = UIAction(title: String(localized: "Settings"), image: UIImage(systemName: "gear")) { [weak self] _ in
             self?.showSettings()
         }
-        var first: [UIMenuElement] = [save, replace, goTo, quickly, todos, statistics, wrap, readable, ask, check]
+        let print = UIAction(title: String(localized: "Print…"), image: UIImage(systemName: "printer")) { [weak self] _ in
+            self?.printDocument()
+        }
+        print.accessibilityIdentifier = "editor.menu.print"
+        let exportHTML = UIAction(title: String(localized: "Export as HTML…"), image: UIImage(systemName: "doc.text")) { [weak self] _ in
+            self?.exportHTMLDocument()
+        }
+        exportHTML.accessibilityIdentifier = "editor.menu.exportHTML"
+        let exportPDF = UIAction(title: String(localized: "Export as PDF…"), image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
+            self?.exportPDFDocument()
+        }
+        exportPDF.accessibilityIdentifier = "editor.menu.exportPDF"
+        if document.language.language != .markdown {
+            exportHTML.attributes = .disabled
+            exportPDF.attributes = .disabled
+        }
+        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace, goTo, quickly, todos, statistics, wrap, readable, ask, check]
         if document.language.language == .markdown {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -2243,6 +2259,101 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Commands
 
+    @objc func printDocument() {
+        if document.language.language == .markdown {
+            let folder = document.fileURL.deletingLastPathComponent()
+            MarkdownExportIOS.renderPage(
+                markdown: textView.text,
+                title: MarkdownExport.baseName(displayName: document.displayName),
+                folder: folder
+            ) { [weak self] html, _, _ in
+                self?.presentPrint(UIMarkupTextPrintFormatter(markupText: html))
+            }
+        } else {
+            let formatter = UISimpleTextPrintFormatter(text: textView.text)
+            formatter.font = textView.font ?? AppSettings.font(for: document.language.language, traits: traitCollection)
+            presentPrint(formatter)
+        }
+    }
+
+    @objc func exportHTMLDocument() {
+        guard document.language.language == .markdown else { return }
+        MarkdownExportIOS.renderPage(
+            markdown: textView.text,
+            title: MarkdownExport.baseName(displayName: document.displayName),
+            folder: document.fileURL.deletingLastPathComponent()
+        ) { [weak self] html, _, _ in
+            self?.shareExport(Data(html.utf8), ext: "html")
+        }
+    }
+
+    @objc func exportPDFDocument() {
+        guard document.language.language == .markdown else { return }
+        MarkdownExportIOS.renderPage(
+            markdown: textView.text,
+            title: MarkdownExport.baseName(displayName: document.displayName),
+            folder: document.fileURL.deletingLastPathComponent()
+        ) { [weak self] html, openedRoot, vaultRoot in
+            guard let self else { return }
+            MarkdownExportIOS.makePDF(html: html, folder: self.document.fileURL.deletingLastPathComponent(),
+                                       openedRoot: openedRoot, vaultRoot: vaultRoot) { [weak self] result in
+                switch result {
+                case .success(let data): self?.shareExport(data, ext: "pdf")
+                case .failure(let error): self?.showExportError(error)
+                }
+            }
+        }
+    }
+
+    private func presentPrint(_ formatter: UIPrintFormatter) {
+        let controller = UIPrintInteractionController.shared
+        let info = UIPrintInfo(dictionary: nil)
+        info.jobName = document.displayName
+        controller.printInfo = info
+        controller.printFormatter = formatter
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let rect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+            guard controller.present(from: rect, in: view, animated: true) else {
+                showExportError(CocoaError(.fileWriteUnknown))
+                return
+            }
+        } else if !controller.present(animated: true) {
+            showExportError(CocoaError(.fileWriteUnknown))
+        }
+    }
+
+    private func shareExport(_ data: Data, ext: String) {
+        let manager = FileManager.default
+        guard let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            showExportError(CocoaError(.fileNoSuchFile))
+            return
+        }
+        let directory = caches.appendingPathComponent("MarkdownExport-\(UUID().uuidString)", isDirectory: true)
+        do {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent(MarkdownExport.fileName(displayName: document.displayName, ext: ext))
+            try data.write(to: url, options: .atomic)
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            activity.completionWithItemsHandler = { _, _, _, _ in try? manager.removeItem(at: directory) }
+            if let popover = activity.popoverPresentationController {
+                popover.sourceView = view
+                popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+                popover.permittedArrowDirections = []
+            }
+            present(activity, animated: true)
+        } catch {
+            try? manager.removeItem(at: directory)
+            showExportError(error)
+        }
+    }
+
+    private func showExportError(_ error: Error) {
+        let alert = UIAlertController(title: String(localized: "Couldn’t export"),
+                                      message: error.localizedDescription, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
+        present(alert, animated: true)
+    }
+
     @objc func saveDocument() {
         document.save(to: document.fileURL, for: .forOverwriting) { [weak self] ok in
             if !ok { self?.saveFailed(nil) }
@@ -2540,6 +2651,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(printDocument) { return true }
+        if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) {
+            return document.language.language == .markdown
+        }
         if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(explainRegex) { return textToolStates(selection: textView.selectedRange).explain }
         if action == #selector(decodeSelection) { return textToolStates(selection: textView.selectedRange).decode }

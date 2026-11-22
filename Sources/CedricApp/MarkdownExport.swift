@@ -10,9 +10,7 @@ import WebKit
 extension EditorWindowController {
     /// The document's name without its extension.
     var exportBaseName: String {
-        let n = doc.displayName
-        let base = (n as NSString).deletingPathExtension
-        return base.isEmpty ? n : base
+        MarkdownExport.baseName(displayName: doc.displayName)
     }
 
     /// A standalone page, light style, with no script: raw HTML blocks'
@@ -21,8 +19,7 @@ extension EditorWindowController {
     /// Wikilinks and `![[embeds]]` resolve in `vault` and point at their
     /// files relative to the document's folder; notes are inlined.
     nonisolated static func exportPage(markdown: String, title: String, vault: WikiVault? = nil) -> String {
-        PreviewController.page(body: HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault))), palette: EditorPalettes.light,
-                               csp: "script-src 'none'; object-src 'none'; frame-src 'none'", title: title)
+        MarkdownExport.page(markdown: markdown, title: title, vault: vault)
     }
 
     /// The selection's Markdown, or the whole document's.
