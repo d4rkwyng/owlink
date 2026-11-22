@@ -2957,6 +2957,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard selection.location != NSNotFound, selection.location <= text.length,
               selection.length <= text.length - selection.location else { done?(); return }
         let markdown = selection.length > 0 ? text.substring(with: selection) : text as String
+        guard !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            toast(String(localized: "Nothing to copy."))
+            done?()
+            return
+        }
+        // The HTML importer runs on the main thread: a very long text would freeze the editor.
+        if rich && (markdown as NSString).length > Self.richTextCopyLimit {
+            toast(String(localized: "That’s too much to copy as rich text. Select less."))
+            done?()
+            return
+        }
         let pasteboard = copyPasteboard
         let write = PasteboardWrite(changeCount: pasteboard.changeCount)
         let folder = document.fileURL.deletingLastPathComponent()
@@ -2970,7 +2981,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             MarkdownExportIOS.renderFragment(markdown: markdown, folder: folder) { html in
                 defer { done?() }
                 guard current() else { return }
-                pasteboard.write([UTType.html.identifier: Data(html.utf8), UTType.utf8PlainText.identifier: html])
+                // The HTML source as text, as on the Mac. Copy as Rich Text puts the markup itself.
+                pasteboard.write([UTType.utf8PlainText.identifier: html])
             }
             return
         }
@@ -2990,9 +3002,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                   UTType.rtf.identifier: rtf,
                                   UTType.utf8PlainText.identifier: attributed.string])
             } catch {
-                self.showExportError(error)
+                self.showCopyError(error)
             }
         }
+    }
+
+    static let richTextCopyLimit = 300_000
+
+    private func showCopyError(_ error: Error) {
+        let alert = UIAlertController(title: String(localized: "Couldn’t copy"),
+                                      message: error.localizedDescription, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
+        present(alert, animated: true)
     }
 
     @objc func printDocument() {
@@ -3400,9 +3421,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(printDocument) { return true }
-        if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) ||
-            action == #selector(copyAsHTML) || action == #selector(copyAsRichText) {
+        if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) {
             return document.language.language == .markdown
+        }
+        if action == #selector(copyAsHTML) || action == #selector(copyAsRichText) {
+            return document.language.language == .markdown && textView.window != nil
         }
         if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(commentSelection(_:)) { return lineEditable && document.language.language.commentSyntax != nil }

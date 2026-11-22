@@ -14,16 +14,32 @@ struct SystemCopyPasteboard: CopyPasteboard {
     func write(_ item: [String: Any]) { UIPasteboard.general.items = [item] }
 }
 
+/// Markdown rendering kept off the main thread, on a thread of its own with
+/// a main-thread-sized stack (as the Mac's MarkdownWork): rendering recurses
+/// into nested lists and quotes, which can overflow a dispatch thread's
+/// smaller stack on a deeply nested document.
+enum MarkdownWork {
+    static func run<T: Sendable>(_ work: @escaping @Sendable () -> T, then: @escaping @MainActor @Sendable (T) -> Void) {
+        let thread = Thread {
+            let result = work()
+            DispatchQueue.main.async { MainActor.assumeIsolated { then(result) } }
+        }
+        thread.stackSize = 8 << 20
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+}
+
 @MainActor
 enum MarkdownExportIOS {
+    /// Copy as HTML: the rendered fragment. Like the Mac's, it makes no
+    /// note-name index (the folder is not walked for `[[wikilinks]]`).
     static func renderFragment(markdown: String, folder: URL?, completion: @escaping @MainActor (String) -> Void) {
         let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
-        DispatchQueue.global(qos: .userInitiated).async {
+        MarkdownWork.run({
             let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
-            if markdown.contains("[[") { vault?.prepareIndex() }
-            let html = HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault)))
-            DispatchQueue.main.async { completion(html) }
-        }
+            return HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault)))
+        }, then: completion)
     }
 
     static func renderPage(
@@ -34,13 +50,13 @@ enum MarkdownExportIOS {
         completion: @escaping @MainActor (String, URL?, URL?) -> Void
     ) {
         let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
-        DispatchQueue.global(qos: .userInitiated).async {
+        struct Page: Sendable { let html: String; let vaultRoot: URL? }
+        MarkdownWork.run({
             let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
             if markdown.contains("[[") { vault?.prepareIndex() }
             let html = MarkdownExport.page(markdown: markdown, title: title, vault: vault, remote: remote)
-            let vaultRoot = vault?.root
-            DispatchQueue.main.async { completion(html, openedRoot, vaultRoot) }
-        }
+            return Page(html: html, vaultRoot: vault?.root)
+        }, then: { completion($0.html, openedRoot, $0.vaultRoot) })
     }
 
     static func makePDF(

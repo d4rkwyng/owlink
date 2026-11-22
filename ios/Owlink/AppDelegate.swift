@@ -58,13 +58,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         builder.insertChild(UIMenu(options: .displayInline, children: [goTo]), atEndOfMenu: .edit)
         let copyHTML = UICommand(title: String(localized: "Copy as HTML"), action: #selector(EditorViewController.copyAsHTML))
         let copyRich = UICommand(title: String(localized: "Copy as Rich Text"), action: #selector(EditorViewController.copyAsRichText))
-        builder.insertChild(UIMenu(options: .displayInline, children: [copyHTML, copyRich]), atEndOfMenu: .edit)
         let tools = UIMenu(title: String(localized: "Text Tools"), children: [
             UICommand(title: String(localized: "Explain Regex"), action: #selector(EditorViewController.explainRegex)),
             UICommand(title: String(localized: "Decode Selection"), action: #selector(EditorViewController.decodeSelection)),
             UICommand(title: String(localized: "Find TODOs"), action: #selector(EditorViewController.findTodos)),
         ])
         builder.insertChild(tools, atEndOfMenu: .edit)
+        builder.insertChild(UIMenu(options: .displayInline, children: [copyHTML, copyRich]), atEndOfMenu: .edit)
 
         let preview = UIKeyCommand(title: String(localized: "Preview"), action: #selector(EditorViewController.togglePreview),
                                    input: "p", modifierFlags: [.command, .shift])

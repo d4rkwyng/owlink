@@ -37,11 +37,11 @@ final class CopyMarkdownTests: XCTestCase {
         await withCheckedContinuation { continuation in
             editor.copyMarkdown(rich: false, selection: range) { continuation.resume() }
         }
-        let html = try XCTUnwrap(pasteboard.item[UTType.html.identifier] as? Data)
-        let fragment = try XCTUnwrap(String(data: html, encoding: .utf8))
+        let fragment = try XCTUnwrap(pasteboard.item[UTType.utf8PlainText.identifier] as? String)
         XCTAssertTrue(fragment.contains("<strong>bold</strong>"))
         XCTAssertFalse(fragment.contains("Before"))
-        XCTAssertEqual(pasteboard.item[UTType.utf8PlainText.identifier] as? String, fragment)
+        XCTAssertNil(pasteboard.item[UTType.html.identifier], "Copy as HTML puts the source as text only, as on the Mac")
+        XCTAssertEqual(pasteboard.item.count, 1)
 
         await withCheckedContinuation { continuation in
             editor.copyMarkdown(rich: true, selection: NSRange(location: 0, length: 0)) { continuation.resume() }
@@ -53,7 +53,8 @@ final class CopyMarkdownTests: XCTestCase {
         XCTAssertFalse(rendered.contains("https://evil.example/x"))
         let rtf = try XCTUnwrap(pasteboard.item[UTType.rtf.identifier] as? Data)
         let attributed = try NSAttributedString(data: rtf, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-        XCTAssertTrue(attributed.string.contains("Before bold after"))
+        XCTAssertTrue(attributed.string.hasPrefix("Before bold after") || attributed.string.contains("\nBefore bold after"))
+        XCTAssertTrue(rendered.contains("<strong>bold</strong>"))
         XCTAssertEqual(pasteboard.item[UTType.utf8PlainText.identifier] as? String, attributed.string)
     }
 
@@ -74,5 +75,73 @@ final class CopyMarkdownTests: XCTestCase {
             pasteboard.write([UTType.utf8PlainText.identifier: "newer copy"])
         }
         XCTAssertEqual(pasteboard.item[UTType.utf8PlainText.identifier] as? String, "newer copy")
+    }
+
+    private func makeEditor(_ text: String, ext: String = "md", pasteboard: TestCopyPasteboard) -> (EditorViewController, UIWindow) {
+        let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext))
+        if ext == "md" { doc.language.choose(.markdown) }
+        doc.text = text
+        let editor = EditorViewController(document: doc, readModeOnOpen: false)
+        editor.copyPasteboard = pasteboard
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = UINavigationController(rootViewController: editor)
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        return (editor, window)
+    }
+
+    private func copy(_ editor: EditorViewController, rich: Bool, _ range: NSRange = NSRange(location: 0, length: 0)) async {
+        await withCheckedContinuation { continuation in
+            editor.copyMarkdown(rich: rich, selection: range) { continuation.resume() }
+        }
+    }
+
+    func testNonMarkdownAndEmptyDocumentsWriteNothing() async {
+        let pasteboard = TestCopyPasteboard()
+        let (plain, w1) = makeEditor("**not markdown**", ext: "txt", pasteboard: pasteboard)
+        defer { w1.isHidden = true; w1.rootViewController = nil }
+        await copy(plain, rich: false)
+        await copy(plain, rich: true)
+        XCTAssertEqual(pasteboard.changeCount, 0)
+        XCTAssertFalse(plain.canPerformAction(#selector(EditorViewController.copyAsHTML), withSender: nil))
+
+        let (empty, w2) = makeEditor("  \n", pasteboard: pasteboard)
+        defer { w2.isHidden = true; w2.rootViewController = nil }
+        await copy(empty, rich: false)
+        await copy(empty, rich: true)
+        XCTAssertEqual(pasteboard.changeCount, 0)
+        XCTAssertTrue(empty.canPerformAction(#selector(EditorViewController.copyAsHTML), withSender: nil))
+    }
+
+    func testCRLFAndEmojiSelectionsAndEscaping() async throws {
+        let pasteboard = TestCopyPasteboard()
+        let text = "Intro\r\n\r\n😀 **bold** 👩‍👩‍👧 and a < b & c\r\n"
+        let (editor, window) = makeEditor(text, pasteboard: pasteboard)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        let ns = text as NSString
+        await copy(editor, rich: false, ns.range(of: "😀 **bold** 👩‍👩‍👧"))
+        var html = try XCTUnwrap(pasteboard.item[UTType.utf8PlainText.identifier] as? String)
+        XCTAssertTrue(html.contains("😀 <strong>bold</strong> 👩‍👩‍👧"))
+        XCTAssertFalse(html.contains("Intro"))
+
+        await copy(editor, rich: false, ns.range(of: "a < b & c"))
+        html = try XCTUnwrap(pasteboard.item[UTType.utf8PlainText.identifier] as? String)
+        XCTAssertTrue(html.contains("a &lt; b &amp; c"), html)
+        XCTAssertFalse(html.contains("a < b"))
+        XCTAssertFalse(html.contains("\r"))
+    }
+
+    func testRichTextCopyIsRefusedWhenHugeAndOutOfRangeSelectionIsIgnored() async {
+        let pasteboard = TestCopyPasteboard()
+        let (editor, window) = makeEditor("**x**", pasteboard: pasteboard)
+        defer { window.isHidden = true; window.rootViewController = nil }
+        await copy(editor, rich: false, NSRange(location: 40, length: 2))
+        XCTAssertEqual(pasteboard.changeCount, 0)
+        let big = String(repeating: "word ", count: EditorViewController.richTextCopyLimit / 5 + 10)
+        editor.textView.text = big
+        await copy(editor, rich: true)
+        XCTAssertEqual(pasteboard.changeCount, 0)
+        await copy(editor, rich: false)
+        XCTAssertEqual(pasteboard.changeCount, 1, "the HTML copy has no such limit")
     }
 }
