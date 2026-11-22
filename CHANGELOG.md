@@ -4,11 +4,6 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
-
-### Fixed
-- **Preview links to a heading.** A link such as `other.md#part`, `page.html#section` or `[[other#Part]]` opens the document in the preview at that heading, and Back and Forward return to it. A fragment may also be the heading's text (`#Part`). Same-page `#` links scroll in place reliably, including with ⌘-click.
-
 ## [0.5.1]
 
 ### Added
@@ -23,6 +18,7 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Finder document icons.** Type-coloured pages now show a white symbol, with a short file type label in larger views.
 
 ### Fixed
+- **Preview links to a heading.** Links to a heading in another document open at that heading in the preview.
 - **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
 - **Obsidian image names.** Bare image names in Markdown, embeds and HTML `<img>` tags resolve in the vault, including `Images/` and the configured `attachmentFolderPath`.
 - **Settings and dialog copy.** Remaining settings units, the Go to Line placeholder, default-editor type checkboxes, and the Compare window title are localized.
