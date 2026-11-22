@@ -79,6 +79,16 @@ struct SettingsView: View {
     @State private var testResult: String?
     @StateObject private var models = ModelsModel()
 
+    private var defaultIndentWidth: Int {
+        Indentation(usesTabs: indentWithTabs, width: tabWidth > 0 ? tabWidth : 4).width
+    }
+
+    private var indentWidthOptions: [Int] {
+        Indentation.widths.contains(defaultIndentWidth)
+            ? Indentation.widths
+            : Indentation.widths + [defaultIndentWidth]
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -106,15 +116,14 @@ struct SettingsView: View {
                     }
                     .accessibilityLabel(String(localized: "Default indent"))
                     .accessibilityIdentifier("settings.defaultIndent")
-                    Picker(String(localized: "width"), selection: Binding(
-                        get: { Indentation(usesTabs: indentWithTabs, width: tabWidth > 0 ? tabWidth : 4).width },
+                    Picker(String(localized: "Indent width"), selection: Binding(
+                        get: { defaultIndentWidth },
                         set: { width in
                             AppSettings.defaultIndentation = Indentation(usesTabs: AppSettings.defaultIndentation.usesTabs, width: width)
                         }
                     )) {
-                        ForEach(Indentation.widths, id: \.self) { width in Text("\(width)").tag(width) }
+                        ForEach(indentWidthOptions, id: \.self) { width in Text("\(width)").tag(width) }
                     }
-                    .accessibilityLabel(String(localized: "Indent width"))
                     .accessibilityIdentifier("settings.indentWidth")
                     Toggle(String(localized: "Wrap Lines"), isOn: $wrap)
                     Toggle(String(localized: "Show Line Numbers"), isOn: $lineNumbers)
