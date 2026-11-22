@@ -1106,10 +1106,14 @@ the AI runs or a model switches the engine without a Save. The network
 address applies when you press Return or leave the field, and only once
 it is a local one. Test Connection and each built-in model's Download,
 Pause and Delete stay buttons, so nothing is downloaded or loaded until
-you click. On Intel Macs automatic AI checks are **off** by
-default so typing stays fast: click the owl and choose **Ask AI Now**,
-or turn on "Check automatically when I pause typing" in Settings ›
-Cedric.
+you click. Automatic checks (and automatic AI grammar) are **off** by
+default for LM Studio, Ollama and custom servers. The first time you
+enable them, Cedric explains that visible text goes to the named server
+on your local network, not the cloud. If they were already on for a
+server, they stay off until that notice is confirmed. The existing Intel default remains
+off for on-device engines so typing stays fast; click the owl and choose
+**Ask AI Now**, or turn on "Check automatically when I pause typing" in
+Settings › Cedric.
 A one-word AI fix in prose ("definately" → "definitely") keeps its
 **Fix it**.
 In very large documents the owl only looks when clicked.
@@ -1575,8 +1579,10 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
 (MIT, © the ggml authors), bundled as `llama.framework`. Models are not
 bundled: the ones Owlink offers to download are Qwen models by Alibaba
-Cloud, each under its own licence, shown before download. The default,
-Qwen3 4B Instruct (2507, the Q4_K_M GGUF quantised by Unsloth), is
-Apache-2.0, as are Qwen2.5-Coder 1.5B and 7B and Qwen3 4B. Qwen2.5-Coder
-3B, the default before, stays an optional download labelled
-"Non-commercial licence" (Qwen Research License).
+Cloud, each under its own licence. Download first opens a confirmation
+with the model name, licence name and full bundled licence text; no
+network fetch is made just to show it. Non-commercial terms are flagged
+clearly. The default, Qwen3 4B Instruct (2507, the Q4_K_M GGUF quantised
+by Unsloth), is Apache-2.0, as are Qwen2.5-Coder 1.5B and 7B and Qwen3
+4B. Qwen2.5-Coder 3B, the default before, stays an optional download
+labelled "Non-commercial licence" (Qwen Research License).
