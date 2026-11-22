@@ -3,7 +3,29 @@ import WebKit
 import CedricCore
 
 @MainActor
+protocol CopyPasteboard {
+    var changeCount: Int { get }
+    func write(_ item: [String: Any])
+}
+
+@MainActor
+struct SystemCopyPasteboard: CopyPasteboard {
+    var changeCount: Int { UIPasteboard.general.changeCount }
+    func write(_ item: [String: Any]) { UIPasteboard.general.items = [item] }
+}
+
+@MainActor
 enum MarkdownExportIOS {
+    static func renderFragment(markdown: String, folder: URL?, completion: @escaping @MainActor (String) -> Void) {
+        let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
+            if markdown.contains("[[") { vault?.prepareIndex() }
+            let html = HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault)))
+            DispatchQueue.main.async { completion(html) }
+        }
+    }
+
     static func renderPage(
         markdown: String,
         title: String,

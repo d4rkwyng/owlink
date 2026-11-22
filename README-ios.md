@@ -39,6 +39,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   reading time and a per-file word goal in Statistics. Goals stay in settings,
   not in the file.
 - Statistics also tracks a daily word target across documents, resetting at local midnight.
+- Copy Markdown as HTML or rich text from the edit menu or iPad Edit menu.
 - Markdown Context Bar above the keyboard and Format › Markdown commands:
   bold `⌘B`, italic `⌘I`, strikethrough `⇧⌘X`, inline code Control-backtick,
   link `⌘K`, headings `⌘1`–`⌘3`, and checkbox `⌘↩`.

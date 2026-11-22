@@ -1,4 +1,5 @@
 import UIKit
+import UniformTypeIdentifiers
 import SwiftUI
 import CedricCore
 import CedricAI
@@ -88,6 +89,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let dailyQueue = DispatchQueue(label: "app.owlink.dailyWords", qos: .utility)
     private var dailyTimer: Timer?
     var dailyWords = DailyWordCounter.shared
+    var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
     private var toolStatesCache: (generation: Int, selection: NSRange, explain: Bool, decode: Bool)?
     private weak var statisticsSheet: StatisticsViewController?
     private var statisticsTimer: Timer?
@@ -1102,6 +1104,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                   suggestedActions: [UIMenuElement]) -> UIMenu? {
         guard textView === self.textView else { return UIMenu(children: suggestedActions) }
         var actions: [UIMenuElement] = []
+        if document.language.language == .markdown {
+            let html = UIAction(title: String(localized: "Copy as HTML")) { [weak self] _ in
+                self?.copyMarkdown(rich: false, selection: range)
+            }
+            html.accessibilityIdentifier = "editor.copyHTML"
+            let rich = UIAction(title: String(localized: "Copy as Rich Text")) { [weak self] _ in
+                self?.copyMarkdown(rich: true, selection: range)
+            }
+            rich.accessibilityIdentifier = "editor.copyRichText"
+            actions.append(contentsOf: [html, rich])
+        }
         if canInlineAssist(.explain, selection: range) {
             let explain = UIAction(title: String(localized: "Explain Selection"), image: UIImage(systemName: "questionmark.bubble")) { [weak self] _ in
                 self?.inlineAssist(.explain, selection: range)
@@ -2815,6 +2828,58 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Commands
 
+    @objc func copyAsHTML() {
+        copyMarkdown(rich: false, selection: textView.selectedRange)
+    }
+
+    @objc func copyAsRichText() {
+        copyMarkdown(rich: true, selection: textView.selectedRange)
+    }
+
+    func copyMarkdown(rich: Bool, selection: NSRange, done: (@MainActor () -> Void)? = nil) {
+        guard document.language.language == .markdown else { done?(); return }
+        let text = textView.textStorage.string as NSString
+        guard selection.location != NSNotFound, selection.location <= text.length,
+              selection.length <= text.length - selection.location else { done?(); return }
+        let markdown = selection.length > 0 ? text.substring(with: selection) : text as String
+        let pasteboard = copyPasteboard
+        let write = PasteboardWrite(changeCount: pasteboard.changeCount)
+        let folder = document.fileURL.deletingLastPathComponent()
+        let current: () -> Bool = { [weak self] in
+            guard let self else { return false }
+            return write.allowsWrite(changeCount: pasteboard.changeCount,
+                                     documentIsActive: !self.closing && self.view.window != nil &&
+                                     (self.navigationController == nil || self.navigationController?.topViewController === self))
+        }
+        if !rich {
+            MarkdownExportIOS.renderFragment(markdown: markdown, folder: folder) { html in
+                defer { done?() }
+                guard current() else { return }
+                pasteboard.write([UTType.html.identifier: Data(html.utf8), UTType.utf8PlainText.identifier: html])
+            }
+            return
+        }
+        MarkdownExportIOS.renderPage(markdown: markdown, title: MarkdownExport.baseName(displayName: document.displayName),
+                                     folder: folder) { [weak self] page, _, _ in
+            defer { done?() }
+            guard let self, current() else { return }
+            let html = HTMLScrub.noScriptNoRemote(page)
+            do {
+                let attributed = try NSAttributedString(data: Data(html.utf8),
+                    options: [.documentType: NSAttributedString.DocumentType.html,
+                              .characterEncoding: String.Encoding.utf8.rawValue], documentAttributes: nil)
+                let rtf = try attributed.data(from: NSRange(location: 0, length: attributed.length),
+                    documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+                guard current() else { return }
+                pasteboard.write([UTType.html.identifier: Data(html.utf8),
+                                  UTType.rtf.identifier: rtf,
+                                  UTType.utf8PlainText.identifier: attributed.string])
+            } catch {
+                self.showExportError(error)
+            }
+        }
+    }
+
     @objc func printDocument() {
         if document.language.language == .markdown {
             let folder = document.fileURL.deletingLastPathComponent()
@@ -3221,7 +3286,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         if action == #selector(printDocument) { return true }
-        if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) {
+        if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) ||
+            action == #selector(copyAsHTML) || action == #selector(copyAsRichText) {
             return document.language.language == .markdown
         }
         if Self.markdownActions.contains(action) { return markdownEditable }

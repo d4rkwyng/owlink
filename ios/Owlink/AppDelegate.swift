@@ -56,6 +56,9 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)
         builder.insertChild(UIMenu(options: .displayInline, children: [goTo]), atEndOfMenu: .edit)
+        let copyHTML = UICommand(title: String(localized: "Copy as HTML"), action: #selector(EditorViewController.copyAsHTML))
+        let copyRich = UICommand(title: String(localized: "Copy as Rich Text"), action: #selector(EditorViewController.copyAsRichText))
+        builder.insertChild(UIMenu(options: .displayInline, children: [copyHTML, copyRich]), atEndOfMenu: .edit)
         let tools = UIMenu(title: String(localized: "Text Tools"), children: [
             UICommand(title: String(localized: "Explain Regex"), action: #selector(EditorViewController.explainRegex)),
             UICommand(title: String(localized: "Decode Selection"), action: #selector(EditorViewController.decodeSelection)),

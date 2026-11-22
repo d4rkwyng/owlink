@@ -3,6 +3,18 @@ import Testing
 @testable import CedricCore
 
 @Suite struct MarkdownExportTests {
+    @Test func copyRenderersScrubScriptsAndRichTextRemoteResources() {
+        let markdown = #"<script>alert(1)</script><img src="https://evil.example/x.png" onerror="bad()"> **safe**"#
+        let fragment = HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: nil)))
+        #expect(!fragment.localizedCaseInsensitiveContains("<script"))
+        #expect(!fragment.localizedCaseInsensitiveContains("onerror"))
+        let page = HTMLScrub.noScriptNoRemote(MarkdownExport.page(markdown: markdown, title: "x"))
+        #expect(!page.localizedCaseInsensitiveContains("<script"))
+        #expect(!page.localizedCaseInsensitiveContains("onerror"))
+        #expect(!page.contains("https://evil.example/x.png"))
+        #expect(page.contains("safe"))
+    }
+
     @Test func fileNamesUseTheDisplayNameWithoutItsExtension() {
         #expect(MarkdownExport.fileName(displayName: "report.md", ext: "html") == "report.html")
         #expect(MarkdownExport.fileName(displayName: "report", ext: "pdf") == "report.pdf")
