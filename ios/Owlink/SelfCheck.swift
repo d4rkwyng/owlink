@@ -150,6 +150,13 @@ enum SelfCheck {
         check(editor.textView.text != original, "Markdown Bold changes the selection")
         editor.textView.undoManager?.undo()
         check(editor.textView.text == original, "one Undo restores Markdown Bold")
+        editor.textView.text = "- item"
+        editor.textView.selectedRange = NSRange(location: 6, length: 0)
+        let continued = !editor.textView(editor.textView, shouldChangeTextIn: editor.textView.selectedRange, replacementText: "\n")
+            && editor.textView.text == "- item\n- "
+        check(continued, "Markdown list continues on Return")
+        editor.textView.text = original
+        editor.textView.selectedRange = NSRange(location: 0, length: 0)
     }
 
     /// Ask Cedric for real when an engine is ready here (Apple

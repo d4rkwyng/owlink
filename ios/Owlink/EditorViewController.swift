@@ -259,6 +259,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.textContainerInset = UIEdgeInsets(top: 10, left: editorTextInsetLeft, bottom: 80, right: 8)
         textView.accessibilityIdentifier = "editor.text"
         textView.allowsEditingTextAttributes = false
+        textView.markdownKeysEnabled = { [weak self] in self?.markdownEditable ?? false }
+        textView.onMarkdownTab = { [weak self] forward in self?.handleMarkdownTab(forward: forward) }
+        textView.onMarkdownPaste = { [weak self] in self?.handleMarkdownPaste() ?? false }
     }
 
     private func setUpStatusBar() {
@@ -730,6 +733,77 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 MainActor.assumeIsolated { self?.refreshPreview() }
             }
         }
+    }
+
+    func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
+        guard textView === self.textView, replacement == "\n", textView.isEditable, editGate.isEditable,
+              textView.markedTextRange == nil else { return true }
+        let text = textView.textStorage.string as NSString
+        guard range.location != NSNotFound, range.location >= 0, range.length >= 0, NSMaxRange(range) <= text.length,
+              range.length == 0 || text.rangeOfCharacter(from: .newlines, options: [], range: range).location == NSNotFound else {
+            return true
+        }
+        let language = document.language.language
+        if language == .yaml {
+            guard let edit = MarkdownLists.newline(in: text, selection: range, language: .yaml) else { return true }
+            return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+        }
+        guard language == .markdown, !isInMarkdownFence(at: range.location, in: text) else { return true }
+        if let edit = MarkdownTable.newline(in: text, selection: range) {
+            return !applyTextEdit(edit, actionName: String(localized: "Add Table Row"))
+        }
+        if let edit = MarkdownLists.newline(in: text, selection: range, language: .markdown, tabWidth: 4, useTabs: false) {
+            return !applyTextEdit(edit, actionName: String(localized: "Typing"))
+        }
+        return true
+    }
+
+    func handleMarkdownTab(forward: Bool) {
+        guard markdownEditable else { return }
+        let text = textView.textStorage.string as NSString
+        let selection = textView.selectedRange
+        guard selection.location != NSNotFound, selection.location >= 0, selection.length >= 0,
+              NSMaxRange(selection) <= text.length,
+              selection.length == 0 || text.rangeOfCharacter(from: .newlines, options: [], range: selection).location == NSNotFound else {
+            return
+        }
+        if !isInMarkdownFence(at: selection.location, in: text) {
+            if let edit = MarkdownTable.tab(in: text, selection: selection, forward: forward),
+               applyTextEdit(edit, actionName: String(localized: "Format Table")) { return }
+            if let edit = MarkdownLists.shiftItem(in: text, selection: selection, right: forward, tabWidth: 4),
+               applyTextEdit(edit, actionName: forward ? String(localized: "Indent") : String(localized: "Outdent")) { return }
+        }
+        if forward { textView.insertText("    ") }
+    }
+
+    private func handleMarkdownPaste() -> Bool {
+        guard markdownEditable else { return false }
+        let text = textView.textStorage.string as NSString
+        let selection = textView.selectedRange
+        guard selection.length > 0, !isInMarkdownFence(at: selection.location, in: text) else { return false }
+        let pasteboard = UIPasteboard.general
+        let pasted: String?
+        if pasteboard.hasURLs {
+            guard let urls = pasteboard.urls, urls.count == 1 else { return false }
+            pasted = urls[0].absoluteString
+        } else if pasteboard.hasStrings, let string = pasteboard.string, MarkdownFormat.isURL(string) {
+            pasted = string
+        } else {
+            return false
+        }
+        guard let pasted else { return false }
+        return markdownLinkPaste(pasted)
+    }
+
+    /// A URL pasted over a selection in Markdown becomes [selection](url),
+    /// one undo step (MarkdownPaste.linkPaste); false: paste as usual.
+    func markdownLinkPaste(_ pasted: String) -> Bool {
+        guard markdownEditable else { return false }
+        let text = textView.textStorage.string as NSString
+        let selection = textView.selectedRange
+        guard selection.length > 0, !isInMarkdownFence(at: selection.location, in: text),
+              let edit = MarkdownPaste.linkPaste(in: text, selection: selection, pasted: pasted) else { return false }
+        return applyTextEdit(edit, actionName: String(localized: "Paste"))
     }
 
     private func updateDocumentChangeCount() {
@@ -2929,6 +3003,27 @@ final class PaddingLabel: UILabel {
 /// is off. Keep the width we measured so later layout passes cannot shrink it.
 final class EditorDocumentTextView: UITextView {
     var minimumContentWidth: CGFloat = 0
+    var markdownKeysEnabled: (() -> Bool)?
+    var onMarkdownTab: ((Bool) -> Void)?
+    var onMarkdownPaste: (() -> Bool)?
+
+    override var keyCommands: [UIKeyCommand]? {
+        guard markdownKeysEnabled?() == true else { return super.keyCommands }
+        let tab = UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(markdownTab))
+        let backtab = UIKeyCommand(input: "\t", modifierFlags: .shift, action: #selector(markdownBacktab))
+        tab.wantsPriorityOverSystemBehavior = true
+        backtab.wantsPriorityOverSystemBehavior = true
+        return [tab, backtab] + (super.keyCommands ?? [])
+    }
+
+    @objc private func markdownTab() { onMarkdownTab?(true) }
+    @objc private func markdownBacktab() { onMarkdownTab?(false) }
+
+    override func paste(_ sender: Any?) {
+        if onMarkdownPaste?() == true { return }
+        super.paste(sender)
+    }
+
     override var contentSize: CGSize {
         get { super.contentSize }
         set {

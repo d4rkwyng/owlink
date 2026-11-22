@@ -20,27 +20,38 @@ extension EditorViewController {
         #selector(markdownTableMenu(_:)), #selector(formatTableMenu(_:)),
     ]
 
+    @discardableResult
+    func applyTextEdit(_ edit: TextEdit, actionName: String) -> Bool {
+        let length = textView.textStorage.length
+        guard edit.range.location != NSNotFound, edit.range.location >= 0, edit.range.length >= 0,
+              NSMaxRange(edit.range) <= length,
+              let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
+              let end = textView.position(from: start, offset: edit.range.length),
+              let range = textView.textRange(from: start, to: end) else { return false }
+        let undo = textView.undoManager
+        undo?.beginUndoGrouping()
+        textView.replace(range, withText: edit.replacement)
+        undo?.setActionName(actionName)
+        undo?.endUndoGrouping()
+        textView.selectedRange = edit.selection
+        revealRange(edit.selection)
+        contextBar?.refreshStates()
+        return true
+    }
+
+    func isInMarkdownFence(at offset: Int, in text: NSString) -> Bool {
+        let index = LineIndex(text)
+        return FenceIndex().isInFence(text, index: index, line: index.line(containing: offset))
+    }
+
     private func markdownEdit(_ name: String, allowFence: Bool = true, _ transform: (NSString, NSRange) -> TextEdit?) {
         guard markdownEditable else { return }
         let text = textView.textStorage.string as NSString
         let selection = textView.selectedRange
         guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length else { return }
-        if !allowFence {
-            let index = LineIndex(text)
-            if FenceIndex().isInFence(text, index: index, line: index.line(containing: selection.location)) { return }
-        }
-        guard let edit = transform(text, selection),
-              let start = textView.position(from: textView.beginningOfDocument, offset: edit.range.location),
-              let end = textView.position(from: start, offset: edit.range.length),
-              let range = textView.textRange(from: start, to: end) else { return }
-        let undo = textView.undoManager
-        undo?.beginUndoGrouping()
-        textView.replace(range, withText: edit.replacement)
-        undo?.setActionName(name)
-        undo?.endUndoGrouping()
-        textView.selectedRange = edit.selection
-        revealRange(edit.selection)
-        contextBar?.refreshStates()
+        if !allowFence, isInMarkdownFence(at: selection.location, in: text) { return }
+        guard let edit = transform(text, selection) else { return }
+        applyTextEdit(edit, actionName: name)
     }
 
     private func markdownStyle(_ style: MarkdownFormat.Style, name: String) {

@@ -34,6 +34,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
 - Markdown Context Bar above the keyboard and Format › Markdown commands:
   bold `⌘B`, italic `⌘I`, strikethrough `⇧⌘X`, inline code Control-backtick,
   link `⌘K`, headings `⌘1`–`⌘3`, and checkbox `⌘↩`.
+  Return continues or ends Markdown lists; hardware Tab and ⇧Tab move through
+  table cells or indent and outdent list items. Pasting a URL over selected
+  text makes a Markdown link.
 - Data safety: "Edited" under the title while there are unsaved changes
   (UIDocument's `hasUnsavedChanges`); Undo and Redo in the bar; Revert to
   Opened Version in the ⋯ menu (a private copy of the file as opened, in
