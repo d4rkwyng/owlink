@@ -174,7 +174,7 @@ extension OwlPlacement {
             guard !screen.isNull, !screen.isEmpty, !safe.isNull, !safe.isEmpty,
                   size.width > 0, size.height > 0, margin >= 0,
                   trailing >= minimumTrailingInset, trailing >= leading + minimumInsetDifference,
-                  navigationBar.height > 0, navigationBar.width >= navigationBar.height * 2 else { return nil }
+                  navigationBar.intersects(screen) else { return nil }
             let x = screen.maxX - trailing / 2 - columnCorrection - size.width / 2
             let y = min(safe.maxY, screen.maxY, statusTop) - margin - size.height
             let frame = CGRect(x: x, y: y, width: size.width, height: size.height)

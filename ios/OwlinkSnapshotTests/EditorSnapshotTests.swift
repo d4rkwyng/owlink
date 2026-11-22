@@ -3,6 +3,11 @@ import UIKit
 import CedricCore
 import CedricAI
 
+private final class TrailingRailWindow: UIWindow {
+    var simulatedSafeAreaInsets = UIEdgeInsets.zero
+    override var safeAreaInsets: UIEdgeInsets { simulatedSafeAreaInsets }
+}
+
 /// Drives the real editor (the app's own sources, compiled into this
 /// hostless test bundle) in a window without SpringBoard: open a sample,
 /// type, save and read the file back; Cedric's offline hint and its fix;
@@ -108,6 +113,60 @@ final class EditorSnapshotTests: XCTestCase {
         editor.willMove(toParent: nil)
         XCTAssertTrue(editor.owlSprite.superview === editor.view)
         cover.removeFromSuperview()
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
+    }
+
+    func testDefaultRailOwlTracksBoundsChangeOnIPad() async throws {
+        let defaults = AppSettings.defaults
+        let previousManual = defaults.object(forKey: AppSettings.Key.owlManualPlacement)
+        let previousPlacement = defaults.data(forKey: AppSettings.Key.owlPlacement)
+        defer {
+            if let previousManual { defaults.set(previousManual, forKey: AppSettings.Key.owlManualPlacement) }
+            else { defaults.removeObject(forKey: AppSettings.Key.owlManualPlacement) }
+            if let previousPlacement { defaults.set(previousPlacement, forKey: AppSettings.Key.owlPlacement) }
+            else { defaults.removeObject(forKey: AppSettings.Key.owlPlacement) }
+        }
+        defaults.set(false, forKey: AppSettings.Key.owlManualPlacement)
+        defaults.removeObject(forKey: AppSettings.Key.owlPlacement)
+
+        let doc = try await open(try sample("sample.swift"))
+        let editor = EditorViewController(document: doc)
+        let nav = UINavigationController(rootViewController: editor)
+        editor.traitOverrides.userInterfaceIdiom = .pad
+        let window = TrailingRailWindow(frame: CGRect(x: 0, y: 0, width: 1024, height: 768))
+        window.simulatedSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: 34, right: 84)
+        window.rootViewController = nav
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        windows.append(window)
+
+        func assertOwlMatchesCurrentRail(file: StaticString = #filePath, line: UInt = #line) throws {
+            XCTAssertTrue(editor.owlSprite.superview === nav.view, file: file, line: line)
+            func statusLabel(in view: UIView) -> UILabel? {
+                if view.accessibilityIdentifier == "editor.status" { return view as? UILabel }
+                return view.subviews.lazy.compactMap { statusLabel(in: $0) }.first
+            }
+            let label = try XCTUnwrap(statusLabel(in: editor.view), file: file, line: line)
+            let band = try XCTUnwrap(label.superview?.superview, file: file, line: line)
+            let screen = window.convert(window.bounds, to: editor.view)
+            let safe = window.convert(window.bounds.inset(by: window.safeAreaInsets), to: editor.view)
+            let bar = nav.navigationBar.convert(nav.navigationBar.bounds, to: editor.view)
+            let statusTop = band.convert(band.bounds, to: editor.view).minY
+            let expected = try XCTUnwrap(OwlPlacement.RailOwlSlot.frame(
+                screen: screen, safe: safe, navigationBar: bar, statusTop: statusTop,
+                statusBarShown: true, size: editor.owlSprite.bounds.size
+            ), file: file, line: line)
+            let actual = editor.view.convert(editor.owlSprite.frame, from: nav.view)
+            XCTAssertEqual(actual.origin.x, expected.origin.x, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(actual.origin.y, expected.origin.y, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(actual.size.width, expected.size.width, accuracy: 1, file: file, line: line)
+            XCTAssertEqual(actual.size.height, expected.size.height, accuracy: 1, file: file, line: line)
+        }
+
+        try assertOwlMatchesCurrentRail()
+        window.frame = CGRect(x: 0, y: 0, width: 768, height: 1024)
+        window.layoutIfNeeded()
+        try assertOwlMatchesCurrentRail()
         await withCheckedContinuation { c in doc.close { _ in c.resume() } }
     }
 
@@ -307,6 +366,63 @@ final class EditorSnapshotTests: XCTestCase {
             XCTAssertLessThanOrEqual(lineCaret.midY, textView.bounds.maxY)
             await withCheckedContinuation { c in doc.close { _ in c.resume() } }
         }
+    }
+
+    func testEditorLayoutRefreshDoesNotRevealOffscreenCaret() async throws {
+        let previousWrap = AppSettings.defaults.object(forKey: AppSettings.Key.wrap)
+        let previousNumbers = AppSettings.defaults.object(forKey: AppSettings.Key.lineNumbers)
+        defer {
+            if let previousWrap { AppSettings.defaults.set(previousWrap, forKey: AppSettings.Key.wrap) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.wrap) }
+            if let previousNumbers { AppSettings.defaults.set(previousNumbers, forKey: AppSettings.Key.lineNumbers) }
+            else { AppSettings.defaults.removeObject(forKey: AppSettings.Key.lineNumbers) }
+            AppSettings.post()
+        }
+        AppSettings.wrap = true
+        AppSettings.lineNumbers = true
+        let doc = try await open(try sample("sample.swift"))
+        doc.text = Array(repeating: "A line kept in the document for scrolling.", count: 800).joined(separator: "\n")
+        let (window, editor) = show(doc, size: Self.iPhone, dark: false)
+        let textView = editor.textView
+        XCTAssertTrue(textView.becomeFirstResponder())
+        window.layoutIfNeeded()
+        textView.selectedRange = NSRange(location: 0, length: 0)
+        window.layoutIfNeeded()
+
+        textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: 1200), animated: false)
+        window.layoutIfNeeded()
+        let scrolledOffset = textView.contentOffset.y
+        XCTAssertGreaterThan(scrolledOffset, 500)
+        let caret = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: 0))
+        XCTAssertLessThan(textView.caretRect(for: caret).midY, scrolledOffset)
+
+        AppSettings.lineNumbers = false
+        editor.textViewDidChangeSelection(textView)
+        editor.viewSafeAreaInsetsDidChange()
+        window.layoutIfNeeded()
+        // A small inset compensation during layout is fine; snapping back
+        // to the caret at the top is not.
+        XCTAssertGreaterThan(textView.contentOffset.y, 500)
+        XCTAssertGreaterThan(textView.contentOffset.y, scrolledOffset - 80)
+        let caretAfterLayout = textView.caretRect(for: caret)
+        XCTAssertLessThan(caretAfterLayout.midY, textView.contentOffset.y)
+
+        textView.insertText("x")
+        let typedCaret = try XCTUnwrap(textView.position(from: textView.beginningOfDocument, offset: 1))
+        let typedY = textView.caretRect(for: typedCaret).midY
+        let visibleMinY = textView.contentOffset.y + textView.adjustedContentInset.top
+        let visibleMaxY = textView.contentOffset.y + textView.bounds.height - textView.adjustedContentInset.bottom
+        XCTAssertGreaterThanOrEqual(typedY, visibleMinY)
+        XCTAssertLessThanOrEqual(typedY, visibleMaxY)
+
+        textView.setContentOffset(CGPoint(x: textView.contentOffset.x, y: 1200), animated: false)
+        editor.revealRange(textView.selectedRange)
+        let revealedY = textView.caretRect(for: typedCaret).midY
+        let revealedMinY = textView.contentOffset.y + textView.adjustedContentInset.top
+        let revealedMaxY = textView.contentOffset.y + textView.bounds.height - textView.adjustedContentInset.bottom
+        XCTAssertGreaterThanOrEqual(revealedY, revealedMinY)
+        XCTAssertLessThanOrEqual(revealedY, revealedMaxY)
+        await withCheckedContinuation { c in doc.close { _ in c.resume() } }
     }
 
     func testOpenTypeSaveReadBack() async throws {
