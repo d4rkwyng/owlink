@@ -65,6 +65,7 @@ public final class OwlToolbox: @unchecked Sendable {
     public let allowed: Set<OwlToolName>
     /// The open document's picture, rendered only when asked for.
     public let imageSource: (any OwlImageSource)?
+    private let inlineSelection: String?
     private let lock = NSLock()
     private var calls = 0
     private var _proposals: [OwlEditProposal] = []
@@ -73,10 +74,12 @@ public final class OwlToolbox: @unchecked Sendable {
     public static let maxCalls = OwlTools.maxRounds * OwlTools.maxCallsPerRound
 
     public init(snapshot: OwlDocumentSnapshot, allowed: Set<OwlToolName>, imageSource: (any OwlImageSource)? = nil,
+                inlineSelection: String? = nil,
                 onEvent: @escaping @Sendable (OwlChatEvent) -> Void = { _ in }) {
         self.snapshot = snapshot
         self.allowed = allowed
         self.imageSource = imageSource
+        self.inlineSelection = inlineSelection
         self.onEvent = onEvent
     }
 
@@ -121,6 +124,11 @@ public final class OwlToolbox: @unchecked Sendable {
             return r
         }
         var r = OwlTools.run(call, on: snapshot, allowed: allowed)
+        if let p = r.proposal, let inlineSelection,
+           p.original != inlineSelection || p.range != snapshot.selection {
+            r = OwlToolResult(text: "error: find must be exactly the selected text",
+                              proposal: nil, summary: String(localized: "edit outside the selection refused"), ok: false)
+        }
         if let p = r.proposal, let other = proposals.first(where: { $0.overlaps(p) }) {
             let same = other.original == p.original && other.replacement == p.replacement
             r = OwlToolResult(text: same ? "error: this edit is already proposed" : "error: this overlaps an edit you already proposed (lines \(other.firstLine)-\(other.lastLine)); put both changes in one edit",
@@ -193,14 +201,18 @@ public struct OwlChatRequest: Sendable {
     public var scanTruncated: Bool
     /// The document draws a picture (an SVG): describe_image can look at it.
     public var imageSource: (any OwlImageSource)?
+    /// An inline command targets this exact selection, rather than whole lines.
+    public var inlineSelection: String?
 
     public init(question: String, action: OwlQuickAction? = nil, context: OwlChatContext, snapshot: OwlDocumentSnapshot,
                 history: [OwlChatEntry] = [], useTools: Bool, prose: Bool, maxTokens: Int = 700, scan: String? = nil,
-                scanHasHigh: Bool = false, scanTruncated: Bool = false, imageSource: (any OwlImageSource)? = nil) {
+                scanHasHigh: Bool = false, scanTruncated: Bool = false, imageSource: (any OwlImageSource)? = nil,
+                inlineSelection: String? = nil) {
         self.question = question; self.action = action; self.context = context; self.snapshot = snapshot
         self.history = history; self.useTools = useTools; self.prose = prose; self.maxTokens = maxTokens
         self.scan = scan; self.scanHasHigh = scanHasHigh; self.scanTruncated = scanTruncated
         self.imageSource = imageSource
+        self.inlineSelection = inlineSelection
     }
 
     /// The model saw only part of the document (trimmed to fit, or not
@@ -343,6 +355,10 @@ public struct OwlChatRequest: Sendable {
 
     /// The question text sent: a quick action's fixed instruction, else the user's words.
     public var prompt: String {
+        if let action, let inlineSelection {
+            return OwlInlineAssist.instruction(action: action, selection: inlineSelection, prose: prose,
+                                               toolsOn: useTools, context: context)
+        }
         if let action { return OwlPrompts.quickInstruction(action, prose: prose, toolsOn: useTools, context: context, scan: scan) }
         return question
     }
@@ -382,7 +398,8 @@ public enum OwlChatRunner {
     public static func run(_ req: OwlChatRequest, engine: any OwlChatEngine, model: String = "",
                            onEvent: @escaping @Sendable (OwlChatEvent) -> Void) async throws -> OwlChatOutcome {
         let specs = OwlTools.specs(req.tools)
-        let toolbox = OwlToolbox(snapshot: req.snapshot, allowed: Set(req.tools), imageSource: req.imageSource, onEvent: onEvent)
+        let toolbox = OwlToolbox(snapshot: req.snapshot, allowed: Set(req.tools), imageSource: req.imageSource,
+                                 inlineSelection: req.inlineSelection, onEvent: onEvent)
         // A small model's up-front digest fits in what the shown text left of the engine's budget.
         var room = engine.contextBudget - (req.context.numbered as NSString).length
         // Asked about problems, without tools: the checks' list first (run before the call).
@@ -445,7 +462,7 @@ public enum OwlChatRunner {
             break
         }
         var proposals = toolbox.proposals
-        if proposals.isEmpty, req.action?.proposesEdit == true, let block = fencedBlock(answer),
+        if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
            let p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
                                          reason: "", in: req.snapshot) {
             proposals = [p]
@@ -800,17 +817,34 @@ final class Locked<T>: @unchecked Sendable {
 // MARK: - Choosing the engine
 
 public enum OwlChatEngines {
+    private static func builtInChoice(settings: LocalAISettings, engine: BuiltInEngine) -> BuiltInModel? {
+        guard let catalog = engine.catalog else { return nil }
+        let installed = engine.installedModels
+        return settings.model.flatMap { id in installed.first { $0.id == id } }
+            ?? engine.suggestedModel(in: installed.map(\.info)).flatMap { catalog.model(id: $0.id) }
+    }
+
+    /// The configured model's key without loading an engine or contacting a server.
+    /// An auto-selected server model is unknown until the engine resolves it.
+    public static func configuredScoreKey(settings: LocalAISettings) -> String? {
+        guard settings.enabled else { return nil }
+        switch settings.backend {
+        case .apple: return AppleChatEngine().scoreKey
+        case .builtIn:
+            return builtInChoice(settings: settings, engine: BuiltInEngine()).map { "builtIn:\($0.id)" }
+        case .lmStudio, .ollama, .custom:
+            guard let model = settings.model, !model.isEmpty else { return nil }
+            return "\(settings.backend.rawValue):\(model)"
+        }
+    }
+
     /// The chat engine for the AI settings (nil: off, unavailable, no model).
     public static func make(settings: LocalAISettings, session: URLSession? = nil) async -> (any OwlChatEngine)? {
         guard settings.enabled else { return nil }
         switch settings.backend {
         case .builtIn:
             let engine = BuiltInEngine()
-            guard let catalog = engine.catalog else { return nil }
-            let installed = engine.installedModels
-            let chosen = settings.model.flatMap { id in installed.first { $0.id == id } }
-                ?? engine.suggestedModel(in: installed.map(\.info)).flatMap { catalog.model(id: $0.id) }
-            guard let chosen else { return nil }
+            guard let chosen = builtInChoice(settings: settings, engine: engine) else { return nil }
             return BuiltInChatEngine(model: chosen, path: engine.store.fileURL(for: chosen), host: engine.host)
         case .apple:
             return AppleChatEngine.isAvailable ? AppleChatEngine() : nil
