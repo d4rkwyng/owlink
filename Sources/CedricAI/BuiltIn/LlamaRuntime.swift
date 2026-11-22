@@ -7,7 +7,7 @@ import CLlamaLoader
 /// Macs run on the CPU (ggml's Metal path on Intel GPUs is not something we
 /// test or rely on), which works but is slow.
 public struct LlamaRuntime: BuiltInRuntime {
-    public static let contextTokens: Int32 = 4096
+    public static let contextTokens: Int32 = 16384
     static let batchTokens: Int32 = 512
 
     public init() {}

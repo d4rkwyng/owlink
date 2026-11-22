@@ -135,10 +135,29 @@ import CedricCore
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { _ in "Engine error" }) { _, _ in }
         #expect(engine.calls == 2 && !result.stopped)
-        #expect(result.error?.contains("part 2 of \(plan.parts.count): Engine error") == true)
+        #expect(result.error?.contains("The review stopped: Engine error") == true)
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 2 of"))
         #expect(result.outcome.answer.contains("Line 10") && result.outcome.answer.contains("rest was not reviewed"))
         #expect(result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
         #expect(!result.outcome.answer.lowercased().contains("safe to run"))
+    }
+
+    @Test func failedPartOnATypedQuestionDoesNotCombineAndKeepsTheCause() async throws {
+        let engine = Engine(failAt: 2, reply: "The opening section sets up the script.")
+        let req = try #require((80...400).lazy.map {
+            Self.request(Self.snapshot(lines: $0), action: nil, question: "What does this file do?")
+        }.first { OwlChunkedReviewRunner.plan($0, engine: engine)?.parts.count == 3 })
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
+                                                      describeError: { _ in "Engine error" }) { _, _ in }
+        #expect(engine.calls == 2 && !result.stopped)
+        #expect(result.error == "The review stopped: Engine error")
+        #expect(result.outcome.answer.contains("The opening section sets up the script."))
+        #expect(result.outcome.answer.contains("The review stopped: Engine error"))
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("could not combine"))
+        #expect(!result.outcome.answer.contains("Part 1"))
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 2 of"))
     }
 
     @Test func scopeAndActionExclusions() {
@@ -156,14 +175,17 @@ import CedricCore
         }
     }
 
-    @Test func largeSummariesAreNotCombined() async throws {
+    @Test func largeSummariesFallBackWithoutPartLabelsWhenCombineDoesNotFit() async throws {
         let engine = Engine(reply: String(repeating: "summary ", count: 800))
         let req = Self.request(Self.snapshot(), action: .explain)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
         #expect(engine.calls == plan.parts.count)
-        #expect(result.outcome.answer.contains("Part 1 (lines"))
+        #expect(result.outcome.answer.contains("summary"))
+        #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == plan.parts.count)
+        #expect(!result.outcome.answer.contains("Part 1 (lines"))
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
     }
 
     @Test func chunkedScriptVerdictRespectsScan() async throws {
@@ -229,7 +251,7 @@ import CedricCore
         #expect(single.calls == 1)
 
         // Pick a deterministic document size requiring exactly three parts for each action.
-        for action in [OwlQuickAction.scriptSafety, .findProblems, .explain] {
+        for action in [OwlQuickAction?.some(.scriptSafety), .findProblems, .explain, nil] {
             let engine = Engine()
             let req = try #require((80...400).lazy.map { Self.request(Self.snapshot(lines: $0), action: action) }
                 .first { OwlChunkedReviewRunner.plan($0, engine: engine)?.parts.count == 3 })
@@ -237,11 +259,14 @@ import CedricCore
             let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                           describeError: { String(describing: $0) }) { _, _ in }
             #expect(!result.stopped && result.error == nil)
-            #expect(engine.calls == (action == .explain ? 4 : 3))
+            #expect(engine.calls == (action == .explain || action == nil ? 4 : 3))
+            #expect(!result.outcome.answer.contains("Part 1"))
+            #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
             for (index, part) in plan.parts.enumerated() {
                 let messages = engine.messages[index]
                 guard case .user(let user)? = messages.last else { Issue.record("Missing user prompt"); continue }
-                #expect(user.contains("Lines \(part.first)–\(part.last) of \(plan.totalLines), part \(index + 1) of 3"))
+                #expect(user.contains("Lines \(part.first)–\(part.last) of \(plan.totalLines)"))
+                #expect(!user.localizedCaseInsensitiveContains("part \(index + 1) of"))
                 #expect(!user.contains("OUTLINE OF THE WHOLE DOCUMENT"))
                 let chunk = OwlChatContext.reviewPart(req.snapshot, first: part.first, last: part.last)
                 #expect(chunk.numbered == part.numbered)
@@ -260,14 +285,43 @@ import CedricCore
             let req = Self.request(s, action: action, question: action == nil ? "What does this script do?" : "Check this script for risks.")
             let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
             #expect(plan.parts.count > 1 && plan.parts.count <= 8 && plan.isComplete && plan.uncappedCount <= 8)
-            for (index, part) in plan.parts.enumerated() {
+            for part in plan.parts {
                 var r = req
                 r.context = OwlChatContext.reviewPart(s, first: part.first, last: part.last)
-                r.reviewPartHeader = "Lines \(part.first)–\(part.last) of 263, part \(index + 1) of \(plan.parts.count)"
+                r.reviewPartHeader = "Lines \(part.first)–\(part.last) of 263"
                 #expect((part.numbered as NSString).length <= r.documentBudget(engineBudget: 5_000, server: false))
                 #expect(r.contextAdditions(engineBudget: 5_000).digest == nil)
             }
         }
+    }
+
+    @Test func typedWholeDocumentQuestionCombinesItsPartAnswers() async throws {
+        let engine = Engine(replies: [
+            1: "The file defines its first behavior.",
+            2: "The file defines its second behavior.",
+            3: "The file defines its third behavior.",
+            4: "The file defines three behaviors, each with its own purpose."
+        ])
+        let req = try #require((80...400).lazy.map {
+            Self.request(Self.snapshot(lines: $0), action: nil, question: "Summarize the behavior of this file.")
+        }.first { OwlChunkedReviewRunner.plan($0, engine: engine)?.parts.count == 3 })
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
+                                                      describeError: { String(describing: $0) }) { _, _ in }
+        #expect(engine.calls == plan.parts.count + 1)
+        #expect(result.outcome.answer == "The file defines three behaviors, each with its own purpose.")
+        #expect(!result.outcome.answer.contains("Part 1"))
+        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
+    }
+
+    @Test func chunkingOnlyWhenWholeDocumentExceedsBudget() throws {
+        let s = Self.snapshot()
+        #expect(s.length == 9_519 && s.countedLines == 263)
+        let req = Self.request(s, action: nil)
+        #expect(OwlChunkedReviewRunner.plan(req, engine: Engine(budget: 24_000)) == nil)
+        #expect(OwlChunkedReviewRunner.plan(req, engine: Engine(budget: 32_000)) == nil)
+        let appleBudgetPlan = try #require(OwlChunkedReviewRunner.plan(req, engine: Engine(budget: 5_000)))
+        #expect(appleBudgetPlan.parts.count > 1)
     }
 
     @Test func curlyApostropheDontRunOutranksAReassuringVerdict() async throws {
