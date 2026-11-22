@@ -32,6 +32,13 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   monospaced family); the choice is remembered.
   Settings › Writing can use a prose font for Markdown and plain text; code
   keeps the monospaced editor font.
+  **Check spelling while typing** and **Check grammar in prose** (Settings,
+  and iPad Edit › Spelling and Grammar) use the system's checker for Markdown
+  and plain text, stay off for code and data files (and while a large
+  document pauses the extras), and are on until turned off. Grammar needs
+  iOS 27; before that the setting is kept but does nothing. Unlike the Mac,
+  the system marks the whole document, so fenced code and markup in Markdown
+  may be underlined too.
   Jumps show numbers for the open file even when the setting is off.
 - Return keeps the current indent, and brackets and quotes pair in code as
   on the Mac; **Auto-close brackets and quotes** is in Settings (on by default).

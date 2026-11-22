@@ -77,6 +77,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         ])
         builder.insertChild(tools, atEndOfMenu: .edit)
         builder.insertChild(UIMenu(options: .displayInline, children: [copyHTML, copyRich]), atEndOfMenu: .edit)
+        // Edit › Spelling and Grammar: the Mac's two settings (checkmarks via validate).
+        let proofing = [
+            UICommand(title: String(localized: "Check Spelling While Typing"), action: #selector(EditorViewController.toggleCheckSpelling)),
+            UICommand(title: String(localized: "Check Grammar in Prose"), action: #selector(EditorViewController.toggleCheckGrammar)),
+        ]
+        if builder.menu(for: .spelling) != nil {
+            builder.insertChild(UIMenu(options: .displayInline, children: proofing), atEndOfMenu: .spelling)
+        } else {
+            builder.insertChild(UIMenu(title: String(localized: "Spelling and Grammar"), children: proofing), atEndOfMenu: .edit)
+        }
 
         let preview = UIKeyCommand(title: String(localized: "Preview"), action: #selector(EditorViewController.togglePreview),
                                    input: "p", modifierFlags: [.command, .shift])

@@ -71,6 +71,9 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.styleCheck) private var styleCheck = false
     @AppStorage(AppSettings.Key.readableWidthDefault) private var readableWidthDefault = false
     @AppStorage(AppSettings.Key.useProseFont) private var useProseFont = false
+    /// Unset reads as on, as in `AppSettings`.
+    @AppStorage(AppSettings.Key.checkSpellingWhileTyping) private var checkSpellingWhileTyping = true
+    @AppStorage(AppSettings.Key.checkGrammarInProse) private var checkGrammarInProse = true
     @AppStorage(AppSettings.Key.proseFontName) private var proseFontName = ""
     @AppStorage(AppSettings.Key.proseFontSize) private var proseFontSize = ProseFont.defaultSize
     @State private var styleExtra = ""
@@ -206,6 +209,10 @@ struct SettingsView: View {
                     }
                     .disabled(!useProseFont)
                     .accessibilityIdentifier("settings.proseFontSize")
+                    Toggle(String(localized: "Check spelling while typing"), isOn: $checkSpellingWhileTyping)
+                        .accessibilityIdentifier("settings.checkSpellingWhileTyping")
+                    Toggle(String(localized: "Check grammar in prose"), isOn: $checkGrammarInProse)
+                        .accessibilityIdentifier("settings.checkGrammar")
                     Toggle(String(localized: "Style Check"), isOn: $styleCheck)
                         .accessibilityIdentifier("settings.styleCheck")
                     TextField(String(localized: "Also flag"), text: $styleExtra)
@@ -227,11 +234,13 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Writing"))
                 } footer: {
-                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
+                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nSpelling and grammar use the system’s checker: on for Markdown and plain text, off for code and data files. The system marks the whole document, including code blocks in Markdown.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
                 }
                 .onChange(of: useProseFont) { AppSettings.useProseFont = useProseFont }
                 .onChange(of: proseFontName) { AppSettings.proseFontName = proseFontName.isEmpty ? nil : proseFontName }
                 .onChange(of: proseFontSize) { AppSettings.proseFontSize = proseFontSize }
+                .onChange(of: checkSpellingWhileTyping) { AppSettings.post() }
+                .onChange(of: checkGrammarInProse) { AppSettings.post() }
                 .onChange(of: styleCheck) { AppSettings.post() }
                 .onChange(of: styleExtra) { writeStylePhrases() }
                 .onChange(of: styleExcept) { writeStylePhrases() }

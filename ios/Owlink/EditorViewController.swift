@@ -846,6 +846,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         writingLargeReason = LargeDocument.reason(for: lineIndex)
         clearFocusRendering()
         updateWritingInset()
+        applyProseChecking()
         markdownFenceIndex.invalidateAll()
         cachedIndentation = nil
         lineIndentation = nil
@@ -909,6 +910,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             writingLargeReason = reason
             clearFocusRendering()
             updateWritingInset()
+            applyProseChecking()
             if !writing.isOff { showWritingPaused(reason) }
         }
         markdownFenceIndex.invalidate(fromLine: first)
@@ -1209,12 +1211,41 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func disableAutomaticSubstitutions(_ textView: UITextView) {
         textView.autocorrectionType = .no
         textView.autocapitalizationType = .none
-        textView.spellCheckingType = .no
         textView.smartQuotesType = .no
         textView.smartDashesType = .no
         textView.smartInsertDeleteType = .no
         textView.inlinePredictionType = .no
+        applyProseChecking()
     }
+
+    /// Whether the system may check spelling and grammar here: writing only
+    /// (Markdown and plain text, not data files such as CSV or PEM), never
+    /// code, and not while large-document mode pauses the extras (as on the Mac).
+    var proseCheckingApplies: Bool {
+        let language = document.language.language
+        return writingLargeReason == nil && SpellScope.isProse(language)
+            && SpellScope.checks(language: language, fileName: document.fileURL.lastPathComponent)
+    }
+
+    /// Spelling and grammar underlines from the system's checker, by the
+    /// settings and `proseCheckingApplies`. Autocorrect and the smart
+    /// substitutions stay off. UITextView marks the whole document: in
+    /// Markdown that includes fenced code and markup (the Mac skips those).
+    func applyProseChecking() {
+        let on = proseCheckingApplies
+        let spelling: UITextSpellCheckingType = on && AppSettings.checkSpellingWhileTyping ? .yes : .no
+        var changed = textView.spellCheckingType != spelling
+        textView.spellCheckingType = spelling
+        if #available(iOS 27.0, *) {
+            let grammar: UITextGrammarCheckingType = on && AppSettings.checkGrammarInProse ? .yes : .no
+            changed = changed || textView.grammarCheckingType != grammar
+            textView.grammarCheckingType = grammar
+        }
+        if changed, textView.isFirstResponder { textView.reloadInputViews() }
+    }
+
+    @objc func toggleCheckSpelling() { AppSettings.checkSpellingWhileTyping.toggle() }
+    @objc func toggleCheckGrammar() { AppSettings.checkGrammarInProse.toggle() }
 
     func textViewDidBeginEditing(_ textView: UITextView) {
         disableAutomaticSubstitutions(textView)
@@ -1759,6 +1790,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.typingAttributes[.foregroundColor] = UIColor(hex: palette.foreground)
         applyTabStops()
         applyWrap()
+        applyProseChecking()
         invisiblesOverlay.refresh()
         colorizer?.setPalette(palette)
         scheduleWritingUpdate()
@@ -1806,6 +1838,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         case #selector(toggleTypewriter): command.state = writing.typewriter ? .on : .off
         case #selector(toggleWritingFocus): command.state = writing.focus ? .on : .off
         case #selector(toggleInvisibles): command.state = AppSettings.showInvisibles ? .on : .off
+        case #selector(toggleCheckSpelling): command.state = AppSettings.checkSpellingWhileTyping ? .on : .off
+        case #selector(toggleCheckGrammar): command.state = AppSettings.checkGrammarInProse ? .on : .off
         case #selector(focusParagraph): command.state = AppSettings.focusUnit == .paragraph ? .on : .off
         case #selector(focusSentence): command.state = AppSettings.focusUnit == .sentence ? .on : .off
         case #selector(indentUsingSpaces(_:)), #selector(indentUsingTabs(_:)), #selector(tabWidthMenu(_:)):
@@ -1849,6 +1883,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         writingLargeReason = reason
         clearFocusRendering()
         updateWritingInset()
+        applyProseChecking()
         if reason == nil { scheduleWritingUpdate() }
         else if !writing.isOff { showWritingPaused(reason!) }
     }
@@ -3777,6 +3812,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(nextBookmarkMenu(_:)) || action == #selector(previousBookmarkMenu(_:))
             || action == #selector(clearBookmarksMenu(_:)) { return !bookmarks.isEmpty }
         if action == #selector(showStatistics) { return true }
+        if action == #selector(toggleCheckSpelling) || action == #selector(toggleCheckGrammar) { return true }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)

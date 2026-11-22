@@ -32,6 +32,9 @@ enum AppSettings {
         static let tabWidth = "tabWidth"
         static let indentWithTabs = "indentWithTabs"
         static let focusUnit = "focusUnit"
+        /// Same keys as the Mac (Settings, Edit › Spelling and Grammar). Unset means on.
+        static let checkSpellingWhileTyping = "checkSpellingWhileTyping"
+        static let checkGrammarInProse = "checkGrammarInProse"
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
@@ -113,6 +116,19 @@ enum AppSettings {
     static var autoCloseBrackets: Bool {
         get { defaults.object(forKey: Key.autoCloseBrackets) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.autoCloseBrackets); post() }
+    }
+
+    /// The system's spelling checker in Markdown and plain text (never code or data). On by default.
+    static var checkSpellingWhileTyping: Bool {
+        get { defaults.object(forKey: Key.checkSpellingWhileTyping) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.checkSpellingWhileTyping); post() }
+    }
+
+    /// The system's grammar checker in Markdown and plain text, where the OS
+    /// has one for text views (iOS 27); stored either way. On by default.
+    static var checkGrammarInProse: Bool {
+        get { defaults.object(forKey: Key.checkGrammarInProse) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.checkGrammarInProse); post() }
     }
 
     static var focusUnit: FocusUnit {
