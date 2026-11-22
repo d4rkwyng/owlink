@@ -12,6 +12,8 @@ enum AppSettings {
         static let wrap = "ios.wrap"
         static let owlHints = "ios.owlHints"
         static let lineNumbers = "ios.lineNumbers"
+        static let owlPlacement = "ios.owlPlacement"
+        static let owlManualPlacement = "ios.owlManualPlacement"
         /// Same keys as the Mac (Settings › Writing). This app has its own defaults.
         static let styleCheck = "styleCheck"
         static let styleCheckExtra = "styleCheckExtra"
@@ -60,6 +62,11 @@ enum AppSettings {
     static var wrap: Bool {
         get { defaults.object(forKey: Key.wrap) as? Bool ?? true }
         set { defaults.set(newValue, forKey: Key.wrap); post() }
+    }
+
+    static var lineNumbers: Bool {
+        get { defaults.object(forKey: Key.lineNumbers) as? Bool ?? true }
+        set { defaults.set(newValue, forKey: Key.lineNumbers); post() }
     }
 
     /// The owl's offline hints (rules): on by default, like the Mac.

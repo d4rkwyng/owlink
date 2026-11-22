@@ -17,6 +17,28 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window = w
         ws.sizeRestrictions?.minimumSize = CGSize(width: 320, height: 400)
         #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if let index = args.firstIndex(of: "-OwlinkOrientation"), index + 1 < args.count {
+            let orientation: UIInterfaceOrientationMask?
+            switch args[index + 1] {
+            case "landscape": orientation = .landscape
+            case "landscapeLeft": orientation = .landscapeLeft
+            case "landscapeRight": orientation = .landscapeRight
+            case "portrait": orientation = .portrait
+            default:
+                NSLog("Invalid -OwlinkOrientation: %@", args[index + 1])
+                orientation = nil
+            }
+            if let orientation {
+                DispatchQueue.main.async {
+                    ws.requestGeometryUpdate(.iOS(interfaceOrientations: orientation)) { error in
+                        NSLog("Could not set Owlink orientation: %@", error.localizedDescription)
+                    }
+                }
+            }
+        } else if args.contains("-OwlinkOrientation") {
+            NSLog("Missing value for -OwlinkOrientation")
+        }
         if let out = SelfCheck.outDir {
             RecoveryOffer.skipLaunchOffer()
             SelfCheck.run(in: w, browser: browser, out: out)
@@ -219,4 +241,12 @@ final class EditorNavigationController: UINavigationController {
     override var childForStatusBarHidden: UIViewController? { topViewController }
     override var childForHomeIndicatorAutoHidden: UIViewController? { topViewController }
     override var childForScreenEdgesDeferringSystemGestures: UIViewController? { topViewController }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if let owl = (topViewController as? EditorViewController)?.owlSprite,
+           owl.superview === view, view.subviews.last !== owl {
+            view.bringSubviewToFront(owl)
+        }
+    }
 }

@@ -43,9 +43,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// This file's Readable Width choice. Nil follows Settings, which is off.
     private var readableWidthChoice: Bool?
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
-    /// This tab only. Off until a jump (a citation, Find next, Go to Line)
-    /// needs the numbers. Not written to the saved setting.
-    private var showLineNumbers = false
+    /// A jump forces numbers on for this tab without changing the setting.
+    private var jumpShowsLineNumbers = false
+    private var lastLineNumbersSetting = AppSettings.lineNumbers
+    private var showLineNumbers: Bool { AppSettings.lineNumbers || jumpShowsLineNumbers }
     /// 1-based line drawn stronger in the gutter, the one just jumped to.
     private var markedLine: Int?
     private let lineNumberGutter = LineNumberGutter()
@@ -184,6 +185,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         owl.onChange = { [weak self] in self?.showHint() }
         owl.onNote = { [weak self] note in self?.toast(note) }
+        lastLineNumbersSetting = AppSettings.lineNumbers
         applySettings()
         loadText()
         applyEditGate()
@@ -208,7 +210,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                                name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         // Opening or closing an iPhone Duo is a size-class change (compact
         // outside, regular inside; outer landscape is compact both ways).
-        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitHorizontalSizeClass.self,
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self, UITraitHorizontalSizeClass.self,
                                  UITraitVerticalSizeClass.self]) { (self: Self, _: UITraitCollection) in
             self.splitPosition = self.splitStore.position(regularWidth: self.traitCollection.horizontalSizeClass == .regular,
                                                           regularHeight: self.traitCollection.verticalSizeClass == .regular)
@@ -354,6 +356,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutOwl()
         layoutDivider()
         layoutGutter()
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        view.setNeedsLayout()
     }
 
     /// Home-indicator inset, ignoring a keyboard that has been added to the
@@ -693,7 +700,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // "click next" jump: show the line number it landed on.
         guard textView.findInteraction?.isFindNavigatorVisible == true else { return }
         let line = lineIndex.line(containing: min(textView.selectedRange.location, lineIndex.length)) + 1
-        showLineNumbers = true
+        jumpShowsLineNumbers = true
         markedLine = line
         layoutGutter()
     }
@@ -811,6 +818,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     // MARK: Settings and theme
 
     @objc private func settingsChanged() {
+        let lineNumbers = AppSettings.lineNumbers
+        if lastLineNumbersSetting && !lineNumbers {
+            jumpShowsLineNumbers = false
+            markedLine = nil
+        }
+        lastLineNumbersSetting = lineNumbers
         applySettings()
         updateBarButtons()
         scheduleOwl()
@@ -861,6 +874,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
         applyBarStyle()
+        view.setNeedsLayout()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if owlInRail { setOwlFrame(owlFrame, inRail: false) }
+    }
+
+    override func willMove(toParent parent: UIViewController?) {
+        if parent == nil, owlInRail { setOwlFrame(owlFrame, inRail: false) }
+        super.willMove(toParent: parent)
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -960,15 +984,32 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: The owl in the corner
 
-    private static let placementKey = "ios.owlPlacement"
+    private var owlInRail = false
+
+    /// Owl coordinates everywhere else in this controller are in `view`.
+    private var owlFrame: CGRect {
+        owlSprite.superview?.convert(owlSprite.frame, to: view) ?? owlSprite.frame
+    }
+
+    func setOwlFrame(_ frame: CGRect, inRail: Bool) {
+        let parent = inRail ? (navigationController?.view ?? view!) : view!
+        if owlSprite.superview !== parent {
+            let old = owlFrame
+            parent.addSubview(owlSprite)
+            owlSprite.frame = view.convert(old, to: parent)
+        }
+        if inRail { parent.bringSubviewToFront(owlSprite) }
+        owlInRail = inRail
+        owlSprite.frame = view.convert(frame, to: parent)
+    }
 
     var owlPlacement: OwlPlacement {
         get {
-            guard let d = AppSettings.defaults.data(forKey: Self.placementKey),
+            guard let d = AppSettings.defaults.data(forKey: AppSettings.Key.owlPlacement),
                   let p = try? JSONDecoder().decode(OwlPlacement.self, from: d) else { return .default }
             return p
         }
-        set { AppSettings.defaults.set(try? JSONEncoder().encode(newValue), forKey: Self.placementKey) }
+        set { AppSettings.defaults.set(try? JSONEncoder().encode(newValue), forKey: AppSettings.Key.owlPlacement) }
     }
 
     private func setUpOwlSprite() {
@@ -980,10 +1021,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         owlSprite.onDoubleTap = { [weak self] in self?.moveOwl(to: .default) }
         owlSprite.onDragBegan = { [weak self] in self?.closeHint() }
-        owlSprite.dragArea = { [weak self] in self?.owlArea() ?? .zero }
+        owlSprite.dragArea = { [weak self] in
+            guard let self, let parent = self.owlSprite.superview else { return .zero }
+            return self.view.convert(self.owlArea(), to: parent)
+        }
         owlSprite.onDragEnded = { [weak self] frame in
-            guard let self else { return }
-            self.moveOwl(to: OwlPlacement.snapped(frameYDown: frame, in: self.owlArea()))
+            guard let self, let parent = self.owlSprite.superview else { return }
+            let inView = parent.convert(frame, to: self.view)
+            self.moveOwl(to: OwlPlacement.snapped(frameYDown: inView, in: self.owlArea()), fromDrag: true)
         }
         owlSprite.menuProvider = { [weak self] in self?.owlMenu() ?? UIMenu(children: []) }
         owlSprite.accessibilityCustomActions = [
@@ -1023,6 +1068,24 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return area.insetBy(dx: 4, dy: 4)
     }
 
+    /// Only the default placement follows the rail; a dragged position stays
+    /// in the pane. UIKit exposes the rail's safe inset, not its controls.
+    private func railOwlFrame() -> CGRect? {
+        guard traitCollection.userInterfaceIdiom == .phone,
+              !traitCollection.preferredContentSizeCategory.isAccessibilityCategory,
+              let nav = navigationController, nav.topViewController === self,
+              let window = view.window, !nav.isNavigationBarHidden else { return nil }
+        let bar = nav.navigationBar
+        let screen = window.convert(window.bounds, to: view)
+        let safe = window.convert(window.bounds.inset(by: window.safeAreaInsets), to: view)
+        let barFrame = bar.convert(bar.bounds, to: view)
+        let statusTop = statusBar.convert(statusBar.bounds, to: view).minY
+        let statusBarShown = window.windowScene?.statusBarManager?.isStatusBarHidden != true
+        let size = CGSize(width: OwlSprite.size, height: OwlSprite.size)
+        return OwlPlacement.RailOwlSlot.frame(screen: screen, safe: safe, navigationBar: barFrame,
+                                              statusTop: statusTop, statusBarShown: statusBarShown, size: size)
+    }
+
     private func layoutOwl() {
         // The panes' own frames first: the split lays out its panes after
         // this view, so a panel just opened still had the old text width
@@ -1030,14 +1093,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         split.layoutIfNeeded()
         let area = owlArea()
         guard area.width >= OwlSprite.size, area.height >= OwlSprite.size else {
-            // No room beside the chat: out of the way rather than on it.
+            if owlInRail, !owlSprite.isDragging { setOwlFrame(owlFrame, inRail: false) }
             if askPanel != nil { owlSprite.isHidden = true }
             return
         }
         let size = CGSize(width: OwlSprite.size, height: OwlSprite.size)
         if !owlSprite.isDragging {
-            let f = owlPlacement.frameYDown(in: area, size: size)
-            owlSprite.frame = OwlPlacement.avoidingFolds(f, folds: folds(), in: area)
+            if owlPlacement == .default, !AppSettings.defaults.bool(forKey: AppSettings.Key.owlManualPlacement), let slot = railOwlFrame() {
+                setOwlFrame(slot, inRail: true)
+            } else {
+                let f = owlPlacement.frameYDown(in: area, size: size)
+                setOwlFrame(OwlPlacement.avoidingFolds(f, folds: folds(), in: area), inRail: false)
+            }
         }
         applyOwlHidden()
         layoutBubble(area: area)
@@ -1047,7 +1114,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func layoutBubble(area: CGRect) {
         guard bubbleOpen, !hintBar.isHidden else { return }
         // On his side of the fold.
-        let o = owlSprite.frame
+        let o = owlFrame
         let fold = FoldLayout.crossingFolds(folds(), content: area).first
         let lane = FoldLayout.lane(in: area, folds: folds(), trailing: fold.map { o.midX > $0.midX } ?? true)
         guard lane.width > 60, lane.height > 40 else { return }
@@ -1071,15 +1138,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     /// Saves where he goes and slides him there (0.16 s, as on the Mac).
-    func moveOwl(to place: OwlPlacement) {
+    func moveOwl(to place: OwlPlacement, fromDrag: Bool = false) {
         owlPlacement = place
+        AppSettings.defaults.set(fromDrag, forKey: AppSettings.Key.owlManualPlacement)
         let area = owlArea()
         guard area.width >= OwlSprite.size, area.height >= OwlSprite.size else { return }
-        let f = OwlPlacement.avoidingFolds(place.frameYDown(in: area, size: owlSprite.bounds.size), folds: folds(), in: area)
+        let slot = place == .default && !fromDrag ? railOwlFrame() : nil
+        let f = slot ?? OwlPlacement.avoidingFolds(place.frameYDown(in: area, size: owlSprite.bounds.size), folds: folds(), in: area)
+        let old = owlFrame
+        setOwlFrame(old, inRail: slot != nil)
         if UIAccessibility.isReduceMotionEnabled {
-            owlSprite.frame = f
+            setOwlFrame(f, inRail: slot != nil)
         } else {
-            UIView.animate(withDuration: 0.16) { self.owlSprite.frame = f }
+            UIView.animate(withDuration: 0.16) { self.setOwlFrame(f, inRail: slot != nil) }
         }
         layoutBubble(area: area)
         fadeOwlNearCaret()
@@ -1087,16 +1158,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// He fades while the caret is near him (so he never sits on what you type).
     private func fadeOwlNearCaret() {
+        if owlInRail { owlSprite.setFaded(false); return }
         guard !textView.isHidden, let sel = textView.selectedTextRange else { owlSprite.setFaded(false); return }
         let caret = textView.convert(textView.caretRect(for: sel.end), to: view)
-        owlSprite.setFaded(caret.insetBy(dx: -28, dy: -18).intersects(owlSprite.frame))
+        owlSprite.setFaded(caret.insetBy(dx: -28, dy: -18).intersects(owlFrame))
     }
 
     private var owlBadgeHidden = false
 
     /// Hidden by his badge state, in Focus Preview, or if he'd touch the chat.
     private func applyOwlHidden() {
-        let hide = owlBadgeHidden || EditorPanes.owlHidden(layout: paneLayout, owlFrame: owlSprite.frame, chat: askPanel?.view.frame)
+        let hide = owlBadgeHidden || EditorPanes.owlHidden(layout: paneLayout, owlFrame: owlFrame, chat: askPanel?.view.frame)
         if owlSprite.isHidden != hide { owlSprite.isHidden = hide }
     }
 
@@ -1151,7 +1223,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard NSMaxRange(abs) <= (textView.text as NSString).length else { return }
         textView.selectedRange = abs
         textView.scrollRangeToVisible(abs)
-        showLineNumbers = true
+        jumpShowsLineNumbers = true
         layoutGutter()
     }
 
@@ -1840,14 +1912,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// Moves the caret to a 1-based line and turns line numbers on for this
     /// tab. Does not change the text and does not start editing.
-    private func revealLine(_ line: Int) {
+    func revealLine(_ line: Int) {
         guard line >= 1, lineIndex.lineCount > 0 else { return }
         if focusOn { exitFocusPreview() }
         if textView.isHidden {
             previewOn = false
             layoutPreview()
         }
-        showLineNumbers = true
+        jumpShowsLineNumbers = true
         let index = min(line, lineIndex.lineCount) - 1
         markedLine = index + 1
         let r = NSRange(location: lineIndex.starts[index], length: 0)
@@ -1907,10 +1979,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if lineNumberGutter.frame != next { lineNumberGutter.frame = next }
         lineNumberGutter.font = font
         lineNumberGutter.numberColor = UIColor(hex: palette.gutterForeground)
+        lineNumberGutter.backgroundColor = UIColor(hex: palette.gutterBackground)
         lineNumberGutter.highlightColor = UIColor(hex: palette.foreground)
         lineNumberGutter.bandColor = UIColor(hex: palette.currentLine)
         lineNumberGutter.highlight = markedLine
-        guard let vr = SyntaxColorizer.visibleRange(textView), lineIndex.length == (textView.text as NSString).length else {
+        guard let vr = SyntaxColorizer.visibleRange(textView), lineIndex.length == textView.textStorage.length else {
             lineNumberGutter.rows = []
             lineNumberGutter.setNeedsDisplay()
             return
@@ -1921,8 +1994,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         rows.reserveCapacity(last - first + 1)
         for i in first...last {
             guard let pos = textView.position(from: textView.beginningOfDocument, offset: lineIndex.starts[i]) else { continue }
-            let y = textView.caretRect(for: pos).midY
-            guard y >= -20, y <= textView.bounds.height + 20 else { continue }
+            let y = textView.caretRect(for: pos).midY - textView.bounds.minY
+            guard y >= 0, y <= textView.bounds.height else { continue }
             rows.append(LineNumberGutter.Row(line: i + 1, midY: y))
         }
         lineNumberGutter.rows = rows

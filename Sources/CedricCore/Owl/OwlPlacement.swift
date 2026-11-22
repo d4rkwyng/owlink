@@ -150,6 +150,40 @@ extension OwlPlacement {
         Self.flipped(CGRect(origin: origin(in: area, size: size), size: size), in: area)
     }
 
+    /// A bottom slot in a trailing navigation rail, in y-down window coordinates.
+    /// On the Duo, an 84 pt trailing safe inset has its centre at x=424 in
+    /// a 466 pt window; the rail buttons centre at x=417.5. The 6.5 pt
+    /// correction follows that column. The controls aren't exposed as UIKit
+    /// views: with the clock shown they end at 425–446 pt, without it at
+    /// about 295 pt. Reserve 460 or 310 pt respectively from the window top.
+    public enum RailOwlSlot {
+        private static let controlsBottomWithStatus: CGFloat = 460
+        private static let controlsBottomWithoutStatus: CGFloat = 310
+        private static let columnCorrection: CGFloat = 6.5
+        private static let minimumTrailingInset: CGFloat = 60
+        private static let minimumInsetDifference: CGFloat = 30
+
+        public static func railControlsBottom(statusBarShown: Bool) -> CGFloat {
+            statusBarShown ? controlsBottomWithStatus : controlsBottomWithoutStatus
+        }
+
+        public static func frame(screen: CGRect, safe: CGRect, navigationBar: CGRect, statusTop: CGFloat, statusBarShown: Bool,
+                                 size: CGSize, margin: CGFloat = 4) -> CGRect? {
+            let leading = safe.minX - screen.minX
+            let trailing = screen.maxX - safe.maxX
+            guard !screen.isNull, !screen.isEmpty, !safe.isNull, !safe.isEmpty,
+                  size.width > 0, size.height > 0, margin >= 0,
+                  trailing >= minimumTrailingInset, trailing >= leading + minimumInsetDifference,
+                  navigationBar.height > 0, navigationBar.width >= navigationBar.height * 2 else { return nil }
+            let x = screen.maxX - trailing / 2 - columnCorrection - size.width / 2
+            let y = min(safe.maxY, screen.maxY, statusTop) - margin - size.height
+            let frame = CGRect(x: x, y: y, width: size.width, height: size.height)
+            guard frame.minX >= screen.minX + margin, frame.maxX <= screen.maxX - margin,
+                  frame.minY >= max(safe.minY, screen.minY + railControlsBottom(statusBarShown: statusBarShown)) + margin else { return nil }
+            return frame
+        }
+    }
+
     /// The placement for an owl dropped at y-down `frame` in `area`.
     public static func snapped(frameYDown frame: CGRect, in area: CGRect) -> OwlPlacement {
         snapped(origin: flipped(frame, in: area).origin, size: frame.size, in: area)
