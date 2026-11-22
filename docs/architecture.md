@@ -596,11 +596,19 @@ first shown (no WebKit work at launch). Markdown goes through
 - Network: off unless View › Allow Network in Preview: a compiled
   `WKContentRuleList` blocks http(s), ws(s) and ftp loads, and a
   Content-Security-Policy meta tag is injected as a second layer.
-- Non-persistent website data store; clicked links open in the browser.
+- Non-persistent website data store. Local Markdown and HTML links navigate
+  inside the preview, with Back, Forward and This Document; editor renders
+  resume on return. Other local files keep the text-open/reveal-only rules.
+- HTTP(S) pages use a separate web view with a non-persistent store, no
+  app scripts, message handlers or document scheme, and no local-file
+  navigation. Open in Browser and ⌘-click retain the full-URL confirmation.
+- Bare image names in Markdown and HTML use the bounded `WikiVault` index
+  after a relative lookup, preferring the configured Obsidian attachment
+  folder; resolved files remain confined to the vault.
 
 The preview bar (`PreviewBar` in `PreviewPane.swift`) sits in the pane's
 24 pt header, docked or detached. Which controls a preview gets is
-`PreviewBarItem.items(for:certificate:)` in CedricCore (Markdown: refresh,
+`PreviewBarItem.items(for:certificate:)` in CedricCore (Markdown: navigation, refresh,
 sync, zoom −/+, export, JavaScript, network, detach; HTML the same without
 export; CSV: row count, Unsort, refresh, sync, zoom, detach; the
 Certificate panel: refresh, detach). The tab recomputes a
@@ -630,6 +638,8 @@ always to the right of the editor, so there is no side to store. Restore
 runs in `AfterFirstFrame` for both, so a restored preview costs nothing
 before the first frame and nothing at all when there is none. Sessions
 saved before `previewShown` decode it as nil, which means not shown.
+An iOS port would reuse the CedricCore resolver and implement navigation
+and an isolated web view in the iOS preview controller.
 
 **CSV / TSV grid** (`CSVPreview`): `CSV.parse` (CedricCore, RFC 4180,
 UTF-16 offsets) on a background queue from an immutable copy of the text

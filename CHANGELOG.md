@@ -4,6 +4,14 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- **Browse in preview.** Follow Markdown, HTML and web links in the preview with Back, Forward and This Document; Open in Browser asks before opening a web page externally. ⌘-click keeps the external link prompt.
+
+### Fixed
+- **Obsidian image names.** Bare image names in Markdown, embeds and HTML `<img>` tags resolve in the vault, including `Images/` and the configured `attachmentFolderPath`.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
