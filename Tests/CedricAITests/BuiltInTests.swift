@@ -196,6 +196,17 @@ func randomBlob(_ n: Int) -> Data {
         }
     }
 
+    @Test func everyCatalogModelHasLicenseConfirmation() throws {
+        let catalog = try #require(ModelCatalog.bundled(bundle: .main))
+        for model in catalog.models {
+            let confirmation = try #require(model.licenseConfirmation(bundle: .main))
+            if model.license.localizedCaseInsensitiveContains("non-commercial") {
+                #expect(confirmation.isNonCommercial)
+                #expect(confirmation.body.hasPrefix("NON-COMMERCIAL LICENSE\n\n"))
+            }
+        }
+    }
+
     @Test func validationRejectsUnsafeEntries() throws {
         let good = testModel(body: Data("x".utf8))
         #expect(throws: Never.self) { try ModelCatalog(models: [good]).validate() }

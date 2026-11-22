@@ -54,6 +54,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             SaveCheck.run(in: w, browser: browser, out: out)
             return
         }
+        if let index = args.firstIndex(of: "-OwlinkShowLicence") {
+            if index + 1 < args.count, !args[index + 1].hasPrefix("-") {
+                if let preview = ModelLicencePreview.resolve(modelID: args[index + 1]) {
+                    RecoveryOffer.skipLaunchOffer()
+                    w.rootViewController = UIHostingController(rootView: preview)
+                    return
+                }
+            } else {
+                NSLog("Missing value for -OwlinkShowLicence")
+            }
+        }
         #endif
         if !options.urlContexts.isEmpty || TestLaunch.active { RecoveryOffer.skipLaunchOffer() }
         if let ctx = options.urlContexts.first {

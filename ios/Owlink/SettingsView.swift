@@ -200,6 +200,16 @@ struct SettingsView: View {
             } message: {
                 Text(String(localized: "When you pause typing, Cedric will send the visible text (up to 8 KB) to \(automaticServerName) for automatic checks. It is not sent to the cloud and stays on your local network."))
             }
+            .sheet(item: $models.confirm) { request in
+                ModelLicenceSheet(confirmation: request.confirmation) {
+                    models.startIfUnchanged(request.model)
+                }
+            }
+            .alert(String(localized: "Couldn’t load the model licence"), isPresented: $models.missingLicence) {
+                Button(String(localized: "OK"), role: .cancel) {}
+            } message: {
+                Text(String(localized: "The bundled licence text is missing. No download was started."))
+            }
             .onAppear {
                 address = ai.backend.usesServer ? ai.baseURL.absoluteString : ""
                 if styleExtra.isEmpty { styleExtra = AppSettings.styleCheckExtra.joined(separator: ", ") }
@@ -238,12 +248,6 @@ struct SettingsView: View {
         } footer: {
             Text(String(localized: "Downloaded from Hugging Face only when you tap Download, checked against its SHA-256, and kept out of iCloud backups. Runs on this device only."))
         }
-        .alert(item: $models.confirm) { m in
-            Alert(title: Text(String(localized: "Download \(m.name)?")),
-                  message: Text(String(localized: "\(m.shortDescription). Licence: \(m.license) (\(m.licenseURL.absoluteString)). It downloads from huggingface.co.")),
-                  primaryButton: .default(Text(String(localized: "Download"))) { models.start(m) },
-                  secondaryButton: .cancel())
-        }
     }
 
     @ViewBuilder private func modelButton(_ m: BuiltInModel) -> some View {
@@ -257,8 +261,10 @@ struct SettingsView: View {
             Button(String(localized: "Pause")) { models.pause(m) }
         case .verifying:
             ProgressView()
-        default:
-            Button(String(localized: "Download")) { models.confirm = m }.disabled(BuiltInPlatform.runtime == nil)
+        case .paused:
+            Button(String(localized: "Download")) { models.resume(m) }.disabled(BuiltInPlatform.runtime == nil)
+        case .notDownloaded, .failed:
+            Button(String(localized: "Download")) { models.requestDownload(m) }.disabled(BuiltInPlatform.runtime == nil)
         }
     }
 
@@ -338,7 +344,8 @@ extension BuiltInModel: @retroactive Hashable {
 @MainActor
 final class ModelsModel: ObservableObject {
     @Published var states: [String: ModelDownloadState] = [:]
-    @Published var confirm: BuiltInModel?
+    @Published var confirm: ModelLicenceRequest?
+    @Published var missingLicence = false
     let offered: [BuiltInModel]
     private let downloader = ModelDownloader()
 
@@ -352,10 +359,46 @@ final class ModelsModel: ObservableObject {
         }
     }
 
-    func start(_ m: BuiltInModel) {
+    func requestDownload(_ m: BuiltInModel) {
         Task {
-            do { try await downloader.start(m) } catch let e as ModelDownloadError { states[m.id] = .failed(e) } catch {}
+            let state = await downloader.state(of: m)
+            states[m.id] = state
+            switch state {
+            case .notDownloaded, .failed:
+                guard let confirmation = m.licenseConfirmation() else {
+                    missingLicence = true
+                    return
+                }
+                confirm = ModelLicenceRequest(model: m, confirmation: confirmation)
+            case .paused: await start(m)
+            default: break
+            }
         }
+    }
+
+    func startIfUnchanged(_ m: BuiltInModel) {
+        Task {
+            let state = await downloader.state(of: m)
+            states[m.id] = state
+            switch state {
+            case .notDownloaded, .failed: await start(m)
+            default: break
+            }
+        }
+    }
+
+    func resume(_ m: BuiltInModel) {
+        Task {
+            let state = await downloader.state(of: m)
+            states[m.id] = state
+            if case .paused = state { await start(m) }
+        }
+    }
+
+    private func start(_ m: BuiltInModel) async {
+        do { try await downloader.start(m) }
+        catch let e as ModelDownloadError { states[m.id] = .failed(e) }
+        catch { states[m.id] = .failed(.io(error.localizedDescription)) }
     }
 
     func pause(_ m: BuiltInModel) { Task { await downloader.pause(m) } }
