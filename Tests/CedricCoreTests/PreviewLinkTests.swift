@@ -118,4 +118,30 @@ import Testing
         #expect(loadedStarts == 2, "loading duplicate bookmarks starts each resolved path once")
         #expect(loaded.stored.count == 2)
     }
+
+    @Test func previewRoutingKeepsSecurityRules() throws {
+        let t = try makeTree(["vault/doc.md", "vault/page.html", "vault/page.xhtml", "vault/note.mdown", "vault/run.sh", "vault/installer.pkg", "outside.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("vault")
+        try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("escape.md"), withDestinationURL: t.appendingPathComponent("outside.md"))
+        func route(_ url: URL, command: Bool = false) -> PreviewLinkAction {
+            PreviewLinkAction.previewAction(for: url, folder: root, command: command, isText: { isText($0) || LanguageDetector.language(forFileName: $0.lastPathComponent) != nil })
+        }
+        let web = try #require(URL(string: "https://example.com/a?b=1"))
+        #expect(route(web) == .openWebInPreview(web))
+        #expect(route(web, command: true) == .confirmExternal(web))
+        let mail = try #require(URL(string: "mailto:a@example.com"))
+        #expect(route(mail) == .confirmExternal(mail))
+        let md = root.appendingPathComponent("doc.md"), html = root.appendingPathComponent("page.html")
+        #expect(route(md) == .openInPreview(md))
+        #expect(route(html) == .openInPreview(html))
+        #expect(route(root.appendingPathComponent("page.xhtml")) == .openInPreview(root.appendingPathComponent("page.xhtml")))
+        #expect(route(root.appendingPathComponent("note.mdown")) == .openInPreview(root.appendingPathComponent("note.mdown")))
+        #expect(route(md, command: true) == .openInCedric(md))
+        #expect(route(root.appendingPathComponent("run.sh")) == .openInCedric(root.appendingPathComponent("run.sh")))
+        #expect(route(root.appendingPathComponent("installer.pkg")) == .revealInFinder(root.appendingPathComponent("installer.pkg")))
+        #expect(route(root.appendingPathComponent("escape.md")) == .revealInFinder(root.appendingPathComponent("escape.md")))
+        #expect(route(t.appendingPathComponent("outside.md")) == .revealInFinder(t.appendingPathComponent("outside.md")))
+        #expect(route(try #require(URL(string: "smb://host/share"))) == .ignore("smb"))
+    }
 }

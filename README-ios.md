@@ -69,6 +69,13 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   Print documents, or export Markdown as HTML or a rendered PDF, from the
   document menu. Bare image names (`<img>`, `![]()`, `![[ ]]`) are found
   in the vault, including `Images/`, with width and float kept.
+  Links browse in the preview (attached and detached), with **Back**,
+  **Forward** and **This Document**: a Markdown or HTML file the link
+  rules allow renders there under the same policy (JavaScript off, strict
+  CSP); http(s) opens in an isolated preview web view (own process pool,
+  nothing stored, no app scripts, handlers or `cedric-doc:`); other text
+  files open in the editor. **Open in Browser** asks first, showing the
+  full URL; mailto and `⌘`-click ask too. Nothing a link names is launched.
   Text and preview open at the same place both ways (`ScrollSync`). Side
   by side, the handle between them drags (44 pt wide) and snaps to 1/3,
   1/2, 2/3 and the fold (the default, a strong snap); double-tap resets

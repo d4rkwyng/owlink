@@ -103,6 +103,11 @@ public enum PageBreaks {
 /// opens in Cedric, any other local file is only shown in Finder, and
 /// every other scheme is ignored.
 public enum PreviewLinkAction: Equatable, Sendable {
+    /// A Markdown or HTML file the preview may show in place (same
+    /// renderer, same strict page policy); never launched.
+    case openInPreview(URL)
+    /// An http or https page, shown in the preview's isolated web view.
+    case openWebInPreview(URL)
     /// http, https or mailto: ask first, showing the whole URL.
     case confirmExternal(URL)
     /// A text file inside the document's folder (symbolic links resolved).
@@ -113,6 +118,21 @@ public enum PreviewLinkAction: Equatable, Sendable {
     case ignore(String)
 
     public static let externalSchemes: Set<String> = ["http", "https", "mailto"]
+
+    /// Preview browsing uses the same confinement and special-file rules as
+    /// the editor/PDF routes; command-click keeps the external prompt.
+    public static func previewAction(for url: URL, folder: URL?, command: Bool, isText: (URL) -> Bool,
+                                     fileManager fm: FileManager = .default) -> PreviewLinkAction {
+        let action = action(for: url, folder: folder, isText: isText, fileManager: fm)
+        switch action {
+        case .confirmExternal(let u) where !command && u.scheme?.lowercased() != "mailto":
+            return .openWebInPreview(u)
+        case .openInCedric(let u) where !command:
+            let language = LanguageDetector.language(forFileName: u.lastPathComponent)
+            return language == .markdown || language == .html ? .openInPreview(u) : action
+        default: return action
+        }
+    }
 
     /// `folder`: the document's folder (nil for an untitled document).
     /// `isText`: whether Cedric edits a file of that name and kind.

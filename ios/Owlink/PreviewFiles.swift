@@ -88,6 +88,17 @@ final class PreviewFiles: NSObject, WKURLSchemeHandler {
         guard let folder else { return nil }
         return PreviewFolder.linkTarget(url, folder: folder, openedRoot: openedRoot, vaultRoot: vaultRoot)
     }
+
+    /// The root a link's file (from `linkTarget`) may open in: the vault,
+    /// the granted folder or the document's folder, whichever holds it.
+    func linkFolder(_ file: URL) -> URL? {
+        let path = file.standardizedFileURL.path
+        for root in [vaultRoot, openedRoot, folder].compactMap({ $0 }) {
+            let r = root.standardizedFileURL.path
+            if path.hasPrefix(r.hasSuffix("/") ? r : r + "/") { return root }
+        }
+        return folder
+    }
 }
 
 private final class PreviewTaskBox: @unchecked Sendable {

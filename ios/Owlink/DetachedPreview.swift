@@ -153,7 +153,9 @@ final class PreviewSceneDelegate: UIResponder, UIWindowSceneDelegate {
 /// no document of its own, nothing to save.
 final class DetachedPreviewViewController: UIViewController {
     let target: PreviewWindows.Target
-    private let preview = PreviewController()
+    /// The same preview as the editor's (links browse here too, with
+    /// Back, Forward and This Document).
+    let preview = PreviewController()
     private let blankLabel = UILabel()
     private var scrollFollow = PreviewScrollFollow()
     /// The editor's palette for this document, once a snapshot has arrived.
@@ -180,7 +182,8 @@ final class DetachedPreviewViewController: UIViewController {
         view.addSubview(preview.view)
         preview.didMove(toParent: self)
         preview.web.accessibilityIdentifier = "detachedPreview.web"
-        // A linked note opens in an editor window, not here.
+        // A linked note opens in an editor window, not here (a short note
+        // says so); Markdown and HTML links still browse in this preview.
         preview.onOpenFile = nil
         blankLabel.text = String(localized: "\(target.title) isn’t open in Owlink. Open it to see its preview here.")
         blankLabel.numberOfLines = 0

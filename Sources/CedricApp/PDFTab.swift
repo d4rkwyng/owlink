@@ -192,9 +192,9 @@ final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemVa
         let act = PreviewLinkAction.pdfAction(for: url)
         lastLinkAction = act
         switch act {
-        case .confirmExternal(let u): LinkPrompt.confirmExternal(u, in: window)
+        case .confirmExternal(let u), .openWebInPreview(let u): LinkPrompt.confirmExternal(u, in: window)
         case .revealInFinder(let u): PreviewLinkLog.reveal(u)
-        case .openInCedric(let u): PreviewLinkLog.reveal(u) // never for a PDF; reveal at most
+        case .openInCedric(let u), .openInPreview(let u): PreviewLinkLog.reveal(u) // never for a PDF; reveal at most
         case .ignore: NSSound.beep()
         }
     }
