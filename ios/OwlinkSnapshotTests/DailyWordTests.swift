@@ -187,6 +187,22 @@ final class DailyWordTests: XCTestCase {
         XCTAssertEqual(DailyWordDefaults.words(on: day, defaults: defaults), 3)
     }
 
+    func testLateBaselinePreservesIntermediateClampedChanges() async throws {
+        let counter = counter()
+        let text = String(repeating: "word ", count: 21_000)
+        let editor = editor(text, counter: counter)
+        editor.textView.text = text + String(repeating: "added ", count: 10)
+        editor.commitDailyWords()
+        editor.textView.text = String(repeating: "word ", count: 20_990)
+        editor.commitDailyWords()
+        editor.textView.text = text
+        editor.commitDailyWords()
+        for _ in 0..<200 where counter.wordsToday != 10 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(counter.wordsToday, 10)
+    }
+
     func testExplicitRollAtLocalMidnightAndGetterIsPure() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

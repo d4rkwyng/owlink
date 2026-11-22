@@ -102,7 +102,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var dailyBaselineArm = 0
     private var dailyBaselinePending = false
     private var dailyDropAfterBaseline = false
-    private var dailyPendingWords: Int?
+    private var dailyPendingWords: [Int] = []
     private static let dailyImmediateLimit = 100_000
     var dailyWords = DailyWordCounter.shared
     var copyPasteboard: any CopyPasteboard = SystemCopyPasteboard()
@@ -1329,13 +1329,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             dailyBaselineArm &+= 1
             dailyBaselinePending = false
             dailyDropAfterBaseline = false
-            dailyPendingWords = nil
+            dailyPendingWords = []
         }
         guard storage.length <= dailyWordCountLimit else {
             dailyBaselineArm &+= 1
             dailyBaselinePending = false
             dailyDropAfterBaseline = false
-            dailyPendingWords = nil
+            dailyPendingWords = []
             wordCount = nil
             wordCountGeneration = nil
             dailyWords.drop(key)
@@ -1360,8 +1360,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                         self.dailyBaselinePending = false
                         if let words { counter.rebaseOriginal(key: key, original: words) }
                         else { counter.drop(key) }
-                        if let latest = self.dailyPendingWords { counter.note(key: key, words: latest) }
-                        self.dailyPendingWords = nil
+                        for words in self.dailyPendingWords.dropFirst() { counter.note(key: key, words: words) }
+                        self.dailyPendingWords = []
                         if self.dailyDropAfterBaseline { counter.drop(key); self.dailyDropAfterBaseline = false }
                     }
                 }
@@ -1375,8 +1375,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func record(words: Int?, baseline: Bool, dropAfter: Bool) {
         if baseline { dailyWords.rebaseline(key: dailyKey, words: words) }
         else if dailyBaselinePending {
-            if dailyPendingWords == nil { dailyWords.note(key: dailyKey, words: words) }
-            dailyPendingWords = words
+            if let words {
+                if dailyPendingWords.isEmpty { dailyWords.note(key: dailyKey, words: words) }
+                dailyPendingWords.append(words)
+            } else {
+                dailyWords.drop(dailyKey)
+                dailyPendingWords = []
+            }
         } else { dailyWords.note(key: dailyKey, words: words) }
         if dropAfter {
             if dailyBaselinePending { dailyDropAfterBaseline = true }
