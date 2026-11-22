@@ -100,4 +100,110 @@ final class LastOpenDocumentTests: XCTestCase {
         XCTAssertFalse(LastOpenDocument.shouldReopenAtLaunch(openingExplicitFile: false, reopenSetting: false))
         XCTAssertTrue(LastOpenDocument.shouldReopenAtLaunch(openingExplicitFile: false, reopenSetting: true))
     }
+
+    /// The first window decides for the whole launch: a file opened
+    /// explicitly means no later window reopens the last document.
+    func testFirstWindowDecidesOnceForTheLaunch() {
+        var explicitFirst = LaunchReopenGate()
+        XCTAssertFalse(explicitFirst.consider(openingExplicitFile: true, reopenSetting: true))
+        XCTAssertTrue(explicitFirst.considered)
+        XCTAssertFalse(explicitFirst.consider(openingExplicitFile: false, reopenSetting: true),
+                       "a later window doesn't reopen")
+
+        var reopenFirst = LaunchReopenGate()
+        XCTAssertTrue(reopenFirst.consider(openingExplicitFile: false, reopenSetting: true))
+        XCTAssertFalse(reopenFirst.consider(openingExplicitFile: false, reopenSetting: true),
+                       "only once per launch")
+
+        var settingOff = LaunchReopenGate()
+        XCTAssertFalse(settingOff.consider(openingExplicitFile: false, reopenSetting: false))
+        XCTAssertTrue(settingOff.considered)
+    }
+
+    /// Every way a reopen ends lets the launch offer through again.
+    func testCancelledReopenStopsHoldingTheOffer() {
+        RecoveryOffer.reopenStarted()
+        RecoveryOffer.reopenStarted()
+        XCTAssertTrue(RecoveryOffer.reopenInFlight)
+        RecoveryOffer.reopenCancelled()
+        XCTAssertFalse(RecoveryOffer.reopenInFlight)
+    }
+
+    // MARK: Security scope
+
+    private final class ScopeLog {
+        var starts: [URL] = []
+        var stops: [URL] = []
+        var grants = true
+    }
+
+    private func scopedStore(_ d: UserDefaults, _ log: ScopeLog) -> LastOpenDocument {
+        LastOpenDocument(defaults: d,
+                         startAccess: { log.starts.append($0); return log.grants },
+                         stopAccess: { log.stops.append($0) })
+    }
+
+    func testResolvedScopeEndsWhenThatDocumentIsForgotten() throws {
+        let log = ScopeLog()
+        let store = scopedStore(defaults(), log)
+        let a = try tempFile("a"), b = try tempFile("b")
+        store.remember(a)
+        let resolved = try XCTUnwrap(store.resolve())
+        XCTAssertEqual(log.starts, [resolved])
+        XCTAssertEqual(store.scopedURL, resolved)
+        XCTAssertTrue(log.stops.isEmpty, "kept while the document is open")
+
+        store.forget(b)
+        XCTAssertTrue(log.stops.isEmpty, "another window's document leaves it")
+        store.forget(a)
+        XCTAssertEqual(log.stops, [resolved], "stopped on the URL that started it")
+        XCTAssertNil(store.scopedURL)
+        store.forget(a)
+        XCTAssertEqual(log.stops.count, 1, "stopped once")
+    }
+
+    func testResolvingAgainEndsTheEarlierScope() throws {
+        let log = ScopeLog()
+        let store = scopedStore(defaults(), log)
+        store.remember(try tempFile("a"))
+        let first = try XCTUnwrap(store.resolve())
+        let second = try XCTUnwrap(store.resolve())
+        XCTAssertEqual(log.stops, [first])
+        XCTAssertEqual(store.scopedURL, second)
+    }
+
+    func testMissingFileEndsTheScopeItStarted() throws {
+        let log = ScopeLog()
+        let store = scopedStore(defaults(), log)
+        let url = try tempFile("gone")
+        store.remember(url)
+        try FileManager.default.removeItem(at: url)
+        XCTAssertNil(store.resolve())
+        // A bookmark to a deleted file may not resolve at all (no scope);
+        // any scope that was started is stopped.
+        XCTAssertEqual(log.stops, log.starts)
+        XCTAssertNil(store.scopedURL)
+    }
+
+    /// No scope started (denied, or resolved by path): nothing to stop.
+    func testUnstartedScopeIsNeverStopped() throws {
+        let log = ScopeLog()
+        log.grants = false
+        let d = defaults()
+        let store = scopedStore(d, log)
+        let url = try tempFile("x")
+        store.remember(url)
+        XCTAssertNotNil(store.resolve())
+        XCTAssertNil(store.scopedURL)
+        store.forget(url)
+        XCTAssertTrue(log.stops.isEmpty)
+
+        log.grants = true
+        store.remember(url)
+        d.removeObject(forKey: LastOpenDocument.bookmarkKey)
+        XCTAssertNotNil(store.resolve(), "found by path")
+        XCTAssertTrue(log.starts.count == 1, "the path fallback starts no scope")
+        store.forget(url)
+        XCTAssertTrue(log.stops.isEmpty)
+    }
 }

@@ -13,6 +13,16 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         let browser = DocumentBrowserViewController()
         let w = UIWindow(windowScene: ws)
         w.rootViewController = browser
+        // Launch opens a file of its own (a URL from another app,
+        // `-OwlinkOpen`), or reopens the last document: decided once per
+        // process, by the first window whichever it does, so windows
+        // opened later start at the browser.
+        let openingExplicitFile = !options.urlContexts.isEmpty || TestLaunch.active
+        let reopenLast = Self.launchReopen.consider(openingExplicitFile: openingExplicitFile,
+                                                    reopenSetting: AppSettings.reopenFilesFromLastSession)
+        // Held before the browser shows: its viewDidAppear mustn't offer
+        // recovery copies over the document being reopened.
+        if reopenLast { RecoveryOffer.reopenStarted() }
         w.makeKeyAndVisible()
         window = w
         ws.sizeRestrictions?.minimumSize = CGSize(width: 320, height: 400)
@@ -39,25 +49,31 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         } else if args.contains("-OwlinkOrientation") {
             NSLog("Missing value for -OwlinkOrientation")
         }
-        if let out = SelfCheck.outDir {
+        // A debug check or preview instead of the browser: no offer, and
+        // no reopen, so the hold ends too.
+        func skipLaunchOffer() {
             RecoveryOffer.skipLaunchOffer()
+            if reopenLast { RecoveryOffer.reopenCancelled() }
+        }
+        if let out = SelfCheck.outDir {
+            skipLaunchOffer()
             SelfCheck.run(in: w, browser: browser, out: out)
             return
         }
         if let out = RevertCheck.outDir {
-            RecoveryOffer.skipLaunchOffer()
+            skipLaunchOffer()
             RevertCheck.run(in: w, browser: browser, out: out)
             return
         }
         if let out = SaveCheck.outDir {
-            RecoveryOffer.skipLaunchOffer()
+            skipLaunchOffer()
             SaveCheck.run(in: w, browser: browser, out: out)
             return
         }
         if let index = args.firstIndex(of: "-OwlinkShowLicence") {
             if index + 1 < args.count, !args[index + 1].hasPrefix("-") {
                 if let preview = ModelLicencePreview.resolve(modelID: args[index + 1]) {
-                    RecoveryOffer.skipLaunchOffer()
+                    skipLaunchOffer()
                     w.rootViewController = UIHostingController(rootView: preview)
                     return
                 }
@@ -66,26 +82,24 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
             }
         }
         #endif
-        let openingExplicitFile = !options.urlContexts.isEmpty || TestLaunch.active
         if openingExplicitFile { RecoveryOffer.skipLaunchOffer() }
         if let ctx = options.urlContexts.first {
             browser.open(ctx.url, importIfNeeded: !ctx.options.openInPlace)
         } else if let url = TestLaunch.documentToOpen() {
             browser.presentDocument(at: url)
-        } else if !Self.launchReopenConsidered {
-            // Once per launch, in the first window: windows opened later
-            // start at the browser.
-            Self.launchReopenConsidered = true
-            if LastOpenDocument.shouldReopenAtLaunch(openingExplicitFile: openingExplicitFile,
-                                                     reopenSetting: AppSettings.reopenFilesFromLastSession),
-               let url = LastOpenDocument.shared.resolve() {
+        } else if reopenLast {
+            if let url = LastOpenDocument.shared.resolve() {
+                // The hold ends when the open does.
                 browser.reopenLastDocument(at: url)
+            } else {
+                // Nothing to reopen: offer now if the browser already showed.
+                RecoveryOffer.reopenFinished(opened: false, browser: browser)
             }
         }
     }
 
-    /// The last document was considered for reopening (this launch).
-    private static var launchReopenConsidered = false
+    /// The launch's reopen decision, taken by the process's first window.
+    private static var launchReopen = LaunchReopenGate()
 
     /// The window went away: its documents are no longer open in it.
     func sceneDidDisconnect(_ scene: UIScene) {
@@ -214,16 +228,27 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
     }
 
     func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
+        // Every way a reopen ends clears the hold on the recovery offer,
+        // even with this browser gone, and a reopen that failed forgets
+        // the record (and its security scope).
         let finishReopen: (Bool) -> Void = { [weak self] opened in
-            guard reopening, let self else { return }
+            guard reopening else { return }
             if !opened { LastOpenDocument.shared.forget(url) }
-            RecoveryOffer.reopenFinished(opened: opened, browser: self)
+            if let self {
+                RecoveryOffer.reopenFinished(opened: opened, browser: self)
+            } else {
+                RecoveryOffer.reopenCancelled()
+            }
         }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
         let doc = TextDocument(fileURL: url)
         doc.openBinaryAnyway = binaryOK
         doc.open { [weak self] ok in
-            guard let self else { return }
+            guard let self else {
+                if ok { doc.close(completionHandler: nil) }
+                finishReopen(false)
+                return
+            }
             // Opened meanwhile in another window: that one keeps it.
             if ok, self.bringForwardIfOpenElsewhere(url) {
                 doc.close(completionHandler: nil)

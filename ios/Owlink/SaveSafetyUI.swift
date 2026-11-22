@@ -161,12 +161,19 @@ extension TextDocument {
     /// over the opening document.
     private(set) static var reopenInFlight = false
 
+    /// Held from before the first window shows (so its browser's
+    /// `viewDidAppear` can't offer over the reopen); idempotent.
     static func reopenStarted() { reopenInFlight = true }
+
+    /// The reopen ended with no browser to offer from (its window went
+    /// away), or launch went another way (a debug check): stop holding the
+    /// offer, offering nothing now.
+    static func reopenCancelled() { reopenInFlight = false }
 
     /// Opened: the offer waits until the browser shows again (the editor
     /// closed). Not opened: offered now if the browser is already showing.
     static func reopenFinished(opened: Bool, browser: DocumentBrowserViewController) {
-        reopenInFlight = false
+        reopenCancelled()
         if !opened, browser.view.window != nil, browser.presentedViewController == nil {
             offerLeftovers(from: browser)
         }
