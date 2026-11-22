@@ -742,14 +742,14 @@ Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
 **Document icons.** Files whose default app you set to Owlink show in
-Finder as a white page with Cedric and a coral label with the type (TXT,
-MD, JSON, YAML, SWIFT, PY, JS, TS, SH, LOG, CSV, XML, HTML, CSS, TOML,
-INI, SQL, PS1). Finder shows them:
+Finder as type-coloured pages with white symbols and, in larger views, short
+type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
+HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
 - only for types you chose Owlink for, in Settings or with Get Info ›
   Change All. A type that opens in Owlink without your choice (Markdown,
-  JSON, YAML on a Mac with no other editor) shows the page and owl
-  without a label until you choose it; **Use Owlink for All Text Files**
+  JSON, YAML on a Mac with no other editor) shows the generic page with a
+  white line and no label until you choose it; **Use Owlink for All Text Files**
   does that for every type;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the
