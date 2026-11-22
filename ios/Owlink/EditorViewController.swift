@@ -43,6 +43,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// This file's Readable Width choice. Nil follows Settings, which is off.
     private var readableWidthChoice: Bool?
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
+    private var lastTextScrollOffsetY: CGFloat?
     /// A jump forces numbers on for this tab without changing the setting.
     private var jumpShowsLineNumbers = false
     private var lastLineNumbersSetting = AppSettings.lineNumbers
@@ -165,6 +166,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
         setUpTextView()
+        lastTextScrollOffsetY = textView.contentOffset.y
         setUpStatusBar()
         setUpLayout()
         setUpNavigation()
@@ -357,8 +359,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateAskPanelWidth()
         layoutOwl()
         layoutDivider()
-        updateUnwrappedContentSize()
         layoutGutter()
+        updateUnwrappedContentSize()
     }
 
     override func viewSafeAreaInsetsDidChange() {
@@ -668,8 +670,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleOwl()
         askModel?.documentEdited()
         askModel?.scheduleScopeRefresh()
+        if showLineNumbers { layoutGutter() } else { layoutTextInsets() }
         updateUnwrappedContentSize()
-        if showLineNumbers { layoutGutter() }
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
             previewTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
@@ -757,8 +759,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
         fadeOwlNearCaret()
-        if scrollView === textView, askModel?.scope == .visible {
-            askModel?.scheduleScopeRefresh()
+        if scrollView === textView {
+            let offsetY = scrollView.contentOffset.y
+            let movedVertically = lastTextScrollOffsetY.map { $0 != offsetY } ?? false
+            lastTextScrollOffsetY = offsetY
+            if movedVertically, askModel?.scope == .visible {
+                askModel?.scheduleScopeRefresh()
+            }
         }
         if scrollView === textView, showLineNumbers { layoutGutter() }
         // A detached preview window follows the text's place, roughly.
@@ -966,6 +973,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             textView.alwaysBounceHorizontal = true
         }
         textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        if showLineNumbers { layoutGutter() } else { layoutTextInsets() }
         updateUnwrappedContentSize()
         view.setNeedsLayout()
     }
@@ -2058,6 +2066,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             textView.scrollRangeToVisible(range)
             return
         }
+        layoutTextInsets()
         updateUnwrappedContentSize()
         textView.scrollRangeToVisible(range)
         var rect = textView.caretRect(for: position)
@@ -2113,14 +2122,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func layoutGutter() {
         let font = (textView.font ?? AppSettings.font(for: traitCollection)).withSize(
             max(10, (textView.font?.pointSize ?? 13) * 0.85))
-        let width = showLineNumbers ? LineNumberGutter.width(lineCount: lineIndex.lineCount, font: font) : 0
-        let insets = textInsets(gutterWidth: width)
-        var edge = textView.textContainerInset
-        if abs(edge.left - insets.left) > 0.5 || abs(edge.right - insets.right) > 0.5 {
-            edge.left = insets.left
-            edge.right = insets.right
-            textView.textContainerInset = edge
-        }
+        let (width, insets) = layoutTextInsets()
         guard showLineNumbers else {
             lineNumberGutter.isHidden = true
             return
@@ -2153,6 +2155,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         lineNumberGutter.rows = rows
         lineNumberGutter.setNeedsDisplay()
+    }
+
+    /// The text's side insets for the gutter and Readable Width; set before
+    /// anything reads textContainerInset (the unwrapped content width).
+    @discardableResult
+    private func layoutTextInsets() -> (CGFloat, (left: CGFloat, right: CGFloat, gutterX: CGFloat)) {
+        let font = (textView.font ?? AppSettings.font(for: traitCollection)).withSize(
+            max(10, (textView.font?.pointSize ?? 13) * 0.85))
+        let width = showLineNumbers ? LineNumberGutter.width(lineCount: lineIndex.lineCount, font: font) : 0
+        let insets = textInsets(gutterWidth: width)
+        var edge = textView.textContainerInset
+        if abs(edge.left - insets.left) > 0.5 || abs(edge.right - insets.right) > 0.5 {
+            edge.left = insets.left
+            edge.right = insets.right
+            textView.textContainerInset = edge
+        }
+        return (width, insets)
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
