@@ -99,7 +99,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// A jump forces numbers on for this tab without changing the setting.
     private var jumpShowsLineNumbers = false
     private var lastLineNumbersSetting = AppSettings.lineNumbers
-    private var showLineNumbers: Bool { AppSettings.lineNumbers || jumpShowsLineNumbers }
+    /// Bookmarks keep the numbers on too, so their markers show.
+    private var showLineNumbers: Bool { AppSettings.lineNumbers || jumpShowsLineNumbers || !bookmarks.isEmpty }
     /// 1-based line drawn stronger in the gutter, the one just jumped to.
     private var markedLine: Int?
     private let lineNumberGutter = LineNumberGutter()
@@ -136,6 +137,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private(set) var preview: PreviewController?
     private(set) var previewOn = false
     var lineIndentation: Indentation?
+    /// Bookmarked lines (0-based) for this open document; they follow
+    /// edits (storageEdited, applyTextEdits) and are not kept on close or
+    /// reload.
+    var bookmarks = Bookmarks()
     private(set) var generation = 0
     var markdownPasteboardReader: () -> (urls: [URL], string: String?) = {
         let pasteboard = UIPasteboard.general
@@ -432,6 +437,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // Not an arranged subview, and not inside the text view: the numbers
         // stay on screen while the text scrolls.
         split.addSubview(lineNumberGutter)
+        lineNumberGutter.onTapLine = { [weak self] line in self?.toggleBookmark(line: line - 1) }
         // Frame-based, placed in viewDidLayoutSubviews: the owl and his bubble.
         view.addSubview(owlSprite)
         view.addSubview(hintBar)
@@ -777,7 +783,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
         return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                writingModeMenu(), languageMenu(), indentationMenu(), formatMenu(),
+                writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), formatMenu(),
                 UIMenu(options: .displayInline, children: [settings])]
     }
 
@@ -836,6 +842,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         markdownFenceIndex.invalidateAll()
         cachedIndentation = nil
         lineIndentation = nil
+        let hadBookmarks = !bookmarks.isEmpty
+        bookmarks = Bookmarks()
         applyTabStops()
         autoClosers = []
         if NSMaxRange(sel) <= (textView.text as NSString).length { textView.selectedRange = sel }
@@ -857,6 +865,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         askModel?.documentReplaced()
         scheduleMarkRecount()
         scheduleEditorHighlights()
+        if hadBookmarks { bookmarksChanged() }
     }
 
     @objc private func storageEdited() {
@@ -875,7 +884,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
+        // Bookmarks follow their lines, measured against the old text
+        // (applyTextEdits then puts structured edits' own set in place).
+        var bookmarkEdit: (first: Int, removed: Int, wholeLines: Bool)?
+        if !bookmarks.isEmpty {
+            let a = lineIndex.line(containing: oldRange.location), b = lineIndex.line(containing: NSMaxRange(oldRange))
+            bookmarkEdit = (a, b - a, lineIndex.starts[a] == oldRange.location && lineIndex.starts[b] == NSMaxRange(oldRange))
+        }
         let first = lineIndex.replace(oldRange, newLength: edited.length, in: textStorage.string as NSString)
+        if let e = bookmarkEdit {
+            bookmarks.adjust(firstLine: e.first, removed: e.removed, inserted: lineIndex.lineCount - oldLines + e.removed,
+                             wholeLines: e.wholeLines)
+            lineNumberGutter.bookmarked = Set(bookmarks.lines.map { $0 + 1 })
+        }
         if writingLargeReason == nil,
            let reason = LargeDocument.reason(afterEditOf: first..<(lineIndex.line(containing: NSMaxRange(edited)) + 1), in: lineIndex) {
             writingLargeReason = reason
@@ -908,7 +929,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleOwl()
         askModel?.documentEdited()
         askModel?.scheduleScopeRefresh()
-        if showLineNumbers { layoutGutter() } else { layoutTextInsets() }
+        // Also hides numbers shown only for bookmarks once the last one goes.
+        if showLineNumbers || !lineNumberGutter.isHidden { layoutGutter() } else { layoutTextInsets() }
         updateUnwrappedContentSize()
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
@@ -1760,6 +1782,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         case #selector(focusSentence): command.state = AppSettings.focusUnit == .sentence ? .on : .off
         case #selector(indentUsingSpaces(_:)), #selector(indentUsingTabs(_:)), #selector(tabWidthMenu(_:)):
             validateIndentationCommand(command)
+        case #selector(toggleBookmarkMenu(_:)): command.title = bookmarkLineTitle
         default: break
         }
     }
@@ -3648,7 +3671,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// visible line numbers. Hidden while the text itself is hidden.
     /// Readable Width, when this file has it on and lines wrap, centres a
     /// column and draws the gutter in that margin when it fits.
-    private func layoutGutter() {
+    func layoutGutter() {
         let font = UIFont.monospacedSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) * 0.85), weight: .regular)
         let (width, insets) = layoutTextInsets()
         guard showLineNumbers else {
@@ -3666,6 +3689,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         lineNumberGutter.highlightColor = UIColor(hex: palette.foreground)
         lineNumberGutter.bandColor = UIColor(hex: palette.currentLine)
         lineNumberGutter.highlight = markedLine
+        lineNumberGutter.bookmarked = Set(bookmarks.lines.map { $0 + 1 })
+        lineNumberGutter.bookmarkColor = UIColor(hex: palette.caret)
         guard let vr = SyntaxColorizer.visibleRange(textView), lineIndex.length == textView.textStorage.length else {
             lineNumberGutter.rows = []
             lineNumberGutter.setNeedsDisplay()
@@ -3720,6 +3745,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(findTodos) { return canFindTodos }
         if action == #selector(markAll) { return textView.window != nil }
         if action == #selector(clearMarks) { return hasMarks }
+        if action == #selector(toggleBookmarkMenu(_:)) { return true }
+        if action == #selector(nextBookmarkMenu(_:)) || action == #selector(previousBookmarkMenu(_:))
+            || action == #selector(clearBookmarksMenu(_:)) { return !bookmarks.isEmpty }
         if action == #selector(showStatistics) { return true }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {

@@ -33,8 +33,10 @@ extension EditorViewController {
     ]
 
     @discardableResult
-    func applyTextEdit(_ edit: TextEdit, actionName: String, indentation: IndentationChange? = nil) -> Bool {
-        applyTextEdits([(edit.range, edit.replacement)], selection: edit.selection, actionName: actionName, indentation: indentation)
+    func applyTextEdit(_ edit: TextEdit, actionName: String, indentation: IndentationChange? = nil,
+                       bookmarks: Bookmarks? = nil) -> Bool {
+        applyTextEdits([(edit.range, edit.replacement)], selection: edit.selection, actionName: actionName,
+                       indentation: indentation, bookmarks: bookmarks)
     }
 
     /// Several edits (ascending, not overlapping, in the current text's
@@ -42,9 +44,14 @@ extension EditorViewController {
     /// as its own range edit, so earlier ranges stay valid. `indentation`
     /// also changes the line indentation (Convert Indentation), restored
     /// by Undo; with no text change only the undo items refresh.
+    /// Bookmarks go to `bookmarks` when given (Move Line), else stay with
+    /// the lines whose text survives (Bookmarks.replacing): the counts-only
+    /// follow-up in storageEdited would merge every bookmark in a
+    /// multi-line replacement onto its first line. Undo and redo put the
+    /// set back as it was.
     @discardableResult
     func applyTextEdits(_ edits: [(range: NSRange, replacement: String)], selection: NSRange, actionName: String,
-                        indentation: IndentationChange? = nil) -> Bool {
+                        indentation: IndentationChange? = nil, bookmarks explicitMarks: Bookmarks? = nil) -> Bool {
         let storage = textView.textStorage
         let length = storage.length
         var floor = 0
@@ -58,6 +65,24 @@ extension EditorViewController {
         let previousIndentation = lineIndentation
         let original = storage.string as NSString
         let changesText = edits.contains { original.substring(with: $0.range) != $0.replacement }
+        let previousBookmarks = bookmarks
+        var marks = explicitMarks
+        if marks == nil, changesText, !bookmarks.isEmpty {
+            // Last to first, as the text is changed: earlier ranges and the
+            // lines above them are still those of the original text.
+            var m = bookmarks
+            if edits.count == 1, let edit = edits.first {
+                m = m.replacing(edit.range, with: edit.replacement, in: original, firstLine: lineIndex.line(containing: edit.range.location))
+            } else {
+                let working = NSMutableString(string: original)
+                for edit in edits.reversed() {
+                    m = m.replacing(edit.range, with: edit.replacement, in: working,
+                                    firstLine: lineIndex.line(containing: edit.range.location))
+                    working.replaceCharacters(in: edit.range, with: edit.replacement)
+                }
+            }
+            marks = m
+        }
         // The inverse, in the new text's coordinates.
         var inverse: [(range: NSRange, replacement: String)] = []
         inverse.reserveCapacity(edits.count)
@@ -93,12 +118,18 @@ extension EditorViewController {
             for edit in edits.reversed() { storage.replaceCharacters(in: edit.range, with: edit.replacement) }
             if edits.count > 1 { storage.endEditing() }
         }
+        let bookmarksMoved = changesText && marks != nil
+        if bookmarksMoved, var marks {
+            marks.clamp(lineCount: lineIndex.lineCount)
+            bookmarks = marks
+        }
         textView.selectedRange = selection
         if let indentation { lineIndentation = indentation.value; applyTabStops() }
         undo?.enableUndoRegistration()
         undo?.registerUndo(withTarget: self) { target in
             _ = target.applyTextEdits(inverse, selection: previousSelection, actionName: actionName,
-                                      indentation: indentation == nil ? nil : IndentationChange(value: previousIndentation))
+                                      indentation: indentation == nil ? nil : IndentationChange(value: previousIndentation),
+                                      bookmarks: bookmarksMoved ? previousBookmarks : nil)
         }
         if grouping, let undo, undo.groupingLevel > 0 {
             undo.setActionName(actionName)
@@ -106,7 +137,10 @@ extension EditorViewController {
         }
         revealRange(selection)
         contextBar?.refreshStates()
-        // storage.replaceCharacters does not call the text-view delegate.
+        // storage.replaceCharacters does not call the text-view delegate;
+        // textViewDidChange also redraws the gutter with the bookmarks
+        // (not before revealRange: TextKit 2 can spin finding the visible
+        // range mid-edit).
         if changesText { textViewDidChange(textView) } else { updateUndoItems() }
         return true
     }

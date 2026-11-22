@@ -38,6 +38,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
 - Highlight occurrences (on by default) and matching brackets (always on, as on the Mac), using the current theme without repainting all occurrences on each caret move.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
 - Mark All / Clear Marks (the ⋯ menu, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
+- Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
   and Find TODOs in the edit and document menus. Results stay on the device.
 - Statistics: word count in the status line, document and selection counts,

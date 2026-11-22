@@ -138,7 +138,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             command(String(localized: "Convert Indentation to Spaces"), #selector(EditorViewController.convertIndentationToSpaces(_:))),
             command(String(localized: "Convert Indentation to Tabs"), #selector(EditorViewController.convertIndentationToTabs(_:))),
         ])
-        builder.insertSibling(UIMenu(title: String(localized: "Text"), children: [line, indentation]), afterMenu: .edit)
+        // F2 is the function key's input character (NSF2FunctionKey on the
+        // Mac); UIKit has no named constant for it.
+        let f2 = "\u{F705}"
+        let bookmarks = UIMenu(title: String(localized: "Bookmarks"), children: [
+            key(String(localized: "Bookmark Line"), #selector(EditorViewController.toggleBookmarkMenu(_:)), f2, .command),
+            key(String(localized: "Next Bookmark"), #selector(EditorViewController.nextBookmarkMenu(_:)), f2, []),
+            key(String(localized: "Previous Bookmark"), #selector(EditorViewController.previousBookmarkMenu(_:)), f2, .shift),
+            key(String(localized: "Clear Bookmarks"), #selector(EditorViewController.clearBookmarksMenu(_:)), f2, [.command, .shift]),
+        ])
+        builder.insertSibling(UIMenu(title: String(localized: "Text"), children: [line, indentation, bookmarks]), afterMenu: .edit)
         let markdown = UIMenu(title: String(localized: "Markdown"), children: [
             key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
             key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),

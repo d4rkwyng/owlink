@@ -13,13 +13,23 @@ extension EditorViewController {
         #selector(keepLinesMatching(_:)), #selector(deleteLinesMatching(_:)),
     ]
 
-    private func lineEdit(_ name: String, _ transform: (NSString, NSRange) -> TextEdit?) {
+    /// `moveBy`: Move Line Up (-1) / Down (+1); the moved lines take
+    /// their bookmarks along.
+    private func lineEdit(_ name: String, moveBy: Int? = nil, _ transform: (NSString, NSRange) -> TextEdit?) {
         guard lineEditable else { return }
         let text = textView.textStorage.string as NSString
         let selection = textView.selectedRange
         guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length,
               let edit = transform(text, selection) else { return }
-        applyTextEdit(edit, actionName: name)
+        var moved: Bookmarks?
+        if let moveBy, !bookmarks.isEmpty {
+            let block = LineOperations.lineBlock(selection, in: text)
+            let firstLine = lineIndex.line(containing: block.location)
+            let lastLine = block.length == 0 ? firstLine : lineIndex.line(containing: NSMaxRange(block) - 1)
+            moved = bookmarks
+            moved?.moveLines(firstLine..<(lastLine + 1), by: moveBy)
+        }
+        applyTextEdit(edit, actionName: name, bookmarks: moved)
     }
 
     @objc func duplicateLine(_ sender: Any?) {
@@ -29,10 +39,10 @@ extension EditorViewController {
         lineEdit(String(localized: "Delete Line")) { LineOperations.deleteLines($1, in: $0) }
     }
     @objc func moveLineUp(_ sender: Any?) {
-        lineEdit(String(localized: "Move Line Up")) { LineOperations.moveUp($1, in: $0) }
+        lineEdit(String(localized: "Move Line Up"), moveBy: -1) { LineOperations.moveUp($1, in: $0) }
     }
     @objc func moveLineDown(_ sender: Any?) {
-        lineEdit(String(localized: "Move Line Down")) { LineOperations.moveDown($1, in: $0) }
+        lineEdit(String(localized: "Move Line Down"), moveBy: 1) { LineOperations.moveDown($1, in: $0) }
     }
     @objc func commentSelection(_ sender: Any?) {
         lineEdit(String(localized: "Comment Selection")) {
