@@ -79,24 +79,29 @@ import Testing
         #expect(!EditorPanes.owlHidden(layout: folded, owlFrame: CGRect(x: 0, y: 0, width: 44, height: 44), chat: nil))
     }
 
-    @Test func statusBarRestsAboveTheHomeIndicatorAndRidesADockedKeyboard() {
-        // Keyboard hidden: the guide is a zero-height line on the safe area
-        // (iOS 26). The bar rests just above the inset.
-        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 766, keyboardBottom: 766, homeInset: 34) == 762)
-        // Guide already at the screen edge.
-        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 800, keyboardBottom: 800, homeInset: 34) == 762)
+    @Test func statusBarRestsAtTheScreenEdgeAndRidesADockedKeyboard() {
+        // Keyboard hidden: the bar reaches the screen edge.
+        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 766, keyboardBottom: 766, homeInset: 34) == 800)
+        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 800, keyboardBottom: 800, homeInset: 34) == 800)
         // A home-indicator-tall guide that does reach the bottom is still not a keyboard.
-        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 766, keyboardBottom: 800, homeInset: 34) == 762)
+        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 766, keyboardBottom: 800, homeInset: 34) == 800)
         // Docked keyboard.
         #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 500, keyboardBottom: 800, homeInset: 34) == 500)
         // iPhone landscape: shorter keyboard, smaller home inset.
         #expect(EditorPanes.statusBarBottom(viewHeight: 390, keyboardTop: 230, keyboardBottom: 390, homeInset: 21) == 230)
         // Landscape, keyboard down.
-        #expect(EditorPanes.statusBarBottom(viewHeight: 390, keyboardTop: 369, keyboardBottom: 369, homeInset: 21) == 365)
+        #expect(EditorPanes.statusBarBottom(viewHeight: 390, keyboardTop: 369, keyboardBottom: 369, homeInset: 21) == 390)
         // Floating keyboard: the bottom of the view stays clear.
-        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 200, keyboardBottom: 420, homeInset: 34) == 762)
+        #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 200, keyboardBottom: 420, homeInset: 34) == 800)
         // Guide not laid out yet.
         #expect(EditorPanes.statusBarBottom(viewHeight: 800, keyboardTop: 0, keyboardBottom: 0, homeInset: 0) == 800)
         #expect(EditorPanes.statusBarBottom(viewHeight: 0, keyboardTop: 0, keyboardBottom: 0, homeInset: 0) == 0)
+    }
+
+    @Test func statusBarHeightFillsTheHomeIndicatorOrKeepsAReadableStrip() {
+        #expect(EditorPanes.statusBarHeight(homeInset: 34) == 34)
+        #expect(EditorPanes.statusBarHeight(homeInset: 20) == 24)
+        #expect(EditorPanes.statusBarHeight(homeInset: 21) == 24)
+        #expect(EditorPanes.statusBarHeight(homeInset: 0) == 24)
     }
 }

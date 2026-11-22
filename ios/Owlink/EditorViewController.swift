@@ -59,9 +59,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// line hidden) on the safe area's bottom.
     private var splitBottom: NSLayoutConstraint!
     private var splitBottomFocus: NSLayoutConstraint!
-    /// Status line's bottom, offset from the view's bottom: above the home
-    /// indicator while resting, or higher while a docked keyboard is up.
+    /// Status line's bottom and height, offset from the view's bottom.
     private var statusBarBottomPin: NSLayoutConstraint!
+    private var statusBarHeightPin: NSLayoutConstraint!
     /// Home-indicator inset last seen while the keyboard was down. A docked
     /// keyboard can inflate the safe area; that must not look like a tall
     /// home indicator and pin the bar under the keys.
@@ -244,7 +244,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         hideKeyboardButton.addAction(UIAction { [weak self] _ in self?.hideKeyboard() }, for: .primaryActionTriggered)
         NSLayoutConstraint.activate([
             hideKeyboardButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
-            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            hideKeyboardButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
         ])
         let row = UIStackView(arrangedSubviews: [languageButton, formatButton, UIView(), statusLabel, hideKeyboardButton])
         row.spacing = 14
@@ -252,18 +252,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         row.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(row)
         statusBar.backgroundColor = .secondarySystemBackground
-        // Horizontal margins clear the safe area and rounded corners. The
-        // 24 pt row is the full height of the gray strip.
-        statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16)
+        // Horizontal margins clear the corner curve; safe-area side insets
+        // continue to apply in landscape.
+        statusBar.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 0, leading: 24, bottom: 0, trailing: 24)
         statusBar.insetsLayoutMarginsFromSafeArea = true
         var guide: UILayoutGuide = statusBar.layoutMarginsGuide
         if #available(iOS 26.0, *) { guide = statusBar.layoutGuide(for: .margins(cornerAdaptation: .horizontal)) }
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
-            row.topAnchor.constraint(equalTo: statusBar.topAnchor),
-            row.heightAnchor.constraint(equalToConstant: 24),
-            row.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
+            row.heightAnchor.constraint(equalToConstant: 20),
+            row.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor, constant: -2),
         ])
     }
 
@@ -313,11 +312,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        // Not the keyboard guide. The bar rests just above the home indicator,
-        // clear of the rounded corners; a docked keyboard lifts it onto the
-        // keyboard (updateStatusBarPin).
+        // The bar rests at the screen edge, filling the home-indicator zone;
+        // a docked keyboard lifts its shorter strip onto the keyboard.
         statusBarBottomPin = statusBar.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-        statusBarBottomPin.isActive = true
+        statusBarHeightPin = statusBar.heightAnchor.constraint(equalToConstant: 24)
+        NSLayoutConstraint.activate([statusBarBottomPin, statusBarHeightPin])
     }
 
     override func viewDidLayoutSubviews() {
@@ -347,8 +346,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private func updateStatusBarPin() {
         guard !animatingStatusBar, let pin = statusBarBottomPin else { return }
         let g = keyboardFrameInView()
+        let homeInset = homeInsetForStatusBar()
         let y = EditorPanes.statusBarBottom(viewHeight: view.bounds.height, keyboardTop: g.minY, keyboardBottom: g.maxY,
-                                            homeInset: homeInsetForStatusBar())
+                                            homeInset: homeInset)
+        statusBarHeightPin.constant = EditorPanes.statusBarHeight(homeInset: y < view.bounds.height ? 0 : homeInset)
         let constant = y - view.bounds.height
         guard abs(pin.constant - constant) > 0.5 else { return }
         pin.constant = constant
@@ -361,19 +362,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard let raw = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
               let pin = statusBarBottomPin else { return }
         let frame = keyboardFrame(raw)
+        let homeInset = homeInsetForStatusBar()
         let y = EditorPanes.statusBarBottom(viewHeight: view.bounds.height, keyboardTop: frame.minY, keyboardBottom: frame.maxY,
-                                            homeInset: homeInsetForStatusBar())
+                                            homeInset: homeInset)
+        let barHeight = EditorPanes.statusBarHeight(homeInset: y < view.bounds.height ? 0 : homeInset)
         let constant = y - view.bounds.height
         let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0
         let curve = note.userInfo?[UIResponder.keyboardAnimationCurveUserInfoKey] as? UInt ?? 0
         guard duration > 0.01 else {
             if abs(pin.constant - constant) > 0.5 { pin.constant = constant }
+            statusBarHeightPin.constant = barHeight
             return
         }
         animatingStatusBar = true
         let options = UIView.AnimationOptions(rawValue: curve << 16).union(.beginFromCurrentState)
         UIView.animate(withDuration: duration, delay: 0, options: options, animations: {
             pin.constant = constant
+            self.statusBarHeightPin.constant = barHeight
             self.view.layoutIfNeeded()
         }, completion: { _ in
             self.animatingStatusBar = false
