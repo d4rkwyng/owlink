@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Owlink's document icons: one template (a white page with a folded corner,
-Cedric the owl as the badge, a coral label with the type's name), one .icns
+a simplified owl mark, a coral label with the type's name), one .icns
 per file type.
 
     python3 tools/icon/doc_icons.py            # writes Resources/DocIcons/*.icns
+    python3 tools/icon/doc_icons.py --out DIR  # write .icns somewhere else
+    python3 tools/icon/doc_icons.py --preview DIR  # PNGs only, no .icns
     python3 tools/icon/doc_icons.py --sheet S  # also a contact sheet PNG at S
 
-Needs Pillow and iconutil, like cedric_icon.py (whose owl it draws).
+Needs Pillow and iconutil, like cedric_icon.py (colours and Canvas).
 
 Why .icns files: Finder shows the icon named by CFBundleTypeIconFile in the
 default app's CFBundleDocumentTypes entry. The other mechanism, UTTypeIcons
@@ -20,8 +22,8 @@ Sources/CedricCore/DocumentTypes.swift; Tests/CedricCoreTests checks that
 each type's icon file exists.
 
 Sizes: 16 to 512 px (no 1024: a document icon is never shown at 512 pt on
-a Retina screen in Finder, and the 1024 doubles the file). 16 px is the page
-and the label band only; 32 px adds the owl; the label text from 32 px up.
+a Retina screen in Finder, and the 1024 doubles the file). The 16 and 32 px
+icons are drawn directly on the pixel grid, not downsampled.
 """
 import argparse, os, subprocess, sys, tempfile
 from PIL import Image, ImageDraw, ImageFont
@@ -50,6 +52,35 @@ PAGE = ci.hx('fdfdfd')
 EDGE = ci.hx('c9cad6')
 FOLD = ci.hx('e4e5ee')
 LINE = ci.hx('d9dae6')
+
+# The 16 and 32 px badges use up to three compact glyphs.
+SHORT_LABELS = {'JSON': 'JSN', 'YAML': 'YML', 'SWIFT': 'SW',
+                'HTML': 'HTM', 'TOML': 'TML'}
+
+# Each glyph is deliberately drawn on the output pixel grid at small sizes.
+GLYPHS = {
+    '1': ('010', '110', '010', '010', '111'),
+    'A': ('010', '101', '111', '101', '101'),
+    'C': ('011', '100', '100', '100', '011'),
+    'D': ('110', '101', '101', '101', '110'),
+    'F': ('111', '100', '110', '100', '100'),
+    'G': ('011', '100', '101', '101', '011'),
+    'H': ('101', '101', '111', '101', '101'),
+    'I': ('111', '010', '010', '010', '111'),
+    'J': ('011', '001', '001', '101', '010'),
+    'L': ('100', '100', '100', '100', '111'),
+    'M': ('10001', '11011', '10101', '10001', '10001'),
+    'N': ('1001', '1101', '1011', '1001', '1001'),
+    'O': ('010', '101', '101', '101', '010'),
+    'P': ('110', '101', '110', '100', '100'),
+    'Q': ('010', '101', '101', '111', '011'),
+    'S': ('011', '100', '010', '001', '110'),
+    'T': ('111', '010', '010', '010', '010'),
+    'V': ('101', '101', '101', '101', '010'),
+    'W': ('10001', '10001', '10101', '10101', '01010'),
+    'X': ('101', '101', '010', '101', '101'),
+    'Y': ('101', '101', '010', '010', '010'),
+}
 
 # Page geometry in the unit square (Apple's document shape is roughly 0.69 x 0.88).
 X0, X1, Y0, Y1 = 0.155, 0.845, 0.06, 0.94
@@ -94,8 +125,6 @@ def page(c):
 def band(c, text):
     y0, y1 = 0.755, 0.885
     c.rrect(X0 + 0.045, y0, X1 - 0.045, y1, 0.035, ci.CORAL, owl=False)
-    if c.size < 32:
-        return
     # the label, as large as fits the band
     d = ImageDraw.Draw(c.im)
     w_max = (X1 - X0 - 0.15) * c.n
@@ -111,19 +140,67 @@ def band(c, text):
     d.text((cx - (l + r) / 2, cy - (t + b) / 2), text, font=ft, fill=ci.WHITE)
 
 
+def pixel_text(draw, text, y, sx, sy, width):
+    w = (sum(len(GLYPHS[ch][0]) for ch in text) + len(text) - 1) * sx
+    x = (width - w) // 2
+    for ch in text:
+        for row, bits in enumerate(GLYPHS[ch]):
+            for col, bit in enumerate(bits):
+                if bit == '1':
+                    left, top = x + col * sx, y + row * sy
+                    draw.rectangle((left, top, left + sx - 1, top + sy - 1), fill=ci.WHITE)
+        x += (len(GLYPHS[ch][0]) + 1) * sx
+
+
+def small_icon(text, size):
+    im = Image.new('RGBA', (size, size))
+    d = ImageDraw.Draw(im)
+    if size == 16:
+        d.polygon([(2, 1), (10, 1), (13, 4), (13, 14), (2, 14)], fill=EDGE)
+        d.polygon([(3, 2), (9, 2), (12, 5), (12, 13), (3, 13)], fill=PAGE)
+        d.line([(10, 2), (10, 4), (12, 4)], fill=FOLD, width=1)
+        if text:
+            d.rectangle((1, 9, 14, 15), fill=ci.CORAL)
+            pixel_text(d, SHORT_LABELS.get(text, text), 10, 1, 1, size)
+        else:
+            d.rounded_rectangle((4, 6, 11, 12), radius=2, fill=ci.NAVY)
+            d.point([(6, 8), (9, 8)], fill=ci.WHITE)
+            d.point((7, 10), fill=ci.YEL)
+    else:
+        d.polygon([(5, 1), (20, 1), (27, 8), (27, 30), (5, 30)], fill=EDGE)
+        d.polygon([(6, 2), (19, 2), (26, 9), (26, 29), (6, 29)], fill=PAGE)
+        d.polygon([(20, 2), (20, 8), (26, 8)], fill=FOLD)
+        d.rounded_rectangle((10, 7, 21, 18), radius=4, fill=ci.NAVY)
+        d.rectangle((12, 10, 13, 11), fill=ci.WHITE)
+        d.rectangle((18, 10, 19, 11), fill=ci.WHITE)
+        d.polygon([(15, 13), (17, 13), (16, 15)], fill=ci.YEL)
+        if text:
+            d.rectangle((2, 19, 29, 30), fill=ci.CORAL)
+            pixel_text(d, SHORT_LABELS.get(text, text), 20, 2, 2, size)
+    return im
+
+
+def simplified_owl(c):
+    c.rrect(0.35, 0.24, 0.65, 0.59, 0.12, ci.NAVY, owl=False)
+    for x in (0.425, 0.575):
+        c.circle(x, 0.385, 0.055, ci.WHITE, owl=False)
+        c.circle(x, 0.39, 0.022, ci.NAVY, owl=False)
+    c.poly([(0.466, 0.46), (0.534, 0.46), (0.5, 0.515)], ci.YEL, owl=False)
+
+
 def doc_icon(text, size):
-    # the owl: centred over the lines, its feet at y 0.6 (owl units 0.22..0.85 -> 0.27..0.60 here)
-    c = ci.Canvas(size, s=0.52, ox=0.5, oy=0.60)
+    if size in (16, 32):
+        return small_icon(text, size)
+    c = ci.Canvas(size)
     page(c)
-    if size >= 32:
-        ci.owl(c, chevron=size >= 64)
+    simplified_owl(c)
     if text:
         band(c, text)
     return c.image()
 
 
-def build(sheet=None):
-    os.makedirs(OUT, exist_ok=True)
+def build(out=OUT, sheet=None):
+    os.makedirs(out, exist_ok=True)
     made = {}
     for text, name in TYPES:
         cache = {}
@@ -134,16 +211,46 @@ def build(sheet=None):
                 if px not in cache:
                     cache[px] = doc_icon(text, px)
                 cache[px].save(os.path.join(iset, fn))
-            subprocess.run(['iconutil', '-c', 'icns', iset, '-o', os.path.join(OUT, name + '.icns')], check=True)
+            subprocess.run(['iconutil', '-c', 'icns', iset, '-o', os.path.join(out, name + '.icns')], check=True)
         made[name] = (text, cache)
-    # anything left from an older list
-    keep = {name + '.icns' for _, name in TYPES}
-    for f in os.listdir(OUT):
-        if f.endswith('.icns') and f not in keep:
-            os.remove(os.path.join(OUT, f))
+    # Drop leftovers from an older type list, but only in the committed
+    # Resources/DocIcons directory. --out must never delete from a scratch dir.
+    if os.path.abspath(out) == os.path.abspath(OUT):
+        keep = {name + '.icns' for _, name in TYPES}
+        for f in os.listdir(out):
+            if f.endswith('.icns') and f not in keep:
+                os.remove(os.path.join(out, f))
     if sheet:
         write_sheet(sheet, made)
     return made
+
+
+def preview(out):
+    os.makedirs(out, exist_ok=True)
+    sizes = (16, 32, 64, 128, 256, 512)
+    backgrounds = {'light': (236, 236, 240, 255), 'dark': (42, 42, 46, 255)}
+    images = {name: {s: doc_icon(text, s) for s in sizes} for text, name in TYPES}
+    for theme, bg in backgrounds.items():
+        sheet = Image.new('RGBA', (480, 36 + len(TYPES) * 148), bg)
+        draw = ImageDraw.Draw(sheet)
+        font = label_font(13)
+        ink = ci.NAVY if theme == 'light' else ci.WHITE
+        for x, label in ((10, 'Type'), (150, '16 px'), (210, '32 px'), (300, '128 px')):
+            draw.text((x, 8), label, font=font, fill=ink)
+        for row, (text, name) in enumerate(TYPES):
+            y = 36 + row * 148
+            draw.text((10, y + 5), name, font=font, fill=ink)
+            for size in sizes:
+                image = images[name][size]
+                if size in (16, 32, 128):
+                    sheet.alpha_composite(image, ({16: 150, 32: 210, 128: 300}[size], y))
+                composite = Image.new('RGBA', image.size, bg)
+                composite.alpha_composite(image)
+                composite.convert('RGB').save(os.path.join(out, f'{name}-{size}-{theme}.png'))
+                if size in (16, 32):
+                    composite.resize((size * 8, size * 8), Image.Resampling.NEAREST).convert('RGB').save(
+                        os.path.join(out, f'{name}-{size}-{theme}-x8.png'))
+        sheet.convert('RGB').save(os.path.join(out, f'contact-{theme}.png'))
 
 
 def write_sheet(path, made):
@@ -164,8 +271,18 @@ def write_sheet(path, made):
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
+    dest = ap.add_mutually_exclusive_group()
+    dest.add_argument('--out', help='directory for generated .icns files')
+    dest.add_argument('--preview', help='write composited PNGs only')
     ap.add_argument('--sheet')
     a = ap.parse_args()
-    build(a.sheet)
-    total = sum(os.path.getsize(os.path.join(OUT, f)) for f in os.listdir(OUT))
-    print(f'wrote {len(TYPES)} icons to {OUT} ({total // 1024} KB)')
+    if a.preview:
+        if a.sheet:
+            ap.error('--sheet requires .icns generation, not --preview')
+        preview(a.preview)
+        print(f'wrote previews for {len(TYPES)} icons to {a.preview}')
+    else:
+        out = a.out or OUT
+        build(out, a.sheet)
+        total = sum(os.path.getsize(os.path.join(out, name + '.icns')) for _, name in TYPES)
+        print(f'wrote {len(TYPES)} icons to {out} ({total // 1024} KB)')
