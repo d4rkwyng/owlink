@@ -84,6 +84,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private let wordsButton = UIButton(type: .system)
     private var wordsTimer: Timer?
     private var wordCount: Int?
+    private let dailyKey = UUID().uuidString
+    private let dailyQueue = DispatchQueue(label: "app.owlink.dailyWords", qos: .utility)
+    private var dailyTimer: Timer?
+    var dailyWords = DailyWordCounter.shared
     private var toolStatesCache: (generation: Int, selection: NSRange, explain: Bool, decode: Bool)?
     private weak var statisticsSheet: StatisticsViewController?
     private var statisticsTimer: Timer?
@@ -220,6 +224,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         recoveryWriter = RecoveryWriter(document: document) { [weak self] in self?.textView.text ?? "" }
         document.onSaved = { [weak self] in
             guard let self, !self.closing else { return }
+            self.commitDailyWords()
             // Edits made while it saved keep their copy.
             if self.document.hasUnsavedChanges { self.recoveryWriter.textChanged() } else { self.recoveryWriter.clear() }
             self.saveErrorBanner.hide()
@@ -774,6 +779,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.undoManager?.removeAllActions()
         colorizer.setLanguage(document.language.language)
         generation += 1
+        dailyTimer?.invalidate()
+        countDailyWords(baseline: true)
         scheduleWordCount()
         scheduleStatisticsUpdate()
         updateStatus()
@@ -809,6 +816,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleWritingUpdate()
         scheduleEditorHighlights(selectionChanged: false)
         generation += 1
+        dailyTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.commitDailyWords() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dailyTimer = timer
         scheduleWordCount()
         scheduleStatisticsUpdate()
         updateDocumentChangeCount()
@@ -1219,6 +1232,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             wordsButton.isHidden = true
             return
         }
+
         wordsTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -1241,6 +1255,27 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                     self.wordsButton.isHidden = count == nil
                     self.view.setNeedsLayout()
                 }
+            }
+        }
+    }
+
+    func commitDailyWords() {
+        dailyTimer?.invalidate()
+        dailyTimer = nil
+        countDailyWords(baseline: false)
+    }
+
+    private func countDailyWords(baseline: Bool, dropAfter: Bool = false) {
+        let text = textView.textStorage.string
+        let key = dailyKey
+        let counter = dailyWords
+        dailyQueue.async {
+            let ns = text as NSString
+            let words = TextStats.count(ns, range: NSRange(location: 0, length: ns.length))?.words
+            DispatchQueue.main.async {
+                if baseline { counter.rebaseline(key: key, words: words) }
+                else { counter.note(key: key, words: words) }
+                if dropAfter { counter.drop(key) }
             }
         }
     }
@@ -1302,8 +1337,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     @objc func showStatistics() {
+        commitDailyWords()
         let vc = StatisticsViewController(text: textView.textStorage.string, selection: textView.selectedRange,
-                                          filePath: document.fileURL.path, documentLines: lineIndex.lineCount)
+                                          filePath: document.fileURL.path, documentLines: lineIndex.lineCount,
+                                          dailyWords: dailyWords)
         presentTool(vc, anchor: wordsButton.isHidden || wordsButton.alpha == 0 ? nil : wordsButton)
     }
 
@@ -2929,6 +2966,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
+        dailyTimer?.invalidate()
+        countDailyWords(baseline: false, dropAfter: true)
         owl.cancel()
         textView.resignFirstResponder()
         document.close { [weak self] _ in

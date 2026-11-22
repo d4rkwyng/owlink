@@ -3,6 +3,28 @@ import Testing
 @testable import CedricCore
 
 @Suite struct DailyWordsTests {
+    @Test func logPersistsNetChangesAndTargetAcrossReloads() {
+        let (defaults, suite) = TestDefaults.make("cedric-tests-")
+        defer { TestDefaults.remove(suite) }
+        let now = Date()
+        let day = DailyWords.dayString(for: now)
+        var log = DailyWordLog.load(now: now, defaults: defaults)
+        log.rebaseline(key: "first", words: 100)
+        log.rebaseline(key: "second", words: 10)
+        let first = log.note(key: "first", words: 105, on: day)
+        let second = log.note(key: "second", words: 12, on: day)
+        let deletion = log.note(key: "first", words: 103, on: day)
+        #expect(first && second && deletion)
+        DailyWordDefaults.setWords(log.wordsToday, on: day, defaults: defaults)
+        let changed = log.setTarget(500)
+        #expect(changed)
+        DailyWordDefaults.setTarget(log.target, in: defaults)
+        let restored = DailyWordLog.load(now: now, defaults: defaults)
+        #expect(restored.wordsToday == 5)
+        #expect(restored.target == 500)
+        #expect(restored.ledger.counts.isEmpty)
+    }
+
     /// 2026-11-21 00:30 in Tokyo is still 2026-11-20 in Los Angeles.
     /// November 2026 is Japan standard time (UTC+9) and Pacific standard
     /// time (UTC−8; US daylight time ended on 1 November 2026).
