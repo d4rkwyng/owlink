@@ -8,6 +8,7 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Added
 - **Folder sidebar actions menu.** An ellipsis in the sidebar header offers the context menu's folder actions, plus Refresh and Collapse All.
+- **Browse in preview.** Follow Markdown, HTML and web links in the preview with Back, Forward and This Document; Open in Browser asks before opening a web page externally. ⌘-click keeps the external link prompt.
 
 ### Changed
 - **The last session comes back.** Settings › General › Reopen files from last session is on by default and follows macOS's “Close windows when quitting an application” setting until you change it. Closing the last window, or quitting, restores those open tabs and their saved window state on the next launch. Opening a file from Finder still restores the rest of the session and focuses that file. With the setting off, files do not reopen; unsaved text stays in File › Reopen Closed Tab.
@@ -16,6 +17,7 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Fixed
 - **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
+- **Obsidian image names.** Bare image names in Markdown, embeds and HTML `<img>` tags resolve in the vault, including `Images/` and the configured `attachmentFolderPath`.
 
 ## [0.5.0] - 2026-11-22
 

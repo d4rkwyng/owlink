@@ -987,7 +987,7 @@ final class MarkdownRenderer {
         let alias = bar.map { String(body[body.index(after: $0)...]).trimmingCharacters(in: .whitespaces) }
         let (name, fragment) = WikiVault.split(target)
         let vault = options.vault
-        let file = name.isEmpty ? nil : vault?.resolve(name)
+        let file = name.isEmpty ? nil : (embed ? (vault?.resolveImage(name) ?? vault?.resolve(name)) : vault?.resolve(name))
         let exporting = options.exportLinks
         func href(_ file: URL) -> String? {
             guard exporting else { return WikiVault.href(file) }
