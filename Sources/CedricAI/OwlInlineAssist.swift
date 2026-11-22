@@ -18,6 +18,20 @@ public enum OwlInlineAssist {
         canExplain(askEnabled: askEnabled, engineReady: engineReady, hasSelection: hasSelection) && allowsTools
     }
 
+    public static func remainingBudget(engineBudget: Int, numberedContext: String, instructionWrapper: String,
+                                       systemPrompt: String, history: [OwlChatEntry],
+                                       digestReservation: Int = 0, slack: Int = 256) -> Int {
+        let historyLength = OwlPrompts.chatHistoryMessages(history).reduce(0) { total, message in
+            switch message {
+            case .user(let text), .assistant(let text): return total + (text as NSString).length
+            default: return total
+            }
+        }
+        return max(0, engineBudget - (numberedContext as NSString).length
+                   - (instructionWrapper as NSString).length - (systemPrompt as NSString).length
+                   - historyLength - max(0, digestReservation) - max(0, slack))
+    }
+
     public static func clip(_ selection: String, budget: Int) -> SelectionClip {
         let source = selection as NSString
         var length = min(source.length, max(0, budget))

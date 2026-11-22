@@ -699,11 +699,25 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             }
             var requestSnapshot = snap
             var inlineClip: OwlInlineAssist.SelectionClip?
+            // An SVG may offer describe_image even when the selected action
+            // otherwise has no tools.
+            let picture = OwlPicture.isPicture(fileName: snap.fileName)
+                ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
             if inline, let action {
+                let budgetRequest = OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap,
+                                                   history: history, useTools: tools, prose: prose, scan: scan,
+                                                   scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture)
+                let additions = budgetRequest.contextAdditions(engineBudget: engine.contextBudget)
+                let promptTools = !OwlTools.specs(budgetRequest.tools).isEmpty
+                let system = OwlPrompts.chatSystem(toolsOn: promptTools, server: engine.usesServer,
+                                                   digest: additions.digest != nil, checks: additions.checks != nil,
+                                                   canEdit: budgetRequest.tools.contains(.proposeEdit))
                 let wrapper = OwlInlineAssist.instruction(action: action, selection: "", prose: prose,
                                                           toolsOn: tools, context: ctx)
-                let room = max(0, engine.contextBudget - (ctx.numbered as NSString).length
-                               - (wrapper as NSString).length - 256)
+                let room = OwlInlineAssist.remainingBudget(engineBudget: engine.contextBudget,
+                                                           numberedContext: ctx.numbered, instructionWrapper: wrapper,
+                                                           systemPrompt: system, history: history,
+                                                           digestReservation: additions.digestReservation)
                 let clip = OwlInlineAssist.clip(snap.substring(snap.selection), budget: room)
                 inlineClip = clip
                 pendingInlineNote = clip.note
@@ -718,9 +732,6 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 }
             }
             self.lastUsedTools = tools
-            // An SVG: describe_image can render it (only if the model calls it).
-            let picture = OwlPicture.isPicture(fileName: snap.fileName)
-                ? SVGPictureSource(text: snap.text, folder: tab.doc.fileURL?.deletingLastPathComponent()) : nil
             let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: requestSnapshot,
                                      history: history, useTools: tools, prose: prose, scan: scan,
                                      scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture,

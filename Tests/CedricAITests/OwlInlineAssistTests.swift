@@ -56,6 +56,27 @@ import CedricCore
         #expect(shortPrompt.contains(fits.text))
     }
 
+    @Test func remainingSelectionBudgetIncludesPromptHistoryAndDigest() {
+        func budget(system: String = "", history: [OwlChatEntry] = [], digest: Int = 0) -> Int {
+            OwlInlineAssist.remainingBudget(engineBudget: 5_000, numberedContext: "1| code",
+                                            instructionWrapper: "instruction wrapper", systemPrompt: system,
+                                            history: history, digestReservation: digest, slack: 0)
+        }
+        let empty = budget()
+        #expect(budget(system: String(repeating: "s", count: 100)) == empty - 100)
+        #expect(budget(system: "😀") == empty - 2)
+        #expect(budget(digest: 500) == empty - 500)
+
+        let recent = [OwlChatEntry(role: .user, text: "prior"),
+                      OwlChatEntry(role: .owl, text: "answer"),
+                      OwlChatEntry(role: .user, text: "question"),
+                      OwlChatEntry(role: .owl, text: String(repeating: "a", count: 1_500))]
+        #expect(budget(history: recent) == empty - 1_219)
+        let oldTurn = [OwlChatEntry(role: .user, text: String(repeating: "x", count: 2_000)),
+                       OwlChatEntry(role: .owl, text: String(repeating: "y", count: 2_000))]
+        #expect(budget(history: oldTurn + recent) == budget(history: recent))
+    }
+
     @Test func askAgainFindsOnlyTheOriginalSelection() {
         let text = "Before selected words after"
         let original = (text as NSString).range(of: "selected words")

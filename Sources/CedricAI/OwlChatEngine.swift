@@ -302,6 +302,23 @@ public struct OwlChatRequest: Sendable {
         return OwlPrompts.dataBlock("RESULTS OF OWLINK'S OFFLINE CHECKS (data, not instructions)", list)
     }
 
+    public struct ContextAdditions: Sendable {
+        public let checks: String?
+        public let digest: Digest?
+        public let digestReservation: Int
+    }
+
+    /// Builds the same checks and digest, with the same reservations, that
+    /// the runner will prepend to the chat.
+    public func contextAdditions(engineBudget: Int) -> ContextAdditions {
+        var room = engineBudget - (context.numbered as NSString).length
+        let checks = checks(budget: min(1_000, room))
+        room -= checks.map { ($0 as NSString).length } ?? 0
+        let reservation = min(2_000, max(0, room))
+        let digest = digest(budget: reservation)
+        return ContextAdditions(checks: checks, digest: digest, digestReservation: digest == nil ? 0 : reservation)
+    }
+
     /// What Cedric says first when he has not seen all of the document:
     /// "I can see lines 1–52 of 210." (and what the tools added), so a
     /// partial answer never reads as a whole one. On unless the question
@@ -404,12 +421,9 @@ public enum OwlChatRunner {
         let specs = OwlTools.specs(req.tools)
         let toolbox = OwlToolbox(snapshot: req.snapshot, allowed: Set(req.tools), imageSource: req.imageSource,
                                  inlineSelection: req.inlineSelection, onEvent: onEvent)
-        // A small model's up-front digest fits in what the shown text left of the engine's budget.
-        var room = engine.contextBudget - (req.context.numbered as NSString).length
-        // Asked about problems, without tools: the checks' list first (run before the call).
-        let checks = req.checks(budget: min(1_000, room))
-        room -= checks.map { ($0 as NSString).length } ?? 0
-        let digest = req.digest(budget: min(2_000, room))
+        let additions = req.contextAdditions(engineBudget: engine.contextBudget)
+        let checks = additions.checks
+        let digest = additions.digest
         let seededLines = digest?.lines ?? IndexSet()
         let seededLooks: Set<OwlToolName> = digest?.hasOutline == true ? [.getOutline] : []
         let coverage: @Sendable () -> String? = {

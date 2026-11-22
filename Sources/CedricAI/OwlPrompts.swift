@@ -214,18 +214,7 @@ public enum OwlPrompts {
                                     canDescribeImage: Bool = false, totalLines: Int? = nil,
                                     digest: String? = nil, checks: String? = nil, canEdit: Bool = true) -> [OwlChatMessage] {
         var out: [OwlChatMessage] = [.system(chatSystem(toolsOn: toolsOn, server: server, digest: digest != nil, checks: checks != nil, canEdit: canEdit))]
-        // Older turns are dropped (small context): the last two questions and answers.
-        var kept: [OwlChatEntry] = []
-        var users = 0
-        for e in history.reversed() where e.role == .user || e.role == .owl {
-            if e.role == .user { users += 1; if users > 2 { break } }
-            kept.insert(e, at: 0)
-        }
-        while kept.first?.role == .owl { kept.removeFirst() }
-        for e in kept {
-            let t = String(e.text.prefix(1200))
-            out.append(e.role == .user ? .user(t) : .assistant(t))
-        }
+        out += chatHistoryMessages(history)
         var user = "Language: \(language)\n"
         if let fileName {
             user += "File: \(fileName)\n"
@@ -245,6 +234,21 @@ public enum OwlPrompts {
         if model.lowercased().contains("qwen3") { user += "\n/no_think" }
         out.append(.user(user))
         return out
+    }
+
+    /// The history exactly as `chatMessages` keeps it.
+    public static func chatHistoryMessages(_ history: [OwlChatEntry]) -> [OwlChatMessage] {
+        var kept: [OwlChatEntry] = []
+        var users = 0
+        for e in history.reversed() where e.role == .user || e.role == .owl {
+            if e.role == .user { users += 1; if users > 2 { break } }
+            kept.insert(e, at: 0)
+        }
+        while kept.first?.role == .owl { kept.removeFirst() }
+        return kept.map {
+            let text = String($0.text.prefix(1200))
+            return $0.role == .user ? .user(text) : .assistant(text)
+        }
     }
 
     /// The start of an image document's "File kind:" line (the test engine
