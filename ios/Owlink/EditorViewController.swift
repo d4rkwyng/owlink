@@ -55,6 +55,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var focusCache: [Int]?
     private var focusPalette: UInt32?
     private var highlightTimer: Timer?
+    private struct HighlightPaint {
+        let range: NSRange
+        let textRange: NSTextRange
+        let bracket: Bool
+    }
+    private var highlightPainted: [HighlightPaint] = []
+    private var highlightKey: [Int]?
+    private var highlightBrackets: [NSRange] = []
+    private var highlightBracketKey: [Int]?
+    private var highlightPalette: UInt32?
+    private var highlightCaretColor: UInt32?
+    private var highlightContrast = false
     private var readableWidthOn: Bool { readableWidthChoice ?? AppSettings.readableWidthDefault }
     private var lastTextScrollOffsetY: CGFloat?
     /// A jump forces numbers on for this tab without changing the setting.
@@ -218,6 +230,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         loadText()
         applyEditGate()
         NotificationCenter.default.addObserver(self, selector: #selector(settingsChanged), name: AppSettings.changed, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(highlightContrastChanged),
+                                               name: UIAccessibility.darkerSystemColorsStatusDidChangeNotification, object: nil)
         // As the Mac does: TextKit 2's content storage owns the storage's delegate.
         NotificationCenter.default.addObserver(self, selector: #selector(storageEdited),
                                                name: NSTextStorage.didProcessEditingNotification, object: textView.textStorage)
@@ -257,6 +271,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         EditorBarStyle.renderNavigationBarIfRequested(navigationController?.navigationBar)
         updateEdited()
         colorizer.colorViewport()
+        scheduleEditorHighlights(selectionChanged: false)
         if let r = pendingRecovery {
             pendingRecovery = nil
             switch r {
@@ -409,7 +424,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if writingLayoutSize != textView.bounds.size {
             writingLayoutSize = textView.bounds.size
             scheduleWritingUpdate()
-            scheduleEditorHighlights()
+            scheduleEditorHighlights(selectionChanged: false)
         }
     }
 
@@ -735,6 +750,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     // MARK: Text
 
     private func loadText() {
+        clearEditorHighlights()
         loading = true
         let sel = textView.selectedRange
         textView.text = document.text
@@ -770,6 +786,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let textStorage = textView.textStorage
         let edited = textStorage.editedRange, delta = textStorage.changeInLength
         guard textStorage.editedMask.contains(.editedCharacters), !loading else { return }
+        clearEditorHighlights()
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
@@ -788,7 +805,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func textViewDidChange(_ textView: UITextView) {
         scheduleWritingUpdate()
-        scheduleEditorHighlights()
+        scheduleEditorHighlights(selectionChanged: false)
         generation += 1
         scheduleWordCount()
         scheduleStatisticsUpdate()
@@ -1460,9 +1477,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         applyWrap()
         colorizer?.setPalette(palette)
         scheduleWritingUpdate()
-        if !AppSettings.highlightOccurrences, let layout = textView.textLayoutManager {
-            layout.removeRenderingAttribute(.backgroundColor, for: layout.documentRange)
-        }
+        if !AppSettings.highlightOccurrences { clearEditorHighlights() }
         scheduleEditorHighlights()
         refreshPreview()
     }
@@ -1625,9 +1640,27 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return NSRange(location: start, length: length)
     }
 
-    private func scheduleEditorHighlights() {
+    @objc private func highlightContrastChanged() {
+        highlightKey = nil
+        scheduleEditorHighlights(selectionChanged: false)
+    }
+
+    private func clearEditorHighlights() {
+        if let layout = textView.textLayoutManager {
+            for paint in highlightPainted {
+                layout.removeRenderingAttribute(.backgroundColor, for: paint.textRange)
+            }
+        }
+        highlightPainted = []
+        highlightKey = nil
+        highlightBracketKey = nil
+        highlightBrackets = []
+    }
+
+    private func scheduleEditorHighlights(selectionChanged: Bool = true) {
         highlightTimer?.invalidate()
-        refreshEditorHighlights(includeOccurrences: false)
+        guard AppSettings.highlightOccurrences else { clearEditorHighlights(); return }
+        if selectionChanged { refreshEditorHighlights(includeOccurrences: false) }
         let timer = Timer(timeInterval: 0.12, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshEditorHighlights() }
         }
@@ -1638,38 +1671,73 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func refreshEditorHighlights(includeOccurrences: Bool = true) {
         guard let layout = textView.textLayoutManager, let manager = layout.textContentManager,
               let visible = editorVisibleRange(),
-              let start = manager.location(layout.documentRange.location, offsetBy: visible.location),
-              let end = manager.location(start, offsetBy: visible.length),
-              let visibleRange = NSTextRange(location: start, end: end) else { return }
-        layout.removeRenderingAttribute(.backgroundColor, for: visibleRange)
-        guard textView.markedTextRange == nil else { return }
-        let text = textView.textStorage.string as NSString
+              let viewport = layout.textViewportLayoutController.viewportRange else { return }
+        guard AppSettings.highlightOccurrences, textView.markedTextRange == nil else { clearEditorHighlights(); return }
+        let text = textView.textStorage.mutableString
         let selection = textView.selectedRange
         guard selection.location != NSNotFound, NSMaxRange(selection) <= text.length else { return }
-
-        func paint(_ ranges: [NSRange], color: UIColor) {
-            for range in ranges {
-                let clipped = NSIntersectionRange(range, visible)
-                guard clipped.length > 0,
-                      let a = manager.location(start, offsetBy: clipped.location - visible.location),
-                      let b = manager.location(a, offsetBy: clipped.length),
-                      let r = NSTextRange(location: a, end: b) else { continue }
-                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
+        let key = [selection.location, selection.length, visible.location, visible.length, generation]
+        let contrast = UIAccessibility.isDarkerSystemColorsEnabled
+        if includeOccurrences, highlightKey == key, highlightPalette == palette.findMatch,
+           highlightCaretColor == palette.caret, highlightContrast == contrast { return }
+        let bracketKey = [selection.location, selection.length, generation]
+        if highlightBracketKey != bracketKey {
+            highlightBracketKey = bracketKey
+            highlightBrackets = []
+            if selection.length == 0, let (first, second) = AutoEdit.matchingBracket(in: text, caret: selection.location) {
+                highlightBrackets = [first, second]
             }
         }
-
-        if includeOccurrences, AppSettings.highlightOccurrences,
-           let needle = Occurrences.needle(selection: selection, in: text) {
-            let occurrences = Occurrences.find(needle, in: text, range: visible)
+        var occurrences: [NSRange] = includeOccurrences ? [] : highlightPainted.filter { !$0.bracket }.map(\.range)
+        if includeOccurrences, let needle = Occurrences.needle(selection: selection, in: text) {
+            let start = max(0, visible.location - 2_000)
+            let end = min(text.length, NSMaxRange(visible) + 2_000)
+            let found = Occurrences.find(needle, in: text, range: NSRange(location: start, length: end - start))
             let source = selection.length == 0 ? Occurrences.word(at: selection.location, in: text) : selection
-            if occurrences.count >= 2 || source.map({ !occurrences.contains($0) }) == true {
-                paint(occurrences.filter { $0 != selection }, color: UIColor(hex: palette.findMatch).withAlphaComponent(0.55))
+            if found.count >= 2 || source.map({ !found.contains($0) }) == true {
+                occurrences = found.filter { $0 != selection }.map { NSIntersectionRange($0, visible) }.filter { $0.length > 0 }
             }
         }
-        if selection.length == 0, AutoEdit.pairs(in: document.language.language),
-           let (first, second) = AutoEdit.matchingBracket(in: text, caret: selection.location) {
-            paint([first, second], color: UIColor(hex: palette.caret).withAlphaComponent(0.3))
+        let brackets = highlightBrackets.map { NSIntersectionRange($0, visible) }.filter { $0.length > 0 }
+        let recolor = highlightPalette != palette.findMatch || highlightCaretColor != palette.caret || highlightContrast != contrast
+        let oldOccurrences = highlightPainted.filter { !$0.bracket }.map(\.range)
+        let oldBrackets = highlightPainted.filter(\.bracket).map(\.range)
+        let changedOccurrences = oldOccurrences != occurrences
+        let changedBrackets = oldBrackets != brackets
+        if changedOccurrences || changedBrackets || recolor {
+            let start = manager.offset(from: layout.documentRange.location, to: viewport.location)
+            let removed = highlightPainted.filter { recolor || ($0.bracket ? !brackets.contains($0.range) : !occurrences.contains($0.range)) }
+            for item in removed { layout.removeRenderingAttribute(.backgroundColor, for: item.textRange) }
+            highlightPainted.removeAll { item in removed.contains { $0.textRange == item.textRange && $0.bracket == item.bracket } }
+            func paint(_ range: NSRange, bracket: Bool) {
+                guard let a = manager.location(viewport.location, offsetBy: range.location - start),
+                      let b = manager.location(a, offsetBy: range.length),
+                      let r = NSTextRange(location: a, end: b) else { return }
+                let color = bracket ? UIColor(hex: palette.caret).withAlphaComponent(contrast ? 0.65 : 0.3)
+                    : UIColor(hex: palette.findMatch).withAlphaComponent(contrast ? 0.85 : 0.55)
+                layout.addRenderingAttribute(.backgroundColor, value: color, for: r)
+                highlightPainted.append(HighlightPaint(range: range, textRange: r, bracket: bracket))
+            }
+            for range in occurrences where !highlightPainted.contains(where: { !$0.bracket && $0.range == range })
+                || removed.contains(where: { $0.bracket && NSIntersectionRange($0.range, range).length > 0 }) {
+                highlightPainted.removeAll { !$0.bracket && $0.range == range }
+                paint(range, bracket: false)
+            }
+            // Brackets are painted last, including after an overlapping occurrence changes.
+            if changedOccurrences || removed.contains(where: { $0.bracket }) {
+                for item in highlightPainted.filter(\.bracket) {
+                    layout.removeRenderingAttribute(.backgroundColor, for: item.textRange)
+                }
+                highlightPainted.removeAll(where: \.bracket)
+            }
+            for range in brackets where !highlightPainted.contains(where: { $0.bracket && $0.range == range }) {
+                paint(range, bracket: true)
+            }
         }
+        if includeOccurrences { highlightKey = key }
+        highlightPalette = palette.findMatch
+        highlightCaretColor = palette.caret
+        highlightContrast = contrast
     }
 
     /// The window the theme overrode, so dismissing the editor can put the
@@ -1708,6 +1776,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
+        highlightTimer?.invalidate()
+        highlightTimer = nil
         if isBeingDismissed || navigationController?.isBeingDismissed == true {
             EditorBarStyle.restore(window: themedWindow)
             themedWindow = nil

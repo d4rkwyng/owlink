@@ -81,7 +81,7 @@ final class EditorHighlightTests: XCTestCase {
         XCTAssertTrue(AppSettings.highlightOccurrences)
     }
 
-    func testBracketPairIsCodeOnlyAndCoexistsWithFocus() throws {
+    func testBracketPairInAllLanguagesCoexistsWithFocus() throws {
         let text = "call(a[b])\n\nOther."
         let editor = editor(text)
         editor.toggleWritingFocus()
@@ -95,7 +95,53 @@ final class EditorHighlightTests: XCTestCase {
 
         editor.setLanguage(.plain)
         editor.refreshEditorHighlights()
+        XCTAssertNotNil(try background(at: 4, in: editor))
+        XCTAssertNotNil(try background(at: 9, in: editor))
+        AppSettings.highlightOccurrences = false
         XCTAssertNil(try background(at: 4, in: editor))
         XCTAssertNil(try background(at: 9, in: editor))
+    }
+
+    func testDebouncedSelectionAndCRLF() async throws {
+        let editor = editor("alpha\r\nalpha\r\nlast")
+        editor.textView.selectedRange = NSRange(location: 1, length: 0)
+        editor.textViewDidChangeSelection(editor.textView)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNotNil(try background(at: 8, in: editor))
+        editor.textView.selectedRange = NSRange(location: editor.textView.textStorage.length, length: 0)
+        editor.textViewDidChangeSelection(editor.textView)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(try background(at: 8, in: editor))
+    }
+
+    func testMarkedTextAndEmptyDocument() throws {
+        let editor = editor("alpha alpha")
+        editor.textView.selectedRange = NSRange(location: 1, length: 0)
+        editor.refreshEditorHighlights()
+        XCTAssertNotNil(try background(at: 7, in: editor))
+        editor.textView.becomeFirstResponder()
+        editor.textView.setMarkedText("a", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertNotNil(editor.textView.markedTextRange)
+        editor.refreshEditorHighlights()
+        XCTAssertNil(try background(at: 7, in: editor))
+        editor.textView.unmarkText()
+        let empty = self.editor("")
+        empty.refreshEditorHighlights()
+        XCTAssertEqual(empty.textView.text, "")
+    }
+
+    func testScrollingRefreshesVisibleOccurrences() async throws {
+        let text = (["alpha"] + Array(repeating: "filler", count: 100) + ["alpha", "alpha"]).joined(separator: "\n")
+        let editor = editor(text)
+        editor.textView.selectedRange = NSRange(location: 0, length: 5)
+        editor.textViewDidChangeSelection(editor.textView)
+        let last = (text as NSString).range(of: "alpha", options: .backwards).location
+        editor.textView.setContentOffset(CGPoint(x: 0, y: 1_000), animated: false)
+        editor.textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        editor.scrollViewDidScroll(editor.textView)
+        try await Task.sleep(for: .milliseconds(200))
+        let visible = try XCTUnwrap(editor.editorVisibleRange())
+        XCTAssertTrue(NSLocationInRange(last, visible))
+        XCTAssertNotNil(try background(at: last, in: editor))
     }
 }
