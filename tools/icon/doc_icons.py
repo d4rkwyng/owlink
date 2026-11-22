@@ -151,7 +151,7 @@ def small_icon(text):
     im = Image.new('RGBA', (16, 16))
     d = ImageDraw.Draw(im)
     if text in RIM_TYPES:
-        d.polygon([(1, 0), (10, 0), (15, 5), (15, 15), (1, 15)], fill=RIM)
+        d.polygon([(1, 0), (10, 0), (15, 5), (15, 14), (14, 15), (1, 15)], fill=RIM)
     d.polygon([(2, 1), (10, 1), (14, 5), (14, 15), (2, 15)], fill=edge)
     d.polygon([(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)], fill=color)
     d.polygon([(9, 2), (9, 6), (13, 6)], fill=fold)

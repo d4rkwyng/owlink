@@ -72,7 +72,7 @@ class DocumentIconTests(unittest.TestCase):
                     image = icons.doc_icon(text, 64)
                 owl.assert_not_called()
                 bottom = image.crop((0, 46, 64, 57))
-                white = sum(1 for pixel in bottom.getdata() if pixel == icons.ci.WHITE)
+                white = sum(count for count, color in bottom.getcolors(64 * 11) if color == icons.ci.WHITE)
                 if text:
                     self.assertGreater(white, 0)
                 else:
@@ -84,6 +84,8 @@ class DocumentIconTests(unittest.TestCase):
                 with self.subTest(text=text, size=size):
                     image = icons.doc_icon(text, size)
                     self.assertIn(icons.RIM, {color for _, color in image.getcolors(size * size)})
+                    if size == 16:
+                        self.assertEqual(image.getpixel((15, 15))[3], 0)
 
     def test_iconset_uses_logical_size_for_retina_images(self):
         # Inspect the actual PNGs passed to iconutil, including both 32 px entries.
