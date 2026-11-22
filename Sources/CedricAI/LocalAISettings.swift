@@ -63,6 +63,18 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         backend.usesServer && automaticChecks && !acknowledged
     }
 
+    public static let serverAutomaticChecksAcknowledgedKey = "CedricServerAutomaticChecksAcknowledged"
+
+    /// Leaves unacknowledged automatic server checks off without changing saved settings.
+    public func applyingServerAutomaticAcknowledgement(_ acknowledged: Bool) -> LocalAISettings {
+        var settings = self
+        if Self.shouldShowAutomaticServerNotice(backend: backend, automaticChecks: automaticChecks,
+                                                acknowledged: acknowledged) {
+            settings.automaticChecks = false
+        }
+        return settings
+    }
+
     public init(enabled: Bool = false,
                 backend: Backend = .builtIn,
                 baseURL: URL? = nil,

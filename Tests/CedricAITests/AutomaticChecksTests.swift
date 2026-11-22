@@ -71,6 +71,23 @@ import CedricCore
         #expect(!LocalAISettings.shouldShowAutomaticServerNotice(backend: .custom, automaticChecks: false, acknowledged: false))
         #expect(!LocalAISettings.shouldShowAutomaticServerNotice(backend: .lmStudio, automaticChecks: true, acknowledged: true))
     }
+
+    @Test func unacknowledgedAutomaticServerChecksAreGatedWithoutChangingOtherSettings() {
+        for backend in LocalAISettings.Backend.allCases {
+            for automatic in [false, true] {
+                for acknowledged in [false, true] {
+                    let original = LocalAISettings(enabled: true, backend: backend, model: "model",
+                                                   automaticChecks: automatic)
+                    var expected = original
+                    if backend.usesServer && automatic && !acknowledged {
+                        expected.automaticChecks = false
+                    }
+                    #expect(original.applyingServerAutomaticAcknowledgement(acknowledged) == expected)
+                    #expect(original.automaticChecks == automatic)
+                }
+            }
+        }
+    }
 }
 
 @Suite struct ManualSchedulerTests {

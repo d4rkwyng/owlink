@@ -64,7 +64,8 @@ struct SettingsView: View {
     @State private var styleExtra = ""
     @State private var styleExcept = ""
     @State private var readableColumns = AppSettings.readableColumns
-    @State private var ai = LocalAISettings.load()
+    @State private var ai = AIStore.load()
+    @State private var showAutomaticServerNotice = false
     @State private var address = ""
     @State private var testResult: String?
     @StateObject private var models = ModelsModel()
@@ -148,11 +149,19 @@ struct SettingsView: View {
                             Text(AIStatus.backendTitle(b)).tag(b)
                         }
                     }
-                    Toggle(String(localized: "Automatic AI Hints"), isOn: Binding(get: { ai.enabled }, set: { ai.enabled = $0; save() }))
+                    Toggle(String(localized: "Use Cedric AI"), isOn: Binding(get: { ai.enabled }, set: { ai.enabled = $0; save() }))
+                        .accessibilityIdentifier("settings.aiEnabled")
+                    Toggle(String(localized: "Check automatically when I pause typing"),
+                           isOn: Binding(get: { ai.automaticChecks }, set: setAutomaticChecks))
+                        .disabled(!ai.enabled)
+                        .accessibilityIdentifier("settings.automaticChecks")
                 } header: {
                     Text(String(localized: "Cedric AI"))
                 } footer: {
                     Text(String(localized: "Off by default. Cedric’s offline hints never need it. Ask Cedric uses Apple Intelligence or the built-in model on this device, or a server on your network if you set one up. Never the cloud."))
+                    if ai.backend.usesServer {
+                        Text(String(localized: "Automatic checks are off by default for servers on your network. Review the notice before turning them on."))
+                    }
                 }
 
                 if ai.backend.usesServer {
@@ -180,6 +189,17 @@ struct SettingsView: View {
             .navigationTitle(String(localized: "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button(String(localized: "Done")) { dismiss() } } }
+            .alert(String(localized: "Allow automatic checks to send text to \(automaticServerName)?"),
+                   isPresented: $showAutomaticServerNotice) {
+                Button(String(localized: "Confirm")) {
+                    UserDefaults.standard.set(true, forKey: LocalAISettings.serverAutomaticChecksAcknowledgedKey)
+                    ai.automaticChecks = true
+                    save()
+                }
+                Button(String(localized: "Cancel"), role: .cancel) {}
+            } message: {
+                Text(String(localized: "When you pause typing, Cedric will send the visible text (up to 8 KB) to \(automaticServerName) for automatic checks. It is not sent to the cloud and stays on your local network."))
+            }
             .onAppear {
                 address = ai.backend.usesServer ? ai.baseURL.absoluteString : ""
                 if styleExtra.isEmpty { styleExtra = AppSettings.styleCheckExtra.joined(separator: ", ") }
@@ -253,6 +273,27 @@ struct SettingsView: View {
     private func save() {
         ai.save()
         AppSettings.post()
+    }
+
+    private var automaticServerName: String {
+        let host = ai.baseURL.host ?? ai.baseURL.absoluteString
+        switch ai.backend {
+        case .lmStudio: return String(localized: "LM Studio at \(host)")
+        case .ollama: return String(localized: "Ollama at \(host)")
+        case .custom: return String(localized: "the server at \(host)")
+        case .builtIn, .apple: return ""
+        }
+    }
+
+    private func setAutomaticChecks(_ enabled: Bool) {
+        if LocalAISettings.shouldShowAutomaticServerNotice(
+            backend: ai.backend, automaticChecks: enabled,
+            acknowledged: UserDefaults.standard.bool(forKey: LocalAISettings.serverAutomaticChecksAcknowledgedKey)) {
+            showAutomaticServerNotice = true
+            return
+        }
+        ai.automaticChecks = enabled
+        save()
     }
 
     private func applyAddress() {

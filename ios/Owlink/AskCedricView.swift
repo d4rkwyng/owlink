@@ -72,7 +72,7 @@ final class AskCedricModel: ObservableObject {
 
     /// The settings Ask Cedric runs on (nil: nothing ready), as on the Mac.
     static func chatSettings() -> LocalAISettings? {
-        OwlChatSetup.chatSettings(LocalAISettings.load(), appleAvailable: AppleFoundationModelsProvider.isAvailable,
+        OwlChatSetup.chatSettings(AIStore.load(), appleAvailable: AppleFoundationModelsProvider.isAvailable,
                                   builtInInstalled: !BuiltInEngine().installedModels.isEmpty)
     }
 

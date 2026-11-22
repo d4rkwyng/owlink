@@ -19,7 +19,7 @@ import CedricAI
 enum AIStore {
     static let env = DevEnvironment.values
     static var defaults: UserDefaults { env["CEDRIC_AI_DEFAULTS"].flatMap(UserDefaults.init(suiteName:)) ?? .standard }
-    static let serverAutomaticChecksAcknowledgedKey = "CedricServerAutomaticChecksAcknowledged"
+    static let serverAutomaticChecksAcknowledgedKey = LocalAISettings.serverAutomaticChecksAcknowledgedKey
 
     static func load() -> LocalAISettings {
         var s = LocalAISettings.load(from: defaults)
@@ -33,11 +33,8 @@ enum AIStore {
         if let v = env["CEDRIC_AI_MIN_IDLE"].flatMap(Double.init) { s.minIdle = v }
         if let v = env["CEDRIC_AI_AUTO"] {
             s.automaticChecks = v == "1"
-        } else if LocalAISettings.shouldShowAutomaticServerNotice(backend: s.backend, automaticChecks: s.automaticChecks,
-                                                                  acknowledged: defaults.bool(forKey: serverAutomaticChecksAcknowledgedKey)) {
-            // Unacknowledged saved automatic-on for a server: leave it off until
-            // the first-use notice is confirmed in Settings.
-            s.automaticChecks = false
+        } else {
+            s = s.applyingServerAutomaticAcknowledgement(defaults.bool(forKey: serverAutomaticChecksAcknowledgedKey))
         }
         return s
     }

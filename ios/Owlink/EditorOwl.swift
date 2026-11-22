@@ -54,7 +54,7 @@ final class EditorOwl {
             let window = Self.window(s, documentID: self.documentID)
             let found = self.rules.check(window.context, facts: s.facts)
             self.merge(found, offset: window.offset, generation: s.generation, text: s.text, source: "rules")
-            let ai = LocalAISettings.load()
+            let ai = AIStore.load()
             if ai.isUsable, ai.automaticChecks, Date().timeIntervalSince(self.lastAICheck) >= ai.minInterval {
                 self.askAI(snap, quiet: true)
             }
@@ -67,7 +67,8 @@ final class EditorOwl {
         lastAICheck = Date()
         aiTask = Task { [weak self] in
             guard let self else { return }
-            var settings = LocalAISettings.load()
+            var settings = AIStore.load()
+            if quiet && (!settings.isUsable || !settings.automaticChecks) { return }
             if !settings.isUsable {
                 // Asked for: use whatever is ready, as Ask Cedric does.
                 guard let s = OwlChatSetup.chatSettings(settings, appleAvailable: AppleFoundationModelsProvider.isAvailable,
@@ -82,6 +83,7 @@ final class EditorOwl {
                 if !quiet { self.onNote?(engine.unavailableReason ?? String(localized: "The AI engine isn’t ready.")) }
                 return
             }
+            if quiet && AIStore.load() != settings { return }
             let s = snap()
             let window = Self.window(s, documentID: self.documentID)
             let found = await provider.hints(for: window.context)
