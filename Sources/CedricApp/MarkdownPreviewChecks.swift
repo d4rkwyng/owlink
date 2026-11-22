@@ -16,9 +16,38 @@ extension DevChecks {
         case "mdexport": exportCheck(app)
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
+        case "previewnav": previewNavigationDemo(app)
         default: return false
         }
         return true
+    }
+
+    static func previewNavigationDemo(_ app: AppDelegate) {
+        guard let tab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "Home.md" }) else {
+            expect(false, "demo Home.md is open"); finish(); return
+        }
+        sized(tab)
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "A place for field notes", "demo home is shown"),
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    previewJS(tab, "Array.from(document.images).filter(i => i.complete && i.naturalWidth > 0).length") { value in
+                        expect((value as? NSNumber)?.intValue == 3, "all three demo images load", "\(value ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            snapshot("home.png", window: tab.window),
+            { next in previewJS(tab, "document.querySelector('a.wikilink').click(); 1") { _ in next() } },
+            waitForPreview(tab, contains: "The other note", "demo wikilink opens in preview"),
+            sync { expect(tab.preview?.canGoBack == true, "demo Back is enabled") },
+            snapshot("local.png", window: tab.window),
+            sync { tab.previewBarAction(.home) },
+            waitForPreview(tab, contains: "A place for field notes", "demo Home returns to the editor document"),
+            snapshot("returned-home.png", window: tab.window),
+            sync { finish() },
+        ])
     }
 
     /// Runs `code` in the preview, in Cedric's own content world (where
@@ -75,8 +104,8 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option])
                 expect(tab.previewVisible, "⌥⌘P shows the preview")
-                let want: [PreviewBarItem] = [.refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
-                expect(bar?.state.items == want, "Markdown: the bar has its eight controls", "\(bar?.state.items ?? [])")
+                let want: [PreviewBarItem] = [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+                expect(bar?.state.items == want, "Markdown: the bar has its controls", "\(bar?.state.items ?? [])")
                 for item in want {
                     guard let v = bar?.view(item) else { expect(false, "bar \(item)", "no view"); continue }
                     let tip = (v as? NSControl)?.toolTip ?? ""
@@ -107,7 +136,7 @@ extension DevChecks {
                 let view = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
                 let preview = view?.items.first { $0.title == "Preview" }?.submenu
                 let titles = preview?.items.map(\.title).filter { !$0.isEmpty } ?? []
-                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
+                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Open in Browser", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
                         "Restore File Order", "Export as HTML…", "Export as PDF…", "Allow JavaScript in Preview",
                         "Allow Network in Preview"].allSatisfy(titles.contains), "View › Preview lists the bar's actions", "\(titles)")
                 @MainActor func enabled(_ sel: Selector) -> Bool { menuItem(action: sel).map { app.validateMenuItem($0) } ?? false }
@@ -323,6 +352,18 @@ extension DevChecks {
             },
             waitForPreview(tab, contains: "Paragraph 60", "the preview shows the document"),
             { next in
+                let probe = WKWebView(frame: .zero, configuration: PreviewController.browserConfiguration())
+                probe.loadHTMLString("<html><body>isolated</body></html>", baseURL: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    probe.evaluateJavaScript("typeof window.webkit?.messageHandlers?.cedricScroll") { value, error in
+                        MainActor.assumeIsolated {
+                            expect(error == nil && value as? String == "undefined", "isolated web configuration has no Cedric bridge", "\(value ?? "nil") \(String(describing: error))")
+                            next()
+                        }
+                    }
+                }
+            },
+            { next in
                 previewJS(tab, "typeof window.__cedricPatch + ',' + typeof window.__cedricScrollTo") { v in
                     expect(v as? String == "function,function", "Cedric's script runs in its own world with page JavaScript off", "\(v ?? "nil")")
                     next()
@@ -416,21 +457,42 @@ extension DevChecks {
                     poll()
                 }
             },
-            // A relative .md link opens in Cedric.
+            // A relative .md link stays in this preview and Home resumes live rendering.
             { next in
+                let count = app.tabs.count
                 previewJS(tab, "document.querySelector('a[href=\"other.md\"]').click(); 1") { _ in
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                        let other = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "other.md" }
-                        expect(other != nil, "a relative .md link opens the file in a Cedric tab", app.tabs.map(\.doc.displayName).joined(separator: ","))
-                        other?.doc.markSaved()
-                        other?.window?.performClose(nil)
-                        next()
+                        tab.renderPreview()
+                        previewJS(tab, "document.body.innerText") { text in
+                            expect((text as? String)?.contains("the other file") == true, "relative Markdown opens in the preview and survives an editor render", "\(text ?? "nil")")
+                            expect(app.tabs.count == count && tab.preview?.canGoBack == true, "no tab opened; Back is enabled")
+                            tab.previewAllowsJavaScript = true
+                            tab.previewAllowsJavaScript = false
+                            expect(tab.preview?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                                   "turning JavaScript off applies to a navigated document")
+                            tab.previewBarAction(.back)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                previewJS(tab, "document.body.innerText") { text in
+                                    expect((text as? String)?.contains("Very First paragraph") == true, "Back returns to the live document", "\(text ?? "nil")")
+                                    expect(tab.preview?.canGoForward == true, "Forward is enabled")
+                                    tab.previewBarAction(.forward)
+                                    tab.previewBarAction(.home)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                        previewJS(tab, "document.body.innerText") { text in
+                                            expect((text as? String)?.contains("Very First paragraph") == true && tab.preview?.isHome == true,
+                                                   "This Document restores the live preview", "\(text ?? "nil")")
+                                            next()
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             },
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
-            // revealed, other schemes ignored, the web after a confirm.
+            // revealed, other schemes ignored, the web isolated in preview.
             { next in
                 let tabsBefore = app.tabs.count
                 PreviewLinkLog.revealed = []
@@ -441,7 +503,6 @@ extension DevChecks {
                     }
                 }
                 @MainActor func action() -> PreviewLinkAction? { tab.preview?.lastLinkAction }
-                @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
                 click("build.command") {
                     let cmd = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "build.command" }
                     if case .openInCedric = action() {
@@ -475,17 +536,20 @@ extension DevChecks {
                                         click("x-apple.systempreferences:com.apple.Security") {
                                             expect(action() == .ignore("x-apple.systempreferences"), "other schemes are ignored")
                                             click("https://example.com/a?b=1") {
-                                                let sheet = tab.window?.attachedSheet
-                                                let shown = sheet.flatMap { s in
-                                                    s.contentView.flatMap { allViews($0) }?
-                                                        .compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ") }
-                                                expect(shown?.contains("https://example.com/a?b=1") == true, "a web link asks first, showing the whole URL", shown ?? "no sheet")
-                                                if let sheet, let cancel = allViews(sheet.contentView!).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) {
-                                                    cancel.performClick(nil)
-                                                }
+                                                let web = tab.preview?.browserView
+                                                expect(action() == .openWebInPreview(URL(string: "https://example.com/a?b=1")!),
+                                                       "a web link opens in the isolated preview")
+                                                expect(web?.isHidden == false && tab.previewBarEnables(.openInBrowser), "web view and Open in Browser are available")
+                                                expect(web?.configuration.websiteDataStore.isPersistent == false
+                                                       && web?.configuration.userContentController.userScripts.isEmpty == true
+                                                       && web?.configuration.urlSchemeHandler(forURLScheme: "cedric-doc") == nil,
+                                                       "web view has a non-persistent store, no scripts and no document scheme")
+                                                expect(tab.preview?.csp.contains("script-src 'none'") == true,
+                                                       "local preview retains its strict CSP")
+                                                tab.previewBarAction(.home)
                                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                                     MainActor.assumeIsolated {
-                                                        expect(PreviewLinkLog.opened.isEmpty, "Cancel opens nothing")
+                                                        expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
                                                         expect(!FileManager.default.fileExists(atPath: dir.appendingPathComponent("launched").path),
                                                                "nothing was launched")
                                                         expect(app.tabs.count == tabsBefore, "no stray tabs", "\(app.tabs.count) vs \(tabsBefore)")

@@ -74,12 +74,17 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
 
         ![md](\(name)) ![[\(name)]]
         """, vault: vault)
-        #expect(html.components(separatedBy: "/Images/\(name)").count == 4)
+        #expect(html.components(separatedBy: #"src="\#(name)""#).count == 3)
+        #expect(html.contains("/Images/\(name)"))
         #expect(html.contains(#"alt="Sierra Vault" width="200" style="float: right; margin: 0 0 10px 10px;""#))
         #expect(PreviewImageAccess.readable(name, folder: vault.documentFolder, openedRoot: nil))
         let page = try #require(PreviewFolder.pageURL(for: vault.documentFolder))
         let src = try #require(URL(string: name, relativeTo: page)?.absoluteURL)
         #expect(PreviewFolder.file(for: src, in: vault.documentFolder, openedRoot: nil, vaultRoot: vault.root, scriptOn: true, vault: vault)?.path == t.appendingPathComponent("v/Images/\(name)").path)
+        for source in PreviewImageAccess.localSources(html) {
+            let url = try #require(URL(string: source, relativeTo: page)?.absoluteURL)
+            #expect(PreviewFolder.file(for: url, in: vault.documentFolder, openedRoot: nil, vaultRoot: vault.root, scriptOn: true, vault: vault)?.path == t.appendingPathComponent("v/Images/\(name)").path)
+        }
         #expect(ob("![missing](missing.webp)", vault: vault).contains(#"src="missing.webp""#))
     }
 
@@ -101,6 +106,9 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(vault.resolve("../outside.webp") == nil)
         #expect(vault.resolve("/outside.webp") == nil)
         #expect(!PreviewImageAccess.readable("../outside.webp", folder: folder, openedRoot: root))
+        #expect(!PreviewImageAccess.readable(t.appendingPathComponent("outside.webp").absoluteString, folder: folder, openedRoot: root))
+        let escape = try #require(PreviewFolder.pageURL(forFile: folder.appendingPathComponent("escape.webp")))
+        #expect(PreviewFolder.file(for: escape, in: folder, openedRoot: root, vaultRoot: root, scriptOn: false, vault: vault) == nil)
     }
 
     @Test func noteEmbedsAreOneLevelDeep() throws {

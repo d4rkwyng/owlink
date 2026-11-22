@@ -88,13 +88,19 @@ extension PreviewFolder {
     /// `vaultRoot`: the Obsidian vault's folder, for `![[embeds]]` found there.
     public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                             vault: WikiVault? = nil) -> URL? {
+        func containsFolder(_ root: URL) -> Bool {
+            let base = resolved(root).path
+            let path = resolved(folder).path
+            return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        }
         if let f = file(for: url, in: folder, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
         if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
             let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
-            if let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
+            if resolver.documentFolder == folder.standardizedFileURL, containsFolder(resolver.root),
+               let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
                let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return safe }
         }
-        for root in [openedRoot, vaultRoot].compactMap({ $0 }) {
+        for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
             if let f = file(for: url, in: root, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
         }
         guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
@@ -136,25 +142,6 @@ public enum PreviewImageAccess {
         return true
     }
 
-    /// Change only the source attribute, leaving raw HTML attributes intact.
-    public static func resolveBareNames(_ html: String, vault: WikiVault, exportLinks: Bool = false) -> String {
-        let ns = html as NSString
-        let matches = img.matches(in: html, range: NSRange(location: 0, length: ns.length))
-        let out = NSMutableString(string: html)
-        for match in matches.reversed() {
-            let range = match.range(at: 1)
-            let source = unquote(ns.substring(with: range))
-            guard !source.contains("?"), !source.contains("#"),
-                  let decoded = source.removingPercentEncoding,
-                  let file = vault.resolveImage(decoded),
-                  file.standardizedFileURL != vault.documentFolder.appendingPathComponent(decoded).standardizedFileURL else { continue }
-            let href = exportLinks ? WikiVault.relativeHref(file, from: vault.documentFolder) : WikiVault.href(file)
-            guard let href else { continue }
-            out.replaceCharacters(in: range, with: "\"\(Markdown.escape(href))\"")
-        }
-        return out as String
-    }
-
     /// Whether the preview can read `src`, for a document in `folder`.
     public static func readable(_ src: String, folder: URL, openedRoot: URL?, fileManager fm: FileManager = .default) -> Bool {
         if src.lowercased().hasPrefix(PreviewFolder.scheme + ":") || src.lowercased().hasPrefix("file:") {
@@ -174,9 +161,10 @@ public enum PreviewImageAccess {
         if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
         p = p.removingPercentEncoding ?? p
         let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
-        guard !p.hasPrefix("/"), !p.split(separator: "/").contains("..") else { return false }
+        guard !p.hasPrefix("/") else { return false }
         let relative = folder.appendingPathComponent(p).standardizedFileURL
         if let page = PreviewFolder.pageURL(forFile: relative),
+           PreviewFolder.file(for: page, in: vault.root, scriptOn: false) != nil,
            let file = PreviewFolder.file(for: page, in: folder, openedRoot: openedRoot, vaultRoot: vault.root, scriptOn: false, vault: vault) {
             return fm.isReadableFile(atPath: file.path)
         }

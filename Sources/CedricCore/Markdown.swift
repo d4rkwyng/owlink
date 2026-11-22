@@ -46,9 +46,7 @@ public enum Markdown {
     }
 
     public static func render(_ source: String, options: Options = Options()) -> String {
-        let html = MarkdownRenderer(options: options).render(source)
-        guard let vault = options.vault else { return html }
-        return PreviewImageAccess.resolveBareNames(html, vault: vault, exportLinks: options.exportLinks)
+        MarkdownRenderer(options: options).render(source)
     }
 
     /// One line of inline Markdown, for tests.

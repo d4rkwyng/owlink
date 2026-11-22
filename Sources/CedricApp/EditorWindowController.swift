@@ -1473,6 +1473,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         s.detached = previewDetached
         s.sorted = csv?.isSorted ?? false
         s.rowCount = csv?.rowCountText ?? ""
+        s.canGoBack = web?.canGoBack ?? false
+        s.canGoForward = web?.canGoForward ?? false
+        s.canGoHome = web.map { !$0.isHome } ?? false
+        s.canOpenInBrowser = web?.webURL != nil
+        if let web, pane.titleLabel.stringValue != web.navigationTitle {
+            pane.titleLabel.stringValue = web.navigationTitle
+            pane.needsLayout = true
+        }
         // Called after every render: a no-op unless something changed.
         if pane.bar.apply(s) { pane.needsLayout = true }
     }
@@ -1488,6 +1496,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .zoomIn: return PreviewZoom.canStep(s.zoom, in: true)
         case .zoomOut: return PreviewZoom.canStep(s.zoom, in: false)
         case .sortReset: return s.sorted
+        case .back: return s.canGoBack
+        case .forward: return s.canGoForward
+        case .home: return s.canGoHome
+        case .openInBrowser: return s.canOpenInBrowser
         default: return true
         }
     }
@@ -1496,6 +1508,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func previewBarAction(_ item: PreviewBarItem) {
         guard let pane = previewPane else { return }
         switch item {
+        case .back: preview?.goBack()
+        case .forward: preview?.goForward()
+        case .home: preview?.goHome()
+        case .openInBrowser:
+            if let url = preview?.webURL { LinkPrompt.confirmExternal(url, in: previewPane?.window) }
         case .refresh:
             pane.renderer.refresh()
             renderPreview()
@@ -1537,6 +1554,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         p.onLoaded = { [weak self] in self?.syncPreviewScroll() }
         p.onScrolledToLine = { [weak self] line in self?.previewScrolled(toLine: line) }
         p.onLink = { [weak self] action in self?.previewLink(action) }
+        p.onNavigationChange = { [weak self] in self?.updatePreviewBar() }
+        p.onNavigationError = { [weak self] text in self?.showNotice(text, buttons: []) }
         return p
     }
 
@@ -1659,12 +1678,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     var previewAllowsJavaScript: Bool {
         get { preview?.allowJavaScript ?? false }
-        set { preview?.allowJavaScript = newValue; renderPreview() }
+        set { preview?.allowJavaScript = newValue; preview?.trustChanged(); renderPreview() }
     }
 
     var previewAllowsNetwork: Bool {
         get { preview?.allowNetwork ?? false }
-        set { preview?.allowNetwork = newValue; renderPreview() }
+        set { preview?.allowNetwork = newValue; preview?.trustChanged(); renderPreview() }
     }
 
     /// The file was reloaded from disk (a `git pull`, another editor):
@@ -1674,6 +1693,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         guard let p = preview, p.allowJavaScript || p.allowNetwork else { return }
         p.allowJavaScript = false
         p.allowNetwork = false
+        p.trustChanged()
         updatePreviewBar()
     }
 

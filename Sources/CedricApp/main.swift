@@ -291,6 +291,11 @@ func buildMainMenu() -> NSMenu {
             // "Attach Preview" while detached (AppDelegate.validateMenuItem).
             item(String(localized: "Detach Preview"), #selector(AppDelegate.toggleDetachPreview(_:)), "p", [.command, .option, .shift]),
             .separator(),
+            item(String(localized: "Back"), #selector(AppDelegate.previewBackMenu(_:))),
+            item(String(localized: "Forward"), #selector(AppDelegate.previewForwardMenu(_:))),
+            item(String(localized: "This Document"), #selector(AppDelegate.previewHomeMenu(_:))),
+            item(String(localized: "Open in Browser"), #selector(AppDelegate.previewBrowserMenu(_:))),
+            .separator(),
             item(String(localized: "Refresh Preview"), #selector(AppDelegate.refreshPreviewMenu(_:)), "r", [.command, .option]),
             item(String(localized: "Sync Scrolling"), #selector(AppDelegate.togglePreviewSyncMenu(_:))),
             item(String(localized: "Zoom In Preview"), #selector(AppDelegate.previewZoomInMenu(_:)), "=", [.command, .option]),

@@ -52,7 +52,7 @@ public final class WikiVault: @unchecked Sendable {
 
     /// The file a link names (`name` without its `#…`), or nil.
     public func resolve(_ name: String) -> URL? {
-        var n = name.trimmingCharacters(in: .whitespaces)
+        let n = name.trimmingCharacters(in: .whitespaces)
         guard !n.isEmpty, !n.contains("\0") else { return nil }
         guard !n.hasPrefix("/") else { return nil }
         let parts = n.split(separator: "/").map(String.init)
@@ -108,6 +108,9 @@ public final class WikiVault: @unchecked Sendable {
         let (idx, attachments) = currentIndex()
         let hits = (idx[name.lowercased()] ?? []).filter { isFile($0) }
         return hits.min { a, b in
+            let aLocal = a.deletingLastPathComponent().standardizedFileURL == documentFolder
+            let bLocal = b.deletingLastPathComponent().standardizedFileURL == documentFolder
+            if aLocal != bLocal { return aLocal }
             let aPreferred = attachments.map { Self.contains(a, in: $0) } ?? false
             let bPreferred = attachments.map { Self.contains(b, in: $0) } ?? false
             if aPreferred != bPreferred { return aPreferred }
@@ -166,7 +169,13 @@ public final class WikiVault: @unchecked Sendable {
                 if count >= maxEntries { break }
                 let name = item.lastPathComponent
                 let values = try? item.resourceValues(forKeys: Set(keys))
-                if values?.isSymbolicLink == true { continue }
+                if values?.isSymbolicLink == true {
+                    var isDir: ObjCBool = false
+                    if contains(item, in: root), fm.fileExists(atPath: item.path, isDirectory: &isDir), !isDir.boolValue {
+                        idx[name.lowercased(), default: []].append(item.standardizedFileURL)
+                    }
+                    continue
+                }
                 if values?.isDirectory == true {
                     if depth + 1 < maxDepth, name != "node_modules" { queue.append((item, depth + 1)) }
                 } else {
