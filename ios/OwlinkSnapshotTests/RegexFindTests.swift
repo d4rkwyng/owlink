@@ -157,7 +157,7 @@ final class RegexFindTests: XCTestCase {
 
     // MARK: Review fixes
 
-    func testSystemSessionWhenOffAndRegexSessionWhenOnAndToggleIsPersisted() throws {
+    func testSessionSwitchesBackendAndToggleIsPersisted() throws {
         let editor = editor("text")
         let interaction = try XCTUnwrap(editor.textView.findInteraction)
         let ours = try XCTUnwrap(editor.textView.findInteraction(interaction, sessionFor: editor.textView))
@@ -167,7 +167,7 @@ final class RegexFindTests: XCTestCase {
         XCTAssertFalse(AppSettings.findRegex)
         let system = try XCTUnwrap(editor.textView.findInteraction(interaction, sessionFor: editor.textView))
         XCTAssertNotNil(system)
-        XCTAssertNil(editor.regexFind.session, "the system's own session while Regex is off, not ours")
+        XCTAssertTrue(editor.regexFind.session === system, "the wrapper delegates literal search to the text view")
         editor.regexFind.setEnabled(true)
         let next = EditorViewController(document: editor.document, readModeOnOpen: false)
         XCTAssertTrue(next.regexFind.enabled, "the toggle is remembered")
@@ -254,7 +254,7 @@ final class RegexFindTests: XCTestCase {
         XCTAssertNotEqual(slow.regexFind.lastMessage, editor.regexFind.lastMessage)
     }
 
-    func testReplaceAllHasNoMatchCap() async throws {
+    func testReplaceAllExceedsHighlightCap() async throws {
         let count = RegexFind.maxHighlightedMatches + 500
         let editor = editor(String(repeating: "a\n", count: count))
         editor.textView.becomeFirstResponder()
@@ -264,6 +264,41 @@ final class RegexFindTests: XCTestCase {
         XCTAssertTrue(done)
         editor.textView.undoManager?.undo()
         XCTAssertEqual(editor.textView.text, String(repeating: "a\n", count: count), "one undo step for all of them")
+    }
+
+    func testReplaceAllRefusesOverReplacementLimit() async throws {
+        let text = String(repeating: "a\n", count: RegexFind.maxReplacements + 1)
+        let editor = editor(text)
+        editor.regexFind.timeLimitOverride = 60
+        let session = try session(editor)
+        session.replaceAll(searchQuery: "a", replacementString: "b", options: FindTestOptions())
+        let reported = try await until(60) { editor.regexFind.lastMessage != nil }
+        XCTAssertTrue(reported)
+        XCTAssertEqual(editor.regexFind.lastMessage, String(localized: "Too many replacements (\(RegexFind.maxReplacements)+). Narrow the pattern."))
+        XCTAssertEqual(editor.textView.text, text)
+    }
+
+    func testToggleKeepsVisibleFindSession() async throws {
+        let editor = editor("cat c.t")
+        let interaction = try XCTUnwrap(editor.textView.findInteraction)
+        interaction.presentFindNavigator(showingReplace: false)
+        let visible = try await until { interaction.isFindNavigatorVisible && interaction.activeFindSession != nil }
+        XCTAssertTrue(visible)
+        let active = try XCTUnwrap(interaction.activeFindSession)
+        editor.regexFind.setEnabled(false)
+        XCTAssertTrue(interaction.isFindNavigatorVisible)
+        XCTAssertTrue(interaction.activeFindSession === active)
+        editor.regexFind.setEnabled(true)
+        XCTAssertTrue(interaction.isFindNavigatorVisible)
+        XCTAssertTrue(interaction.activeFindSession === active)
+        interaction.dismissFindNavigator()
+        interaction.presentFindNavigator(showingReplace: true)
+        let replaceVisible = try await until { interaction.isFindNavigatorVisible && interaction.activeFindSession != nil }
+        XCTAssertTrue(replaceVisible)
+        let replaceSession = try XCTUnwrap(interaction.activeFindSession)
+        editor.regexFind.setEnabled(false)
+        XCTAssertTrue(interaction.isFindNavigatorVisible)
+        XCTAssertTrue(interaction.activeFindSession === replaceSession)
     }
 
     func testReplaceAllRerunsWhenTheDocumentChangedMidFlight() async throws {

@@ -814,7 +814,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.undoManager?.removeAllActions()
         colorizer.setLanguage(document.language.language)
         generation += 1
-        if regexFind.enabled { regexFind.invalidate() }
+        regexFind.invalidate()
         dailyTimer?.invalidate()
         countDailyWords(baseline: true)
         scheduleWordCount()
@@ -853,7 +853,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         scheduleWritingUpdate()
         scheduleEditorHighlights(selectionChanged: false)
         generation += 1
-        if regexFind.enabled { regexFind.invalidate() }
+        regexFind.invalidate()
         dailyTimer?.invalidate()
         let timer = Timer(timeInterval: dailyIdleInterval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.commitDailyWords() }
@@ -4001,11 +4001,7 @@ final class PaddingLabel: UILabel {
 final class EditorDocumentTextView: UITextView {
     weak var regexFind: RegexFind?
     override func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
-        // The system's own session while Regex is off.
-        guard let regexFind, regexFind.enabled else {
-            regexFind?.session = nil
-            return super.findInteraction(interaction, sessionFor: view)
-        }
+        guard let regexFind else { return super.findInteraction(interaction, sessionFor: view) }
         let session = UITextSearchingFindSession(searchableObject: regexFind)
         regexFind.session = session
         return session

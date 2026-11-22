@@ -19,8 +19,9 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
     /// What the last search found, for the find navigator's quiet state.
     enum Status: Equatable { case idle, invalidPattern, timedOut, tooManyMatches }
 
-    /// Matches beyond this are not highlighted (Replace All has no cap).
+    /// Matches beyond this are not highlighted.
     nonisolated static let maxHighlightedMatches = 10_000
+    nonisolated static let maxReplacements = 200_000
     private static let chunk = 400
     private static let replaceAllRetries = 2
 
@@ -267,7 +268,7 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
             let result = Result { () -> [(range: NSRange, replacement: String)] in
                 if job.isCancelled { throw FindEngine.FindError.cancelled }
                 let regex = try FindEngine.regex(query, findOptions)
-                let matches = try FindEngine.boundedMatches(regex, in: text, timeLimit: limit, maxMatches: .max,
+                let matches = try FindEngine.boundedMatches(regex, in: text, timeLimit: limit, maxMatches: Self.maxReplacements,
                                                             isCancelled: { job.isCancelled })
                 let ns = text as NSString
                 var edits: [(range: NSRange, replacement: String)] = []
@@ -300,7 +301,9 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
                         self.report(String(localized: "Nothing was replaced."))
                     }
                 case .failure(let error):
-                    if let text = self.message(for: error) { self.report(text) }
+                    if error as? FindEngine.FindError == .tooManyMatches {
+                        self.report(String(localized: "Too many replacements (\(Self.maxReplacements)+). Narrow the pattern."))
+                    } else if let text = self.message(for: error) { self.report(text) }
                 }
             }
         }
@@ -344,17 +347,10 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         expression = nil
         status = .idle
         lastAnnounced = nil
-        // The find bar's session is the system's or ours by the toggle, and
-        // is picked when the navigator opens: reopen it with the same text.
-        if let interaction = editor?.textView.findInteraction, interaction.isFindNavigatorVisible {
-            let text = interaction.searchText
-            interaction.dismissFindNavigator()
-            DispatchQueue.main.async {
-                interaction.searchText = text
-                interaction.presentFindNavigator(showingReplace: true)
-            }
-        } else if let session, let lastQuery, let lastSearchOptions {
+        if let session, let lastQuery, let lastSearchOptions {
             session.performSearch(query: lastQuery, options: lastSearchOptions)
+        } else {
+            aggregator?.invalidate()
         }
     }
 
