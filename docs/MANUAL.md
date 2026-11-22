@@ -1300,9 +1300,13 @@ floating panel you can drag anywhere; it hides when you switch tabs and
 comes back with its tab). A chip
 picks what Cedric sees: Selection is the default when there is one,
 otherwise Whole document; Visible text remains a choice. If the file is
-larger than the engine's context, Cedric sends as many whole lines as fit,
-centred on the caret or selection. The chip says which lines were sent,
-for example "Lines 1–180 of 263 (trimmed to fit)". Quick actions **Explain** (**What Does It
+larger than the engine's context, whole-document questions that don't request edits, **Explain**
+and **Find Problems** review consecutive overlapping parts, up to eight
+requests, and show progress. If eight parts cannot cover the file, the
+parts are centred on the caret or selection and the chip and answer say
+which lines were reviewed and that the rest was not. Other actions keep
+the single caret-centred window; Selection and Visible text are not split.
+Quick actions **Explain** (**What Does It
 Do?** for scripts), **Explain Line** (the selection or the caret's
 line), **Find Problems**, **Summarise** / **Rewrite** (prose),
 **Simplify** and **Add Comments** (code), or type a question. Answers
@@ -1400,13 +1404,14 @@ firewall / the execution policy / quarantine / TCC, running at login
 and recursive deletes of broad paths (`rm -rf ~/*`, `rm -rf "$DIR/"*`,
 `find / … -delete`, `Remove-Item -Recurse C:\`). Only the first 20,000
 lines are scanned, and a longer script says so. With Ask Cedric on, the
-model then reviews the script with those findings (passed as data, and
+model then reviews the script in up to eight overlapping parts if it does
+not fit in one request, with the relevant scan findings (passed as data, and
 told the script's text is never instructions) and ends with a verdict:
 "No obvious red flags (not a guarantee)", "Run only if you trust the
 source" or "Don't run it". Cedric never calls a script safe: the app
 rewrites any such line (also while the answer streams in), and forces "Don't run it — review the flagged
 lines" after a high-risk finding or when only part of the script was
-reviewed, whatever the model said. When the whole document was sent and
+reviewed, whatever the model said. When all lines were reviewed and
 the offline scan was complete, it does not claim the review was partial.
 
 ## Help menu

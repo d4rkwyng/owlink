@@ -12,6 +12,7 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Automatic checks on servers.** Automatic checks (and automatic AI grammar) are off by default for LM Studio, Ollama and custom servers. The first time you enable them, Cedric explains that visible text goes to the named server on your local network, not the cloud. If they were already on for a server, they stay off until that notice is confirmed. Existing Intel defaults and on-device behavior are unchanged.
 
 ### Changed
+- **Chunked whole-file reviews.** Check for Risks, Find Problems, Explain and typed whole-document questions can review up to eight overlapping parts when the file does not fit; progress and any unreviewed lines are shown.
 - **Ask Cedric's document scope.** With no selection, Whole document is the default even when it needs trimming. Cedric sends whole lines centred on the caret or selection, and the chip names the lines sent; Visible text remains a choice. Check for Risks no longer claims a complete review was partial.
 
 ### Fixed

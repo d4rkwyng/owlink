@@ -161,6 +161,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private var task: Task<Void, Never>?
     private(set) var running = false
+    private var chunkedReviewRunning = false
+    private var footerBeforeReview: String?
+    private var reviewProgress: String?
+    private var reviewScopeLabel: String?
     /// The first card's proposal (checks).
     var pending: OwlEditProposal? { cards.first?.proposal }
     var hasProposals: Bool { !cards.isEmpty }
@@ -466,7 +470,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let current = pickedScope.flatMap { scopes.contains($0) ? $0 : nil }
         scopePopup.removeAllItems()
         for sc in scopes {
-            let label = OwlChatRequest.documentContext(s, scope: sc, engineBudget: OwlChatStore.shared.contextBudget,
+            let label = (chunkedReviewRunning && sc == .wholeDocument ? reviewScopeLabel : nil)
+                ?? OwlChatRequest.documentContext(s, scope: sc, engineBudget: OwlChatStore.shared.contextBudget,
                                                        history: history, question: "", action: nil, tools: tools,
                                                        server: server, prose: isProse, imageSource: picture,
                                                        preview: true)?.label ?? sc.title
@@ -490,6 +495,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             footer.stringValue = String(localized: "On \(place) · \(LocalAIOwlBridge.shortTitle(chat.backend))")
         } else {
             footer.stringValue = String(localized: "No AI engine yet: set one up in Cedric AI Settings.")
+        }
+        if chunkedReviewRunning, let reviewProgress {
+            footerBeforeReview = footer.stringValue
+            footer.stringValue = reviewProgress
         }
         panel.title = String(localized: "Ask Cedric — \(tab.doc.displayName)")
         render()
@@ -681,6 +690,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         shownAnswer = ""
         streamedRenders = []
         pendingInlineNote = nil
+        chunkedReviewRunning = false
+        footerBeforeReview = nil
+        reviewProgress = nil
+        reviewScopeLabel = nil
         var snap = snapshot()
         if let selection {
             snap = OwlDocumentSnapshot(text: snap.text, generation: snap.generation, selection: selection, visible: snap.visible,
@@ -772,11 +785,36 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 }
             }
             self.lastUsedTools = tools
-            let req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: requestSnapshot,
+            var req = OwlChatRequest(question: question, action: action, context: ctx, snapshot: requestSnapshot,
                                      history: history, useTools: tools, prose: prose, scan: scan,
                                      scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, imageSource: picture,
                                      inlineSelection: inline ? inlineClip?.text : nil,
                                      inlineSelectionNote: inlineClip?.note)
+            if action == .scriptSafety { req.scanFindings = self.lastScan }
+            if let plan = OwlChunkedReviewRunner.plan(req, engine: engine) {
+                guard self.running, !Task.isCancelled else { return }
+                self.chunkedReviewRunning = true
+                self.footerBeforeReview = self.footer.stringValue
+                if let index = self.scopes.firstIndex(of: usedScope), let first = plan.parts.first, let last = plan.parts.last {
+                    let label = plan.isComplete
+                        ? String(localized: "Whole document (\(plan.totalLines) lines)")
+                        : String(localized: "Lines \(first.first)–\(last.last) of \(plan.totalLines) (rest not reviewed)")
+                    self.reviewScopeLabel = label
+                    self.scopePopup.item(at: index)?.title = label
+                }
+                let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, model: engine.scoreKey,
+                                                              describeError: Self.describe) { [weak self] part, total in
+                    DispatchQueue.main.async { MainActor.assumeIsolated {
+                        guard let self, self.running, self.chunkedReviewRunning else { return }
+                        let progress = String(localized: "Reviewing part \(part) of \(total)")
+                        self.reviewProgress = progress
+                        self.footer.stringValue = progress
+                    } }
+                }
+                self.finish(result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
+                return
+            }
+            if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
             self.forcedVerdict = req.forcedVerdict
             // Any answer about a script: clamped before it shows (ScriptVerdictStream).
             self.safeClaimGuard = req.safeClaimGuard
@@ -799,7 +837,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    static func describe(_ e: Error) -> String {
+    nonisolated static func describe(_ e: Error) -> String {
         switch e {
         case LocalAIError.timedOut: return String(localized: "The model took too long to answer.")
         case LocalAIError.endpointNotLocal: return String(localized: "The AI address isn’t on this Mac or the local network.")
@@ -877,12 +915,16 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// Characters of answer shown so far (checks: streaming arrives in steps).
     var streamedCount: Int { streamed.count }
 
-    private func finish(_ outcome: OwlChatOutcome?, error: String?) {
+    private func finish(_ outcome: OwlChatOutcome?, error: String?, stopped: Bool = false, failed: Bool = false) {
         guard running else { return }
         flush()
         running = false
+        chunkedReviewRunning = false
+        reviewProgress = nil
+        reviewScopeLabel = nil
+        if let footerBeforeReview { footer.stringValue = footerBeforeReview; self.footerBeforeReview = nil }
         tab?.contextBar?.refreshStates()
-        tab?.owl?.chatCue(outcome != nil ? .answered : task?.isCancelled == true ? .stopped : .failed)
+        tab?.owl?.chatCue(stopped || task?.isCancelled == true ? .stopped : failed || outcome == nil ? .failed : .answered)
         task = nil
         lastOutcome = outcome
         if let id = docID {
@@ -912,6 +954,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func stop(_ sender: Any?) {
         guard running else { return }
         task?.cancel()
+        if chunkedReviewRunning { return }
         finish(nil, error: String(localized: "Stopped."))
     }
 
