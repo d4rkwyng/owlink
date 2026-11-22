@@ -306,11 +306,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.regexFind = regexFind
         textView.findInteraction?.optionsMenuProvider = { [weak self] defaults in
             guard let self else { return UIMenu(children: defaults) }
-            let toggle = UIAction(title: String(localized: "Regular Expression"), state: self.regexFind.enabled ? .on : .off) { [weak self] _ in
+            let toggle = UIAction(title: String(localized: "Regex"), state: self.regexFind.enabled ? .on : .off) { [weak self] _ in
                 guard let self else { return }
                 self.regexFind.setEnabled(!self.regexFind.enabled)
             }
             toggle.accessibilityIdentifier = "find.regex"
+            toggle.accessibilityLabel = String(localized: "Regex")
+            toggle.accessibilityHint = String(localized: "Search with regular expressions")
             return UIMenu(children: defaults + [toggle])
         }
         textView.alwaysBounceVertical = true
@@ -2932,15 +2934,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     // MARK: Commands
 
-    func findError(_ message: String) {
+    func findError(_ message: String, announce: Bool = true) {
         toast(message)
-        UIAccessibility.post(notification: .announcement, argument: message)
+        if announce { UIAccessibility.post(notification: .announcement, argument: message) }
     }
 
-    func applyFindReplacement(range: NSRange, replacement: String, name: String) {
-        guard textView.isEditable, editGate.isEditable, textView.markedTextRange == nil else { return }
-        let selection = NSRange(location: range.location + (replacement as NSString).length, length: 0)
-        applyTextEdit(TextEdit(range: range, replacement: replacement, selection: selection), actionName: name)
+    @discardableResult
+    func applyFindReplacement(range: NSRange, replacement: String, name: String) -> Bool {
+        applyFindReplacements([(range, replacement)], name: name)
+    }
+
+    /// Find's replacements (ascending, not overlapping) as one undo step.
+    @discardableResult
+    func applyFindReplacements(_ edits: [(range: NSRange, replacement: String)], name: String) -> Bool {
+        guard textView.isEditable, editGate.isEditable, textView.markedTextRange == nil, let last = edits.last else { return false }
+        // The caret goes after the last replacement, in the new text.
+        let caret = last.range.location + (edits.dropLast().reduce(0) { $0 + ($1.replacement as NSString).length - $1.range.length }) + (last.replacement as NSString).length
+        return applyTextEdits(edits, selection: NSRange(location: caret, length: 0), actionName: name)
     }
 
     @objc func copyAsHTML() {
@@ -3934,7 +3944,11 @@ final class PaddingLabel: UILabel {
 final class EditorDocumentTextView: UITextView {
     weak var regexFind: RegexFind?
     override func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
-        guard let regexFind else { return super.findInteraction(interaction, sessionFor: view) }
+        // The system's own session while Regex is off.
+        guard let regexFind, regexFind.enabled else {
+            regexFind?.session = nil
+            return super.findInteraction(interaction, sessionFor: view)
+        }
         let session = UITextSearchingFindSession(searchableObject: regexFind)
         regexFind.session = session
         return session

@@ -30,6 +30,8 @@ enum AppSettings {
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
+        /// The Mac's find bar does not remember its Regex box; the phone does.
+        static let findRegex = "ios.findRegex"
         static let theme = EditorTheme.defaultsKey
     }
 
@@ -186,6 +188,12 @@ enum AppSettings {
     /// Open documents read-only, with an Edit button: on by default on
     /// iPhone (a stray tap or key in a pocket edits nothing), off on iPad.
     static var openReadOnlyDefault: Bool { UIDevice.current.userInterfaceIdiom == .phone }
+
+    /// Whether Find uses regular expressions ("Regex" in the find options).
+    static var findRegex: Bool {
+        get { defaults.bool(forKey: Key.findRegex) }
+        set { defaults.set(newValue, forKey: Key.findRegex) }
+    }
 
     static var openReadOnly: Bool {
         get { defaults.object(forKey: Key.openReadOnly) as? Bool ?? openReadOnlyDefault }

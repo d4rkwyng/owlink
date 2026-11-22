@@ -5,12 +5,17 @@ public struct FindOptions: Equatable, Sendable {
     public var caseSensitive = false
     public var wholeWord = false
     public var wrap = true
+    /// Match only at the start of a word (a leading `\b`), as the system
+    /// find bar's "Starts With". `wholeWord` takes precedence.
+    public var wordPrefix = false
 
-    public init(regex: Bool = false, caseSensitive: Bool = false, wholeWord: Bool = false, wrap: Bool = true) {
+    public init(regex: Bool = false, caseSensitive: Bool = false, wholeWord: Bool = false, wrap: Bool = true,
+                wordPrefix: Bool = false) {
         self.regex = regex
         self.caseSensitive = caseSensitive
         self.wholeWord = wholeWord
         self.wrap = wrap
+        self.wordPrefix = wordPrefix
     }
 }
 
@@ -28,7 +33,7 @@ public enum FindEngine {
     public static func regex(_ pattern: String, _ options: FindOptions) throws -> NSRegularExpression {
         guard !pattern.isEmpty else { throw FindError.emptyPattern }
         var p = options.regex ? pattern : NSRegularExpression.escapedPattern(for: pattern)
-        if options.wholeWord { p = "\\b(?:" + p + ")\\b" }
+        if options.wholeWord { p = "\\b(?:" + p + ")\\b" } else if options.wordPrefix { p = "\\b(?:" + p + ")" }
         var o: NSRegularExpression.Options = [.anchorsMatchLines]
         if !options.caseSensitive { o.insert(.caseInsensitive) }
         do {
@@ -75,13 +80,23 @@ public enum FindEngine {
         regex.matches(in: text as String, range: NSRange(location: 0, length: text.length)).filter { $0.range.length > 0 }
     }
 
+    /// How long a bounded search may run for a text of `length` UTF-16 units:
+    /// half a second plus a little per 200k for a live search; Replace All
+    /// (`interactive: false`) is given far longer, as it runs once, off the
+    /// UI thread, and can be cancelled.
+    public static func timeLimit(forLength length: Int, interactive: Bool = true) -> TimeInterval {
+        let n = Double(max(0, length))
+        return interactive ? min(10, 0.5 + n / 200_000) : min(60, 2 + n / 50_000)
+    }
+
     /// Searches off the UI thread, stopping even during a long ICU match.
     /// A partial result is never returned, so Replace All cannot silently
-    /// replace only some occurrences.
+    /// replace only some occurrences. `now` is the clock (injectable).
     public static func boundedMatches(_ regex: NSRegularExpression, in text: String,
                                       timeLimit: TimeInterval = 0.5, maxMatches: Int = 10_000,
+                                      now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
                                       isCancelled: @Sendable () -> Bool = { false }) throws -> [NSTextCheckingResult] {
-        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeLimit)
+        let deadline = now() + max(0, timeLimit)
         var found: [NSTextCheckingResult] = []
         var failure: FindError?
         regex.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(location: 0, length: (text as NSString).length)) { match, _, stop in
@@ -90,7 +105,7 @@ public enum FindEngine {
                 stop.pointee = true
                 return
             }
-            if ProcessInfo.processInfo.systemUptime >= deadline {
+            if now() >= deadline {
                 failure = .timedOut
                 stop.pointee = true
                 return

@@ -16,6 +16,14 @@ private struct FindAggregator: @unchecked Sendable {
 
 @MainActor
 final class RegexFind: NSObject, @preconcurrency UITextSearching {
+    /// What the last search found, for the find navigator's quiet state.
+    enum Status: Equatable { case idle, invalidPattern, timedOut, tooManyMatches }
+
+    /// Matches beyond this are not highlighted (Replace All has no cap).
+    nonisolated static let maxHighlightedMatches = 10_000
+    private static let chunk = 400
+    private static let replaceAllRetries = 2
+
     private weak var editor: EditorViewController?
     private var aggregator: UITextSearchAggregator<AnyHashable?>?
     private var request = 0
@@ -29,11 +37,20 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
     private let queue = DispatchQueue(label: "app.owlink.regexFind", qos: .userInitiated)
     private var job: FindJob?
     private var replacementJob: FindJob?
-    private var editEpoch = 0
-    private(set) var enabled = false
+    /// Changes when Regex is switched or the session ends, not on edits.
+    private var lifecycle = 0
+    private var keepsMatches = false
+    private var lastAnnounced: String?
+    private(set) var enabled: Bool
+    private(set) var status = Status.idle
+    /// The last message shown to the person (also toasted), for tests.
+    private(set) var lastMessage: String?
+    /// Tests: replaces the length-scaled search time limit.
+    var timeLimitOverride: TimeInterval?
 
     init(editor: EditorViewController) {
         self.editor = editor
+        self.enabled = AppSettings.findRegex
     }
 
     var selectedTextRange: UITextRange? { editor?.textView.selectedTextRange }
@@ -44,6 +61,40 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         return view.compare(foundRange, toRange: toRange, document: document)
     }
 
+    private static func findOptions(_ options: UITextSearchOptions) -> FindOptions {
+        FindOptions(regex: true,
+                    caseSensitive: !options.stringCompareOptions.contains(.caseInsensitive),
+                    wholeWord: options.wordMatchMethod == .fullWord,
+                    wordPrefix: options.wordMatchMethod == .startsWith)
+    }
+
+    // MARK: Messages
+
+    /// `once`: a search repeats per keystroke, so say its message once until
+    /// a search succeeds again.
+    private func report(_ message: String, once: Bool = false) {
+        lastMessage = message
+        guard let editor else { return }
+        if once {
+            if lastAnnounced == message { return }
+            lastAnnounced = message
+        }
+        editor.findError(message)
+    }
+
+    private func message(for error: Error) -> String? {
+        guard let error = error as? FindEngine.FindError else { return nil }
+        switch error {
+        case .emptyPattern, .cancelled: return nil
+        case .invalidPattern: return String(localized: "Invalid pattern")
+        case .timedOut: return String(localized: "The search took too long. Try a simpler expression.")
+        case .tooManyMatches:
+            return String(localized: "More than \(Self.maxHighlightedMatches) matches. Make the expression more specific, or use Replace All.")
+        }
+    }
+
+    // MARK: Search
+
     func performTextSearch(queryString: String, options: UITextSearchOptions, resultAggregator: UITextSearchAggregator<AnyHashable?>) {
         lastQuery = queryString
         lastSearchOptions = options
@@ -53,25 +104,24 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         self.job = job
         let token = request
         aggregator = resultAggregator
-        matches = []
-        expression = nil
         guard let view = editor?.textView else { resultAggregator.finishedSearching(); return }
         if !enabled {
+            matches = []
+            expression = nil
             view.performTextSearch(queryString: queryString, options: options, resultAggregator: resultAggregator)
             return
         }
         let text = view.textStorage.string
         let aggregator = FindAggregator(value: resultAggregator)
-        snapshot = text
-        let findOptions = FindOptions(regex: true,
-                                      caseSensitive: !options.stringCompareOptions.contains(.caseInsensitive),
-                                      wholeWord: options.wordMatchMethod == .fullWord)
-        self.options = findOptions
+        let findOptions = Self.findOptions(options)
+        let limit = timeLimitOverride ?? FindEngine.timeLimit(forLength: (text as NSString).length)
         queue.async { [weak self] in
             let result = Result {
                 if job.isCancelled { throw FindEngine.FindError.cancelled }
                 let regex = try FindEngine.regex(queryString, findOptions)
-                return (regex, try FindEngine.boundedMatches(regex, in: text, isCancelled: { job.isCancelled }))
+                return (regex, try FindEngine.boundedMatches(regex, in: text, timeLimit: limit,
+                                                              maxMatches: Self.maxHighlightedMatches,
+                                                              isCancelled: { job.isCancelled }))
             }
             DispatchQueue.main.async {
                 guard let self, self.request == token, self.enabled,
@@ -80,24 +130,65 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
                     return
                 }
                 switch result {
-                case .success(let (regex, matches)):
+                case .success(let (regex, found)):
+                    self.status = .idle
+                    self.lastAnnounced = nil
                     self.expression = regex
-                    self.matches = matches
-                    for match in matches {
-                        if let range = self.textRange(match.range, in: editor.textView) {
-                            aggregator.value.foundRange(range, searchString: queryString, document: nil)
-                        }
-                    }
+                    self.matches = found
+                    self.snapshot = text
+                    self.options = findOptions
+                    self.deliver(found, from: 0, cursor: (editor.textView.beginningOfDocument, 0), token: token,
+                                 query: queryString, aggregator: aggregator)
                 case .failure(let error):
-                    if case FindEngine.FindError.emptyPattern = error {
-                    } else if case FindEngine.FindError.invalidPattern = error {
-                        editor.findError(String(localized: "Invalid pattern"))
-                    } else {
-                        editor.findError(String(localized: "The search took too long or found too many matches. Try a simpler expression."))
+                    self.matches = []
+                    self.expression = nil
+                    switch error as? FindEngine.FindError {
+                    case .invalidPattern: self.status = .invalidPattern
+                    case .timedOut: self.status = .timedOut
+                    case .tooManyMatches: self.status = .tooManyMatches
+                    default: self.status = .idle
                     }
+                    // An unfinished pattern while typing is quiet: no toast,
+                    // no announcement; Replace says so.
+                    if self.status != .invalidPattern, let text = self.message(for: error) {
+                        self.report(text, once: true)
+                    }
+                    aggregator.value.finishedSearching()
                 }
-                aggregator.value.finishedSearching()
             }
+        }
+    }
+
+    /// Hands the found ranges to the system a few hundred per run-loop turn,
+    /// each positioned relative to the previous one, so a big result list
+    /// does not block the main thread.
+    private func deliver(_ found: [NSTextCheckingResult], from index: Int, cursor: (UITextPosition, Int), token: Int,
+                         query: String, aggregator: FindAggregator) {
+        guard request == token, enabled, let view = editor?.textView else {
+            aggregator.value.finishedSearching()
+            return
+        }
+        var cursor = cursor
+        var i = index
+        let stop = min(found.count, index + Self.chunk)
+        while i < stop {
+            let range = found[i].range
+            i += 1
+            guard let start = view.position(from: cursor.0, offset: range.location - cursor.1),
+                  let end = view.position(from: start, offset: range.length),
+                  let textRange = view.textRange(from: start, to: end) else { continue }
+            cursor = (end, NSMaxRange(range))
+            aggregator.value.foundRange(textRange, searchString: query, document: nil)
+        }
+        if i >= found.count {
+            aggregator.value.finishedSearching()
+            return
+        }
+        let next = cursor
+        let from = i
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { aggregator.value.finishedSearching(); return }
+            self.deliver(found, from: from, cursor: next, token: token, query: query, aggregator: aggregator)
         }
     }
 
@@ -109,9 +200,19 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         editor?.textView.clearAllDecoratedFoundText()
     }
 
+    // MARK: Replace
+
     func shouldReplace(foundTextRange range: UITextRange, document: AnyHashable??, withText replacementText: String) -> Bool {
         guard let view = editor?.textView, view.isEditable else { return false }
         return enabled || view.shouldReplace(foundTextRange: range, document: document, withText: replacementText)
+    }
+
+    /// Replace and Replace All say so, rather than doing nothing, when the
+    /// person is composing text in the editor.
+    private func refusesWhileComposing() -> Bool {
+        guard editor?.textView.markedTextRange != nil else { return false }
+        report(String(localized: "Finish entering text before replacing."))
+        return true
     }
 
     func replace(foundTextRange range: UITextRange, document: AnyHashable??, withText replacementText: String) {
@@ -121,61 +222,85 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
             view.replace(foundTextRange: range, document: document, withText: replacementText)
             return
         }
+        guard !refusesWhileComposing() else { return }
         let location = view.offset(from: view.beginningOfDocument, to: range.start)
         let length = view.offset(from: range.start, to: range.end)
         guard view.textStorage.string == snapshot, let expression,
-              let match = matches.first(where: { $0.range == NSRange(location: location, length: length) }) else { return }
+              let index = matches.firstIndex(where: { $0.range == NSRange(location: location, length: length) }) else { return }
+        let match = matches[index]
         let replacement = FindEngine.replacement(for: match, in: snapshot as NSString, template: replacementText,
                                                   regex: expression, options: options)
-        editor.applyFindReplacement(range: match.range, replacement: replacement, name: String(localized: "Replace"))
+        // The matches after this one move by the length change, so a second
+        // Replace straight away needs no new search.
+        let delta = (replacement as NSString).length - match.range.length
+        var remaining = matches
+        remaining.remove(at: index)
+        for j in index..<remaining.count { remaining[j] = remaining[j].adjustingRanges(offset: delta) }
+        keepsMatches = true
+        let applied = editor.applyFindReplacement(range: match.range, replacement: replacement, name: String(localized: "Replace"))
+        keepsMatches = false
+        if applied {
+            matches = remaining
+            snapshot = view.textStorage.string
+        }
     }
 
     func replaceAll(queryString: String, options: UITextSearchOptions, withText replacementText: String) {
         guard let editor, editor.textView.isEditable else { return }
-        let view = editor.textView
         guard enabled else {
-            view.replaceAll(queryString: queryString, options: options, withText: replacementText)
+            editor.textView.replaceAll(queryString: queryString, options: options, withText: replacementText)
             return
         }
-        let text = view.textStorage.string
-        let findOptions = FindOptions(regex: true,
-                                      caseSensitive: !options.stringCompareOptions.contains(.caseInsensitive),
-                                      wholeWord: options.wordMatchMethod == .fullWord)
-        let epoch = editEpoch
+        guard !refusesWhileComposing() else { return }
         replacementJob?.cancel()
+        runReplaceAll(query: queryString, findOptions: Self.findOptions(options), template: replacementText, attempt: 0)
+    }
+
+    private func runReplaceAll(query: String, findOptions: FindOptions, template: String, attempt: Int) {
+        guard let editor else { return }
+        let text = editor.textView.textStorage.string
+        let generation = lifecycle
+        let limit = timeLimitOverride ?? FindEngine.timeLimit(forLength: (text as NSString).length, interactive: false)
         let job = FindJob()
         replacementJob = job
         queue.async { [weak self] in
-            let result = Result {
+            let result = Result { () -> [(range: NSRange, replacement: String)] in
                 if job.isCancelled { throw FindEngine.FindError.cancelled }
-                let regex = try FindEngine.regex(queryString, findOptions)
-                let matches = try FindEngine.boundedMatches(regex, in: text, isCancelled: { job.isCancelled })
-                guard let first = matches.first, let last = matches.last else { return (NSRange(location: 0, length: 0), "") }
-                let span = NSRange(location: first.range.location, length: NSMaxRange(last.range) - first.range.location)
+                let regex = try FindEngine.regex(query, findOptions)
+                let matches = try FindEngine.boundedMatches(regex, in: text, timeLimit: limit, maxMatches: .max,
+                                                            isCancelled: { job.isCancelled })
                 let ns = text as NSString
-                let replacement = NSMutableString(string: ns.substring(with: span))
-                for match in matches.reversed() {
-                    if job.isCancelled { throw FindEngine.FindError.cancelled }
-                    let value = FindEngine.replacement(for: match, in: ns, template: replacementText, regex: regex, options: findOptions)
-                    replacement.replaceCharacters(in: NSRange(location: match.range.location - span.location, length: match.range.length), with: value)
+                var edits: [(range: NSRange, replacement: String)] = []
+                edits.reserveCapacity(matches.count)
+                for (n, match) in matches.enumerated() {
+                    if n % 1000 == 0, job.isCancelled { throw FindEngine.FindError.cancelled }
+                    edits.append((match.range, FindEngine.replacement(for: match, in: ns, template: template, regex: regex, options: findOptions)))
                 }
-                return (span, replacement as String)
+                return edits
             }
             DispatchQueue.main.async {
-                guard let self, self.enabled, self.editEpoch == epoch, !job.isCancelled, let editor = self.editor,
-                      editor.textView.isEditable, editor.textView.textStorage.string == text else { return }
+                guard let self, self.enabled, self.lifecycle == generation, !job.isCancelled, let editor = self.editor else { return }
+                guard editor.textView.isEditable else {
+                    self.report(String(localized: "The document is read-only."))
+                    return
+                }
+                guard editor.textView.textStorage.string == text else {
+                    // Edited while searching: search again on the new text.
+                    if attempt < Self.replaceAllRetries {
+                        self.runReplaceAll(query: query, findOptions: findOptions, template: template, attempt: attempt + 1)
+                    } else {
+                        self.report(String(localized: "The document kept changing, so nothing was replaced. Try Replace All again."))
+                    }
+                    return
+                }
                 switch result {
-                case .success(let (range, replacement)):
-                    if range.length > 0 {
-                        editor.applyFindReplacement(range: range, replacement: replacement, name: String(localized: "Replace All"))
+                case .success(let edits):
+                    guard !edits.isEmpty, !self.refusesWhileComposing() else { return }
+                    if !editor.applyFindReplacements(edits, name: String(localized: "Replace All")) {
+                        self.report(String(localized: "Nothing was replaced."))
                     }
                 case .failure(let error):
-                    if case FindEngine.FindError.emptyPattern = error { return }
-                    if case FindEngine.FindError.invalidPattern = error {
-                        editor.findError(String(localized: "Invalid pattern"))
-                    } else {
-                        editor.findError(String(localized: "The search took too long or found too many matches. Try a simpler expression."))
-                    }
+                    if let text = self.message(for: error) { self.report(text) }
                 }
             }
         }
@@ -189,13 +314,17 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         editor?.textView.scrollRangeToVisible(range, inDocument: document)
     }
 
+    // MARK: Lifecycle
+
+    /// The text changed: search again. After Find's own single replacement
+    /// the shifted matches stay usable meanwhile.
     func invalidate() {
         request += 1
-        editEpoch += 1
         job?.cancel()
-        replacementJob?.cancel()
-        matches = []
-        expression = nil
+        if !keepsMatches {
+            matches = []
+            expression = nil
+        }
         if let session, let lastQuery, let lastSearchOptions {
             session.performSearch(query: lastQuery, options: lastSearchOptions)
         } else {
@@ -206,20 +335,32 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
     func setEnabled(_ enabled: Bool) {
         guard self.enabled != enabled else { return }
         self.enabled = enabled
+        AppSettings.findRegex = enabled
         request += 1
-        editEpoch += 1
+        lifecycle += 1
         job?.cancel()
         replacementJob?.cancel()
         matches = []
         expression = nil
-        if let session, let lastQuery, let lastSearchOptions {
+        status = .idle
+        lastAnnounced = nil
+        // The find bar's session is the system's or ours by the toggle, and
+        // is picked when the navigator opens: reopen it with the same text.
+        if let interaction = editor?.textView.findInteraction, interaction.isFindNavigatorVisible {
+            let text = interaction.searchText
+            interaction.dismissFindNavigator()
+            DispatchQueue.main.async {
+                interaction.searchText = text
+                interaction.presentFindNavigator(showingReplace: true)
+            }
+        } else if let session, let lastQuery, let lastSearchOptions {
             session.performSearch(query: lastQuery, options: lastSearchOptions)
         }
     }
 
     func endSession() {
         request += 1
-        editEpoch += 1
+        lifecycle += 1
         job?.cancel()
         replacementJob?.cancel()
         aggregator = nil
@@ -228,11 +369,7 @@ final class RegexFind: NSObject, @preconcurrency UITextSearching {
         session = nil
         matches = []
         expression = nil
-    }
-
-    private func textRange(_ range: NSRange, in view: UITextView) -> UITextRange? {
-        guard let start = view.position(from: view.beginningOfDocument, offset: range.location),
-              let end = view.position(from: start, offset: range.length) else { return nil }
-        return view.textRange(from: start, to: end)
+        status = .idle
+        lastAnnounced = nil
     }
 }
