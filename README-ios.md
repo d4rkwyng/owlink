@@ -99,8 +99,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   selection). A file too big for the model sends whole lines around the
   caret and the chip names them ("Lines 40–160 of 900 (trimmed to fit)").
   Explain, Find Problems and typed whole-document questions review a file
-  that doesn't fit in up to eight overlapping parts, with progress and a
-  note on any lines not reviewed (`OwlChunkedReviewRunner`). Check for
+  that doesn't fit in up to eight overlapping parts, then combine their
+  answers into one response; progress says “Reviewing…” without part counts,
+  with a note on any lines not reviewed (`OwlChunkedReviewRunner`). Check for
   Risks stays Mac-only (iOS has no offline script scan yet).
 - **Explain Selection** and **Rewrite Selection** in the text's edit menu
   and the Cedric menu (`⌥⌘E`, `⌥⇧⌘E`): the exact selection (clipped to

@@ -148,6 +148,7 @@ final class AskCedricModel: ObservableObject {
             refreshScope()
             return
         }
+        engineTitle = OwlChatEngines.displayTitle(settings: s)
         previewServer = s.backend.usesServer
         previewTools = OwlChatEngines.configuredScoreKey(settings: s).map { gate.allowsTools($0) } ?? false
         refreshScope()
@@ -289,10 +290,10 @@ final class AskCedricModel: ObservableObject {
         }
         reviewScopeLabel = label
         let result = await OwlChunkedReviewRunner.run(request, plan: plan, engine: engine, model: engine.scoreKey,
-                                                      describeError: { @Sendable error in AIStatus.describe(error) }) { [weak self] part, total in
+                                                      describeError: { @Sendable error in AIStatus.describe(error) }) { [weak self] _, _ in
             DispatchQueue.main.async { MainActor.assumeIsolated {
                 guard let self, self.running, self.reviewScopeLabel != nil else { return }
-                self.reviewProgress = String(localized: "Reviewing part \(part) of \(total)")
+                self.reviewProgress = String(localized: "Reviewing…")
             } }
         }
         let answer = OwlChatRunner.stripThinking(result.outcome.answer)

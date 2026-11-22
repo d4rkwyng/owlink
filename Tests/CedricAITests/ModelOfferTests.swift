@@ -43,4 +43,10 @@ import CedricCore
         #expect(why?.contains(small.name) == true)
         #expect(why?.contains("smaller model") == true)
     }
+
+    @Test func memoryEstimateScalesWithContextWindow() {
+        let fourK = ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes, contextTokens: 4096)
+        let eightK = ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes, contextTokens: 8192)
+        #expect(eightK - small.sizeBytes - 256 * 1_048_576 == 2 * (fourK - small.sizeBytes - 256 * 1_048_576))
+    }
 }

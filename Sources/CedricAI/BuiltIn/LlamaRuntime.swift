@@ -16,7 +16,11 @@ import CLlamaLoader
 /// Macs run on the CPU (ggml's Metal path on Intel GPUs is not something we
 /// test or rely on), which works but is slow.
 public struct LlamaRuntime: BuiltInRuntime {
-    public static let contextTokens: Int32 = 4096
+    #if os(iOS)
+    public static let contextTokens: Int32 = 8192
+    #else
+    public static let contextTokens: Int32 = 16384
+    #endif
     static let batchTokens: Int32 = 512
 
     public init() {}
@@ -65,7 +69,8 @@ public struct LlamaRuntime: BuiltInRuntime {
             throw BuiltInError.loadFailed("not a model from Owlink's list")
         }
         #if os(iOS)
-        if let why = ModelMemoryGate.refusal(for: model, available: Int64(os_proc_available_memory())) {
+        if let why = ModelMemoryGate.refusal(for: model, available: Int64(os_proc_available_memory()),
+                                             contextTokens: Self.contextTokens) {
             throw BuiltInError.loadFailed(why)
         }
         #endif

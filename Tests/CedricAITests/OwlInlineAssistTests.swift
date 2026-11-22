@@ -175,4 +175,17 @@ import CedricCore
         automatic.enabled = false
         #expect(OwlChatEngines.configuredScoreKey(settings: automatic) == nil)
     }
+
+    @Test func displayTitleIncludesConfiguredModel() throws {
+        let apple = LocalAISettings(enabled: true, backend: .apple)
+        #expect(OwlChatEngines.displayTitle(settings: apple) == "Apple Intelligence")
+
+        let catalog = try #require(ModelCatalog.bundled())
+        let model = try #require(catalog.defaultModel)
+        let builtIn = LocalAISettings(enabled: true, backend: .builtIn, model: model.id)
+        #expect(OwlChatEngines.displayTitle(settings: builtIn) == "Built-in · \(model.name)")
+
+        let server = LocalAISettings(enabled: true, backend: .lmStudio, model: "qwen2.5-coder:1.5b-instruct")
+        #expect(OwlChatEngines.displayTitle(settings: server) == "LM Studio · Qwen2.5 Coder 1.5B")
+    }
 }

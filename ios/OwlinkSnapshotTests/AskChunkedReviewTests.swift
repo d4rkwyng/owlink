@@ -25,8 +25,7 @@ final class AskChunkedReviewTests: XCTestCase {
         let request = OwlChatRequest(question: question, action: nil, context: context, snapshot: snap,
                                      useTools: tools, prose: true)
         let plan = try XCTUnwrap(OwlChunkedReviewRunner.plan(request, engine: engine))
-        let first = try XCTUnwrap(plan.parts.first)
-        let expectedPart = String(localized: "Part \(1) (lines \(first.first)–\(first.last))")
+        XCTAssertGreaterThan(plan.parts.count, 1)
 
         var progress: [String] = []
         let subscription = model.$reviewProgress.compactMap { $0 }.sink { progress.append($0) }
@@ -37,10 +36,13 @@ final class AskChunkedReviewTests: XCTestCase {
         withExtendedLifetime((subscription, completion)) {}
 
         XCTAssertFalse(progress.isEmpty)
+        XCTAssertTrue(progress.allSatisfy { $0 == String(localized: "Reviewing…") })
+        XCTAssertTrue(progress.allSatisfy { !$0.localizedCaseInsensitiveContains("part") })
         XCTAssertEqual(model.entries.last?.role, .owl)
         let answer = try XCTUnwrap(model.entries.last?.text)
         XCTAssertFalse(answer.isEmpty)
-        XCTAssertTrue(answer.contains(expectedPart))
+        XCTAssertFalse(answer.localizedCaseInsensitiveContains("part 1 of"))
+        XCTAssertFalse(answer.contains("Part 1 (lines"))
     }
 
     func testStopBeforeFirstPartShowsStoppedNote() async throws {

@@ -437,7 +437,7 @@ public struct OwlChatRequest: Sendable {
         }
         let task = action.map { OwlPrompts.quickInstruction($0, prose: prose, toolsOn: useTools, context: context, scan: scan) } ?? question
         guard let header = reviewPartHeader else { return task }
-        return "\(header)\nReview only these lines and cite the real file line numbers shown. Do not review other lines.\n\n\(task)"
+        return "\(header)\nReview only these lines and cite the real file line numbers shown. Do not review other lines or mention that the review is limited to these lines.\n\n\(task)"
     }
 
     /// The tools offered. describe_image only with a picture, and then even
@@ -621,10 +621,10 @@ public struct ServerChatEngine: OwlChatEngine {
         self.client = client; self.model = model; self.kind = kind
     }
 
-    public var title: String { "\(LocalAIOwlBridge.shortTitle(kind)) · \(model)" }
+    public var title: String { "\(LocalAIOwlBridge.shortTitle(kind)) · \(HintSource.shortModelName(model))" }
     public var scoreKey: String { "\(kind.rawValue):\(model)" }
-    /// Servers have their own (usually larger) context; keep requests modest.
-    public var contextBudget: Int { 12_000 }
+    /// Servers usually have 32k+ context; cap requests while allowing a whole file when it fits.
+    public var contextBudget: Int { 32_000 }
     public var usesServer: Bool { true }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
@@ -841,8 +841,14 @@ public struct BuiltInChatEngine: OwlChatEngine {
 
     public var title: String { "Built-in · \(model.name)" }
     public var scoreKey: String { "builtIn:\(model.id)" }
-    /// n_ctx 4096 tokens: ≈ 2000 tokens of document (≈ 6 KB).
-    public var contextBudget: Int { 6_000 }
+    /// The iOS 8K n_ctx gets 12,000 characters; macOS 16K gets 24,000.
+    public var contextBudget: Int {
+        #if os(iOS)
+        12_000
+        #else
+        24_000
+        #endif
+    }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
                      onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
@@ -909,6 +915,26 @@ public enum OwlChatEngines {
         case .lmStudio, .ollama, .custom:
             guard let model = settings.model, !model.isEmpty else { return nil }
             return "\(settings.backend.rawValue):\(model)"
+        }
+    }
+
+    /// A useful engine name before the engine itself has loaded.
+    public static func displayTitle(settings: LocalAISettings) -> String {
+        switch settings.backend {
+        case .apple:
+            return "Apple Intelligence"
+        case .builtIn:
+            let engine = BuiltInEngine()
+            let configured = settings.model.flatMap { engine.catalog?.model(id: $0) }
+            if let model = configured ?? builtInChoice(settings: settings, engine: engine) {
+                return "Built-in · \(model.name)"
+            }
+            return LocalAIOwlBridge.shortTitle(settings.backend)
+        case .lmStudio, .ollama, .custom:
+            guard let model = settings.model, !model.isEmpty else {
+                return LocalAIOwlBridge.shortTitle(settings.backend)
+            }
+            return "\(LocalAIOwlBridge.shortTitle(settings.backend)) · \(HintSource.shortModelName(model))"
         }
     }
 
