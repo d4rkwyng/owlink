@@ -45,7 +45,7 @@ import CedricCore
         rig.clock.advance(9.5)
         #expect(await rig.scheduler.gate(for: doc) == .typing(remaining: 0.5))
         // A scroll (same generation) doesn't restart it, an edit does.
-        await rig.scheduler.contextChanged(context("other", gen: 1, doc: doc))
+        await rig.scheduler.contextChanged(context("other visible text in the window", gen: 1, doc: doc))
         #expect(await rig.scheduler.gate(for: doc) == .typing(remaining: 0.5))
         await rig.scheduler.contextChanged(context(gen: 2, doc: doc))
         #expect(await rig.scheduler.gate(for: doc) == .typing(remaining: 10))

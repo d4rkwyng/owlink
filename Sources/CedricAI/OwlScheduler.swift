@@ -7,6 +7,9 @@ import CedricCore
 ///   document has been open and untouched for `minIdle` (10 s in the app);
 /// - never for a document marked large (`setLargeDocument`): its text
 ///   isn't sent and, for the built-in engine, no model is loaded;
+/// - never when the text has fewer than `HintPrompt.minimumHintCharacters`
+///   non-whitespace characters: an empty document has nothing to check,
+///   and asking invents a problem;
 /// - at most once per `minInterval` (90 s) per document;
 /// - never while the app is inactive, in Low Power Mode, or on battery
 ///   below `minimumBattery` (20 %);
@@ -54,6 +57,9 @@ public actor OwlScheduler {
         case unknownDocument
         /// Marked large (too big or with very long lines): never asked.
         case largeDocument
+        /// Empty, or under `HintPrompt.minimumHintCharacters` non-whitespace
+        /// characters: never asked, by any engine.
+        case tooShort
     }
 
     public enum Outcome: Sendable, Equatable {
@@ -194,13 +200,15 @@ public actor OwlScheduler {
 
     /// Asked for (the user clicked "Ask AI Now"): starts a request for
     /// `context` now, whatever the typing pause, the interval, the power
-    /// state or `minIdle` say. Still never for a large document, and an
-    /// edit still cancels it. False when it didn't start (large, or a
-    /// request for this generation is already running).
+    /// state or `minIdle` say. Still never for a large document or one
+    /// with almost no text, and an edit still cancels it. False when it
+    /// didn't start (large, too short, or a request for this generation
+    /// is already running).
     @discardableResult
     public func checkNow(_ context: OwlContext) -> Bool {
         let id = context.documentID
         if largeDocuments.contains(id) { return false }
+        if !HintPrompt.hasEnoughText(context.text) { return false }
         let now = clock.now
         var doc = docs[id] ?? Doc(context: context, opened: now, lastEdit: now)
         if doc.inflight != nil, doc.context.editGeneration == context.editGeneration { return false }
@@ -221,6 +229,7 @@ public actor OwlScheduler {
     public func gate(for id: UUID) -> Gate {
         if largeDocuments.contains(id) { return .largeDocument }
         guard let doc = docs[id] else { return .unknownDocument }
+        if !HintPrompt.hasEnoughText(doc.context.text) { return .tooShort }
         let now = clock.now
         if !appActive { return .inactive }
         if doc.askedGeneration == doc.context.editGeneration { return .alreadyAsked }
@@ -262,13 +271,13 @@ public actor OwlScheduler {
         case .fire: start(id)
         case .typing(let r), .throttled(let r): arm(id, after: r)
         case .power: arm(id, after: config.minInterval)   // re-check the battery later
-        case .inactive, .alreadyAsked, .busy, .unknownDocument, .largeDocument: break
+        case .inactive, .alreadyAsked, .busy, .unknownDocument, .largeDocument, .tooShort: break
         }
         return g
     }
 
     private func start(_ id: UUID) {
-        guard var doc = docs[id] else { return }
+        guard var doc = docs[id], HintPrompt.hasEnoughText(doc.context.text) else { return }
         let context = doc.context
         doc.lastFire = clock.now
         doc.askedGeneration = context.editGeneration

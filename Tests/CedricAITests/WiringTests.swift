@@ -269,7 +269,7 @@ final class SlowProvider: OwlHintProvider, @unchecked Sendable {
         await rig.bridge.apply(Self.fast)
         let running = rig.bridge.scheduler
         let doc = UUID()
-        #expect(rig.bridge.checkNow(context("if i <= n {}", gen: 1, doc: doc)))
+        #expect(rig.bridge.checkNow(context("if i <= n { print(indexValue) }", gen: 1, doc: doc)))
         #expect(await eventually { @MainActor in rig.bridge.thinking.contains(doc) })
         var tweaked = Self.fast
         tweaked.minInterval = 30

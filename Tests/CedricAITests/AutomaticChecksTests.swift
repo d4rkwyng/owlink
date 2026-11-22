@@ -72,7 +72,7 @@ import CedricCore
         try? await Task.sleep(nanoseconds: 400_000_000)
         #expect(provider.calls == 0)
         let doc = UUID()
-        #expect(bridge.checkNow(context("if i <= n {}", gen: 4, doc: doc)))
+        #expect(bridge.checkNow(context("if i <= n { print(indexValue) }", gen: 4, doc: doc)))
         #expect(await eventually { @MainActor in got.value == 1 })
         #expect(provider.calls == 1)
         // Paused (source back to Rules) or a large document: not even when asked.
@@ -95,7 +95,7 @@ import CedricCore
         s.automaticChecks = false
         await bridge.apply(s)
         let doc = UUID()
-        #expect(bridge.checkNow(context("if i <= n {}", gen: 1, doc: doc)))
+        #expect(bridge.checkNow(context("if i <= n { print(indexValue) }", gen: 1, doc: doc)))
         #expect(await eventually { @MainActor in bridge.thinking.contains(doc) })
         #expect(bridge.wantsContext(for: doc) && !bridge.wantsContext(for: UUID()))
         // The user types while it runs: the answer is for old text, so it's cancelled.

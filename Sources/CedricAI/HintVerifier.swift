@@ -106,9 +106,13 @@ public enum HintVerifier {
         return out
     }
 
-    /// False when the code contradicts the claim.
+    /// False when the code contradicts the claim, when the claim names a
+    /// construct the document does not have, or when it quotes text that
+    /// is not in the document.
     public static func holds(_ categories: Set<Category>, title: String, detail: String?, find: String,
                              text: String, language: String) -> Bool {
+        if !citationsAreInDocument(title: title, detail: detail, find: find, text: text) { return false }
+        if namesAbsentConstruct(title: title, detail: detail, text: text, language: language) { return false }
         let claim = title + " " + (detail ?? "") + " " + find
         for c in categories {
             switch c {
@@ -179,6 +183,170 @@ public enum HintVerifier {
             lastSignificant = ch
         }
         return true
+    }
+
+    // MARK: Claims the text cannot support
+
+    /// Plain text and Markdown are where a model invents a code block,
+    /// table, link, heading or list. Code languages keep those words
+    /// ("scans the table" in SQL).
+    static func checksDocumentShape(_ language: String) -> Bool {
+        ["plain", "text", "txt", "markdown", "md"].contains(language.lowercased())
+    }
+
+    /// The `find` snippet, and every backtick or double-quoted span in the
+    /// title and detail, must occur in `text`. An empty citation is not a
+    /// claim about the text. A quote of a fix that was never in the
+    /// document is still a claim the text doesn't support, so it is dropped.
+    static func citationsAreInDocument(title: String, detail: String?, find: String, text: String) -> Bool {
+        let cited = find.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cited.isEmpty, !text.contains(cited) { return false }
+        let claim = title + "\n" + (detail ?? "")
+        for span in quotedSpans(in: claim) {
+            let q = span.trimmingCharacters(in: .whitespacesAndNewlines)
+            if q.isEmpty { continue }
+            if !text.contains(q) { return false }
+        }
+        return true
+    }
+
+    /// Backticks, `"straight quotes"` and “curly quotes”. An unclosed quote
+    /// is ignored: half a mark is not a citation.
+    static func quotedSpans(in claim: String) -> [String] {
+        var out: [String] = []
+        func pairs(_ open: Character, _ close: Character) {
+            let chars = Array(claim)
+            var i = 0
+            while i < chars.count {
+                guard chars[i] == open else { i += 1; continue }
+                var j = i + 1
+                while j < chars.count, chars[j] != close { j += 1 }
+                if j >= chars.count { break }
+                if j > i + 1 { out.append(String(chars[(i + 1)..<j])) }
+                i = j + 1
+            }
+        }
+        pairs("`", "`")
+        pairs("\"", "\"")
+        pairs("“", "”")
+        return out
+    }
+
+    /// True when the claim names a code block, or (in plain text or
+    /// Markdown) a table, link, heading or list, and the document has no
+    /// such construct. Cheap scans of the lines; a construct we are not
+    /// sure about is left alone.
+    static func namesAbsentConstruct(title: String, detail: String?, text: String, language: String) -> Bool {
+        let claim = (title + " " + (detail ?? "")).lowercased()
+        if claim.contains("code block") || claim.contains("fenced code") || claim.contains("code fence")
+            || claim.contains("unclosed fence") || claim.contains("fence is") {
+            if !hasCodeBlock(text) { return true }
+        }
+        guard checksDocumentShape(language) else { return false }
+        if mentions(claim, "table"), !text.contains("|") { return true }
+        if (mentions(claim, "link") || mentions(claim, "hyperlink")), !hasLink(text) { return true }
+        if mentions(claim, "heading"), !hasHeading(text) { return true }
+        if mentions(claim, "list"), !hasListMarker(text) { return true }
+        return false
+    }
+
+    /// `word` or `words`, as a whole word.
+    static func mentions(_ claim: String, _ word: String) -> Bool {
+        let pattern = "\\b" + NSRegularExpression.escapedPattern(for: word) + "s?\\b"
+        return claim.range(of: pattern, options: .regularExpression) != nil
+    }
+
+    /// A ``` or ~~~ fence (a line of its own), or a CommonMark indented
+    /// code block (four spaces or a tab, then something that isn't space).
+    static func hasCodeBlock(_ text: String) -> Bool {
+        for line in lines(of: text) {
+            let fenceAt = firstNonSpace(line, limit: 3)
+            if fenceAt.spaces <= 3, let c = fenceAt.char, (c == "`" || c == "~") {
+                var run = 0
+                var j = fenceAt.index
+                while j < line.endIndex, line[j] == c { run += 1; j = line.index(after: j) }
+                if run >= 3 { return true }
+            }
+            if line.hasPrefix("\t") {
+                if line.dropFirst().contains(where: { !$0.isWhitespace }) { return true }
+            } else if line.hasPrefix("    "), line.dropFirst(4).contains(where: { !$0.isWhitespace }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func hasLink(_ text: String) -> Bool {
+        if text.contains("](") || text.contains("][") || text.contains("[[") { return true }
+        let lower = text.lowercased()
+        return lower.contains("https://") || lower.contains("http://") || lower.contains("mailto:")
+    }
+
+    static func hasHeading(_ text: String) -> Bool {
+        var previousWasText = false
+        for line in lines(of: text) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if isATXHeading(line) { return true }
+            if previousWasText, isSetextUnderline(trimmed) { return true }
+            previousWasText = !trimmed.isEmpty && !isSetextUnderline(trimmed)
+        }
+        return false
+    }
+
+    static func isATXHeading(_ line: String) -> Bool {
+        let start = firstNonSpace(line, limit: 3)
+        guard start.spaces <= 3, start.char == "#" else { return false }
+        var hashes = 0
+        var i = start.index
+        while i < line.endIndex, line[i] == "#", hashes < 7 {
+            hashes += 1
+            i = line.index(after: i)
+        }
+        guard (1...6).contains(hashes) else { return false }
+        if i == line.endIndex { return true }
+        return line[i] == " " || line[i] == "\t"
+    }
+
+    static func isSetextUnderline(_ trimmed: String) -> Bool {
+        guard let c = trimmed.first, c == "=" || c == "-" else { return false }
+        return trimmed.allSatisfy { $0 == c }
+    }
+
+    static func hasListMarker(_ text: String) -> Bool {
+        for line in lines(of: text) {
+            let start = firstNonSpace(line, limit: 3)
+            guard start.spaces <= 3, let c = start.char else { continue }
+            if c == "-" || c == "*" || c == "+" {
+                let n = line.index(after: start.index)
+                if n < line.endIndex, line[n] == " " || line[n] == "\t" { return true }
+                continue
+            }
+            var j = start.index
+            var digits = 0
+            while j < line.endIndex, line[j].isNumber, digits < 9 {
+                digits += 1
+                j = line.index(after: j)
+            }
+            guard digits > 0, j < line.endIndex, line[j] == "." || line[j] == ")" else { continue }
+            let n = line.index(after: j)
+            if n < line.endIndex, line[n] == " " || line[n] == "\t" { return true }
+        }
+        return false
+    }
+
+    static func lines(of text: String) -> [String] {
+        text.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+    }
+
+    /// Up to `limit` leading spaces, then the next character.
+    static func firstNonSpace(_ line: String, limit: Int) -> (spaces: Int, index: String.Index, char: Character?) {
+        var i = line.startIndex
+        var spaces = 0
+        while i < line.endIndex, line[i] == " ", spaces < limit + 1 {
+            spaces += 1
+            i = line.index(after: i)
+        }
+        return (spaces, i, i < line.endIndex ? line[i] : nil)
     }
 
     static func looksLikeMarkup(_ text: String, _ language: String) -> Bool {

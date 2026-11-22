@@ -108,6 +108,7 @@ public struct BuiltInHintProvider: OwlHintProvider {
 
     /// The throwing variant with the raw result, for "Test" and the live check.
     public func requestHints(for context: OwlContext) async throws -> (hints: [OwlHint], result: GenerationResult) {
+        guard HintPrompt.hasEnoughText(context.text) else { return ([], GenerationResult(text: "")) }
         let (request, text) = request(for: context)
         do {
             let result = try await host.generate(modelAt: path, request)

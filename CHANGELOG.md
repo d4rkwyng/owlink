@@ -9,6 +9,9 @@ are its section below (`Scripts/changelog-section.sh`).
 ### Added
 - **Explain and Rewrite Selection.** Select text and use the Cedric menu, editor context menu, Markdown Context Bar, or ⌥⌘E / ⌥⇧⌘E. Explain works with any ready local engine; Rewrite requires a model that passes the existing tool gate and offers Apply / Skip edit cards. Engines run on this Mac or a configured private LAN server only.
 
+### Fixed
+- **No AI hint on an empty document.** Cedric no longer asks Apple Intelligence, the built-in model or a local server for a hint when the document is empty or has fewer than 20 characters of text (spaces don't count). A new blank Plain Text document was being told it had an "Empty code block".
+
 ## [0.4.1] - 2026-11-21
 
 ### Added

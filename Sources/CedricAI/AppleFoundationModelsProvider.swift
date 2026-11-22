@@ -78,6 +78,7 @@ public struct AppleFoundationModelsProvider: OwlHintProvider {
 
     /// The throwing variant with the raw JSON and the latency, for the live check.
     public func requestHints(for context: OwlContext) async throws -> (hints: [OwlHint], raw: String, seconds: TimeInterval) {
+        guard HintPrompt.hasEnoughText(context.text) else { return ([], "", 0) }
         guard #available(macOS 26.0, *), Self.isAvailable else { throw LocalAIError.transport("Apple Intelligence unavailable") }
         let text = HintPrompt.capped(context.text, maxBytes: Self.maxContextBytes)
         let messages = OwlPrompts.messages(for: .codeHints, context: context, text: text, model: "apple")

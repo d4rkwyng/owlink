@@ -194,4 +194,92 @@ import CedricCore
         #expect(HintVerifier.duplicatesRule([.secret], text: "k = \"" + "gh" + "p_" + String(repeating: "x", count: 36) + "\"\n", language: "python"))
         #expect(!HintVerifier.duplicatesRule([.logic], text: sql, language: "sql"))
     }
+
+    /// What Apple Intelligence showed on a brand-new empty Plain Text
+    /// document (0 words, 0 characters): there is no code block to be empty.
+    @Test func emptyCodeBlockHintOnPlainTextIsRejected() {
+        let hint: [String: Any] = ["kind": "warning", "category": "other", "title": "Empty code block",
+                                   "detail": "The code has no content, which may cause errors in execution or parsing.",
+                                   "line": 1, "find": "", "replacement": "", "confidence": 0.8]
+        #expect(HintPrompt.parse(json([hint]), text: "", source: "apple", language: "plain").isEmpty)
+        #expect(HintPrompt.parse(json([hint]), text: "   \n\t", source: "apple", language: "plain").isEmpty)
+        let note = "Just a note."
+        #expect(HintPrompt.parse(json([hint]), text: note, source: "apple", language: "plain").isEmpty)
+        #expect(HintPrompt.parse(json([hint]), text: note, source: "apple", language: "markdown").isEmpty)
+        // "fenced code" is the same claim.
+        var fenced = hint
+        fenced["title"] = "Fenced code is empty"
+        #expect(HintPrompt.parse(json([fenced]), text: note, source: "apple", language: "plain").isEmpty)
+        // Three spaces is not an indented code block.
+        #expect(HintPrompt.parse(json([hint]), text: "   print(1)\n", source: "apple", language: "plain").isEmpty)
+
+        // A real empty fence is still flagged, closed so the offline
+        // unclosed-fence rule does not take the hint instead.
+        for sample in ["```\n```\n", "```swift\n```\n", "~~~\n~~~\n", "Intro paragraph here.\n\n```\n```\n\nAfter.\n"] {
+            let kept = HintPrompt.parse(json([hint]), text: sample, source: "apple", language: "markdown")
+            #expect(kept.count == 1, "\(sample)")
+            #expect(kept.first?.title == "Empty code block")
+        }
+        let indented = "    \n    \n"
+        #expect(HintPrompt.parse(json([hint]), text: indented, source: "apple", language: "plain").isEmpty)
+        let indentedCode = "    print(1)\n"
+        #expect(HintPrompt.parse(json([hint]), text: indentedCode, source: "apple", language: "plain").count == 1)
+        #expect(HintPrompt.parse(json([hint]), text: "\tprint(1)\n", source: "apple", language: "plain").count == 1)
+        // A claim that does not invent a construct still stands.
+        let prose: [String: Any] = ["kind": "tip", "category": "other", "title": "Missing a verb",
+                                    "detail": "The sentence never says what happens.", "find": "Just a note.",
+                                    "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([prose]), text: note, source: "apple", language: "plain").count == 1)
+    }
+
+    @Test func absentConstructsAreRejectedAndRealOnesStay() {
+        let note = "Just a short note about the day."
+        func claim(_ title: String, _ detail: String, find: String = "") -> [String: Any] {
+            ["kind": "warning", "category": "other", "title": title, "detail": detail,
+             "line": 1, "find": find, "replacement": "", "confidence": 0.9]
+        }
+        #expect(HintPrompt.parse(json([claim("Empty table", "The table has no rows.")]), text: note, source: "apple", language: "plain").isEmpty)
+        #expect(HintPrompt.parse(json([claim("Broken link", "The link goes nowhere.")]), text: note, source: "apple", language: "markdown").isEmpty)
+        #expect(HintPrompt.parse(json([claim("Skipped heading", "The heading level jumps.")]), text: note, source: "apple", language: "plain").isEmpty)
+        #expect(HintPrompt.parse(json([claim("Empty list", "The list has no items.")]), text: note, source: "apple", language: "markdown").isEmpty)
+        // The same words in SQL are about a database table, not a Markdown one.
+        let sql = "SELECT * FROM users WHERE email IS NULL;\n"
+        let scan = claim("Index the email column", "This lookup scans the table.", find: "WHERE email")
+        #expect(HintPrompt.parse(json([scan]), text: sql, source: "apple", language: "sql").count == 1)
+
+        let table = "| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+        #expect(HintPrompt.parse(json([claim("Wide table", "The table has two columns.")]), text: table, source: "apple", language: "markdown").count == 1)
+        let linked = "See [the notes](https://example.com/notes) for the rest of it.\n"
+        #expect(HintPrompt.parse(json([claim("Absolute link", "The link leaves this Mac.")]), text: linked, source: "apple", language: "markdown").count == 1)
+        let headed = "# Notes\n\nHello there, this is a paragraph.\n"
+        #expect(HintPrompt.parse(json([claim("Short heading", "The heading is one word.")]), text: headed, source: "apple", language: "markdown").count == 1)
+        let setext = "Notes\n=====\n\nHello there, this is a paragraph.\n"
+        #expect(HintPrompt.parse(json([claim("Short heading", "The heading is one word.")]), text: setext, source: "apple", language: "plain").count == 1)
+        let list = "- apples\n- pears\n"
+        #expect(HintPrompt.parse(json([claim("Short list", "The list has two items.")]), text: list, source: "apple", language: "markdown").count == 1)
+    }
+
+    @Test func quotedAndCitedTextMustBeInTheDocument() {
+        let code = "let total = 3\nprint(total)\n"
+        let invented: [String: Any] = ["kind": "warning", "category": "other", "title": "Unused name",
+                                       "detail": "The variable `missingName` is never used.",
+                                       "find": "", "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([invented]), text: code, source: "apple", language: "swift").isEmpty)
+        let quoted: [String: Any] = ["kind": "warning", "category": "other", "title": "Odd sentence",
+                                     "detail": "It says \"hello world\" where the file is silent.",
+                                     "find": "", "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([quoted]), text: code, source: "apple", language: "swift").isEmpty)
+        let curly: [String: Any] = ["kind": "warning", "category": "other", "title": "Odd sentence",
+                                    "detail": "It says “hello world” where the file is silent.",
+                                    "find": "", "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([curly]), text: code, source: "apple", language: "swift").isEmpty)
+        let cited: [String: Any] = ["kind": "warning", "category": "logic", "title": "Odd name",
+                                    "detail": "This snippet is confusing.", "find": "not in the file",
+                                    "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([cited]), text: code, source: "apple", language: "swift").isEmpty)
+        let real: [String: Any] = ["kind": "warning", "category": "other", "title": "Name is short",
+                                   "detail": "The variable `total` is only assigned.", "find": "let total = 3",
+                                   "replacement": "", "confidence": 0.9]
+        #expect(HintPrompt.parse(json([real]), text: code, source: "apple", language: "swift").count == 1)
+    }
 }

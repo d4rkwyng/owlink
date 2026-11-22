@@ -97,7 +97,7 @@ import CedricCore
         await rig.advance(5)
         #expect(await eventually { rig.delivered.value == [7] })
         // A scroll: same generation, new visible text.
-        await rig.scheduler.contextChanged(context("other text", gen: 7, doc: doc))
+        await rig.scheduler.contextChanged(context("other text visible in the window", gen: 7, doc: doc))
         rig.clock.advance(500)
         #expect(await rig.scheduler.timerFired(doc) == .alreadyAsked)
         try? await Task.sleep(nanoseconds: 30_000_000)
