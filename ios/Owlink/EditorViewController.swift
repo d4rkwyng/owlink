@@ -2272,14 +2272,21 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             MarkdownExportIOS.renderPage(
                 markdown: textView.text,
                 title: MarkdownExport.baseName(displayName: document.displayName),
-                folder: folder
-            ) { [weak self] html, _, _ in
-                self?.presentPrint(UIMarkupTextPrintFormatter(markupText: html))
+                folder: folder,
+                remote: false
+            ) { [weak self] html, openedRoot, vaultRoot in
+                guard let self else { return }
+                MarkdownExportIOS.makePDF(html: html, folder: folder, openedRoot: openedRoot, vaultRoot: vaultRoot) { [weak self] result in
+                    switch result {
+                    case .success(let data): self?.presentPrint(item: data)
+                    case .failure(let error): self?.showExportError(error)
+                    }
+                }
             }
         } else {
             let formatter = UISimpleTextPrintFormatter(text: textView.text)
             formatter.font = textView.font ?? AppSettings.font(for: document.language.language, traits: traitCollection)
-            presentPrint(formatter)
+            presentPrint(formatter: formatter)
         }
     }
 
@@ -2299,7 +2306,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         MarkdownExportIOS.renderPage(
             markdown: textView.text,
             title: MarkdownExport.baseName(displayName: document.displayName),
-            folder: document.fileURL.deletingLastPathComponent()
+            folder: document.fileURL.deletingLastPathComponent(),
+            remote: false
         ) { [weak self] html, openedRoot, vaultRoot in
             guard let self else { return }
             MarkdownExportIOS.makePDF(html: html, folder: self.document.fileURL.deletingLastPathComponent(),
@@ -2312,12 +2320,13 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    private func presentPrint(_ formatter: UIPrintFormatter) {
+    private func presentPrint(formatter: UIPrintFormatter? = nil, item: Any? = nil) {
         let controller = UIPrintInteractionController.shared
         let info = UIPrintInfo(dictionary: nil)
         info.jobName = document.displayName
         controller.printInfo = info
         controller.printFormatter = formatter
+        controller.printingItem = item
         if UIDevice.current.userInterfaceIdiom == .pad {
             let rect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
             guard controller.present(from: rect, in: view, animated: true) else {

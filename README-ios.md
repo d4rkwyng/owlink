@@ -120,8 +120,6 @@ finds files in a folder Owlink can list and the
 headings of the open Markdown document. Ask Cedric can call check_document
 and read_section, and a propose_edit is a card with Apply and Skip (never
 applied while the file is read-only).
-Print documents, or export Markdown as HTML or a rendered PDF, from the
-document menu.
 
 Not on iOS: the `cedric` command, Replace in Files, the folder sidebar, Git,
 the certificate view, XML formatting, and the command palette’s menu

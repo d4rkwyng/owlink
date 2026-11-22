@@ -51,4 +51,37 @@ import Testing
         #expect(html.contains("<title>A &lt; B &amp; C</title>"))
         #expect(!html.contains("<title>A < B & C</title>"))
     }
+
+    @Test func hostileURLsAndFramesAreScrubbed() {
+        let html = MarkdownExport.page(
+            markdown: #"[go](javascript:alert(1))<iframe src="https://evil.example"></iframe><svg onload="alert(2)"></svg><meta http-equiv="refresh" content="0;url=https://evil.example">"#,
+            title: "x"
+        )
+        #expect(!html.localizedCaseInsensitiveContains("<script"))
+        #expect(!html.localizedCaseInsensitiveContains("javascript:"))
+        #expect(!html.localizedCaseInsensitiveContains("<iframe"))
+        #expect(!html.localizedCaseInsensitiveContains("onload"))
+        #expect(!html.localizedCaseInsensitiveContains(#"http-equiv="refresh""#))
+        #expect(!html.localizedCaseInsensitiveContains("url=https://evil.example"))
+    }
+
+    @Test func sandboxedPageDropsRemoteImages() {
+        let html = MarkdownExport.page(
+            markdown: #"<img src="https://evil.example/t.png"><img src="a.png">"#,
+            title: "x",
+            remote: false
+        )
+        #expect(html.contains("default-src 'none'"))
+        #expect(html.contains("connect-src 'none'"))
+        #expect(!html.contains("https://evil.example"))
+        #expect(html.contains("a.png"))
+        let exported = MarkdownExport.page(
+            markdown: #"<img src="https://evil.example/t.png"><img src="a.png">"#,
+            title: "x"
+        )
+        #expect(exported.contains("script-src 'none'"))
+        #expect(!exported.contains("default-src 'none'"))
+        #expect(exported.contains("https://evil.example/t.png"))
+        #expect(exported.contains("a.png"))
+    }
 }

@@ -50,9 +50,21 @@ final class MarkdownExportSnapshotTests: XCTestCase {
             }
         }
         XCTAssertEqual(html, MarkdownExport.page(markdown: markdown, title: "Export"))
+        XCTAssertTrue(html.contains("script-src 'none'"))
+
+        let hostile = #"<script>alert(1)</script><img src="https://evil.example/t.png" onerror="alert(2)">Hello export"#
+        let sandboxed = await withCheckedContinuation { continuation in
+            MarkdownExportIOS.renderPage(markdown: hostile, title: "Export", folder: nil, remote: false) { page, _, _ in
+                continuation.resume(returning: page)
+            }
+        }
+        XCTAssertEqual(sandboxed, MarkdownExport.page(markdown: hostile, title: "Export", remote: false))
+        XCTAssertFalse(sandboxed.localizedCaseInsensitiveContains("<script"))
+        XCTAssertFalse(sandboxed.contains("https://evil.example"))
+        XCTAssertTrue(sandboxed.contains("default-src 'none'"))
 
         let result = await withCheckedContinuation { continuation in
-            MarkdownExportIOS.makePDF(html: html, folder: nil, openedRoot: nil, vaultRoot: nil) { result in
+            MarkdownExportIOS.makePDF(html: sandboxed, folder: nil, openedRoot: nil, vaultRoot: nil) { result in
                 continuation.resume(returning: result)
             }
         }

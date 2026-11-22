@@ -8,13 +8,14 @@ enum MarkdownExportIOS {
         markdown: String,
         title: String,
         folder: URL?,
+        remote: Bool = true,
         completion: @escaping @MainActor (String, URL?, URL?) -> Void
     ) {
         let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
         DispatchQueue.global(qos: .userInitiated).async {
             let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
             if markdown.contains("[[") { vault?.prepareIndex() }
-            let html = MarkdownExport.page(markdown: markdown, title: title, vault: vault)
+            let html = MarkdownExport.page(markdown: markdown, title: title, vault: vault, remote: remote)
             let vaultRoot = vault?.root
             DispatchQueue.main.async { completion(html, openedRoot, vaultRoot) }
         }

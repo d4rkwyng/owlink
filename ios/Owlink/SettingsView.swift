@@ -256,12 +256,12 @@ struct SettingsView: View {
         }
     }
 
-    private static var proseFontFamilies: [(family: String, name: String)] {
+    private static let proseFontFamilies: [(family: String, name: String)] = {
         UIFont.familyNames
             .filter { !$0.hasPrefix(".") }
             .sorted()
             .compactMap { family in AppSettings.regularFontName(forFamily: family).map { (family, $0) } }
-    }
+    }()
 
     @ViewBuilder private var builtInSection: some View {
         Section {
