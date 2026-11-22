@@ -659,6 +659,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateStatus()
         scheduleOwl()
         askModel?.documentEdited()
+        askModel?.scheduleScopeRefresh()
         if showLineNumbers { layoutGutter() }
         if previewOn || DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
             previewTimer?.invalidate()
@@ -709,6 +710,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func textViewDidChangeSelection(_ textView: UITextView) {
         updateStatus()
         fadeOwlNearCaret()
+        askModel?.scheduleScopeRefresh()
         // Find's Next moves the selection with the find bar up. That is the
         // "click next" jump: show the line number it landed on.
         guard textView.findInteraction?.isFindNavigatorVisible == true else { return }
@@ -721,6 +723,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         colorizer?.scheduleViewport()
         fadeOwlNearCaret()
+        if scrollView === textView, askModel?.scope == .visible {
+            askModel?.scheduleScopeRefresh()
+        }
         if scrollView === textView, showLineNumbers { layoutGutter() }
         // A detached preview window follows the text's place, roughly.
         if scrollView === textView, !textView.isHidden, DetachedPreviews.hasPreviews(forPath: document.recoveryPath) {
@@ -1264,6 +1269,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         model.apply = { [weak self] proposal in self?.apply(proposal) ?? .refused }
         model.documentNow = { [weak self] in self?.currentDocument() ?? AskCedricModel.DocumentNow(text: "", generation: 0, readOnly: true, large: false, lines: LineIndex()) }
         model.makeSnapshot = { [weak self] in self?.askSnapshot() ?? OwlDocumentSnapshot(text: "", generation: 0) }
+        model.refreshScope()
         model.askIsVisible = { [weak self] in self?.askPanel != nil || self?.askSheet != nil }
         model.openSettings = { [weak self] in
             guard let self else { return }

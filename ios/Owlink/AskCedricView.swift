@@ -42,6 +42,9 @@ final class AskCedricModel: ObservableObject {
     @Published var running = false
     @Published var engineTitle: String?
     @Published var unavailable: String?
+    @Published private(set) var scope: OwlChatScope = .wholeDocument
+    @Published private(set) var scopes: [OwlChatScope] = [.visible, .wholeDocument]
+    @Published private(set) var scopeLabel = OwlChatScope.wholeDocument.title
 
     let fileName: String?
     let language: Language
@@ -55,9 +58,15 @@ final class AskCedricModel: ObservableObject {
     var askIsVisible: () -> Bool = { false }
     private var task: Task<Void, Never>?
     private var recheck: Task<Void, Never>?
+    private var scopeRefresh: Task<Void, Never>?
     private var lastQuestion = ""
     private var lastAction: OwlQuickAction?
     private let gate = OwlToolGate.bundled()
+    private static var lastContextBudget = 5_000
+    private(set) var contextBudget = AskCedricModel.lastContextBudget
+    private var previewTools = false
+    private var previewServer = false
+    private var pickedScope: OwlChatScope?
 
     init(fileName: String?, language: Language) {
         self.fileName = fileName
@@ -76,43 +85,105 @@ final class AskCedricModel: ObservableObject {
                                   builtInInstalled: !BuiltInEngine().installedModels.isEmpty)
     }
 
+    private var history: [OwlChatEntry] {
+        entries.filter { $0.role == .user || $0.role == .owl }.map { OwlChatEntry(role: $0.role, text: $0.text) }
+    }
+
+    func refreshScope() {
+        refreshScope(makeSnapshot())
+    }
+
+    func scheduleScopeRefresh() {
+        guard askIsVisible() else { return }
+        scopeRefresh?.cancel()
+        scopeRefresh = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self, self.askIsVisible() else { return }
+            self.refreshScope()
+        }
+    }
+
+    private func refreshScope(_ snap: OwlDocumentSnapshot) {
+        let history = self.history
+        let budget = OwlInlineAssist.documentBudget(engineBudget: contextBudget, instructionWrapper: "",
+                                                    systemPrompt: OwlPrompts.chatSystem(toolsOn: previewTools, server: previewServer),
+                                                    history: history)
+        let offered = OwlChatContext.scopes(for: snap, budget: budget)
+        if let pickedScope, !offered.contains(pickedScope) { self.pickedScope = nil }
+        let selected = pickedScope ?? OwlChatContext.defaultScope(for: snap, budget: budget)
+        let label = OwlChatRequest.documentContext(snap, scope: selected, engineBudget: contextBudget,
+                                                   history: history, question: "", action: nil,
+                                                   tools: previewTools, server: previewServer, prose: prose,
+                                                   preview: true)?.label ?? selected.title
+        if scopes != offered { scopes = offered }
+        if scope != selected { scope = selected }
+        if scopeLabel != label { scopeLabel = label }
+    }
+
+    func selectScope(_ scope: OwlChatScope) {
+        guard scopes.contains(scope) else { return }
+        pickedScope = scope
+        refreshScope()
+    }
+
+    private func rememberEngine(_ engine: any OwlChatEngine) {
+        engineTitle = engine.title
+        contextBudget = engine.contextBudget
+        Self.lastContextBudget = engine.contextBudget
+        previewTools = gate.allowsTools(engine.scoreKey)
+        previewServer = engine.usesServer
+        refreshScope()
+    }
+
     func prepare() async {
-        guard let s = Self.chatSettings(), let engine = await OwlChatEngines.make(settings: s) else {
+        guard let s = Self.chatSettings() else {
+            unavailable = AIStatus.noEngineMessage
+            refreshScope()
+            return
+        }
+        previewServer = s.backend.usesServer
+        previewTools = OwlChatEngines.configuredScoreKey(settings: s).map { gate.allowsTools($0) } ?? false
+        refreshScope()
+        guard let engine = await OwlChatEngines.make(settings: s) else {
             unavailable = AIStatus.noEngineMessage
             return
         }
-        engineTitle = engine.title
+        unavailable = nil
+        rememberEngine(engine)
     }
 
     func ask(_ q: String, action: OwlQuickAction? = nil) {
         guard !running else { return }
         let shown = action?.title(prose: prose) ?? q
         guard !shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let history = entries.filter { $0.role == .user || $0.role == .owl }.map { OwlChatEntry(role: $0.role, text: $0.text) }
+        let snap = makeSnapshot()
+        refreshScope(snap)
+        let scope = self.scope
+        let history = self.history
         entries.append(Entry(role: .user, text: shown))
         entries.append(Entry(role: .owl, text: ""))
         question = ""
         running = true
         lastQuestion = q
         lastAction = action
-        let snap = makeSnapshot()
         let prose = self.prose
         task = Task { [weak self] in
             guard let self else { return }
-            defer { self.running = false }
+            defer { self.running = false; self.refreshScope() }
             guard let s = Self.chatSettings(), let engine = await OwlChatEngines.make(settings: s) else {
                 self.finish(error: AIStatus.noEngineMessage)
                 return
             }
-            self.engineTitle = engine.title
-            let scope: OwlChatScope = snap.selection.length > 0 ? .selection : .wholeDocument
-            guard let ctx = OwlChatContext.build(snap, scope: scope, budget: engine.contextBudget)
-                    ?? OwlChatContext.build(snap, scope: .visible, budget: engine.contextBudget) else {
+            self.rememberEngine(engine)
+            let tools = self.gate.allowsTools(engine.scoreKey)
+            guard let ctx = OwlChatRequest.documentContext(snap, scope: scope, engineBudget: engine.contextBudget,
+                                                           history: history, question: q, action: action, tools: tools,
+                                                           server: engine.usesServer, prose: prose) else {
                 self.finish(error: String(localized: "Too much text for this model: select less and ask again."))
                 return
             }
             let req = OwlChatRequest(question: q, action: action, context: ctx, snapshot: snap, history: history,
-                                     useTools: self.gate.allowsTools(engine.scoreKey), prose: prose)
+                                     useTools: tools, prose: prose)
             do {
                 let outcome = try await OwlChatRunner.run(req, engine: engine, model: engine.scoreKey) { ev in
                     if case .text(let t) = ev {
@@ -502,40 +573,70 @@ struct AskCedricView: View {
 
     private func inputBar(_ c: AskColors) -> some View {
         let empty = model.question.trimmingCharacters(in: .whitespaces).isEmpty
-        return HStack(alignment: .bottom, spacing: 4) {
-            TextField(String(localized: "Ask Cedric…"), text: $model.question, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .lineLimit(1...4)
-                .focused($focused)
-                .onSubmit { model.ask(model.question) }
-                .padding(.leading, 14).padding(.vertical, 11)
-                .accessibilityIdentifier("ask.field")
-            Group {
-                if model.running {
-                    Button { model.stop() } label: {
-                        Image(systemName: "stop.circle.fill").font(.title2)
-                            .frame(minWidth: 44, minHeight: 44)
+        return VStack(alignment: .leading, spacing: 6) {
+            Menu {
+                ForEach(model.scopes, id: \.self) { scope in
+                    Button {
+                        model.selectScope(scope)
+                    } label: {
+                        if scope == model.scope {
+                            Label(scope.title, systemImage: "checkmark")
+                        } else {
+                            Text(scope.title)
+                        }
                     }
-                    .foregroundStyle(c.accent)
-                    .accessibilityLabel(String(localized: "Stop"))
-                } else {
-                    Button { model.ask(model.question) } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.title2)
-                            .frame(minWidth: 44, minHeight: 44)
-                    }
-                    .foregroundStyle(empty || model.unavailable != nil ? c.secondary.opacity(0.6) : c.accent)
-                    .disabled(empty || model.unavailable != nil)
-                    .accessibilityLabel(String(localized: "Send"))
-                    .accessibilityIdentifier("ask.send")
                 }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(model.scopeLabel).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 10)
+                .frame(minHeight: 36)
+                .background(c.chipFill, in: Capsule())
+                .overlay(Capsule().strokeBorder(c.hairline, lineWidth: 1))
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 2)
+            .accessibilityLabel(String(localized: "Context"))
+            .accessibilityValue(model.scopeLabel)
+            .accessibilityIdentifier("ask.scope")
+            HStack(alignment: .bottom, spacing: 4) {
+                TextField(String(localized: "Ask Cedric…"), text: $model.question, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .lineLimit(1...4)
+                    .focused($focused)
+                    .onSubmit { model.ask(model.question) }
+                    .padding(.leading, 14).padding(.vertical, 11)
+                    .accessibilityIdentifier("ask.field")
+                Group {
+                    if model.running {
+                        Button { model.stop() } label: {
+                            Image(systemName: "stop.circle.fill").font(.title2)
+                                .frame(minWidth: 44, minHeight: 44)
+                        }
+                        .foregroundStyle(c.accent)
+                        .accessibilityLabel(String(localized: "Stop"))
+                    } else {
+                        Button { model.ask(model.question) } label: {
+                            Image(systemName: "arrow.up.circle.fill").font(.title2)
+                                .frame(minWidth: 44, minHeight: 44)
+                        }
+                        .foregroundStyle(empty || model.unavailable != nil ? c.secondary.opacity(0.6) : c.accent)
+                        .disabled(empty || model.unavailable != nil)
+                        .accessibilityLabel(String(localized: "Send"))
+                        .accessibilityIdentifier("ask.send")
+                    }
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 2)
+            }
+            .background(c.field, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(focused ? c.accent.opacity(0.7) : c.hairline, lineWidth: 1))
         }
-        .background(c.field, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous)
-            .strokeBorder(focused ? c.accent.opacity(0.7) : c.hairline, lineWidth: 1))
         // Close to the bottom safe area (the home indicator), riding the keyboard when it is up.
         .padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 4)
         .background(c.bar.ignoresSafeArea(.container, edges: [.bottom, .horizontal]).ignoresSafeArea(.keyboard, edges: .bottom))
