@@ -233,8 +233,11 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         case .local(let url, let root, let fragment):
             browserView.isHidden = true
             webView.isHidden = false
-            guard case .openInPreview = PreviewLinkAction.previewAction(for: url, folder: root, command: false, isText: Self.opensInCedric),
-                  let data = try? Data(contentsOf: url), let text = TextCodec.decode(data)?.text, let home else {
+            // Checked and read by the same symlink-free path, so a link
+            // swapped in between can't point the read outside `root`.
+            let target = PreviewFolder.resolved(url)
+            guard case .openInPreview = PreviewLinkAction.previewAction(for: target, folder: root, command: false, isText: Self.opensInCedric),
+                  let data = try? Data(contentsOf: target), let text = TextCodec.decode(data)?.text, let home else {
                 onNavigationError?(String(localized: "Could not read the preview document."))
                 onNavigationChange?()
                 return

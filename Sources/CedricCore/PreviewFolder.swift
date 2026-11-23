@@ -64,7 +64,7 @@ public enum PreviewFolder {
 
     /// `url` with symbolic links resolved, also when its last parts don't
     /// exist (resolvingSymlinksInPath leaves such a path as it is).
-    static func resolved(_ url: URL) -> URL {
+    public static func resolved(_ url: URL) -> URL {
         var head = url
         var tail: [String] = []
         while !FileManager.default.fileExists(atPath: head.path), head.path != "/" {
