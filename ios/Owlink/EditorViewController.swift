@@ -3676,11 +3676,16 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return QuickOpen.folderRoot(documentFolder: folder, readable: readable, granted: granted)
     }
 
+    /// The Go to Line field's VoiceOver name (the Mac's, less ":column",
+    /// which iOS doesn't take).
+    static var goToLineAccessibilityLabel: String { String(localized: "Line number") }
+
     @objc func goToLine() {
         let alert = GoToLineAlertController(title: String(localized: "Go to Line"), message: nil, preferredStyle: .alert)
         alert.addTextField {
             $0.keyboardType = .numberPad
             $0.placeholder = "1–\(self.lineIndex.lineCount)"
+            $0.accessibilityLabel = Self.goToLineAccessibilityLabel
             $0.backgroundColor = .systemBackground
         }
         alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))

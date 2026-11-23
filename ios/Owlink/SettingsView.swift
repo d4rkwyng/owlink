@@ -274,6 +274,7 @@ struct SettingsView: View {
                 if ai.backend.usesServer {
                     Section {
                         TextField("http://192.168.1.20:1234/v1", text: $address)
+                            .accessibilityLabel(String(localized: "Server address"))
                             .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
                             .onSubmit(applyAddress)
                         Button(String(localized: "Test Connection")) { applyAddress(); test() }

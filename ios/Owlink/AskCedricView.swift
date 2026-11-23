@@ -605,6 +605,12 @@ final class AskCedricModel: ObservableObject {
 }
 
 struct AskCedricView: View {
+    /// VoiceOver names, the Mac's (0.5.1): the scope chip says what Cedric
+    /// is asked about; the field is the question (its placeholder alone
+    /// isn't a name).
+    static var scopeAccessibilityLabel: String { String(localized: "Asking about") }
+    static var questionAccessibilityLabel: String { String(localized: "Question for Cedric") }
+
     @ObservedObject var model: AskCedricModel
     /// Called by Done instead of dismissing, when the view is not in a sheet
     /// (the docked side panel on wide screens).
@@ -885,7 +891,7 @@ struct AskCedricView: View {
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "Context"))
+            .accessibilityLabel(Self.scopeAccessibilityLabel)
             .accessibilityValue(model.displayedScopeLabel)
             .accessibilityIdentifier("ask.scope")
             if let progress = model.reviewProgress {
@@ -902,6 +908,7 @@ struct AskCedricView: View {
                     .focused($focused)
                     .onSubmit { model.ask(model.question) }
                     .padding(.leading, 14).padding(.vertical, 11)
+                    .accessibilityLabel(Self.questionAccessibilityLabel)
                     .accessibilityIdentifier("ask.field")
                 Group {
                     if model.running {
