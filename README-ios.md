@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.4.6 (14), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.5.1 (15), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -16,6 +16,41 @@ The project file is generated: edit `ios/Scripts/gen-xcodeproj.py` and run
 in Xcode (a change made in Xcode is lost the next time the script runs).
 Source files can be added in Xcode or Finder: `ios/Owlink`,
 `ios/OwlinkUITests` and `Tests/*` are synchronized folders.
+
+## New in 0.5.1 (15)
+
+Brings the shared code up to Mac Owlink 0.5.1 (tag v0.5.1) and matches
+its changes where they apply on iOS:
+
+- **Preview links.** A linked document is checked and read by the same
+  resolved path (a symbolic link swapped in between can't point the read
+  outside the folder, and a link is judged by its target's name). Page
+  JavaScript and network stay off for every page the preview shows,
+  after a link, Back, Forward or This Document and after the document
+  changes on disk (iOS has no JavaScript/Network switch to reset).
+  Browsing with Back, Forward and This Document, the prompt before a web
+  page leaves the app, and links to a heading in another document were
+  already on iOS.
+- **Obsidian images in a granted folder.** When the folder you granted
+  holds several vaults (iCloud Drive › Obsidian), the preview, export and
+  Copy as HTML use the note's own vault, so its `attachmentFolderPath`
+  is read and a bare image name doesn't resolve to another vault.
+- **VoiceOver names**, as on the Mac: Ask Cedric's scope chip ("Asking
+  about") and question field ("Question for Cedric"), the Go to Line
+  field ("Line number"), and the server address in Settings.
+- **Localized copy**: the font size units in Settings, the Go to Line
+  placeholder, the owl hint bar's VoiceOver label and Fix Typos' quoted
+  word.
+- **Ask Cedric** (shared AI code): a server on your network now gets the
+  Mac's larger whole-file context (32,000 characters), so a model such
+  as Qwen can review a whole file when it fits; the built-in model keeps
+  iOS's 8K-token window (12,000 characters) and Apple Intelligence its
+  5,000. The model's name in the header, typing dots and one combined
+  whole-file answer were already on iOS.
+
+Not on iOS: the folder sidebar's actions menu and resize fix (no folder
+sidebar), Finder document icons, and the Mac's multi-tab session restore
+(iOS reopens the last document, as since 0.4.5).
 
 ## New in 0.4.6 (14)
 
@@ -104,13 +139,16 @@ Details for both are under What it does below.
   document menu. Exported and printed Markdown PDFs are cut between
   blocks (the Mac's `PageBreaks`), so a line is not split across pages
   when a block boundary fits. Bare image names (`<img>`, `![]()`, `![[ ]]`) are found
-  in the vault, including `Images/`, with width and float kept.
+  in the vault, including `Images/` and the vault's `attachmentFolderPath`,
+  with width and float kept; a granted folder above the vault uses the
+  note's own vault (`WikiVault.vaultRoot`).
   Links browse in the preview (attached and detached), with **Back**,
   **Forward** and **This Document**: a Markdown or HTML file the link
   rules allow renders there under the same policy (JavaScript off, strict
   CSP); http(s) opens in an isolated preview web view (own process pool,
   nothing stored, no app scripts, handlers or `cedric-doc:`); other text
-  files open in the editor. **Open in Browser** asks first, showing the
+  files open in the editor; a linked file is checked and read by its
+  resolved path. **Open in Browser** asks first, showing the
   full URL; mailto and `⌘`-click ask too. Nothing a link names is launched.
   A link with a heading fragment (`other.md#part`, `page.html#sec`,
   `[[other#Part]]`) opens that document in the preview at the heading, and
@@ -141,7 +179,8 @@ Details for both are under What it does below.
   position stays in the editor.
 - Ask Cedric is a sheet on a phone and a panel beside the text on a wide
   screen (iPad, an unfolded iPhone Duo).
-- Ask Cedric's scope chip, above the question field: Selection (with a
+- Ask Cedric's scope chip, above the question field (VoiceOver: "Asking
+  about"; the field is "Question for Cedric"): Selection (with a
   selection), Visible text or Whole document (the default without a
   selection). A file too big for the model sends whole lines around the
   caret and the chip names them ("Lines 40–160 of 900 (trimmed to fit)").
@@ -214,9 +253,11 @@ hint is asked for an empty or near-empty document (`HintPrompt.hasEnoughText`).
   `-OwlinkShowLicence <id|first>` shows the sheet in Debug builds), are checked against their SHA-256, and are kept out of iCloud
   backups. Before loading, the app checks `os_proc_available_memory()` and
   refuses with a message rather than being killed for using too much memory.
-  The built-in model uses an 8K-token context window on iOS.
+  The built-in model uses an 8K-token context window on iOS (Ask Cedric
+  sends it up to 12,000 characters of document; 24,000 on the Mac).
 - **A server on your network** (LM Studio, Ollama, another Mac): local
-  addresses only.
+  addresses only. Ask Cedric sends it up to 32,000 characters of document,
+  as the Mac does, so a whole file goes in one request when it fits.
 
 Device builds run `ios/Scripts/fetch-llama.sh` first, which takes the iOS
 slice from SwiftPM's download cache or downloads the same pinned zip from
@@ -328,7 +369,9 @@ Test targets:
 
 - `OwlinkCoreTests` and `OwlinkAITests` run the package's own
   `Tests/CedricCoreTests` and `Tests/CedricAITests` on the simulator
-  (557 + 167 pass; the Mac-only files are listed in `gen-xcodeproj.py`).
+  (1012 + 265 tests at 0.5.1; `FileTailTests.stopLeavesNoDescriptor`
+  fails on the simulator, a known issue; the Mac-only files are listed
+  in `gen-xcodeproj.py`).
 - `OwlinkUITests` (XCUITest) drives the app: open, edit, save and reopen;
   the owl's fix; the Markdown preview; find. It opens bundled samples with
   the launch argument `-OwlinkOpen <name>`, skipping the document browser.
