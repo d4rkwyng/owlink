@@ -199,7 +199,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         let key = "\(folder?.path ?? "-")|\(opened?.path ?? "-")"
         if key != vaultKey {
             vaultKey = key
-            vault = folder.map { WikiVault(documentFolder: $0, openedRoot: opened) }
+            vault = folder.map { Self.vault(for: $0, granted: opened) }
         }
 
         let vault = self.vault
@@ -260,6 +260,13 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 self.web.load(request)
             }
         }
+    }
+
+    /// The Obsidian vault for a document in `folder`: the `.obsidian`
+    /// vault inside the granted folder when there is one (a grant can hold
+    /// several vaults), else the grant (`WikiVault.vaultRoot`).
+    nonisolated static func vault(for folder: URL, granted: URL?) -> WikiVault {
+        WikiVault(documentFolder: folder, openedRoot: WikiVault.vaultRoot(for: folder, granted: granted))
     }
 
     /// A linked HTML file's page: the same CSP first (before the file's

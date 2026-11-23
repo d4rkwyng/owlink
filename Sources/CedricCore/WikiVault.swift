@@ -31,6 +31,20 @@ public final class WikiVault: @unchecked Sendable {
         self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager) ?? folder).standardizedFileURL
     }
 
+    /// The vault root to pass as `openedRoot` when the app may read only
+    /// `granted` (iOS: a folder the person picked): the Obsidian vault
+    /// (`.obsidian/` at or above `folder`) when it lies inside the grant, so
+    /// its `.obsidian/app.json` (attachmentFolderPath) is read and names
+    /// resolve in that vault rather than across every vault the grant holds;
+    /// otherwise the grant itself (a vault above it can't be read).
+    public static func vaultRoot(for folder: URL, granted: URL?, fileManager fm: FileManager = .default) -> URL? {
+        guard let granted else { return nil }
+        let folder = folder.standardizedFileURL
+        guard contains(folder, in: granted) else { return granted }
+        if let vault = obsidianRoot(above: folder, fileManager: fm), contains(vault, in: granted) { return vault }
+        return granted
+    }
+
     /// The nearest folder at or above `folder` that holds `.obsidian/`.
     public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default) -> URL? {
         var dir = folder.standardizedFileURL

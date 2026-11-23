@@ -141,6 +141,32 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(vault.resolveImage("../pic.webp") == nil)
     }
 
+    /// A grant (iOS) holding several vaults: the document's own vault is the
+    /// root, so its attachmentFolderPath is read and another vault's image
+    /// (shallower) doesn't win; a grant inside the vault, or no vault, keeps
+    /// the grant.
+    @Test func vaultRootInsideAGrantIsTheObsidianVault() throws {
+        let t = try makeTree(["Obsidian/A/.obsidian/app.json", "Obsidian/A/notes/doc.md", "Obsidian/A/a/pic.webp",
+                              "Obsidian/A/Attach/deep/pic.webp", "Obsidian/B/.obsidian/app.json", "Obsidian/B/pic.webp",
+                              "Plain/notes/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        try #"{"attachmentFolderPath":"Attach"}"#.write(to: t.appendingPathComponent("Obsidian/A/.obsidian/app.json"), atomically: true, encoding: .utf8)
+        let grant = t.appendingPathComponent("Obsidian"), a = grant.appendingPathComponent("A")
+        let folder = a.appendingPathComponent("notes")
+        #expect(WikiVault.vaultRoot(for: folder, granted: grant)?.path == a.path)
+        let vault = WikiVault(documentFolder: folder, openedRoot: WikiVault.vaultRoot(for: folder, granted: grant))
+        #expect(vault.root.path == a.path)
+        #expect(vault.resolveImage("pic.webp")?.path == a.appendingPathComponent("Attach/deep/pic.webp").path)
+        // Before: the grant was the root, app.json unread, the other vault's shallower image won.
+        let broad = WikiVault(documentFolder: folder, openedRoot: grant)
+        #expect(broad.resolveImage("pic.webp")?.path == grant.appendingPathComponent("B/pic.webp").path)
+        #expect(WikiVault.vaultRoot(for: folder, granted: folder)?.path == folder.path, "a grant inside the vault stays")
+        let plain = t.appendingPathComponent("Plain")
+        #expect(WikiVault.vaultRoot(for: plain.appendingPathComponent("notes"), granted: plain)?.path == plain.path, "no vault: the grant")
+        #expect(WikiVault.vaultRoot(for: folder, granted: nil) == nil)
+        #expect(WikiVault.vaultRoot(for: plain, granted: grant)?.path == grant.path, "a folder outside the grant: unchanged")
+    }
+
     @Test func attachmentFolderRootAndNoteRelative() throws {
         let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/a/pic.webp",
                               "v/notes/sub/deep/pic.webp"])

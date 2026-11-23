@@ -38,7 +38,7 @@ enum MarkdownExportIOS {
     static func renderFragment(markdown: String, folder: URL?, completion: @escaping @MainActor (String) -> Void) {
         let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
         MarkdownWork.run({
-            let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
+            let vault = folder.map { PreviewController.vault(for: $0, granted: openedRoot) }
             return HTMLScrub.noScript(Markdown.render(markdown, options: .export(vault: vault)))
         }, then: completion)
     }
@@ -53,7 +53,7 @@ enum MarkdownExportIOS {
         let openedRoot = folder.flatMap { PreviewFolderGrants.shared.root(for: $0) }
         struct Page: Sendable { let html: String; let vaultRoot: URL? }
         MarkdownWork.run({
-            let vault = folder.map { WikiVault(documentFolder: $0, openedRoot: openedRoot) }
+            let vault = folder.map { PreviewController.vault(for: $0, granted: openedRoot) }
             if markdown.contains("[[") { vault?.prepareIndex() }
             let html = MarkdownExport.page(markdown: markdown, title: title, vault: vault, remote: remote)
             return Page(html: html, vaultRoot: vault?.root)

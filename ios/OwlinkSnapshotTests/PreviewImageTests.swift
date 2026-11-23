@@ -37,4 +37,39 @@ final class PreviewImageTests: XCTestCase {
         XCTAssertNil(files.file(for: outsideURL))
         XCTAssertFalse(PreviewImageAccess.readable("../outside.webp", folder: folder, openedRoot: root, vault: vault))
     }
+
+    /// A folder grant holding several Obsidian vaults (iCloud Drive ›
+    /// Obsidian): the preview's vault is the document's own, so its
+    /// `.obsidian/app.json` attachment folder is used and the scheme
+    /// handler serves that image.
+    func testGrantAboveTheVaultUsesTheVaultsAttachmentFolder() throws {
+        let fm = FileManager.default
+        let temp = fm.temporaryDirectory.appendingPathComponent("preview-grant-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: temp) }
+        let grant = temp.appendingPathComponent("Obsidian", isDirectory: true)
+        let a = grant.appendingPathComponent("A", isDirectory: true)
+        let folder = a.appendingPathComponent("notes", isDirectory: true)
+        for dir in [folder, a.appendingPathComponent(".obsidian"), a.appendingPathComponent("Attach/deep"),
+                    grant.appendingPathComponent("B/.obsidian")] {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        try Data(#"{"attachmentFolderPath":"Attach"}"#.utf8).write(to: a.appendingPathComponent(".obsidian/app.json"))
+        let wanted = a.appendingPathComponent("Attach/deep/pic.webp")
+        try Data([1]).write(to: wanted)
+        try Data([2]).write(to: grant.appendingPathComponent("B/pic.webp"))
+
+        let vault = PreviewController.vault(for: folder, granted: grant)
+        XCTAssertEqual(vault.root.standardizedFileURL.path, a.standardizedFileURL.path)
+        let files = PreviewFiles()
+        files.folder = folder
+        files.openedRoot = grant
+        files.vaultRoot = vault.root
+        files.vault = vault
+        let page = try XCTUnwrap(PreviewFolder.pageURL(for: folder))
+        let bare = try XCTUnwrap(URL(string: "pic.webp", relativeTo: page)?.absoluteURL)
+        XCTAssertEqual(files.file(for: bare)?.path, wanted.path)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(files.file(for: bare))), Data([1]))
+        let html = Markdown.render("![[pic.webp]]", options: .preview(vault: vault))
+        XCTAssertTrue(html.contains("Attach/deep/pic.webp"), html)
+    }
 }
