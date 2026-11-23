@@ -1275,9 +1275,6 @@ public enum HTMLScrub {
     nonisolated(unsafe) static let pairs = regex(#"<(script|iframe|object|embed|noscript)\b[^>]*>.*?</\1\s*>"#)
     nonisolated(unsafe) static let singles = regex(#"<(script|iframe|object|embed|frame|frameset|base)\b[^>]*/?>"#)
     nonisolated(unsafe) static let refresh = regex(#"<meta\b[^>]*http-equiv\s*=\s*["']?refresh[^>]*>"#)
-    /// A start tag, quoted attribute values included (a `>` inside quotes
-    /// doesn't end it).
-    nonisolated(unsafe) static let tags = regex(#"<[a-z][a-z0-9:-]*(?:"[^"]*"|'[^']*'|[^'">])*>?"#)
     /// An `on…=` handler inside a tag: after whitespace, a `/` (`<svg/onload=…>`)
     /// or a closing quote (`<a href="x"onclick=…>`), as browsers read them.
     nonisolated(unsafe) static let handlers = regex(#"(?<=[\s/"'])on[a-z0-9_-]*\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#)
@@ -1294,8 +1291,6 @@ public enum HTMLScrub {
     /// closing quote (`<img alt=""src=…>`).
     nonisolated(unsafe) static let remoteAttr = regex(#"(?:\s|(?<=[/"']))(?:src|href|srcset|background|poster|data|xlink:href)\s*=\s*("\s*(?:https?:|ftp:|//)[^"]*"|'\s*(?:https?:|ftp:|//)[^']*'|(?:https?:|ftp:|//)[^\s>]*)"#)
     nonisolated(unsafe) static let links = regex(#"<link\b[^>]*>"#)
-    /// The start of an `<a>` or `<area>` tag (matched anchored on a tag).
-    nonisolated(unsafe) static let linkTag = regex(#"<(?:a|area)(?=[\s/>])"#)
     /// A `rel` attribute (group 1 the value with its quotes).
     nonisolated(unsafe) static let relAttr = regex(#"(?<=[\s/"'])rel(?=[\s/>=]|$)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?"#)
     /// `rel` keywords that fetch ahead of a tap (or resolve a host).
@@ -1325,14 +1320,21 @@ public enum HTMLScrub {
     /// after `=`), and the value decoded and trimmed as WebKit does. A CSP
     /// stays: it only restricts, and the rich-text copy scrubs a whole page
     /// that starts with the app's own.
+    ///
+    /// Every `<meta` is looked at, even one the tag scan would take for
+    /// part of another tag's value (a comment or raw text can hide that
+    /// tag's start from a browser).
     static func noHTTPEquivMeta(_ html: String) -> String {
-        guard html.range(of: "http-equiv", options: .caseInsensitive) != nil else { return html }
+        guard asciiContains(html, "http-equiv") else { return html }
         let ns = html as NSString
+        let u = Array(html.utf16)
         var out = "", last = 0
         for m in metaStart.matches(in: html, range: NSRange(location: 0, length: ns.length)) where m.range.location >= last {
-            let (end, equiv) = startTag(ns, attributesFrom: NSMaxRange(m.range), named: "http-equiv")
+            let (end, equiv) = startTag(u, attributesFrom: NSMaxRange(m.range), named: "http-equiv")
             guard let equiv else { continue }
-            let kind = decodeCharacterReferences(equiv).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            // Trimmed of ASCII whitespace only, and ASCII-lowercased: anything
+            // else is not read as a CSP here, and the tag goes (fail safe).
+            let kind = asciiLowercased(decodeCharacterReferences(equiv).trimmingCharacters(in: asciiWhitespace))
             guard kind != "content-security-policy" else { continue }
             out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
             last = end
@@ -1341,58 +1343,103 @@ public enum HTMLScrub {
         return out
     }
 
+    static let asciiWhitespace = CharacterSet(charactersIn: " \t\n\u{0C}\r")
+
+    /// `s` with only `A`–`Z` lowercased, as the HTML tokenizer folds tag
+    /// and attribute names (not the locale's or Unicode's case mapping:
+    /// `İ` and the Kelvin sign `K` stay as they are).
+    static func asciiLowercased(_ s: String) -> String {
+        String(decoding: s.utf8.map { (0x41...0x5A).contains($0) ? $0 | 0x20 : $0 }, as: UTF8.self)
+    }
+
+    /// Whether `s`, ASCII-lowercased, contains `needle` (already lowercase
+    /// ASCII), compared code unit by code unit.
+    static func asciiContains(_ s: String, _ needle: String) -> Bool {
+        asciiLowercased(s).range(of: needle, options: .literal) != nil
+    }
+
+    static func isHTMLSpace(_ c: UInt16) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D }
+
+    /// Every start tag, found as the HTML tokenizer finds them: `<` and an
+    /// ASCII letter opens one, its name runs to whitespace, `/` or `>`
+    /// (ASCII-lowercased here), and it ends after its `>`, read by
+    /// `startTag` (a quote opens a value only right after `=`), or at the
+    /// end of the text. Text between tags (`<` not followed by a letter,
+    /// end tags, comments) is skipped; a `<` inside a tag's value is part
+    /// of that tag.
+    static func startTags(in html: String) -> [(range: NSRange, name: String)] {
+        let u = Array(html.utf16)
+        var out: [(range: NSRange, name: String)] = []
+        var i = 0
+        while i + 1 < u.count {
+            let c = u[i + 1] | 0x20
+            guard u[i] == 0x3C, c >= 0x61, c <= 0x7A else { i += 1; continue }
+            var j = i + 2
+            while j < u.count, case let c = u[j], !isHTMLSpace(c), c != 0x2F, c != 0x3E { j += 1 }
+            let name = asciiLowercased(String(decoding: u[(i + 1)..<j], as: UTF16.self))
+            let end = startTag(u, attributesFrom: j, named: nil).end
+            out.append((NSRange(location: i, length: end - i), name))
+            i = end
+        }
+        return out
+    }
+
     /// Reads a start tag's attributes from `start` (just after the tag
-    /// name) as the HTML tokenizer does: where the tag ends (after its
-    /// `>`, or the end of the text) and the raw value of the first
-    /// attribute called `name` (empty when it has none, nil when absent).
-    static func startTag(_ ns: NSString, attributesFrom start: Int, named name: String) -> (end: Int, value: String?) {
-        let n = ns.length
-        func isSpace(_ c: unichar) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D }
-        let gt: unichar = 0x3E, slash: unichar = 0x2F, eq: unichar = 0x3D, dq: unichar = 0x22, sq: unichar = 0x27
+    /// name, in UTF-16 code units) as the HTML tokenizer does: where the
+    /// tag ends (after its `>`, or the end of the text) and the raw value
+    /// of the first attribute called `name` (ASCII-lowercased; empty when
+    /// it has no value, nil when absent).
+    static func startTag(_ u: [UInt16], attributesFrom start: Int, named name: String?) -> (end: Int, value: String?) {
+        let n = u.count
+        let gt: UInt16 = 0x3E, slash: UInt16 = 0x2F, eq: UInt16 = 0x3D, dq: UInt16 = 0x22, sq: UInt16 = 0x27
+        func text(_ a: Int, _ b: Int) -> String { String(decoding: u[a..<b], as: UTF16.self) }
         var i = start
         var found: String?
         while i < n {
-            while i < n, isSpace(ns.character(at: i)) || ns.character(at: i) == slash { i += 1 }
+            while i < n, isHTMLSpace(u[i]) || u[i] == slash { i += 1 }
             guard i < n else { break }
-            if ns.character(at: i) == gt { return (i + 1, found) }
+            if u[i] == gt { return (i + 1, found) }
             // The name: a leading `=` belongs to it.
             let nameStart = i
             i += 1
-            while i < n, case let c = ns.character(at: i), !isSpace(c), c != slash, c != gt, c != eq { i += 1 }
-            let attr = ns.substring(with: NSRange(location: nameStart, length: i - nameStart)).lowercased()
+            while i < n, case let c = u[i], !isHTMLSpace(c), c != slash, c != gt, c != eq { i += 1 }
+            let nameEnd = i
             var j = i
-            while j < n, isSpace(ns.character(at: j)) { j += 1 }
+            while j < n, isHTMLSpace(u[j]) { j += 1 }
             var value = ""
-            if j < n, ns.character(at: j) == eq {
+            if j < n, u[j] == eq {
                 i = j + 1
-                while i < n, isSpace(ns.character(at: i)) { i += 1 }
-                if i < n, case let q = ns.character(at: i), q == dq || q == sq {
+                while i < n, isHTMLSpace(u[i]) { i += 1 }
+                if i < n, case let q = u[i], q == dq || q == sq {
                     let from = i + 1
                     i = from
-                    while i < n, ns.character(at: i) != q { i += 1 }
-                    value = ns.substring(with: NSRange(location: from, length: i - from))
+                    while i < n, u[i] != q { i += 1 }
+                    value = text(from, i)
                     if i < n { i += 1 }
                 } else {
                     let from = i
-                    while i < n, case let c = ns.character(at: i), !isSpace(c), c != gt { i += 1 }
-                    value = ns.substring(with: NSRange(location: from, length: i - from))
+                    while i < n, case let c = u[i], !isHTMLSpace(c), c != gt { i += 1 }
+                    value = text(from, i)
                 }
             }
-            if attr == name, found == nil { found = value }
+            if let name, found == nil, asciiLowercased(text(nameStart, nameEnd)) == name { found = value }
         }
         return (n, found)
     }
 
     /// Every start tag without its event-handler and `ping` attributes, and
     /// with any script URL replaced by `"#"` (text between tags is left alone).
+    /// The tags are those `startTags` finds; inside one, the attribute
+    /// regexes look at every name after a separator, values included
+    /// (removing too much there is safe, too little is not).
     static func noHandlers(_ html: String) -> String {
         let ns = html as NSString
         var out = ""
         var last = 0
-        for m in tags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
-            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
-            out += noScriptURLs(replace(ping, in: replace(handlers, in: ns.substring(with: m.range), with: ""), with: ""))
-            last = m.range.location + m.range.length
+        for (range, _) in startTags(in: html) {
+            out += ns.substring(with: NSRange(location: last, length: range.location - last))
+            out += noScriptURLs(replace(ping, in: replace(handlers, in: ns.substring(with: range), with: ""), with: ""))
+            last = NSMaxRange(range)
         }
         out += ns.substring(from: last)
         return out
@@ -1484,20 +1531,20 @@ public enum HTMLScrub {
     /// `srcset`, stylesheets and CSS `url()` still go, and so do `rel`
     /// keywords that fetch ahead (`prefetch`, `preconnect`, …).
     ///
-    /// The tag regex reads any quote as opening a value, a browser only one
-    /// after `=`: in `<a x=a"><image href="https://…">` it takes the
-    /// `<image>` for part of the `<a>`. So an href is kept only when no `<`
-    /// lies between the link's start and the attribute (a real
-    /// `<a title="<b>" href=…>` just loses its href: safe).
+    /// The link tags are read as the tokenizer reads them (`startTags`).
+    /// A link's span can still hold another element's start where a
+    /// browser would not see that link at all (inside a comment or raw
+    /// text), so an href is kept only when no `<` lies between the link's
+    /// start and the attribute (a real `<a title="<b>" href=…>` just loses
+    /// its href: safe).
     public static func noScriptNoRemoteKeepingLinks(_ html: String) -> String {
         var s = noScript(html)
         s = replace(links, in: s, with: "")
         let ns = s as NSString
-        let linkTags = tags.matches(in: s, range: NSRange(location: 0, length: ns.length))
-            .map(\.range).filter { linkTag.firstMatch(in: s, options: .anchored, range: $0) != nil }
+        let linkTags = startTags(in: s).filter { $0.name == "a" || $0.name == "area" }.map(\.range)
         var out = "", last = 0
         for m in remoteAttr.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
-            let name = ns.substring(with: m.range).drop(while: \.isWhitespace).prefix { $0 != "=" && !$0.isWhitespace }.lowercased()
+            let name = asciiLowercased(String(ns.substring(with: m.range).drop(while: \.isWhitespace).prefix { $0 != "=" && !$0.isWhitespace }))
             let inLink = linkTags.contains { tag in
                 NSLocationInRange(m.range.location, tag) && NSMaxRange(m.range) <= NSMaxRange(tag)
                     && !ns.substring(with: NSRange(location: tag.location + 1, length: m.range.location - tag.location - 1)).contains("<")
@@ -1516,16 +1563,16 @@ public enum HTMLScrub {
     static func noFetchingRel(_ html: String) -> String {
         let ns = html as NSString
         var out = "", last = 0
-        for m in tags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
-            let tag = ns.substring(with: m.range)
-            guard tag.range(of: "rel", options: .caseInsensitive) != nil else { continue }
+        for (range, _) in startTags(in: html) {
+            let tag = ns.substring(with: range)
+            guard asciiContains(tag, "rel") else { continue }
             let tns = tag as NSString
             var clean = "", tlast = 0
             for r in relAttr.matches(in: tag, range: NSRange(location: 0, length: tns.length)) {
                 var value = r.range(at: 1).location == NSNotFound ? "" : tns.substring(with: r.range(at: 1))
                 if let q = value.first, q == "\"" || q == "'" { value = String(value.dropFirst().dropLast()) }
                 let words = decodeCharacterReferences(value).split(whereSeparator: \.isWhitespace).map(String.init)
-                let keep = words.filter { !fetchingRel.contains($0.lowercased()) }
+                let keep = words.filter { !fetchingRel.contains(asciiLowercased($0)) }
                 guard keep.count < words.count else { continue }
                 clean += tns.substring(with: NSRange(location: tlast, length: r.range.location - tlast))
                 if !keep.isEmpty { clean += "rel=\"" + Markdown.escape(keep.joined(separator: " ")) + "\"" }
@@ -1533,8 +1580,8 @@ public enum HTMLScrub {
             }
             guard tlast > 0 else { continue }
             clean += tns.substring(from: tlast)
-            out += ns.substring(with: NSRange(location: last, length: m.range.location - last)) + clean
-            last = NSMaxRange(m.range)
+            out += ns.substring(with: NSRange(location: last, length: range.location - last)) + clean
+            last = NSMaxRange(range)
         }
         out += ns.substring(from: last)
         return out

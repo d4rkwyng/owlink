@@ -202,6 +202,104 @@ import Testing
         #expect(HTMLScrub.noScript(text) == text)
     }
 
+    /// Review of 2887f40 (Grok MUST-FIX, SHOULD-FIX 1; Opus SF4): a quote
+    /// opens a value only right after `=`. `title=a"` is an unquoted value
+    /// `a"`, and every attribute after it is a real one, so the tag scan
+    /// must not stop at that quote.
+    @Test func strayQuoteDoesNotEndTheTag() {
+        let pings = [
+            #"<a href="https://example.com/ok" title=a" ping=https://t.example/p>x</a>"#,
+            #"<a href="https://example.com/ok" title=a" ping='https://t.example/p'>x</a>"#,
+            #"<a href="https://example.com/ok" title=a' ping="https://t.example/p">x</a>"#,
+            #"<a title=a" href="https://example.com/ok" ping="https://t.example/p">x</a>"#,
+            #"<a href="https://example.com/ok" x=" y=a" ping=https://t.example/p>x</a>"#,
+        ]
+        for html in pings {
+            for (name, s) in [("noScript", HTMLScrub.noScript(html)), ("noScriptNoRemote", HTMLScrub.noScriptNoRemote(html)),
+                              ("keepingLinks", HTMLScrub.noScriptNoRemoteKeepingLinks(html))] {
+                #expect(!s.lowercased().contains("ping") && !s.contains("t.example"), "\(name): \(html) -> \(s)")
+            }
+        }
+        // The link's own href is still kept: it really is the link's.
+        for html in pings.prefix(4) {
+            #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(html).contains("https://example.com/ok"), "\(html)")
+        }
+
+        let handlers = [
+            #"<img x=a" src=x onerror=alert(1)>"#,
+            #"<img x=a' src=x onerror='alert(1)'>"#,
+            #"<svg x=a"/onload=alert(1)>"#,
+            #"<div title=a" onclick="alert(1)">d</div>"#,
+        ]
+        for html in handlers {
+            for (name, s) in [("noScript", HTMLScrub.noScript(html)), ("noScriptNoRemote", HTMLScrub.noScriptNoRemote(html)),
+                              ("keepingLinks", HTMLScrub.noScriptNoRemoteKeepingLinks(html))] {
+                #expect(!s.lowercased().contains("alert(1)"), "\(name): \(html) -> \(s)")
+            }
+        }
+
+        // Script URLs after a stray quote.
+        let scripts = [
+            #"<a title=a" href="javascript:alert(1)">x</a>"#,
+            #"<a title=a' href=&#106;avascript:alert(1)>x</a>"#,
+        ]
+        for html in scripts {
+            #expect(!HTMLScrub.noScript(html).lowercased().contains("alert(1)"), "\(html) -> \(HTMLScrub.noScript(html))")
+        }
+
+        // Fetching rel after a stray quote.
+        let rels: [(String, String)] = [
+            (#"<a href="https://example.com/ok" title=a" rel=prefetch>x</a>"#, #"<a href="https://example.com/ok" title=a" >x</a>"#),
+            (#"<a href="https://example.com/ok" title=a' rel="dns-prefetch noopener">x</a>"#,
+             #"<a href="https://example.com/ok" title=a' rel="noopener">x</a>"#),
+            (#"<a href="https://example.com/ok" title=a" rel='preconnect'>x</a>"#, #"<a href="https://example.com/ok" title=a" >x</a>"#),
+        ]
+        for (html, want) in rels {
+            #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(html) == want, "\(html) -> \(HTMLScrub.noScriptNoRemoteKeepingLinks(html))")
+        }
+
+        // An href that belongs to another element is not the link's.
+        let fooled = [
+            #"<a x=a"><image href="https://t.example/p.png">"#,
+            #"<a x=a" y="><image href='https://t.example/p.png'>">"#,
+            #"<a x="><img src=https://t.example/p.png>"#,
+        ]
+        for html in fooled {
+            #expect(!HTMLScrub.noScriptNoRemoteKeepingLinks(html).contains("t.example"), "\(html) -> \(HTMLScrub.noScriptNoRemoteKeepingLinks(html))")
+        }
+    }
+
+    /// The tag scan, read as the HTML tokenizer reads it.
+    @Test func startTagsFollowTheTokenizer() {
+        func tags(_ s: String) -> [String] {
+            let ns = s as NSString
+            return HTMLScrub.startTags(in: s).map { ns.substring(with: $0.range) }
+        }
+        #expect(tags(#"<a title=a" ping=x>t</a>"#) == [#"<a title=a" ping=x>"#])
+        #expect(tags(#"<a title="x>y" b>t"#) == [#"<a title="x>y" b>"#])
+        #expect(tags(#"<a title= 'x>y'>"#) == [#"<a title= 'x>y'>"#])
+        #expect(tags(#"<a x"y=">" z>"#) == [#"<a x"y=">" z>"#])
+        #expect(tags(#"<a title="open"#) == [#"<a title="open"#])
+        #expect(tags("1 < 2 <3 </a> <!-- c --> <b/c=d><i>") == ["<b/c=d>", "<i>"])
+        #expect(HTMLScrub.startTags(in: #"<A x><AREA y><a"b><svg>"#).map(\.name) == ["a", "area", #"a"b"#, "svg"])
+    }
+
+    /// Review of 2887f40 (Grok SHOULD-FIX 2): attribute names are matched
+    /// with ASCII case folding only, as the HTML tokenizer does (not the
+    /// locale's or Unicode's).
+    @Test func asciiCaseFolding() {
+        #expect(HTMLScrub.asciiLowercased("HTTP-EQUIV") == "http-equiv")
+        #expect(HTMLScrub.asciiLowercased("\u{130}\u{212A}") == "\u{130}\u{212A}")
+        #expect(HTMLScrub.asciiContains("<meta HTTP-EQUIV=refresh>", "http-equiv"))
+        #expect(HTMLScrub.asciiContains("<META Http-Equiv=refresh>", "http-equiv"))
+        #expect(!HTMLScrub.asciiContains("<meta http-equ\u{130}v=refresh>", "http-equiv"))
+        #expect(!HTMLScrub.asciiContains("<a \u{212A}rel=x>", "krel"))
+        #expect(HTMLScrub.noScript(#"<meta HTTP-EQUIV="&#114;efresh" content="0;url=other.html">"#) == "")
+        #expect(HTMLScrub.noScript(#"<META HTTP-EQUIV=REFRESH CONTENT=0>"#) == "")
+        #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(#"<A HREF="https://example.com/ok" REL="PREFETCH">x</A>"#)
+                == #"<A HREF="https://example.com/ok" >x</A>"#)
+    }
+
     @Test func characterReferences() {
         #expect(HTMLScrub.decodeCharacterReferences("&#106;&#x61;&#X76;&#97&colon;&Tab;&amp;&unknown;&#99999999999;") == "java:\t&&unknown;\u{FFFD}")
     }
