@@ -381,7 +381,10 @@ final class EditorSnapshotTests: XCTestCase {
         AppSettings.wrap = true
         AppSettings.lineNumbers = true
         let doc = try await open(try sample("sample.swift"))
-        doc.text = Array(repeating: "A line kept in the document for scrolling.", count: 800).joined(separator: "\n")
+        // Lines short enough not to wrap with or without the gutter (sample.swift
+        // folds, so its gutter has a fold column): turning the numbers off
+        // must not reflow, or the offset scales with the content height.
+        doc.text = Array(repeating: "A line kept for scrolling.", count: 800).joined(separator: "\n")
         let (window, editor) = show(doc, size: Self.iPhone, dark: false)
         let textView = editor.textView
         XCTAssertTrue(textView.becomeFirstResponder())
