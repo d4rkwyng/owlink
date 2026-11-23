@@ -24,3 +24,60 @@ public struct ExternalLinkGate: Equatable, Sendable {
         if !opened && scriptCanClick { declinedLoad = load }
     }
 }
+
+/// What the "Open this link?" prompt shows for `url` (0.5.2 S1 security
+/// read), all made visible with `PromptText.visible`:
+///
+/// - `host`: the site the link really goes to, for a line of its own, so
+///   `https://www.apple.com%2Fsignin@evil.example/` reads as evil.example;
+/// - `userinfo`: the user name (and password) before the `@`, when the
+///   link has one, so the prompt can say it is not the site;
+/// - `url`: the whole URL, or for a long one the URL cut in the middle
+///   (`…`): the scheme, the host and its port are always kept whole, a
+///   long user name is cut, and the path, query and fragment share what
+///   is left, their start and their end.
+public struct ExternalLinkText: Equatable, Sendable {
+    public let host: String?
+    public let userinfo: String?
+    public let url: String
+
+    /// Longest URL shown whole, and longest user name.
+    public static let maxURL = 160
+    public static let maxUserinfo = 32
+
+    public init(_ url: URL, maxURL: Int = Self.maxURL) {
+        let raw = url.absoluteString
+        let c = URLComponents(string: raw)
+        host = c?.host.flatMap { $0.isEmpty ? nil : PromptText.visible($0) }
+        var user: Substring?
+        if let c, let u = c.rangeOfUser {
+            user = raw[u.lowerBound..<(c.rangeOfPassword?.upperBound ?? u.upperBound)]
+        }
+        userinfo = user.map { u in
+            let decoded = u.removingPercentEncoding.map { $0[...] } ?? u
+            return PromptText.visible(Self.middle(decoded, Self.maxUserinfo))
+        }
+        self.url = PromptText.visible(Self.shortened(raw, c, maxURL: maxURL))
+    }
+
+    static func shortened(_ raw: String, _ c: URLComponents?, maxURL: Int) -> String {
+        guard raw.count > maxURL else { return raw }
+        guard let c, let h = c.rangeOfHost else { return middle(raw[...], maxURL) }
+        // The head: scheme://[user@]host[:port], with a long user name cut.
+        let authorityEnd = c.rangeOfPort?.upperBound ?? h.upperBound
+        var head = String(raw[..<authorityEnd])
+        if let u = c.rangeOfUser {
+            let userEnd = c.rangeOfPassword?.upperBound ?? u.upperBound
+            head = String(raw[..<u.lowerBound]) + middle(raw[u.lowerBound..<userEnd], maxUserinfo) + String(raw[userEnd..<authorityEnd])
+        }
+        let rest = raw[authorityEnd...]
+        return head + middle(rest, max(maxURL - head.count, 24))
+    }
+
+    /// `s`, cut to `n` characters in the middle with `…`.
+    static func middle(_ s: Substring, _ n: Int) -> String {
+        guard s.count > n, n > 2 else { return String(s) }
+        let keep = n - 1
+        return String(s.prefix(keep - keep / 2)) + "…" + String(s.suffix(keep / 2))
+    }
+}

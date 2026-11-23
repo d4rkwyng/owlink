@@ -295,3 +295,55 @@ import Testing
         #expect(g.asks(load: 5, scriptCanClick: true) && !g.asks(load: 6, scriptCanClick: true) && g.asks(load: 7, scriptCanClick: true))
     }
 }
+
+/// 0.5.2 S1 security read: the link prompt makes the real site obvious.
+@Suite struct ExternalLinkTextTests {
+    func text(_ s: String) -> ExternalLinkText { ExternalLinkText(URL(string: s)!) }
+
+    @Test func aUserNameDressedAsASiteIsCalledOut() {
+        let t = text("https://www.apple.com%2Fsignin@evil.example/")
+        #expect(t.host == "evil.example")
+        #expect(t.userinfo == "www.apple.com/signin")
+        #expect(t.url == "https://www.apple.com%2Fsignin@evil.example/", "short: shown whole")
+        let p = text("ftp://user:secret@files.example:2121/a")
+        #expect(p.host == "files.example" && p.userinfo == "user:secret")
+    }
+
+    @Test func plainLinksHaveNoUserName() {
+        let t = text("https://example.com/a?b=1#c")
+        #expect(t.host == "example.com" && t.userinfo == nil && t.url == "https://example.com/a?b=1#c")
+        let m = text("mailto:someone@example.com")
+        #expect(m.host == nil && m.userinfo == nil && m.url == "mailto:someone@example.com")
+    }
+
+    @Test func aLongUserNameCantPushTheHostOutOfSight() {
+        let long = "https://www.apple.com%2Fsignin%2F" + String(repeating: "a", count: 400) + "@evil.example/next"
+        let t = text(long)
+        #expect(t.host == "evil.example")
+        #expect(t.url.count <= ExternalLinkText.maxURL, "\(t.url.count)")
+        #expect(t.url.hasPrefix("https://www.apple.com") && t.url.contains("…") && t.url.contains("@evil.example/next"), "\(t.url)")
+        #expect((t.userinfo?.count ?? 0) <= ExternalLinkText.maxUserinfo && t.userinfo?.contains("…") == true, "\(t.userinfo ?? "nil")")
+    }
+
+    @Test func aLongURLIsCutInTheMiddleKeepingTheHost() {
+        let long = "https://example.com:8443/" + String(repeating: "x", count: 500) + "?q=end"
+        let t = text(long)
+        #expect(t.url.count == ExternalLinkText.maxURL, "\(t.url.count)")
+        #expect(t.url.hasPrefix("https://example.com:8443/") && t.url.hasSuffix("?q=end") && t.url.contains("…"), "\(t.url)")
+        // A host longer than the limit is still kept whole.
+        let host = (1...4).map { String(repeating: "h\($0)", count: 30) }.joined(separator: ".") + ".example"
+        let h = text("https://\(host)/" + String(repeating: "p", count: 300))
+        #expect(h.host == host && h.url.hasPrefix("https://\(host)/") && h.url.contains("…"))
+        // A long mailto (no host) is cut in the middle too.
+        let m = text("mailto:a@example.com?body=" + String(repeating: "b", count: 400))
+        #expect(m.url.count == ExternalLinkText.maxURL && m.url.hasPrefix("mailto:a@example.com") && m.url.contains("…"))
+    }
+
+    @Test func hiddenCharactersStayVisible() {
+        #expect(ExternalLinkText.middle("abcdefghij", 5) == "ab…ij")
+        #expect(ExternalLinkText.middle("abc", 5) == "abc")
+        // A user name with a right-to-left override, once decoded, is escaped.
+        let t = text("https://a%E2%80%AEb@evil.example/")
+        #expect(t.userinfo == "a<U+202E>b" && t.host == "evil.example", "\(t.userinfo ?? "nil")")
+    }
+}

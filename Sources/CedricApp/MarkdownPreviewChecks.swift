@@ -639,7 +639,7 @@ extension DevChecks {
     /// expects it to show `url` whole with Cancel as the default button
     /// (Return) and Open with no key, and answers Cancel (by button or key).
     static func webPrompt(_ tab: EditorWindowController, _ url: String, _ name: String,
-                          answer: PromptAnswer = .cancelButton) -> (@escaping () -> Void) -> Void {
+                          answer: PromptAnswer = .cancelButton, contains: [String] = []) -> (@escaping () -> Void) -> Void {
         { next in
             @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
             let window = tab.previewPane?.window ?? tab.window
@@ -652,7 +652,7 @@ extension DevChecks {
                 }
                 let views = sheet.contentView.map(allViews) ?? []
                 let shown = views.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
-                expect(shown.contains("Open this link?") && shown.contains(url), name, shown)
+                expect(shown.contains("Open this link?") && shown.contains(url) && contains.allSatisfy(shown.contains), name, shown)
                 let buttons = views.compactMap { $0 as? NSButton }
                 // NSAlert hands Return to the window's default button cell.
                 let defaultTitle = (sheet.defaultButtonCell as? NSButtonCell)?.title
@@ -714,7 +714,9 @@ extension DevChecks {
         var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec) [alias](alias.md)"
         src += " [jump](#unique-section) [jump text](#Unique%20Section)"
         // S1: web links, plain and target=_blank.
-        src += " [web](https://example.invalid/s1?q=1) <a href=\"https://example.invalid/blank\" target=\"_blank\">blank web</a>\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
+        src += " [web](https://example.invalid/s1?q=1) <a href=\"https://example.invalid/blank\" target=\"_blank\">blank web</a>"
+        // A user name dressed as a site: the prompt names the real one.
+        src += " [spoof](https://www.apple.com%2Fsignin@evil.example/)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
         let tab = app.open(write("anchors/notes.md", src))!
         sized(tab)
         let tabs = app.tabs.count
@@ -863,8 +865,10 @@ extension DevChecks {
             },
             waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
             sync { livePage = p()?.webView.url },
-            click("web"),
-            webPrompt(tab, "https://example.invalid/s1?q=1", "a click asks again on the next load", answer: .escapeKey),
+            click("spoof"),
+            webPrompt(tab, "https://www.apple.com%2Fsignin@evil.example/",
+                      "a click asks again on the next load; a user name before @ is called out and the real site shown on its own line",
+                      answer: .escapeKey, contains: ["Site: evil.example", "user name (“www.apple.com/signin”)", "This link goes to evil.example."]),
             sync { stayed("Escape opened nothing") },
             { next in pageJS(tab, "location.href = 'https://example.invalid/script'; 1") { _ in next() } },
             { next in

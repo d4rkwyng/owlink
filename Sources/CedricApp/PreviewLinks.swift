@@ -62,9 +62,19 @@ enum LinkPrompt {
         let a = NSAlert()
         current = a.window
         a.messageText = url.scheme?.lowercased() == "mailto" ? String(localized: "Write an email?") : String(localized: "Open this link?")
-        // The whole URL, so a misleading link text can't hide where it goes
-        // (bidi and control characters shown as escapes).
-        a.informativeText = PromptText.visible(url.absoluteString)
+        // The site on a line of its own, then the URL (whole, or cut in the
+        // middle keeping the host), so a misleading link text or a user name
+        // dressed as a site (`https://www.apple.com%2Fsignin@evil.example/`)
+        // can't hide where it goes (bidi and control characters shown as
+        // escapes: ExternalLinkText).
+        let text = ExternalLinkText(url)
+        var lines: [String] = []
+        if let host = text.host { lines.append(String(localized: "Site: \(host)")) }
+        if let user = text.userinfo, let host = text.host {
+            lines.append(String(localized: "Before the “@” is a user name (“\(user)”), not the site. This link goes to \(host)."))
+        }
+        lines.append(text.url)
+        a.informativeText = lines.joined(separator: "\n\n")
         // Cancel is the default: Return (a newline typed while page script
         // raised the prompt) and Escape both answer Cancel; Open takes a
         // deliberate click (or Tab and Space).
