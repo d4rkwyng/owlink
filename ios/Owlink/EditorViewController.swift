@@ -4360,6 +4360,16 @@ final class EditorDocumentTextView: UITextView {
         super.layoutSubviews()
         invisiblesOverlay?.refresh()
     }
+    /// Custom actions added to UIKit's own (the fold pills' Unfold actions).
+    var extraAccessibilityActions: (() -> [UIAccessibilityCustomAction])?
+    override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
+        get {
+            let extra = extraAccessibilityActions?() ?? []
+            guard !extra.isEmpty else { return super.accessibilityCustomActions }
+            return (super.accessibilityCustomActions ?? []) + extra
+        }
+        set { super.accessibilityCustomActions = newValue }
+    }
     weak var regexFind: RegexFind?
     override func findInteraction(_ interaction: UIFindInteraction, sessionFor view: UIView) -> UIFindSession? {
         guard let regexFind else { return super.findInteraction(interaction, sessionFor: view) }

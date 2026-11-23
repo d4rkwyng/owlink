@@ -224,12 +224,16 @@ final class FoldingController: NSObject, NSTextContentStorageDelegate {
                 if used == pills.count {
                     let b = FoldPillButton()
                     b.addTarget(self, action: #selector(pillTapped(_:)), for: .touchUpInside)
+                    b.onActivate = { [weak self, weak b] in
+                        guard let self, let b else { return }
+                        self.pillTapped(b)
+                    }
                     tv.addSubview(b)
                     pills.append(b)
                 }
                 let b = pills[used]
                 used += 1
-                b.configure(label: Self.label(for: h, index), hidden: h, font: font, foreground: foreground, background: background)
+                b.configure(label: Self.label(for: h, index), header: header, hidden: h, font: font, foreground: foreground, background: background)
                 let size = b.intrinsicContentSize
                 let height = min(max(caret.height, 14), size.height)
                 b.frame = CGRect(x: caret.maxX + 8, y: caret.midY - height / 2, width: size.width, height: height)
@@ -242,14 +246,38 @@ final class FoldingController: NSObject, NSTextContentStorageDelegate {
     @objc private func pillTapped(_ sender: FoldPillButton) {
         unfold(state.folds(startingAt: sender.hiddenRange.location))
     }
+
+    /// VoiceOver: a UITextView is one accessibility element, so the pills
+    /// inside it are never visited. The text view offers one custom action
+    /// per visible pill instead ("Unfold line 3, ⋯ 4 lines"), which opens
+    /// what a tap on that pill opens; the text itself reads as before.
+    var pillAccessibilityActions: [UIAccessibilityCustomAction] {
+        visiblePills.map { b in
+            let name = String(localized: "Unfold line \(b.headerLine + 1), \(b.accessibilityLabel ?? "")")
+            let a = UIAccessibilityCustomAction(name: name) { [weak self, weak b] _ in
+                guard let self, let b, !b.isHidden else { return false }
+                self.pillTapped(b)
+                return true
+            }
+            return a
+        }
+    }
 }
 
 /// The "⋯ N lines" pill on a folded header.
 final class FoldPillButton: UIButton {
     private(set) var hiddenRange = NSRange(location: 0, length: 0)
+    /// The folded header's line (0-based).
+    private(set) var headerLine = 0
+    /// What a tap does (VoiceOver, Full Keyboard Access and Voice Control
+    /// activate the pill without a touch).
+    var onActivate: (() -> Void)?
 
-    func configure(label: String, hidden: NSRange, font: UIFont, foreground: UIColor, background: UIColor) {
+    func configure(label: String, header: Int, hidden: NSRange, font: UIFont, foreground: UIColor, background: UIColor) {
         hiddenRange = hidden
+        headerLine = header
+        isAccessibilityElement = true
+        accessibilityTraits = .button
         var c = UIButton.Configuration.plain()
         c.contentInsets = NSDirectionalEdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6)
         c.attributedTitle = AttributedString(label, attributes: AttributeContainer([.font: font, .foregroundColor: foreground]))
@@ -262,6 +290,12 @@ final class FoldPillButton: UIButton {
         accessibilityIdentifier = "editor.foldPill"
         accessibilityLabel = label
         accessibilityHint = String(localized: "Unfolds the hidden lines.")
+    }
+
+    override func accessibilityActivate() -> Bool {
+        guard let onActivate, !isHidden else { return false }
+        onActivate()
+        return true
     }
 }
 
@@ -290,6 +324,7 @@ extension EditorViewController {
         if let f = folding { return f }
         let f = FoldingController(textView: textView)
         f.onChange = { [weak self] in self?.foldsChanged() }
+        textView.extraAccessibilityActions = { [weak f] in f?.pillAccessibilityActions ?? [] }
         folding = f
         return f
     }

@@ -253,6 +253,66 @@ final class EditorFoldingTests: XCTestCase {
         XCTAssertEqual(e.foldMarks(lines: [0, 2, 5]), [0: .open, 2: .folded])
     }
 
+    /// As on the Mac (CedricApp foldMarks uses the cheap startsRegion): a
+    /// `{` closed on the next line shows ▾, and its tap folds nothing (the
+    /// gutter then toggles the bookmark).
+    func testEmptyRegionMarkMatchesMac() {
+        let e = editor("func a() {\n}\ntail\n")
+        XCTAssertEqual(e.foldMarks(lines: [0, 1, 2]), [0: .open])
+        XCTAssertFalse(e.toggleFold(line: 0))
+        XCTAssertFalse(e.hasFolds)
+    }
+
+    // MARK: VoiceOver
+
+    /// An editor laid out without a window, folded, with its pills placed.
+    private func foldedWithPills() throws -> EditorViewController {
+        let e = editor(swift)
+        e.view.frame = CGRect(x: 0, y: 0, width: 700, height: 900)
+        e.view.layoutIfNeeded()
+        e.textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+        e.foldAll()
+        e.view.layoutIfNeeded()
+        e.layoutGutter()
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [0, 2])
+        return e
+    }
+
+    func testPillIsAnAccessibilityElementThatUnfolds() throws {
+        let e = try foldedWithPills()
+        let f = try XCTUnwrap(e.folding)
+        // Line 0's fold hides the line 2 header, so only its pill shows.
+        let pill = try XCTUnwrap(f.visiblePills.first)
+        XCTAssertEqual(f.visiblePills.count, 1)
+        XCTAssertTrue(pill.isAccessibilityElement)
+        XCTAssertTrue(pill.accessibilityTraits.contains(.button))
+        XCTAssertEqual(pill.accessibilityIdentifier, "editor.foldPill")
+        XCTAssertEqual(pill.accessibilityLabel, "⋯ 4 lines")
+        XCTAssertEqual(pill.accessibilityHint, String(localized: "Unfolds the hidden lines."))
+        // Activating it opens the outermost fold there, as a tap does.
+        XCTAssertTrue(pill.accessibilityActivate())
+        XCTAssertEqual(f.state.headerLines(e.lineIndex), [2])
+        XCTAssertEqual(e.textView.text, swift)
+    }
+
+    func testTextViewOffersAnUnfoldActionPerPill() throws {
+        let e = try foldedWithPills()
+        let f = try XCTUnwrap(e.folding)
+        let unfold = String(localized: "Unfold line 1, ⋯ 4 lines")
+        let action = try XCTUnwrap(e.textView.accessibilityCustomActions?.first { $0.name == unfold })
+        XCTAssertTrue(try XCTUnwrap(action.actionHandler)(action))
+        XCTAssertEqual(f.state.headerLines(e.lineIndex), [2])
+        // The inner header is visible now: its pill and action follow.
+        e.layoutGutter()
+        XCTAssertEqual(f.visiblePills.map(\.accessibilityLabel), ["⋯ 1 line"])
+        let names = e.textView.accessibilityCustomActions?.map(\.name) ?? []
+        XCTAssertTrue(names.contains(String(localized: "Unfold line 3, ⋯ 1 line")), "\(names)")
+        XCTAssertFalse(names.contains(unfold))
+        e.unfoldAll()
+        e.layoutGutter()
+        XCTAssertFalse((e.textView.accessibilityCustomActions ?? []).contains { $0.name.hasPrefix(String(localized: "Unfold line")) })
+    }
+
     func testLanguagesThatDontFold() {
         for (language, ext) in [(Language.plain, "txt"), (.csv, "csv"), (.diff, "diff"), (.html, "html")] {
             let e = editor("a {\n  b\n}\n# h\n  x\n", language, ext: ext)
