@@ -91,6 +91,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   nothing stored, no app scripts, handlers or `cedric-doc:`); other text
   files open in the editor. **Open in Browser** asks first, showing the
   full URL; mailto and `⌘`-click ask too. Nothing a link names is launched.
+  A link with a heading fragment (`other.md#part`, `page.html#sec`,
+  `[[other#Part]]`) opens that document in the preview at the heading, and
+  Back / Forward return to it.
   Text and preview open at the same place both ways (`ScrollSync`). Side
   by side, the handle between them drags (44 pt wide) and snaps to 1/3,
   1/2, 2/3 and the fold (the default, a strong snap); double-tap resets

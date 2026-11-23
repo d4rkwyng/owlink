@@ -368,15 +368,107 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
         guard webView === web else { return }
         loaded = true
+        if let anchor = pendingAnchor, Self.renderGeneration(of: webView.url) == anchor.generation {
+            pendingAnchor = nil
+            // The heading wins over the place (top, for a new page): that
+            // stays only as the fallback when nothing matches, and isn't
+            // re-applied later.
+            applyPendingFraction()
+            scroll(toAnchor: anchor.fragment)
+            return
+        }
         // The content size settles a moment after the load finishes.
         let f = pendingFraction
         applyPendingFraction()
         guard let f else { return }
+        let gen = generation
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let self, self.loaded, self.pendingFraction == nil else { return }
+            guard let self, self.loaded, self.generation == gen, self.pendingFraction == nil else { return }
             self.pendingFraction = f
             self.applyPendingFraction()
         }
+    }
+
+    /// The render a local page load belongs to (its `?r=` query).
+    static func renderGeneration(of url: URL?) -> Int? {
+        guard let url, let r = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "r" })?.value else { return nil }
+        return Int(r)
+    }
+
+    // MARK: Heading anchors
+
+    /// The heading a local page scrolls to once its render has loaded.
+    private var pendingAnchor: (fragment: String, generation: Int)?
+    /// The last anchor scroll: the fragment, whether an element matched,
+    /// and the scroll view's offset after it (for tests).
+    private(set) var lastAnchor: (fragment: String, found: Bool, offset: CGFloat)?
+    /// Anchor scrolls finished so far (for tests).
+    private(set) var anchorScrolls = 0
+
+    /// Finds the first element whose `id` (or `name`) is one of `ids` and
+    /// returns its top and the document's size, in CSS pixels. Run once
+    /// per scroll in the app's own content world: the page can't see or
+    /// call it, page JavaScript stays off, no handlers, nothing posted back.
+    static let anchorScript = """
+    let e = null;
+    for (const id of ids) { e = document.getElementById(id) || document.getElementsByName(id)[0]; if (e) break; }
+    if (!e) return null;
+    const doc = document.documentElement;
+    return { y: e.getBoundingClientRect().top - doc.getBoundingClientRect().top, h: doc.scrollHeight, w: doc.scrollWidth };
+    """
+
+    /// Scrolls the local page so the heading `fragment` names (an exact
+    /// `id` or `name`, else the heading slug of that text) is at the top,
+    /// through the scroll view as `applyPendingFraction` does. The scroll
+    /// view's content size lags the page's layout a little after a load:
+    /// until it matches the document's (by the width's scale), and while
+    /// a new page's commit moves it back, it tries again shortly (a few
+    /// times at most).
+    private func scroll(toAnchor fragment: String, attempt: Int = 0) {
+        let ids = PreviewAnchor.candidates(for: fragment)
+        guard !ids.isEmpty else { return }
+        let gen = generation
+        web.callAsyncJavaScript(Self.anchorScript, arguments: ["ids": ids], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, gen == self.generation else { return }
+            let s = self.web.scrollView
+            if case .success(let value) = result, let d = value as? [String: Any],
+               let y = (d["y"] as? NSNumber)?.doubleValue, let h = (d["h"] as? NSNumber)?.doubleValue, h > 0 {
+                let w = (d["w"] as? NSNumber)?.doubleValue ?? 0
+                let expected = w > 0 ? s.contentSize.width / CGFloat(w) * CGFloat(h) : s.contentSize.height
+                if attempt < 20, s.contentSize.width == 0 || abs(s.contentSize.height - expected) > max(2, expected * 0.01) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                        guard let self, gen == self.generation else { return }
+                        self.scroll(toAnchor: fragment, attempt: attempt + 1)
+                    }
+                    return
+                }
+                let inset = s.adjustedContentInset
+                let scale = s.contentSize.height / CGFloat(h)
+                let top = -inset.top
+                let bottom = max(top, s.contentSize.height - s.bounds.height + inset.bottom)
+                let target = min(max(top, top + CGFloat(y) * scale), bottom)
+                s.setContentOffset(CGPoint(x: -inset.left, y: target), animated: false)
+                // A new page's first commit can still put it back at the
+                // top: check a moment later, and scroll again if so (not
+                // when the reader has taken over).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    guard let self, gen == self.generation else { return }
+                    let held = abs(s.contentOffset.y - target) <= 1 || s.isTracking || s.isDragging || s.isDecelerating
+                    if !held, attempt < 20 {
+                        self.scroll(toAnchor: fragment, attempt: attempt + 1)
+                    } else {
+                        self.finishAnchor(fragment, found: true)
+                    }
+                }
+                return
+            }
+            self.finishAnchor(fragment, found: false) // nothing matched: the place stays
+        }
+    }
+
+    private func finishAnchor(_ fragment: String, found: Bool) {
+        lastAnchor = (fragment, found, web.scrollView.contentOffset.y)
+        anchorScrolls += 1
     }
 
     // MARK: Text size
@@ -473,10 +565,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 askForFolder()
                 return
             }
-            if url.fragment != nil, let page = webView.url, Self.withoutFragment(url) == Self.withoutFragment(page) {
-                decisionHandler(.allow)
-                return
-            }
+            // A link within the page (`#part`) is cancelled too: `handleLink`
+            // scrolls to it by exact id, else the heading slug.
             decisionHandler(.cancel)
             handleLink(url, command: Self.command(action))
             return
@@ -506,6 +596,11 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// a `file:` link is refused; other URLs go by scheme
     /// (`PreviewLinkAction.previewAction`).
     func handleLink(_ url: URL, command: Bool) {
+        // A link within the page shown: it stays (no history step).
+        if url.fragment != nil, let page = web.url, Self.withoutFragment(url) == Self.withoutFragment(page) {
+            if let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment) }
+            return
+        }
         let scheme = url.scheme?.lowercased() ?? ""
         let routed: URL
         if scheme == PreviewFolder.scheme {
@@ -527,7 +622,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         lastLinkAction = act
         switch act {
         case .openInPreview(let file):
-            if let root { push(.local(file, root)) }
+            // The file is the path alone (`linkTarget`): carry the clicked link's `#fragment`.
+            if let root { push(.local(file, root, PreviewAnchor.fragment(of: url))) }
         case .openWebInPreview(let web):
             push(.web(web))
         case .openInCedric(let file):
@@ -623,7 +719,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// (its file, and the root it may read in), or a web page.
     enum Entry: Equatable {
         case home
-        case local(URL, URL)
+        /// A linked document, the root it may read in, and the heading
+        /// (`#fragment`) to scroll to once it has loaded.
+        case local(URL, URL, String?)
         case web(URL)
     }
     private(set) var history: [Entry] = [.home]
@@ -674,6 +772,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     private func displayEntry(keepPlace: Bool) {
         loadViewIfNeeded()
         browser.stopLoading()
+        pendingAnchor = nil
         switch history[historyIndex] {
         case .home:
             browser.isHidden = true
@@ -683,7 +782,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             if let home {
                 render(.markdown(home.markdown), palette: home.palette, document: home.document, rootOverride: nil, keepPlace: keepPlace)
             }
-        case .local(let file, let root):
+        case .local(let file, let root, let fragment):
             browser.isHidden = true
             web.isHidden = false
             // The same rules again (the file may have changed since the click).
@@ -696,6 +795,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             let html = LanguageDetector.language(forFileName: file.lastPathComponent) == .html
             render(html ? .html(text) : .markdown(text), palette: home?.palette ?? csvPalette, document: file,
                    rootOverride: root, keepPlace: keepPlace)
+            // Scrolled to once this render's page has loaded (also on Back,
+            // Forward and a folder-grant refresh), ahead of the place above.
+            pendingAnchor = fragment.map { ($0, generation) }
         case .web(let url):
             generation += 1 // drop a local render still on its way
             web.stopLoading()

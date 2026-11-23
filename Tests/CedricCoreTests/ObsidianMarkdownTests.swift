@@ -38,7 +38,8 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         defer { try? FileManager.default.removeItem(at: t) }
         let vault = WikiVault(documentFolder: t.appendingPathComponent("n"))
         let h = ob("[[Note#Setup]] [[Note#^abc123|alias]] [[#Local]]", vault: vault)
-        #expect(h.contains("Note.md\">Note › Setup</a>"))
+        // A heading link goes to the note at the heading's slug; a block reference to the note.
+        #expect(h.contains("Note.md#setup\">Note › Setup</a>"))
         #expect(h.contains("Note.md\">alias</a>"))
         #expect(h.contains(#"is-unresolved" title=" (not found)">Local</a>"#))
         // No vault: shown as unresolved links, not raw text.

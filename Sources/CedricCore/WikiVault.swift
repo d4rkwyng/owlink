@@ -242,8 +242,17 @@ public final class WikiVault: @unchecked Sendable {
         return lines[k..<end].joined(separator: "\n")
     }
 
-    /// The `cedric-doc:` link for a resolved file.
-    public static func href(_ file: URL) -> String? { PreviewFolder.pageURL(forFile: file)?.absoluteString }
+    /// The `cedric-doc:` link for a resolved file, with `#<slug>` for a
+    /// heading (`[[note#Part]]` → `…/note.md#part`; a block reference
+    /// `#^id` adds nothing, the preview has no block ids).
+    public static func href(_ file: URL, heading: String? = nil) -> String? {
+        guard let page = PreviewFolder.pageURL(forFile: file) else { return nil }
+        guard let heading, !heading.hasPrefix("^") else { return page.absoluteString }
+        let id = PreviewAnchor.headingID(heading)
+        guard !id.isEmpty, var c = URLComponents(url: page, resolvingAgainstBaseURL: false) else { return page.absoluteString }
+        c.fragment = id
+        return c.url?.absoluteString ?? page.absoluteString
+    }
 
     /// A link to `file` relative to `folder` (`../attachments/a%20b.png`),
     /// percent-encoded, for an exported page saved beside the document.
