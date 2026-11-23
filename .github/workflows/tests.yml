@@ -7,7 +7,7 @@ name: Tests
 
 on:
   push:
-    branches: [main, "release-*"]
+    branches: [main, "release-*", "release/**"]
     paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
     paths-ignore: ["**.md", "docs/**", "LICENSE"]
