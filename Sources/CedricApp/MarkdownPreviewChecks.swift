@@ -664,6 +664,7 @@ extension DevChecks {
         let p = { tab.preview }
         @MainActor func onSource() -> Bool { tab.doc.fileURL?.lastPathComponent == "notes.md" && tab.text.hasPrefix("# Anchors") }
         @MainActor func noTab() -> Bool { app.tabs.count == tabs }
+        var loadsBefore = 0
         func click(_ text: String, command: Bool = false) -> (@escaping () -> Void) -> Void {
             { next in
                 let fire = command
@@ -703,6 +704,10 @@ extension DevChecks {
                           when: { p()?.isHome == true && noTab() }),
             sync { expect(p()?.isHome == true && noTab() && PreviewLinkLog.revealed.isEmpty, "and reveals or opens nothing") },
             toTop,
+            // Page JavaScript and Network on for the live document.
+            sync { loadsBefore = (p()?.pageLoads ?? 0) + (p()?.bodySwaps ?? 0); tab.previewAllowsJavaScript = true; tab.previewAllowsNetwork = true },
+            waitForSwap(tab, "the live document re-renders with JavaScript on", since: { loadsBefore }),
+            waitForPreview(tab, contains: "jump text", "and shows the document"),
             // Another document's heading.
             click("other part"),
             waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
@@ -710,6 +715,21 @@ extension DevChecks {
             sync {
                 expect(noTab() && onSource(), "no tab opened; the editor stays on the source document", "\(app.tabs.count) tabs, \(tab.doc.fileURL?.lastPathComponent ?? "-")")
                 expect(p()?.canGoBack == true && tab.previewAllowsJavaScript == false, "Back is enabled; no JavaScript trust carried over")
+                expect(p()?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                       "the linked document's page runs with JavaScript off")
+                // The live document reloads from disk while the preview is
+                // away from it: Back must not turn JavaScript/Network on
+                // again for the new content.
+                tab.reloadFromDisk()
+                tab.previewBarAction(.back)
+                expect(p()?.isHome == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "after a reload from disk while navigated away, Back keeps JavaScript and Network off",
+                       "JS \(tab.previewAllowsJavaScript) Network \(tab.previewAllowsNetwork)")
+                tab.previewBarAction(.forward)
+                tab.previewBarAction(.home)
+                expect(p()?.isHome == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "and This Document keeps them off too")
+                tab.previewBarAction(.back)
                 tab.previewBarAction(.back)
             },
             waitForPreview(tab, contains: "jump text", "Back returns to the source document"),

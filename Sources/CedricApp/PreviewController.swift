@@ -193,6 +193,15 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     func goHome() { if !isHome { push(.home) } }
     func trustChanged() { if case .local = history[historyIndex] { displayEntry() } }
 
+    /// The live document changed on disk: JavaScript and Network go off now
+    /// and stay off when Back/Home returns to it, whatever entry is showing.
+    func resetTrust() {
+        homeJavaScript = false
+        homeNetwork = false
+        allowJavaScript = false
+        allowNetwork = false
+    }
+
     /// A linked local document does not inherit JavaScript/Network trust
     /// granted for the live document. Home restores the user's setting.
     private func applyTrust(for entry: Entry) {

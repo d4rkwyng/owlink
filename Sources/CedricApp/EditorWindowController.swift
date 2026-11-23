@@ -1691,11 +1691,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// The file was reloaded from disk (a `git pull`, another editor):
     /// JavaScript and Network go back off, so new content never inherits
     /// a choice made for the old one.
+    /// The setting saved for Home is cleared too, also while the preview
+    /// shows a linked page, so Back/Home doesn't turn them on again.
     func resetPreviewTrust() {
-        guard let p = preview, p.allowJavaScript || p.allowNetwork else { return }
-        p.allowJavaScript = false
-        p.allowNetwork = false
-        p.trustChanged()
+        guard let p = preview else { return }
+        let wasOn = p.allowJavaScript || p.allowNetwork
+        p.resetTrust()
+        if wasOn { p.trustChanged() }
         updatePreviewBar()
     }
 
