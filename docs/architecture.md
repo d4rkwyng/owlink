@@ -2146,15 +2146,17 @@ Accepted; staples; checks with `spctl -a -vv`; and zips the stapled app.
   signing nor notarization sees it.
 
 **On GitHub.** `.github/workflows/release.yml` runs on a `v*` tag push (or by hand with a
-tag) on `macos-15`: checks the five secrets, builds the release notes from
+tag) on `macos-26`: checks the five secrets, builds the release notes from
 `CHANGELOG.md` (`Scripts/changelog-section.sh`, after Tankard's), restores the SwiftPM
 artifact cache, resolves packages, imports the certificate, runs `Scripts/test.sh`, then
 `Scripts/release.sh` with `CEDRIC_VERSION` from the tag, and attaches `Owlink-<version>.zip` to the
-release. A tag with a suffix (`v0.1.0-rc1`) makes a draft prerelease. `notary-result.json`
+release. Every release it makes is a draft, final tags included, so nothing is public until
+the owner publishes it by hand; a tag with a suffix (`v0.1.0-rc1`) is also a prerelease.
+`notary-result.json`
 and `notary-log.json` are kept as the workflow artifact `notary-<tag>` (90 days) with
 `if: always()`, so a failed notarization leaves Apple's issues list behind. Actions are
 pinned by commit SHA. `.github/workflows/tests.yml` runs `Scripts/test.sh` on pushes to
-`main` and `release-*` and on pull requests, and logs `swift --version`.
+`main`, `release-*` and `release/**` and on pull requests, and logs `swift --version`.
 
 The llama.cpp binary target (a 65 MB zip from the llama.cpp GitHub releases) has hung
 while fetching on the build Mac. Both workflows cache SwiftPM's global artifact cache
