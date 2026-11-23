@@ -99,7 +99,11 @@ final class SpellStepController {
     var onClose: (() -> Void)?
     private var painted: NSTextRange?
     private var textViewHadFocus = false
-    private var keyboardObserver: NSObjectProtocol?
+    /// The keyboard's frame changes move the card; removed on close (and in
+    /// deinit, should the editor go without closing it).
+    nonisolated(unsafe) private var keyboardObserver: NSObjectProtocol?
+    /// Whether the keyboard observer is registered (for the tests).
+    var hasKeyboardObserver: Bool { keyboardObserver != nil }
 
     var current: SpellStepItem? { stepper.current }
 
@@ -114,6 +118,12 @@ final class SpellStepController {
         card.onIgnore = { [weak self] in self?.ignoreAll() }
         card.onLearn = { [weak self] in self?.learn() }
         card.onDone = { [weak self] in self?.done() }
+    }
+
+    /// The backstop: the editor went without a close. The card went with
+    /// its view; the observer is unregistered here (any thread may do so).
+    deinit {
+        if let keyboardObserver { NotificationCenter.default.removeObserver(keyboardObserver) }
     }
 
     /// Large mode: words are looked for only when the next one is needed.
@@ -349,7 +359,9 @@ final class SpellStepController {
     func done() { close() }
 
     /// Done, close, the document going or reloading: the card goes, the text stays as it is.
-    func close() {
+    /// `restoringFocus`: the text view gets the keys back if it had them (not
+    /// when the editor itself is going).
+    func close(restoringFocus: Bool = true) {
         guard isOpen else { return }
         isOpen = false
         clearPaint()
@@ -357,7 +369,7 @@ final class SpellStepController {
         keyboardObserver = nil
         let hadFocus = card.isFirstResponder
         card.removeFromSuperview()
-        if hadFocus, textViewHadFocus { editor?.textView.becomeFirstResponder() }
+        if restoringFocus, hadFocus, textViewHadFocus { editor?.textView.becomeFirstResponder() }
         onClose?()
     }
 

@@ -236,6 +236,47 @@ final class FixTyposTests: XCTestCase {
         XCTAssertEqual(s.current?.word, "zorb")
     }
 
+    // MARK: The editor going
+
+    private func assertClosed(_ s: SpellStepController, _ e: EditorViewController, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertFalse(s.isOpen, file: file, line: line)
+        XCTAssertNil(s.card.superview, file: file, line: line)
+        XCTAssertNil(e.spellStep, file: file, line: line)
+        XCTAssertFalse(s.hasKeyboardObserver, file: file, line: line)
+    }
+
+    func testClosingTheDocumentClosesTheCard() throws {
+        let e = editor("Teh wrod.\n")
+        let s = try XCTUnwrap(e.startFixTypos(checker: FakeChecker(["Teh": ["The"]])))
+        XCTAssertTrue(s.isOpen)
+        XCTAssertTrue(s.hasKeyboardObserver)
+        XCTAssertFalse(e.document.hasUnsavedChanges, "closes without asking")
+        // Close → finishClose: the card goes at once, before the document's close finishes.
+        e.closeDocument()
+        assertClosed(s, e)
+        settle(0.2)
+        assertClosed(s, e)
+    }
+
+    func testLeavingTheParentClosesTheCardButCoveringItDoesNot() throws {
+        let e = editor("Teh wrod.\n")
+        let nav = try XCTUnwrap(e.navigationController)
+        let s = try XCTUnwrap(e.startFixTypos(checker: FakeChecker(["Teh": ["The"]])))
+        // Settings (or any sheet) over the editor: it disappears, the card stays.
+        let sheet = UIViewController()
+        nav.present(sheet, animated: false)
+        settle()
+        nav.dismiss(animated: false)
+        settle()
+        XCTAssertTrue(s.isOpen)
+        XCTAssertTrue(e.spellStep === s)
+        XCTAssertTrue(s.card.superview === e.view)
+        XCTAssertTrue(s.hasKeyboardObserver)
+        // Removed from its parent: the card goes with it.
+        nav.setViewControllers([UIViewController()], animated: false)
+        assertClosed(s, e)
+    }
+
     // MARK: Large documents
 
     func testLargeDocumentScansOnlyAsFarAsTheNextWord() throws {

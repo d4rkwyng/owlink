@@ -2259,7 +2259,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func willMove(toParent parent: UIViewController?) {
-        if parent == nil, owlInRail { setOwlFrame(owlFrame, inRail: false) }
+        if parent == nil {
+            if owlInRail { setOwlFrame(owlFrame, inRail: false) }
+            // Leaving for good: Fix Typos… goes with the editor.
+            spellStep?.close(restoringFocus: false)
+        }
         super.willMove(toParent: parent)
     }
 
@@ -2269,6 +2273,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         highlightTimer = nil
         clearEditorHighlights()
         if isBeingDismissed || navigationController?.isBeingDismissed == true {
+            // Dismissed, not just covered (Settings over it keeps the card).
+            spellStep?.close(restoringFocus: false)
             EditorBarStyle.restore(window: themedWindow)
             themedWindow = nil
         }
@@ -3542,6 +3548,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
+        // The document is going: so is Fix Typos… (closeWithTab on the Mac).
+        spellStep?.close(restoringFocus: false)
         stopDailyWordTracking()
         owl.cancel()
         textView.resignFirstResponder()
