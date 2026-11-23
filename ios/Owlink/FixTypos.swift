@@ -238,7 +238,7 @@ final class SpellStepController {
         let p = stepper.progress
         let word: String, progress: String
         if let c = stepper.current {
-            word = "“\(c.word)”"
+            word = String(localized: "“\(c.word)”")
             guesses = checker.guesses(for: c.word)
             progress = String(localized: "\(p.index) of \(p.total)") + (p.final ? "" : "+")
         } else {

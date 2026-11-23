@@ -3684,7 +3684,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let alert = GoToLineAlertController(title: String(localized: "Go to Line"), message: nil, preferredStyle: .alert)
         alert.addTextField {
             $0.keyboardType = .numberPad
-            $0.placeholder = "1–\(self.lineIndex.lineCount)"
+            $0.placeholder = String(localized: "1–\(self.lineIndex.lineCount)")
             $0.accessibilityLabel = Self.goToLineAccessibilityLabel
             $0.backgroundColor = .systemBackground
         }

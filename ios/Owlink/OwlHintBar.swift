@@ -139,7 +139,7 @@ final class OwlHintBar: UIView {
         ignore.isHidden = ignoreTitle == nil
         if let ignoreTitle { ignore.configuration?.title = ignoreTitle }
         nextButton.isHidden = !more
-        accessibilityLabel = "Cedric: \(hint.title)"
+        accessibilityLabel = String(localized: "Cedric: \(hint.title)")
     }
 }
 

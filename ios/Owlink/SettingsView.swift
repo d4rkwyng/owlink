@@ -109,7 +109,7 @@ struct SettingsView: View {
                         HStack {
                             Text(String(localized: "Font Size"))
                             Spacer()
-                            Text("\(Int(fontSize)) pt").foregroundStyle(.secondary).monospacedDigit()
+                            Text(String(localized: "\(Int(fontSize)) pt")).foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                     .accessibilityIdentifier("settings.fontSize")
@@ -204,7 +204,7 @@ struct SettingsView: View {
                         HStack {
                             Text(String(localized: "Prose font size"))
                             Spacer()
-                            Text("\(Int(proseFontSize)) pt").foregroundStyle(.secondary).monospacedDigit()
+                            Text(String(localized: "\(Int(proseFontSize)) pt")).foregroundStyle(.secondary).monospacedDigit()
                         }
                     }
                     .disabled(!useProseFont)
