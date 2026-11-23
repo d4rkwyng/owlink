@@ -120,22 +120,23 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     ///   at the full virtual length of the answer: a deadline that passed
     ///   (first byte, or an idle limit a chunk didn't reset) is seen there,
     ///   whatever the real timing, and ends the stream with `.timedOut`.
-///   If that read doesn't come within 30 s, the last chunk is never sent
-///   and the load fails instead.
-    /// A touch that never comes (a reader that doesn't touch on this kind of
-    /// chunk) is waited for 5 s once, then the rest plays without waiting,
-    /// so that regression fails in seconds instead of hanging.
+    /// Any of those reads that doesn't come in time (30 s for the deadline
+    /// loop, 10 s for a touch; both far above a runner's stalls) fails the
+    /// load at once with `URLError(.resourceUnavailable)`. The stub never
+    /// plays on out of step, so virtual time can't jump past a deadline
+    /// the client hasn't seen, and a reader that doesn't start its deadline
+    /// loop or doesn't touch on some kind of chunk fails in seconds.
     private static func play(_ response: StubServer.Response, on clock: StreamClock,
                              request: URLRequest, box: UncheckedRef<StubProtocol>) async {
-        _ = await clock.wait(atMost: 30) { $0.deadlineReads > 0 }
-        if Task.isCancelled { return }
-        clock.advance(response.delay)
         let proto = box.value
+        let started = await clock.wait(atMost: 30) { $0.deadlineReads > 0 }
+        if Task.isCancelled { return }
+        guard started else { return fail(proto, "the deadline loop never read the clock") }
+        clock.advance(response.delay)
         let http = HTTPURLResponse(url: request.url!, statusCode: response.status,
                                    httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         proto.client?.urlProtocol(proto, didReceive: http, cacheStoragePolicy: .notAllowed)
         if !response.body.isEmpty { proto.client?.urlProtocol(proto, didLoad: response.body) }
-        var inStep = true
         for (i, chunk) in response.chunks.enumerated() {
             // Real time only to keep chunks apart: 20 ms > the 10 ms in
             // which `StreamWatch` takes bytes as one chunk.
@@ -149,20 +150,24 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
                 // The deadline loop never saw the final time: the last
                 // chunk is withheld and the load fails, so the test
                 // can't pass without that check having run.
-                guard sampled else {
-                    proto.client?.urlProtocol(proto, didFailWithError: URLError(.resourceUnavailable, userInfo: [
-                        NSLocalizedDescriptionKey: "stub: the deadline loop didn't read the clock before the last chunk"]))
-                    return
-                }
+                guard sampled else { return fail(proto, "the deadline loop didn't read the clock before the last chunk") }
             }
             let touched = clock.touchReads
             proto.client?.urlProtocol(proto, didLoad: chunk)
-            if inStep, !last {
-                inStep = await clock.wait(atMost: 5) { $0.touchReads > touched }
+            if !last {
+                // Not touched: fail here rather than advance the clock past
+                // a gap the reader never saw.
+                let read = await clock.wait(atMost: 10) { $0.touchReads > touched }
                 if Task.isCancelled { return }
+                guard read else { return fail(proto, "chunk \(i) was never read (no touch)") }
             }
         }
         proto.client?.urlProtocolDidFinishLoading(proto)
+    }
+
+    private static func fail(_ proto: StubProtocol, _ why: String) {
+        proto.client?.urlProtocol(proto, didFailWithError: URLError(.resourceUnavailable, userInfo: [
+            NSLocalizedDescriptionKey: "stub: \(why)"]))
     }
 
     private static func drain(_ stream: InputStream) -> Data {
