@@ -70,6 +70,11 @@ enum LinkPrompt {
         let text = ExternalLinkText(url)
         var lines: [String] = []
         if let host = text.host { lines.append(String(localized: "Site: \(host)")) }
+        // A host that isn't plain ASCII (`аpple.com`, Cyrillic а) is shown as
+        // the punycode the browser opens, then flagged with how it reads.
+        if let unicode = text.unicodeHost, let host = text.host {
+            lines.append(String(localized: "The site’s name is not plain ASCII: \(host) reads as “\(unicode)”, which can imitate another site."))
+        }
         if let user = text.userinfo, let host = text.host {
             lines.append(String(localized: "Before the “@” is a user name (“\(user)”), not the site. This link goes to \(host)."))
         }

@@ -387,6 +387,35 @@ import Testing
         #expect(m.url.count == ExternalLinkText.maxURL && m.url.hasPrefix("mailto:a@example.com") && m.url.contains("…"))
     }
 
+    // Grok 4.7 review: a homograph host (Cyrillic а in `аpple.com`) is
+    // shown as the punycode the opened URL has, and flagged with its
+    // Unicode reading; the user-name warning names the punycode too.
+    @Test func aNonASCIIHostShowsItsPunycode() {
+        let u = URL(string: "https://аpple.com/signin")!
+        let t = ExternalLinkText(u)
+        let opened = URLComponents(string: u.absoluteString)?.rangeOfHost.map { String(u.absoluteString[$0]) }
+        #expect(t.host == opened && t.host?.unicodeScalars.allSatisfy(\.isASCII) == true, "\(t.host ?? "nil") vs \(opened ?? "nil")")
+        #expect(t.host?.lowercased().hasPrefix("xn--") == true, "\(t.host ?? "nil")")
+        #expect(t.host != "apple.com" && t.host != "аpple.com")
+        #expect(t.unicodeHost == "аpple.com", "\(t.unicodeHost ?? "nil")")
+        #expect(t.url.contains(t.host ?? "?"), "the Site line names the host the URL shows")
+        // Written as punycode already: still flagged with how it reads.
+        let p = text("https://xn--pple-43d.com/")
+        #expect(p.host == "xn--pple-43d.com" && p.unicodeHost == "аpple.com", "\(p.unicodeHost ?? "nil")")
+        // With a user name dressed as a site: the warning's host is the punycode.
+        let w = ExternalLinkText(URL(string: "https://www.apple.com%2Fsignin@аpple.com/")!)
+        #expect(w.host?.unicodeScalars.allSatisfy(\.isASCII) == true && w.host?.hasPrefix("xn--") == true && w.unicodeHost == "аpple.com",
+                "\(w.host ?? "nil")")
+        // A percent-escaped host is flagged with its decoded name.
+        let e = text("https://%D0%B0pple.com/")
+        #expect(e.host == "%D0%B0pple.com" && e.unicodeHost == "аpple.com", "\(e.host ?? "nil") \(e.unicodeHost ?? "nil")")
+        // Plain ASCII hosts: no flag.
+        for s in ["https://example.com/", "https://EXAMPLE.com:8443/a", "https://a-b.example.co.uk/", "http://[::1]:8080/", "https://127.0.0.1/"] {
+            #expect(text(s).unicodeHost == nil, "\(s)")
+        }
+        #expect(text("mailto:someone@example.com").unicodeHost == nil)
+    }
+
     @Test func hiddenCharactersStayVisible() {
         #expect(ExternalLinkText.middle("abcdefghij", 5) == "ab…ij")
         #expect(ExternalLinkText.middle("abc", 5) == "abc")

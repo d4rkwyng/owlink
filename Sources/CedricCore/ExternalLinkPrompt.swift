@@ -29,7 +29,13 @@ public struct ExternalLinkGate: Equatable, Sendable {
 /// read), all made visible with `PromptText.visible`:
 ///
 /// - `host`: the site the link really goes to, for a line of its own, so
-///   `https://www.apple.com%2Fsignin@evil.example/` reads as evil.example;
+///   `https://www.apple.com%2Fsignin@evil.example/` reads as evil.example.
+///   It is the host as the URL that opens spells it: a non-ASCII name is
+///   its punycode (`xn--pple-43d.com`), never the Unicode look-alike
+///   (`аpple.com`, Cyrillic а), so a homograph can't pass as the real site;
+/// - `unicodeHost`: the name as Unicode, only when the host is not plain
+///   ASCII letters, digits, `-` and `.` read as written (a punycode label,
+///   a percent escape, non-ASCII), so the prompt can flag it;
 /// - `userinfo`: the user name (and password) before the `@`, when the
 ///   link has one, so the prompt can say it is not the site;
 /// - `url`: the whole URL, or for a long one the URL cut in the middle
@@ -38,6 +44,7 @@ public struct ExternalLinkGate: Equatable, Sendable {
 ///   is left, their start and their end.
 public struct ExternalLinkText: Equatable, Sendable {
     public let host: String?
+    public let unicodeHost: String?
     public let userinfo: String?
     public let url: String
 
@@ -48,7 +55,18 @@ public struct ExternalLinkText: Equatable, Sendable {
     public init(_ url: URL, maxURL: Int = Self.maxURL) {
         let raw = url.absoluteString
         let c = URLComponents(string: raw)
-        host = c?.host.flatMap { $0.isEmpty ? nil : PromptText.visible($0) }
+        // The host as written in the URL that opens (Foundation's
+        // `absoluteString` spells an IDN host in punycode), not
+        // `URLComponents.host`, which decodes it to Unicode.
+        let written = c?.rangeOfHost.map { String(raw[$0]) }.flatMap { $0.isEmpty ? nil : $0 }
+        host = written.map { PromptText.visible($0) }
+        unicodeHost = written.flatMap { w in
+            let plain = w.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || "-.[]:".unicodeScalars.contains($0)) }
+            let puny = w.lowercased().split(separator: ".").contains { $0.hasPrefix("xn--") }
+            guard !plain || puny else { return nil }
+            let decoded = c?.host ?? w.removingPercentEncoding ?? w
+            return PromptText.visible(decoded)
+        }
         var user: Substring?
         if let c, let u = c.rangeOfUser {
             user = raw[u.lowerBound..<(c.rangeOfPassword?.upperBound ?? u.upperBound)]
