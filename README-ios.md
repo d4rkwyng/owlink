@@ -87,7 +87,9 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   shows the preview alone on any screen; back with Edit, Esc, `⇧⌘P`, a
   swipe down at the top of the page or a swipe in from the leading edge.
   Print documents, or export Markdown as HTML or a rendered PDF, from the
-  document menu. Bare image names (`<img>`, `![]()`, `![[ ]]`) are found
+  document menu. Exported and printed Markdown PDFs are cut between
+  blocks (the Mac's `PageBreaks`), so a line is not split across pages
+  when a block boundary fits. Bare image names (`<img>`, `![]()`, `![[ ]]`) are found
   in the vault, including `Images/`, with width and float kept.
   Links browse in the preview (attached and detached), with **Back**,
   **Forward** and **This Document**: a Markdown or HTML file the link
