@@ -18,6 +18,7 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Finder document icons.** Type-coloured pages now show a white symbol, with a short file type label in larger views.
 
 ### Fixed
+- **Preview JavaScript and network access reset.** JavaScript and network access in the preview turn off when the document changes on disk or you navigate to another document; Back and This Document no longer turn them on again for reloaded content.
 - **Preview links to a heading.** Links to a heading in another document open at that heading in the preview.
 - **The folder sidebar gives its room back.** Hiding or closing it expands the document to fill the window again.
 - **Obsidian image names.** Bare image names in Markdown, embeds and HTML `<img>` tags resolve in the vault, including `Images/` and the configured `attachmentFolderPath`.
