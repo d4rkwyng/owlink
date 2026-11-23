@@ -953,9 +953,9 @@ extension DevChecks {
             },
             home,
             // An untitled document's preview is at about:blank (security read
-            // NIT 1): a click on #far scrolls in place; an href written
-            // about:blank%23far is another page to WebKit, so it is routed,
-            // not allowed, and the page stays.
+            // NIT 1): a click on #far, or an href written about:blank%23far
+            // (what macOS 15 hands over for #far), scrolls in place; WebKit's
+            // navigation is cancelled, so the page never leaves about:blank.
             sync {
                 app.newTab(nil)
                 guard let t = app.tabs.last else { return }
@@ -967,40 +967,36 @@ extension DevChecks {
                 if !t.previewVisible { t.togglePreview() }
             },
             { next in if let b = blank { waitForPreview(b, contains: "the far section", "an untitled document's preview shows it")(next) } else { expect(false, "untitled tab"); next() } },
+        ] + ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
             { next in
                 guard let b = blank else { next(); return }
-                expect(b.preview?.webView.url?.absoluteString == "about:blank", "and is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
-                previewJS(b, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === 'far'); a.click(); return a.getAttribute('href') })()") { v in
-                    print("check: note: clicked far → \(v ?? "nil")")
-                    next()
+                expect(b.preview?.webView.url?.absoluteString == "about:blank", "\(text): the page is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
+                previewJS(b, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in
+                    previewJS(b, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === '\(text)'); if (!a) return 'no link'; a.click(); return a.getAttribute('href') })()") { v in
+                        print("check: note: clicked \(text) → \(v ?? "nil")")
+                        next()
+                    }
                 }
             },
             { next in
                 guard let b = blank else { next(); return }
-                waitForAnchor(b, id: "far-away", "on about:blank, a click on #far-away scrolls the page (not routed)",
-                              when: { b.preview?.isHome == true })(next)
+                waitForAnchor(b, id: "far-away", "on about:blank, a click on \(text) scrolls the page (not routed)",
+                              when: { b.preview?.isHome == true && b.preview?.lastAnchor?.found == true })(next)
             },
             { next in
                 guard let b = blank else { next(); return }
-                previewJS(b, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === 'lit'); if (!a) return 'no link'; a.click(); return a.getAttribute('href') })()") { v in
-                    print("check: note: clicked lit → \(v ?? "nil")")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    let url = b.preview?.webView.url?.absoluteString ?? "nil"
+                    expect(url == "about:blank" && b.preview?.lastLinkAction == nil && b.preview?.isHome == true && b.preview?.webView.isLoading == false,
+                           "and WebKit never navigated: the page is still about:blank, nothing routed",
+                           "\(url) action \(String(describing: b.preview?.lastLinkAction))")
+                    previewJS(b, "document.body.innerText.includes('the far section') + ''") { v in
+                        expect(v as? String == "true", "and still shows the document", "\(v ?? "nil")")
+                        next()
+                    }
                 }
             },
-            sync {
-                guard let b = blank else { return }
-                let url = b.preview?.webView.url?.absoluteString ?? "nil"
-                expect(b.preview?.lastLinkAction != nil && b.preview?.isHome == true && !url.contains("%23") && b.preview?.webView.isLoading == false,
-                       "an href written about:blank%23far-away is routed, not an in-page anchor; the page stays",
-                       "\(url) action \(String(describing: b.preview?.lastLinkAction))")
-            },
-            { next in
-                guard let b = blank else { next(); return }
-                previewJS(b, "document.body.innerText.includes('the far section') + ''") { v in
-                    expect(v as? String == "true", "and still shows the document", "\(v ?? "nil")")
-                    next()
-                }
-            },
+        ] } + [
             sync { for t in app.tabs { t.doc.markSaved() } },
         ])
     }

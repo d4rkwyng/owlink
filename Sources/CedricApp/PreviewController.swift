@@ -606,10 +606,12 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         case .scrollInPage:
             // In-page anchors stay in the page, including ⌘-click (which would
             // otherwise treat the preview's folder URL as a file to reveal).
-            // WebKit scrolls to an exact id; Cedric's own scroll then finds a
-            // heading by its text too (`#Part` → `id="part"`), and pins the
-            // place so the editor follows once instead of bouncing it back.
-            decisionHandler(.allow)
+            // WebKit's navigation is cancelled, so no spelling of the URL
+            // (`about:blank%23x` on macOS 15) can load another document;
+            // Cedric's own scroll finds the exact id or a heading by its text
+            // (`#Part` → `id="part"`), and pins the place so the editor
+            // follows once instead of bouncing it back.
+            decisionHandler(.cancel)
             if let url, let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment, follow: isHome) }
         case .route:
             decisionHandler(.cancel)

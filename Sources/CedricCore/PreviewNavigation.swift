@@ -20,7 +20,8 @@ import Foundation
 public enum PreviewNavigation: Equatable, Sendable {
     /// Cedric's own page load.
     case allowPage
-    /// A link to a place in the page: allowed, then scrolled to by Cedric.
+    /// A link to a place in the page: WebKit's navigation is cancelled and
+    /// Cedric scrolls to the place itself (no document load, either spelling).
     case scrollInPage
     /// A clicked link elsewhere: cancelled, then routed by `PreviewLinkAction`.
     case route
@@ -43,14 +44,20 @@ public enum PreviewNavigation: Equatable, Sendable {
                               expectedPage: URL?, loadingShell: Bool) -> PreviewNavigation {
         guard let url else { return .cancel }
         if linkClick {
-            // In the page: the main frame only, and a real `#`. WebKit hands
-            // a click on `#x` over as the URL string it built (CFURL from
-            // its bytes, not `URL(string:)`), so on every macOS that is
-            // `about:blank#x`, while an href written `about:blank%23x` comes
-            // as `about:blank%23x`: another about: page, a cross-document
-            // load, so it is routed, never allowed.
-            if mainFrame == true, url.absoluteString.contains("#"), isPageScheme(url), samePage(url, page) { return .scrollInPage }
-            return .route
+            // In the page: the main frame only. What WebKit hands over for a
+            // click on `#x` is not the same on every macOS: `about:blank#x`
+            // on macOS 26, `about:blank%23x` on macOS 15 (its Foundation
+            // keeps an `about:` URL's `#` in the path). So for the blank
+            // page alone, `%23` is read as the `#` (`split`), and only when
+            // the page shown is the blank page too. Either way the caller
+            // cancels WebKit's navigation and scrolls in Cedric's own world:
+            // neither spelling can load another document (a literal
+            // `about:blank%23x` href would otherwise blank the page).
+            guard mainFrame == true, isPageScheme(url), samePage(url, page) else { return .route }
+            if !url.absoluteString.contains("#") {
+                guard let page, split(page).page == "about:blank", split(url).page == "about:blank" else { return .route }
+            }
+            return .scrollInPage
         }
         guard loadingShell, mainFrame == true, isPageScheme(url), let expectedPage, url == expectedPage else { return .cancel }
         return .allowPage
@@ -83,8 +90,7 @@ public enum PreviewNavigation: Equatable, Sendable {
     /// `URL(string:)` keeps the `#` of an `about:` URL in the path as
     /// `about:blank%23x` (no fragment). That `%23` is read as the `#` only
     /// for `about:`, where no page has a `#` in its name; any other URL's
-    /// `%23` stays part of its path. (`decide` doesn't take a `%23` as an
-    /// in-page link: what WebKit hands it for a real `#x` click has the `#`.)
+    /// `%23` stays part of its path.
     public static func split(_ url: URL) -> (page: String, fragment: String?) {
         let s = url.absoluteString
         let about = url.scheme?.lowercased() == "about"
