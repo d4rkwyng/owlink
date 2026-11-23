@@ -35,6 +35,9 @@ import WebKit
 ///   CEDRIC_TEST_SHOW_SETTINGS=1   open the Settings window (session tests: it mustn't keep the app alive)
 ///   CEDRIC_TEST_WAIT_MARKER=/tmp/cedric-wait.x  `cedric -w` on the front tab (session tests)
 ///   CEDRIC_TEST_CLOSE_ALL=1       0.5 s in, close every tab one by one, as ⌘W does (session tests)
+///   CEDRIC_TEST_CLOSE_WINDOW=1    0.5 s in, File › Close Window (⇧⌘W) on the newest tab's window (session tests)
+///   CEDRIC_TEST_CLOSE_BUTTON=1    0.5 s in, click the red close button of the newest tab's window: a
+///                                 mouse-down/up posted to this app only, not the real pointer (session tests)
 ///   CEDRIC_TEST_REOPEN_CLOSED=1   then reopen the newest closed tab (as ⇧⌘T does)
 ///   CEDRIC_TEST_EARLY_CLOSE=1     close the selected tab 0.5 s in, before deferred tabs are built
 ///   CEDRIC_TEST_EARLY_REOPEN=1    reopen the newest closed tab 0.5 s in, likewise
@@ -208,6 +211,26 @@ enum DevHooks {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { closeNext() }
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { closeNext() }
+        }
+        if env["CEDRIC_TEST_CLOSE_WINDOW"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if let w = app.tabs.last?.window { app.closeDocumentWindows(in: w) }
+            }
+        }
+        if env["CEDRIC_TEST_CLOSE_BUTTON"] == "1" {
+            // AppKit closes the whole tab group only for a real click on the
+            // button (performClick closes one tab), so post the click itself.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard let w = app.tabs.last?.window, let btn = w.standardWindowButton(.closeButton) else { return }
+                let p = btn.convert(NSPoint(x: btn.bounds.midX, y: btn.bounds.midY), to: nil)
+                func click(_ type: NSEvent.EventType, _ n: Int) -> NSEvent? {
+                    NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: w.windowNumber, context: nil, eventNumber: n, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+                }
+                guard let down = click(.leftMouseDown, 1), let up = click(.leftMouseUp, 2) else { return }
+                NSApp.postEvent(up, atStart: false)
+                NSApp.postEvent(down, atStart: true)
+            }
         }
         if env["CEDRIC_TEST_REOPEN_CLOSED"] == "1" { app.reopenClosedTab(nil) }
         if env["CEDRIC_SESSION_DUMP"] == "1" {

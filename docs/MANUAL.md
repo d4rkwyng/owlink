@@ -87,7 +87,9 @@ M-series Mac.
 ### Mac file basics
 
 Save All (⌥⌘S), Revert to Saved (undoable with ⌘Z),
-Close Window (⇧⌘W: every tab in the window, each hot-closed; on the last window, then quits, ⇧⌘T has the tabs), and the
+Close Window (⇧⌘W: every tab in the window, each hot-closed; on the last
+window it quits with those tabs still open, so they come back like after ⌘Q:
+see [Tabs that come back](#tabs-that-come-back)), and the
 system Services in the app menu.
 
 ### Float on Top
