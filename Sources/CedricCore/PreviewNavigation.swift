@@ -43,7 +43,7 @@ public enum PreviewNavigation: Equatable, Sendable {
                               expectedPage: URL?, loadingShell: Bool) -> PreviewNavigation {
         guard let url else { return .cancel }
         if linkClick {
-            if url.fragment != nil, isPageScheme(url), samePage(url, page) { return .scrollInPage }
+            if split(url).fragment != nil, isPageScheme(url), samePage(url, page) { return .scrollInPage }
             return .route
         }
         guard loadingShell, mainFrame == true, isPageScheme(url), let expectedPage, url == expectedPage else { return .cancel }
@@ -65,12 +65,28 @@ public enum PreviewNavigation: Equatable, Sendable {
 
     /// Whether `url` is the page itself plus a fragment (an in-page link).
     public static func samePage(_ url: URL, _ page: URL?) -> Bool {
-        func strip(_ u: URL) -> String {
-            var c = URLComponents(url: u, resolvingAgainstBaseURL: false)
-            c?.fragment = nil
-            return c?.string ?? u.absoluteString
+        let target = split(url)
+        guard target.fragment != nil else { return false }
+        guard let page else { return target.page == "about:blank" }
+        return target.page == split(page).page
+    }
+
+    /// `url` as written, split at its first `#` into the page and the raw
+    /// (still percent-encoded) fragment, the same on every macOS: macOS 26
+    /// Foundation parses `about:blank#x` with a fragment, but macOS 15's
+    /// `URL(string:)` keeps the `#` of an `about:` URL in the path as
+    /// `about:blank%23x` (no fragment). That `%23` is read as the `#` only
+    /// for `about:`, where no page has a `#` in its name; any other URL's
+    /// `%23` stays part of its path.
+    public static func split(_ url: URL) -> (page: String, fragment: String?) {
+        let s = url.absoluteString
+        let about = url.scheme?.lowercased() == "about"
+        // An `about:` page's name is case-insensitive (`ABOUT:BLANK`).
+        func page(_ p: Substring) -> String { about ? p.lowercased() : String(p) }
+        if let i = s.firstIndex(of: "#") { return (page(s[..<i]), String(s[s.index(after: i)...])) }
+        if about, let r = s.range(of: "%23", options: .caseInsensitive) {
+            return (page(s[..<r.lowerBound]), String(s[r.upperBound...]))
         }
-        guard let page else { return url.absoluteString.lowercased().hasPrefix("about:blank#") }
-        return strip(url) == strip(page)
+        return (page(s[...]), nil)
     }
 }

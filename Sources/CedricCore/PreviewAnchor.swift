@@ -9,7 +9,11 @@ import Foundation
 public enum PreviewAnchor {
     /// `url`'s fragment, percent-decoded; nil when there is none or it is empty.
     public static func fragment(of url: URL) -> String? {
-        guard let f = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment, !f.isEmpty else { return nil }
+        // `about:blank#x` may come through as `about:blank%23x` (macOS 15
+        // Foundation): PreviewNavigation.split reads it the same everywhere.
+        let f = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment
+            ?? PreviewNavigation.split(url).fragment.map { $0.removingPercentEncoding ?? $0 }
+        guard let f, !f.isEmpty else { return nil }
         return f
     }
 

@@ -186,6 +186,40 @@ import Testing
         #expect(!PreviewNavigation.samePage(URL(string: "about:srcdoc#x")!, nil))
         #expect(!PreviewNavigation.samePage(URL(string: "https://example.com/#x")!, nil))
     }
+
+    // macOS 15 Foundation reads `URL(string: "about:blank#x")` as
+    // `about:blank%23x` (no fragment); macOS 26 as `about:blank` + `#x`.
+    // `about:blank%23x` is built the macOS 15 way on any macOS, so each
+    // runner covers both spellings.
+    @Test func aboutBlankAnchorsAreTheSameOnEveryFoundation() {
+        let blank = URL(string: "about:blank")!
+        for s in ["about:blank#part", "about:blank%23part", "ABOUT:BLANK%23part"] {
+            let u = URL(string: s)!
+            #expect(PreviewNavigation.split(u).page.lowercased() == "about:blank" && PreviewNavigation.split(u).fragment == "part", "\(s) → \(u.absoluteString)")
+            #expect(decide(s, click: true, page: blank) == .scrollInPage, "\(s)")
+            #expect(decide(s, click: true) == .route, "\(s) on a cedric-doc page is another page")
+            #expect(PreviewNavigation.samePage(u, nil) && PreviewNavigation.samePage(u, blank), "\(s)")
+            #expect(PreviewAnchor.fragment(of: u) == "part", "\(s)")
+        }
+        // Already on an anchor of the blank page, either spelling.
+        for page in ["about:blank#a", "about:blank%23a"] {
+            #expect(decide("about:blank%23b", click: true, page: URL(string: page)) == .scrollInPage, "\(page)")
+            #expect(decide("about:blank#b", click: true, page: URL(string: page)) == .scrollInPage, "\(page)")
+        }
+        #expect(PreviewAnchor.fragment(of: URL(string: "about:blank%23The%20Part")!) == "The Part")
+        #expect(PreviewAnchor.fragment(of: URL(string: "about:blank%23")!) == nil)
+        #expect(PreviewNavigation.split(blank).fragment == nil)
+        // Still closed: no fragment, another about: page, or a %23 outside about:.
+        #expect(decide("about:blank", click: true, page: blank) == .route)
+        #expect(decide("about:srcdoc%23x", click: true, page: blank) == .route)
+        #expect(decide("about:blankx%23y", click: true, page: blank) == .route)
+        #expect(!PreviewNavigation.samePage(URL(string: "about:srcdoc%23x")!, nil))
+        #expect(!PreviewNavigation.samePage(URL(string: "about:blank%23x")!, URL(string: "cedric-doc://doc/tmp/notes/")))
+        #expect(decide("https://example.com/a%23x", click: true, page: URL(string: "https://example.com/a")) == .route)
+        #expect(decide(page.absoluteString + "%23part", click: true) == .route, "a cedric-doc %23 is a path, not an anchor")
+        #expect(PreviewNavigation.split(URL(string: "cedric-doc://doc/tmp/a%23b.md")!).fragment == nil)
+        #expect(PreviewAnchor.fragment(of: URL(string: "cedric-doc://doc/tmp/a%23b.md")!) == nil)
+    }
 }
 
 /// Links to a heading (`other.md#part`): the fragment the preview carries
