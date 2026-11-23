@@ -610,12 +610,19 @@ first shown (no WebKit work at launch). Markdown goes through
   Cedric's own main-frame page load (`cedric-doc:` or `about:blank`, while
   it is loading, the expected URL) is allowed; a click goes through
   `PreviewLinkAction`, where web and mail links, clicked or ⌘-clicked,
-  ask with the full URL and then open in the default browser; an in-page
-  `#anchor` stays in the page; everything else (redirects, meta refresh,
+  ask and then open in the default browser; an in-page `#anchor` (main
+  frame, a real `#` in the URL WebKit hands over) stays in the page;
+  everything else (redirects, meta refresh,
   script `location`, form submits, frames, new windows, any other scheme)
   is cancelled. A navigation response that isn't `cedric-doc:`/`about:`
   is cancelled too, and the `WKUIDelegate` opens no windows. Images,
   styles and fonts are subresources, governed by the Network setting.
+- The link prompt (`LinkPrompt`, shared with PDF tabs) shows the site on
+  its own line, calls out a user name before `@`, and shows the URL
+  whole or cut in the middle keeping the host (`ExternalLinkText`).
+  Cancel is the default (Return and Escape). After a Cancel with page
+  JavaScript on, that page load asks no more (`ExternalLinkGate`), so a
+  script `click()` loop can't keep the prompt up; a new load asks again.
 - A linked local document is resolved once (`PreviewLinkAction.previewDocument`):
   that path is checked, read, and gives the page its kind and base folder.
 - Bare image names in Markdown and HTML use the bounded `WikiVault` index
