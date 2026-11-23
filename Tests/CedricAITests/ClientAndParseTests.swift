@@ -200,7 +200,7 @@ import CedricCore
 // tests' CPU work at a higher QoS made every one of them late at once on CI
 // (runs 44448784564, 44449227211: 3.4-7.4 s). The upper bounds are 10 s,
 // not 3: each stub stalls far longer than that (an hour, a 20 s stream,
-// three 5 s lookups) unless the deadline under test ends it. The two
+// one-minute lookups) unless the deadline under test ends it. The two
 // dribble tests run on virtual time instead (`StreamClock`, Support.swift).
 @Suite(.timely) struct RequestTests {
     @Test func sendsOnlyCappedContextLanguageAndFileName() async throws {
@@ -413,10 +413,13 @@ import CedricCore
         #expect(w.remaining() == 10, "the cap, 900 s after the start, comes before the idle limit")
     }
 
-    /// A lookup that blocks its thread (getaddrinfo can't be cancelled).
+    /// A lookup that can't be cancelled (like getaddrinfo) and takes a
+    /// minute: far past the 10 s bounds below, so they can be generous for
+    /// a stalled runner and still tell "gave up" from "waited for it".
+    /// No thread is held while it waits.
     static let slowResolver: @Sendable (String) async -> [String] = { _ in
         await withCheckedContinuation { c in
-            DispatchQueue.global().async { Thread.sleep(forTimeInterval: 5); c.resume(returning: ["127.0.0.1"]) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 60) { c.resume(returning: ["127.0.0.1"]) }
         }
     }
 
@@ -446,7 +449,10 @@ import CedricCore
         let start = Date()
         task.cancel()
         let result = await task.result
-        #expect(Date().timeIntervalSince(start) < 1)
+        // 10 s, not 1: a CI runner stalls for seconds (release run
+        // 45208720302); what this catches is waiting for the stalled work
+        // (60 s, an hour) or for the 20 s default timeout.
+        #expect(Date().timeIntervalSince(start) < 10)
         if case .failure(let e) = result { #expect(e as? LocalAIError == .cancelled) } else { Issue.record("not cancelled") }
     }
 
@@ -459,14 +465,17 @@ import CedricCore
 
     @Test func clientCancelsPromptly() async {
         let server = StubServer()
-        server.json("/v1/chat/completions", chatCompletion("late"), delay: 5)
+        server.json("/v1/chat/completions", chatCompletion("late"), delay: 3600)
         let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
         let task = Task { try await client.chat(model: "m", messages: [], maxTokens: 1) }
         try? await Task.sleep(nanoseconds: 100_000_000)
         let start = Date()
         task.cancel()
         let result = await task.result
-        #expect(Date().timeIntervalSince(start) < 1)
+        // 10 s, not 1: a CI runner stalls for seconds (release run
+        // 45208720302); what this catches is waiting for the stalled work
+        // (60 s, an hour) or for the 20 s default timeout.
+        #expect(Date().timeIntervalSince(start) < 10)
         if case .failure(let e) = result { #expect(e as? LocalAIError == .cancelled) } else { Issue.record("not cancelled") }
     }
 }
