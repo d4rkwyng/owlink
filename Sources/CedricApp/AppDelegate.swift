@@ -948,7 +948,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func previewBackMenu(_ sender: Any?) { currentTab?.previewBarAction(.back) }
     @objc func previewForwardMenu(_ sender: Any?) { currentTab?.previewBarAction(.forward) }
     @objc func previewHomeMenu(_ sender: Any?) { currentTab?.previewBarAction(.home) }
-    @objc func previewBrowserMenu(_ sender: Any?) { currentTab?.previewBarAction(.openInBrowser) }
     @objc func toggleWrap(_ sender: Any?) { Settings.shared.wrapLines.toggle() }
     @objc func toggleInvisibles(_ sender: Any?) { Settings.shared.showInvisibles.toggle() }
     @objc func toggleLineNumbers(_ sender: Any?) { Settings.shared.showLineNumbers.toggle() }
@@ -1052,7 +1051,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(previewBackMenu(_:)): return tab?.previewBarEnables(.back) == true
         case #selector(previewForwardMenu(_:)): return tab?.previewBarEnables(.forward) == true
         case #selector(previewHomeMenu(_:)): return tab?.previewBarEnables(.home) == true
-        case #selector(previewBrowserMenu(_:)): return tab?.previewBarEnables(.openInBrowser) == true
         case #selector(pickLanguageMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.language.rawValue ? .on : .off
         case #selector(pickLineEndingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.lineEnding.rawValue ? .on : .off
         case #selector(pickEncodingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.encoding.rawValue ? .on : .off

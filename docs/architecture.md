@@ -603,11 +603,32 @@ first shown (no WebKit work at launch). Markdown goes through
   the page's load finishes, Cedric's own script (app content world, page
   JavaScript still off) scrolls to the element whose `id`/`name` is the
   fragment, else its heading slug (`PreviewAnchor.candidates`). Same-page
-  `#` links go through WebKit and the same script, which pins the scroll
-  so a late scroll event or the editor sync can't move it back.
-- HTTP(S) pages use a separate web view with a non-persistent store, no
-  app scripts, message handlers or document scheme, and no local-file
-  navigation. Open in Browser and ⌘-click retain the full-URL confirmation.
+  `#` links are cancelled in WebKit and scrolled by the same script, which
+  pins the scroll so a late scroll event or the editor sync can't move it
+  back.
+- A web page never loads in the preview (0.5.2 S1). `PreviewNavigation`
+  (CedricCore) decides every navigation in the preview's web view: only
+  Cedric's own main-frame page load (`cedric-doc:` or `about:blank`, while
+  it is loading, the expected URL) is allowed; a click goes through
+  `PreviewLinkAction`, where web and mail links, clicked or ⌘-clicked,
+  ask and then open in the default browser; an in-page `#anchor` (main
+  frame; on the blank page also the `about:blank%23x` spelling macOS 15
+  hands over) stays in the page: WebKit's navigation is cancelled and
+  Cedric scrolls, so no spelling loads another document;
+  everything else (redirects, meta refresh,
+  script `location`, form submits, frames, new windows, any other scheme)
+  is cancelled. A navigation response that isn't `cedric-doc:` or exactly
+  `about:blank` is cancelled too, and the `WKUIDelegate` opens no windows. Images,
+  styles and fonts are subresources, governed by the Network setting.
+- The link prompt (`LinkPrompt`, shared with PDF tabs) shows the site on
+  its own line as the opened URL spells it (punycode for a non-ASCII
+  name, flagged with its Unicode reading), calls out a user name before `@`, and shows the URL
+  whole or cut in the middle keeping the host (`ExternalLinkText`).
+  Cancel is the default (Return and Escape). After a Cancel with page
+  JavaScript on, that page load asks no more (`ExternalLinkGate`), so a
+  script `click()` loop can't keep the prompt up; a new load asks again.
+- A linked local document is resolved once (`PreviewLinkAction.previewDocument`):
+  that path is checked, read, and gives the page its kind and base folder.
 - Bare image names in Markdown and HTML use the bounded `WikiVault` index
   after a relative lookup, preferring the configured Obsidian attachment
   folder; resolved files remain confined to the vault.
@@ -644,8 +665,8 @@ always to the right of the editor, so there is no side to store. Restore
 runs in `AfterFirstFrame` for both, so a restored preview costs nothing
 before the first frame and nothing at all when there is none. Sessions
 saved before `previewShown` decode it as nil, which means not shown.
-An iOS port would reuse the CedricCore resolver and implement navigation
-and an isolated web view in the iOS preview controller.
+An iOS port would reuse the CedricCore resolver and navigation policy
+and implement navigation in the iOS preview controller.
 
 **CSV / TSV grid** (`CSVPreview`): `CSV.parse` (CedricCore, RFC 4180,
 UTF-16 offsets) on a background queue from an immutable copy of the text
