@@ -34,7 +34,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     private var history: [Entry] = [.home]
     private var historyIndex = 0
     private var home: (String, Language, EditorPalette, URL?)?
-    private var keyMonitor: Any?
+    private var keyMonitor: KeyMonitor?
     var onNavigationChange: (() -> Void)?
     var onNavigationError: ((String) -> Void)?
     var isHome: Bool { if case .home = history[historyIndex] { return true }; return false }
@@ -151,7 +151,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         }
         browserView.isHidden = true
         webView.setValue(false, forKey: "drawsBackground")
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        keyMonitor = KeyMonitor(NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let handled = MainActor.assumeIsolated {
                 guard let self, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                       let window = self.container.window, window.isKeyWindow,
@@ -163,10 +163,17 @@ final class PreviewController: NSObject, WKNavigationDelegate {
                 }
             }
             return handled ? nil : event
-        }
+        })
     }
 
-    isolated deinit { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
+    // Swift 6.1 has no `isolated deinit` without an experimental flag, so
+    // the deinit is nonisolated: it removes the key monitor right away on
+    // the main thread, or hops there when the last release is elsewhere.
+    deinit {
+        guard let keyMonitor else { return }
+        if Thread.isMainThread { MainActor.assumeIsolated { keyMonitor.remove() } }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated { keyMonitor.remove() } } }
+    }
 
     func renderHome(text: String, language: Language, palette: EditorPalette, folder: URL?) {
         home = (text, language, palette, folder)
@@ -780,4 +787,12 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
 private final class TaskBox: @unchecked Sendable {
     let task: any WKURLSchemeTask
     init(_ task: any WKURLSchemeTask) { self.task = task }
+}
+
+/// The preview's ⌘[ / ⌘] key monitor, handed from the nonisolated deinit
+/// to the main thread to be removed.
+private final class KeyMonitor: @unchecked Sendable {
+    private let token: Any?
+    init(_ token: Any?) { self.token = token }
+    @MainActor func remove() { if let token { NSEvent.removeMonitor(token) } }
 }
