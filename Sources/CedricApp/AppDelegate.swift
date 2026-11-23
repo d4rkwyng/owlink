@@ -153,14 +153,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ReplaceInFiles.waitForWrites()
         // The last words of the day, if typing hadn't paused yet.
         tabs.forEach { $0.commitDailyWords() }
-        if Settings.shared.reopenFilesFromLastSession {
-            saveSession()
-        } else {
-            // Files should not come back as open tabs; unsaved text stays
-            // on the closed list for ⇧⌘T, so buffers are not pruned.
-            parkOpenDocumentsIntoClosedTabs()
-            saveSession(includeOpenWindows: false)
-        }
+        // The whole session, whatever Reopen files from last session says:
+        // launch decides what comes back (SessionReopenPolicy.plan; with it
+        // off, files go to Reopen Closed Tab there and unsaved text reopens).
+        saveSession()
         releaseAllWaiters()
         terminating = true
         sessionTimer?.invalidate()
@@ -192,8 +188,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// The last document tab has closed: if reopen is on this is only a
     /// fallback (windowShouldClose / Close Window usually quit first, while
-    /// the tabs were still open). If reopen is off, the tab was hot-closed
-    /// and should not come back as an open tab.
+    /// the tabs were still open). If reopen is off, the tabs were
+    /// hot-closed (on the closed list) and should not come back.
     func quitAfterLastClose() {
         prepareToQuit()
         DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -237,12 +233,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
               event.type == .leftMouseUp || event.type == .leftMouseDown,
               let btn = window.standardWindowButton(.closeButton) else { return false }
         return btn.bounds.contains(btn.convert(event.locationInWindow, from: nil))
-    }
-
-    /// Push every still-open document onto the closed list (no session write).
-    private func parkOpenDocumentsIntoClosedTabs() {
-        for t in tabs { rememberClosed(t, persist: false) }
-        for t in viewerTabs { rememberClosedViewer(t, persist: false) }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -748,21 +738,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         fileWordGoals = session.wordGoals ?? []
         for gone in kept.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
         // Closed tabs and word goals still load when the user turned reopen off
-        // (⇧⌘T and the stats popover need them). Open windows and the folder
-        // do not come back; unsaved open tabs are parked on the closed list
-        // so their buffers are not pruned by the next save.
-        guard Settings.shared.reopenFilesFromLastSession else {
+        // (⇧⌘T and the stats popover need them). Then the folder and files
+        // do not come back: they are parked on the closed list. Tabs with
+        // unsaved text always reopen (SessionReopenPolicy.plan), so that
+        // text never falls under the closed list's 30-day / 100-tab limits.
+        let reopen = Settings.shared.reopenFilesFromLastSession
+        let plan = SessionReopenPolicy.plan(session.windows, reopen: reopen)
+        if !plan.park.isEmpty {
             var closed = closedTabs
-            for tab in session.allTabs {
+            for tab in plan.park {
                 let r = ClosedTabs.push(tab, onto: closed)
                 closed = r.list
                 for gone in r.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
             }
             closedTabs = closed
-            return
         }
-        restoreFolder(session.folder)
-        for w in session.windows {
+        if reopen { restoreFolder(session.folder) }
+        for w in plan.windows {
             let openTabs = SessionRestoreList.openTabs(w.tabs) { FileManager.default.fileExists(atPath: $0) }
             let selectedID = w.tabs.indices.contains(w.selectedTab) ? w.tabs[w.selectedTab].id : nil
             let selectedTab = selectedID.flatMap { id in openTabs.firstIndex { $0.id == id } }

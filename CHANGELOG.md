@@ -6,6 +6,9 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [Unreleased]
 
+### Changed
+- **Reopen files from last session is on unless you turn it off in Owlink.** macOS's “Close windows when quitting an application” setting no longer turns it off. With it off, tabs with unsaved text (including untitled tabs) still reopen after a quit instead of going to Reopen Closed Tab, where unsaved text is deleted after 30 days. A `-reopenFilesFromLastSession NO` launch argument now works.
+
 ### Fixed
 - **Obsidian vault bounds.** A stray `.obsidian` folder in your home folder (or above it, or at a disk's root) no longer makes that whole folder the vault for wiki-links and embeds in the preview; the vault falls back to the document's folder. Open the folder in the sidebar to use it as a vault on purpose.
 
