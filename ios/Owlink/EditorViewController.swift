@@ -105,8 +105,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var markedLine: Int?
     private let lineNumberGutter = LineNumberGutter()
     private var colorizer: SyntaxColorizer!
-    /// The highlighter's engine (its tokens find brackets for folding).
+    /// The highlighter's engine (its tokens find brackets for folding,
+    /// and Fix Typos… reads them for SpellScope).
     var highlightEngine: HighlightEngine { colorizer.engine }
+    /// Fix Typos…, while its card is up.
+    var spellStep: SpellStepController?
+    /// Each refreshSpellingMarks(): whether the system's checking was
+    /// toggled to redraw the underlines (for the tests).
+    private(set) var spellingMarkRefreshes: [Bool] = []
     let owl = EditorOwl()
     let hintBar = OwlHintBar()
     private let statusBar = UIView()
@@ -501,6 +507,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutOwl()
         layoutDivider()
         layoutGutter()
+        spellStep?.position()
         updateUnwrappedContentSize()
         updateWritingInset()
         if writingLayoutSize != textView.bounds.size {
@@ -782,7 +789,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
+        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, fixTyposAction(), ask, check]
         if let checkScript = checkScriptAction() { first.append(checkScript) }
         if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
@@ -839,6 +846,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     // MARK: Text
 
     private func loadText() {
+        // The text is replaced: Fix Typos…'s offsets no longer match it.
+        spellStep?.close()
         clearEditorHighlights()
         loading = true
         let sel = textView.selectedRange
@@ -899,6 +908,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         folding?.textEdited(oldRange: oldRange, newLength: edited.length, storage: textStorage)
+        spellStep?.textEdited(oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
         // Bookmarks follow their lines, measured against the old text
         // (applyTextEdits then puts structured edits' own set in place).
@@ -1243,7 +1253,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Markdown that includes fenced code and markup (the Mac skips those).
     func applyProseChecking() {
         let on = proseCheckingApplies
-        let spelling: UITextSpellCheckingType = on && AppSettings.checkSpellingWhileTyping ? .yes : .no
+        let spelling = systemSpelling
         var changed = textView.spellCheckingType != spelling
         textView.spellCheckingType = spelling
         if #available(iOS 27.0, *) {
@@ -1252,6 +1262,26 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             textView.grammarCheckingType = grammar
         }
         if changed, textView.isFirstResponder { textView.reloadInputViews() }
+    }
+
+    /// The system's spelling underlines by the settings: on only for prose
+    /// with "Check spelling while typing" on.
+    var systemSpelling: UITextSpellCheckingType {
+        proseCheckingApplies && AppSettings.checkSpellingWhileTyping ? .yes : .no
+    }
+
+    /// After Ignore All or Learn Word (the Mac's recheckMarks): the system's
+    /// underlines are checked again, so a learned word loses its mark.
+    /// Nothing to do where the system doesn't check (code, data, large mode,
+    /// the setting off); checking is never left off where it should be on.
+    func refreshSpellingMarks() {
+        let wanted = systemSpelling
+        let toggled = wanted == .yes && textView.spellCheckingType == .yes
+        if toggled {
+            textView.spellCheckingType = .no
+            textView.spellCheckingType = .yes
+        }
+        spellingMarkRefreshes.append(toggled)
     }
 
     @objc func toggleCheckSpelling() { AppSettings.checkSpellingWhileTyping.toggle() }
@@ -1700,6 +1730,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if l != document.language.language { foldingContextChanged() }
         document.language.choose(l)
         colorizer.setLanguage(l)
+        if !spellingChecksThisDocument { spellStep?.close() }
         applySettings()
         updateStatus()
         updateBarButtons()
@@ -2263,7 +2294,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func willMove(toParent parent: UIViewController?) {
-        if parent == nil, owlInRail { setOwlFrame(owlFrame, inRail: false) }
+        if parent == nil {
+            if owlInRail { setOwlFrame(owlFrame, inRail: false) }
+            // Leaving for good: Fix Typos… goes with the editor.
+            spellStep?.close(restoringFocus: false)
+        }
         super.willMove(toParent: parent)
     }
 
@@ -2273,6 +2308,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         highlightTimer = nil
         clearEditorHighlights()
         if isBeingDismissed || navigationController?.isBeingDismissed == true {
+            // Dismissed, not just covered (Settings over it keeps the card).
+            spellStep?.close(restoringFocus: false)
             EditorBarStyle.restore(window: themedWindow)
             themedWindow = nil
         }
@@ -3546,6 +3583,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
+        // The document is going: so is Fix Typos… (closeWithTab on the Mac).
+        spellStep?.close(restoringFocus: false)
         stopDailyWordTracking()
         owl.cancel()
         textView.resignFirstResponder()
@@ -3851,6 +3890,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(unfoldAllMenu(_:)) { return foldingMenuState.unfoldAll }
         if action == #selector(showStatistics) { return true }
         if action == #selector(toggleCheckSpelling) || action == #selector(toggleCheckGrammar) { return true }
+        if action == #selector(fixTypos) { return spellingChecksThisDocument && textView.window != nil }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)

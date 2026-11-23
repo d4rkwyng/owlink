@@ -39,6 +39,11 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
   iOS 27; before that the setting is kept but does nothing. Unlike the Mac,
   the system marks the whole document, so fenced code and markup in Markdown
   may be underlined too.
+  **Fix Typos…** (the editor's ••• menu, and iPad Edit › Spelling and
+  Grammar, ⌥⌘;) steps through the misspelled words one at a time with the
+  on-device checker, in the same documents the Mac checks (prose, and
+  comments and strings in code; never data files): Change, Change All,
+  Skip, Ignore All, Learn Word and Done.
   Jumps show numbers for the open file even when the setting is off.
 - Return keeps the current indent, and brackets and quotes pair in code as
   on the Mac; **Auto-close brackets and quotes** is in Settings (on by default).
