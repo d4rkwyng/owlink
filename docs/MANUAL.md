@@ -70,7 +70,7 @@ document window (text, PDF, image or Office tab) restores those open tabs on
 the next launch, with their saved window frame, selection, sidebar folder and
 split or preview state. With it off, those files do not reopen; they go to
 Reopen Closed Tab (⇧⌘T). Tabs with unsaved text (including untitled tabs)
-still reopen after a quit, so that text is never left to the closed list's
+still reopen after a quit (or closing the last window), so that text is never left to the closed list's
 30-day limit. Opening a file from
 Finder still restores the rest of the session and focuses that file, without
 opening a duplicate tab. Moved or deleted files are skipped.

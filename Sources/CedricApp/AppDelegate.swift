@@ -186,10 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         quitsOnLastClose && otherDocumentWindows(than: window) == 0
     }
 
-    /// The last document tab has closed: if reopen is on this is only a
-    /// fallback (windowShouldClose / Close Window usually quit first, while
-    /// the tabs were still open). If reopen is off, the tabs were
-    /// hot-closed (on the closed list) and should not come back.
+    /// The last document tab has closed: only a fallback (windowShouldClose
+    /// / Close Window usually quit first, while the tabs were still open).
     func quitAfterLastClose() {
         prepareToQuit()
         DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -197,12 +195,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Close Window (⇧⌘W) and the traffic-light / last-tab close, when that
     /// close will quit the app: save the session while the tabs are still
-    /// open (if reopen is on), then terminate instead of tearing them down
-    /// one by one. Returns `false` when the close should be cancelled
+    /// open, then terminate instead of tearing them down one by one. With
+    /// reopen off too: launch then parks the files and reopens unsaved
+    /// text (SessionReopenPolicy.plan), where hot-closing each tab would
+    /// leave that text to the closed list's 30-day / 100-tab limits. Returns `false` when the close should be cancelled
     /// because quit is already under way.
     func shouldCloseDocumentWindow(_ window: NSWindow) -> Bool? {
         guard !terminating else { return false }
-        guard Settings.shared.reopenFilesFromLastSession, quitsOnLastClose else { return nil }
+        guard quitsOnLastClose else { return nil }
         let onlyGroup = windowGroups().count == 1
         let lastTab = otherDocumentWindows(than: window) == 0
         if onlyGroup, lastTab || isClosingWholeWindow(window) {
@@ -216,7 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// File › Close Window (⇧⌘W): every tab in this window. On a
     /// quit-causing last window, terminate with the session already saved.
     func closeDocumentWindows(in window: NSWindow) {
-        if Settings.shared.reopenFilesFromLastSession, quitsOnLastClose, windowGroups().count == 1 {
+        if quitsOnLastClose, windowGroups().count == 1 {
             prepareToQuit()
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return
@@ -591,7 +591,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
     /// `sync`: wait for it (quit).
-    func saveSession(sync: Bool = true, includeOpenWindows: Bool = true) {
+    func saveSession(sync: Bool = true) {
         sessionTimer?.invalidate()
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
@@ -600,7 +600,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var keep = Set<UUID>()
         var buffers: [(UUID, String)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
-        if includeOpenWindows {
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
             var selected = 0
@@ -657,7 +656,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 windows.append(SessionWindow(tabs: sessionTabs, selectedTab: selected, frame: group.first?.frameDescriptor,
                                               floatOnTop: floats ? true : nil))
             }
-        }
         }
         for c in closedTabs where c.hasBuffer { keep.insert(c.id) }
         let session = Session(windows: windows, closedTabs: closedTabs.isEmpty ? nil : closedTabs, folder: folderSessionState,
