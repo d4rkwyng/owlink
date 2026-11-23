@@ -85,6 +85,46 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
     }
 
+    /// A web link in the preview opens in the isolated browser; Open in
+    /// Browser asks first with the whole address. The prompt is captured
+    /// as a screenshot attachment and then cancelled (never opened).
+    func testWebLinkOpenInBrowserAsksFirst() throws {
+        let app = launch("links.md", fresh: true)
+        _ = editor(app)
+        let web = app.webViews["editor.previewWeb"]
+        if !web.waitForExistence(timeout: 2) {
+            // In the bar, or (a narrow iPhone) in the system overflow menu.
+            let eye = app.buttons["editor.preview"]
+            if eye.exists { eye.tap() } else {
+                app.navigationBars.buttons["More"].firstMatch.tap()
+                // The eye's own submenu there: its first item is the toggle.
+                app.buttons["Preview"].firstMatch.tap()
+                let toggle = app.cells.buttons["Preview"].firstMatch
+                XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview item in the overflow menu")
+                toggle.tap()
+            }
+        }
+        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        let link = web.links["The Owlink site"].firstMatch
+        XCTAssertTrue(link.waitForExistence(timeout: 10), "no web link in the preview")
+        link.tap()
+        let open = app.buttons["preview.nav.openInBrowser"]
+        XCTAssertTrue(open.waitForExistence(timeout: 10), "no Open in Browser button")
+        open.tap()
+        let alert = app.alerts.firstMatch
+        XCTAssertTrue(alert.waitForExistence(timeout: 5), "no prompt")
+        XCTAssertTrue(alert.staticTexts["Open this link?"].exists)
+        XCTAssertTrue(alert.staticTexts["https://example.com/owlink"].exists, "the whole address")
+        sleep(1) // the alert's appearance animation
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "preview-external-link-prompt"
+        shot.lifetime = .keepAlways
+        add(shot)
+        alert.buttons["Cancel"].tap()
+        XCTAssertFalse(alert.waitForExistence(timeout: 1) && alert.exists, "the prompt stayed")
+        XCTAssertEqual(app.state, .runningForeground, "nothing was opened outside the app")
+    }
+
     func testFindNavigatorOpens() throws {
         let app = launch("sample.swift", fresh: true)
         _ = editor(app)
