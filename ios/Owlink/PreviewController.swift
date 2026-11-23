@@ -425,8 +425,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     """
 
     /// Scrolls the local page so the heading `fragment` names (an exact
-    /// `id` or `name`, else the heading slug of that text) is at the top,
-    /// through the scroll view as `applyPendingFraction` does. The scroll
+    /// `id` or `name`, else the heading slug of that text) is at the top
+    /// (just below the navigation bar while it shows), through the scroll view as `applyPendingFraction` does. The scroll
     /// view's content size lags the page's layout a little after a load:
     /// until it matches the document's (by the width's scale), and while
     /// a new page's commit moves it back, it tries again shortly (a few
@@ -453,7 +453,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 let scale = s.contentSize.height / CGFloat(h)
                 let top = -inset.top
                 let bottom = max(top, s.contentSize.height - s.bounds.height + inset.bottom)
-                let target = min(max(top, top + CGFloat(y) * scale), bottom)
+                let target = min(max(top, top + CGFloat(y) * scale - self.anchorClearance), bottom)
                 s.setContentOffset(CGPoint(x: -inset.left, y: target), animated: false)
                 // A new page's first commit can still put it back at the
                 // top: check a moment later, and scroll again if so (not
@@ -471,6 +471,15 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             }
             self.finishAnchor(fragment, found: false) // nothing matched: the place stays
         }
+    }
+
+    /// How far below the top of the visible page a heading lands: clear
+    /// of the Back/Forward/This Document bar (and a small gap) while it
+    /// shows over the page; nothing when it is hidden.
+    var anchorClearance: CGFloat {
+        guard !navBar.isHidden else { return 0 }
+        let barBottom = navBarFrameInWeb.maxY
+        return max(0, barBottom + 6 - web.scrollView.adjustedContentInset.top)
     }
 
     private func finishAnchor(_ fragment: String, found: Bool) {
@@ -910,6 +919,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     }
 
     var navBarVisible: Bool { !navBar.isHidden }
+    /// The bar's frame in the local web view's coordinates (for tests).
+    var navBarFrameInWeb: CGRect { view.layoutIfNeeded(); return navBar.convert(navBar.bounds, to: web) }
 
     private func updateNav() {
         backButton.isEnabled = canGoBack

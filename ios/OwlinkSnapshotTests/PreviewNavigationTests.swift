@@ -327,12 +327,30 @@ final class PreviewNavigationTests: XCTestCase {
         try await Task.sleep(nanoseconds: 200_000_000)
     }
 
-    /// The heading's top in the view (CSS px), read in the app's content world.
-    private func headingTop(_ preview: PreviewController, id: String) async throws -> Double? {
+    /// The heading's top in the web view's own coordinates (points).
+    private func headingTopInView(_ preview: PreviewController, id: String) async throws -> CGFloat {
         let value = try await preview.web.callAsyncJavaScript(
-            "const e = document.getElementById(id); return e ? e.getBoundingClientRect().top : null",
+            "const e = document.getElementById(id); return e ? { y: e.getBoundingClientRect().top, h: document.documentElement.scrollHeight } : null",
             arguments: ["id": id], in: nil, contentWorld: .defaultClient)
-        return (value as? NSNumber)?.doubleValue
+        let d = try XCTUnwrap(value as? [String: Any], "no element \(id)")
+        let y = try XCTUnwrap((d["y"] as? NSNumber)?.doubleValue), h = try XCTUnwrap((d["h"] as? NSNumber)?.doubleValue)
+        let s = preview.web.scrollView
+        return s.adjustedContentInset.top + CGFloat(y) * s.contentSize.height / CGFloat(h)
+    }
+
+    /// The heading sits at the top of what shows: just below the
+    /// navigation bar while it is up, else at the very top.
+    private func assertHeadingAtTop(_ preview: PreviewController, id: String, _ message: String = "",
+                                    file: StaticString = #filePath, line: UInt = #line) async throws {
+        let top = try await headingTopInView(preview, id: id)
+        let inset = preview.web.scrollView.adjustedContentInset.top
+        if preview.navBarVisible {
+            let bar = preview.navBarFrameInWeb.maxY
+            XCTAssertGreaterThanOrEqual(top, bar - 1, "the heading is not under the bar \(message)", file: file, line: line)
+            XCTAssertLessThanOrEqual(top, bar + 14, "just below the bar \(message)", file: file, line: line)
+        } else {
+            XCTAssertEqual(top, inset, accuracy: 4, "at the top \(message)", file: file, line: line)
+        }
     }
 
     func testLinksKeepTheirHeadingFragment() throws {
@@ -376,8 +394,7 @@ final class PreviewNavigationTests: XCTestCase {
         let at = preview.web.scrollView.contentOffset.y
         XCTAssertGreaterThan(at, 500, "well down the page, not left at the top")
         XCTAssertEqual(at, anchor.offset, accuracy: 1, "the late top-scroll did not wipe the heading")
-        let top = try await headingTop(preview, id: "the-part")
-        XCTAssertEqual(try XCTUnwrap(top), 0, accuracy: 4, "the heading is at the top of the view")
+        try await assertHeadingAtTop(preview, id: "the-part")
 
         // Back to the document, Forward to the heading again.
         preview.goBack()
@@ -425,8 +442,7 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertEqual(preview.lastAnchor?.found, true, "#Part → id=\"part\"")
         let part = preview.web.scrollView.contentOffset.y
         XCTAssertGreaterThan(part, 300)
-        let partTop = try await headingTop(preview, id: "part")
-        XCTAssertEqual(try XCTUnwrap(partTop), 0, accuracy: 4)
+        try await assertHeadingAtTop(preview, id: "part")
 
         n = preview.anchorScrolls
         preview.handleLink(try link("long.md#The%20Part", in: root), command: false)
@@ -466,8 +482,7 @@ final class PreviewNavigationTests: XCTestCase {
             XCTAssertEqual(preview.lastAnchor?.found, true, href)
             XCTAssertGreaterThan(s.contentOffset.y, 300, href)
             try await Task.sleep(nanoseconds: 200_000_000)
-            let top = try await headingTop(preview, id: id)
-            XCTAssertEqual(try XCTUnwrap(top), 0, accuracy: 4, href)
+            try await assertHeadingAtTop(preview, id: id, href)
         }
         XCTAssertNil(preview.lastNotice, "nothing refused")
     }
@@ -495,6 +510,52 @@ final class PreviewNavigationTests: XCTestCase {
         try await waitForAnchor(preview, after: n)
         XCTAssertEqual(preview.lastAnchor?.found, true)
         XCTAssertGreaterThan(preview.web.scrollView.contentOffset.y, 500)
+    }
+
+    /// After a jump the floating Back/Forward/This Document bar doesn't
+    /// cover the heading: it lands just below the bar while the bar
+    /// shows, and at the very top when there is no bar.
+    func testHeadingLandsBelowTheNavigationBar() async throws {
+        let (root, doc) = try anchorTree()
+        let preview = PreviewController()
+        host(preview)
+        preview.loadsWeb = false
+        preview.documentURL = doc
+        let filler = (1...60).map { "Paragraph \($0)." }.joined(separator: "\n\n")
+        preview.show(markdown: "# Home\n\n\(filler)\n\n## Below\n\nHere.\n\n\(filler)\n", palette: EditorPalettes.light)
+        try await waitFor("home loaded") { preview.web.url != nil && !preview.web.isLoading }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        // The document itself, no link followed yet: no bar, no margin.
+        XCTAssertFalse(preview.navBarVisible)
+        XCTAssertEqual(preview.anchorClearance, 0)
+        let home = try XCTUnwrap(preview.web.url)
+        var n = preview.anchorScrolls
+        preview.handleLink(try XCTUnwrap(URL(string: "#below", relativeTo: home)?.absoluteURL), command: false)
+        try await waitForAnchor(preview, after: n)
+        XCTAssertEqual(preview.lastAnchor?.found, true)
+        try await assertHeadingAtTop(preview, id: "below", "(no bar)")
+
+        // Another document's heading: the bar is up, the heading below it.
+        n = preview.anchorScrolls
+        preview.handleLink(try link("long.md#the-part", in: root), command: false)
+        try await waitForAnchor(preview, after: n)
+        XCTAssertEqual(preview.lastAnchor?.found, true)
+        XCTAssertTrue(preview.navBarVisible)
+        let bar = preview.navBarFrameInWeb
+        XCTAssertGreaterThan(bar.height, 20)
+        XCTAssertGreaterThan(preview.anchorClearance, bar.height)
+        let top = try await headingTopInView(preview, id: "the-part")
+        XCTAssertFalse(top < bar.maxY - 1, "heading top \(top) is under the bar (bottom \(bar.maxY))")
+        try await assertHeadingAtTop(preview, id: "the-part", "(bar)")
+
+        // An in-page link on that page, bar still up: below it too.
+        let page = try XCTUnwrap(preview.web.url)
+        n = preview.anchorScrolls
+        preview.handleLink(try XCTUnwrap(URL(string: "#part", relativeTo: page)?.absoluteURL), command: false)
+        try await waitForAnchor(preview, after: n)
+        XCTAssertEqual(preview.lastAnchor?.found, true)
+        try await assertHeadingAtTop(preview, id: "part", "(in-page, bar)")
     }
 
     /// Scrolling to a heading adds no bridge: page JavaScript off, the
