@@ -2155,6 +2155,16 @@ and that neither has entitlements; real-launches the signed app five times
 accepted or not (`dist/notary-log.json`, next to `dist/notary-result.json`); fails unless
 Accepted; staples; checks with `spctl -a -vv`; and zips the stapled app.
 
+The release workflow then runs `Scripts/smoke-launch.sh dist/Owlink-<version>.zip`
+before it uploads: a fresh `ditto` unzip of the exact zip, its layout (every file the
+app looks up through `Bundle.main`), the checkout's `Resources` and `.build` renamed
+aside while the app runs (the `#filePath` resource fallbacks in OwlArt, ModelCatalog
+and OwlToolGate, and any SwiftPM `Bundle.module` build path, would otherwise answer
+for a zip that lacks its files), `CEDRIC_LLAMA_CHECK`, a 10 s launch, a clean quit and
+no new crash report. Owlink has no SwiftPM resource bundles today, so the First Light
+1.0.1 `Bundle.module` crash (d4rkwyng/first-light#22) can't happen as such; the smoke
+catches the same class of bug for what Owlink does ship.
+
 **Entitlements: none.** Checked 2026-11-17 on the M4 Pro:
 
 - *Library validation* (part of the hardened runtime) only loads code signed by Apple or
