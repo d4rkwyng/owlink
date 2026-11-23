@@ -1500,7 +1500,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .back: return s.canGoBack
         case .forward: return s.canGoForward
         case .home: return s.canGoHome
-        case .openInBrowser: return s.canOpenInBrowser
         default: return true
         }
     }
@@ -1512,7 +1511,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .back: preview?.goBack()
         case .forward: preview?.goForward()
         case .home: preview?.goHome()
-        case .openInBrowser: break // no web page is ever shown in the preview (S1)
         case .refresh:
             pane.renderer.refresh()
             renderPreview()

@@ -105,7 +105,7 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option])
                 expect(tab.previewVisible, "⌥⌘P shows the preview")
-                let want: [PreviewBarItem] = [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+                let want: [PreviewBarItem] = [.back, .forward, .home, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
                 expect(bar?.state.items == want, "Markdown: the bar has its controls", "\(bar?.state.items ?? [])")
                 for item in want {
                     guard let v = bar?.view(item) else { expect(false, "bar \(item)", "no view"); continue }
@@ -137,7 +137,7 @@ extension DevChecks {
                 let view = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
                 let preview = view?.items.first { $0.title == "Preview" }?.submenu
                 let titles = preview?.items.map(\.title).filter { !$0.isEmpty } ?? []
-                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Open in Browser", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
+                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
                         "Restore File Order", "Export as HTML…", "Export as PDF…", "Allow JavaScript in Preview",
                         "Allow Network in Preview"].allSatisfy(titles.contains), "View › Preview lists the bar's actions", "\(titles)")
                 @MainActor func enabled(_ sel: Selector) -> Bool { menuItem(action: sel).map { app.validateMenuItem($0) } ?? false }
@@ -539,7 +539,6 @@ extension DevChecks {
                                                 expect(action() == .confirmExternal(web), "a web link asks first (S1)", "\(String(describing: action()))")
                                                 expect(tab.preview?.isHome == true && tab.preview?.webView.url == page && page?.scheme == "cedric-doc",
                                                        "and the preview does not navigate to it", "\(tab.preview?.webView.url?.absoluteString ?? "nil")")
-                                                expect(!tab.previewBarEnables(.openInBrowser), "Open in Browser stays off: no web page in the preview")
                                                 expect(tab.preview?.csp.contains("script-src 'none'") == true,
                                                        "local preview retains its strict CSP")
                                                 expect(PreviewLinkLog.opened.isEmpty, "nothing opens before the answer")
