@@ -221,10 +221,14 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 onNavigationChange?()
                 return
             }
-            let language = LanguageDetector.language(forFileName: url.lastPathComponent) ?? .markdown
+            // Kind and folder from the same path (the root resolved like it,
+            // so the folder's prefix checks against the root still hold):
+            // the page's relative loads come from where the file really is.
+            let language = LanguageDetector.language(forFileName: target.lastPathComponent) ?? .markdown
             // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
             pendingAnchor = fragment
-            show(text: text, language: language, palette: home.2, baseURL: url.deletingLastPathComponent(), rootOverride: root)
+            show(text: text, language: language, palette: home.2, baseURL: target.deletingLastPathComponent(),
+                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL))
         }
         onNavigationChange?()
     }

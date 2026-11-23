@@ -666,7 +666,13 @@ extension DevChecks {
         html += "<meta http-equiv=\"refresh\" content=\"0;url=https://example.invalid/refresh\">"
         for k in 1...40 { html += "<p>more html \(k)</p>" }
         _ = write("anchors/page.html", html + "</body></html>")
-        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec)"
+        // A symbolic link to a document in a subfolder: the page's relative
+        // image loads from the folder the file is really in.
+        _ = write("anchors/real/doc.md", "# Real\n\nthe real doc ![dot](dot.png)\n")
+        try? Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")!
+            .write(to: dir.appendingPathComponent("anchors/real/dot.png"))
+        try? FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("anchors/alias.md").path, withDestinationPath: "real/doc.md")
+        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec) [alias](alias.md)"
         src += " [jump](#unique-section) [jump text](#Unique%20Section)"
         // S1: web links, plain and target=_blank.
         src += " [web](https://example.invalid/s1?q=1) <a href=\"https://example.invalid/blank\" target=\"_blank\">blank web</a>\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
@@ -819,6 +825,19 @@ extension DevChecks {
                 expect(p()?.navigationTitle == "page.html" && url?.scheme == "cedric-doc" && url?.absoluteString.hasSuffix("/anchors/") == true
                        && p()?.webView.isLoading == false,
                        "page.html's meta refresh to a web page does not load it (S1)", url?.absoluteString ?? "nil")
+            },
+            home,
+            click("alias"),
+            waitForPreview(tab, contains: "the real doc", "a symbolic link to a document opens in the preview"),
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    previewJS(tab, "location.href + '|' + [...document.images].filter(i => i.complete && i.naturalWidth > 0).length") { v in
+                        let parts = (v as? String ?? "").split(separator: "|").map(String.init)
+                        expect(parts.count == 2 && parts[0].hasSuffix("/anchors/real/") && parts[1] == "1",
+                               "its page is based in the linked file's own folder, and its relative image loads", "\(v ?? "nil")")
+                        next()
+                    }
+                }
             },
             home,
             sync { for t in app.tabs { t.doc.markSaved() } },
