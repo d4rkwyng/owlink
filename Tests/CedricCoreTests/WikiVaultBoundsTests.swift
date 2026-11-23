@@ -62,4 +62,25 @@ import Testing
         let yes = ["/Users/someone/Notes", "/Volumes/Backup/Vault", "/Users/other/Vault"]
         for p in yes { #expect(WikiVault.mayBeVaultRoot(URL(fileURLWithPath: p), home: home), "\(p)") }
     }
+
+    /// A symbolic link to a volume (the data volume, an external disk, any
+    /// mount point) is held to the same bounds as the volume itself:
+    /// `isVolume` and the path rules apply to the resolved path too.
+    @Test func aSymlinkToAVolumeIsNotAVault() throws {
+        let t = try makeTree([])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let fm = FileManager.default
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        var targets = ["/System/Volumes/Data"].filter { fm.fileExists(atPath: $0) }
+        // Every mounted volume, including /Volumes/<disk> ones and deeper mount points.
+        let mounted = fm.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []
+        targets += mounted.map(\.path).filter { $0 != "/" }
+        #expect(!targets.isEmpty)
+        for (n, target) in targets.enumerated() {
+            let link = t.appendingPathComponent("link\(n)")
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: target)
+            #expect(!WikiVault.mayBeVaultRoot(link, home: home), "link to \(target)")
+            #expect(WikiVault(documentFolder: link, home: home).indexDepth == 1, "link to \(target): a note there doesn't index the volume")
+        }
+    }
 }

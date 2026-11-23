@@ -61,8 +61,9 @@ public final class WikiVault: @unchecked Sendable {
     /// Whether `dir` may be found as a vault root by the `.obsidian` walk:
     /// not `/` or a top-level folder (`/Users`, `/Volumes`), not a volume
     /// root (`/Volumes/<disk>` or any mount point), and not the home folder
-    /// or a folder holding it (`/Users`, …). Paths are compared both as
-    /// written and with symbolic links resolved.
+    /// or a folder holding it (`/Users`, …). Every rule applies to the path
+    /// both as written and with symbolic links resolved, so a link to
+    /// `/System/Volumes/Data` or a disk is refused like the volume itself.
     public static func mayBeVaultRoot(_ dir: URL, home: URL) -> Bool {
         let d = dir.standardizedFileURL
         let candidates = [d, d.resolvingSymlinksInPath()]
@@ -75,8 +76,9 @@ public final class WikiVault: @unchecked Sendable {
                 let hp = h.pathComponents
                 if hp.count >= comps.count, Array(hp.prefix(comps.count)) == comps { return false }
             }
+            // A fresh URL per candidate: resource values are cached on the URL.
+            if let v = try? URL(fileURLWithPath: c.path).resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
         }
-        if let v = try? d.resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
         return true
     }
 
