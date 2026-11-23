@@ -223,9 +223,12 @@ enum DevHooks {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard let w = app.tabs.last?.window, let btn = w.standardWindowButton(.closeButton) else { return }
                 let p = btn.convert(NSPoint(x: btn.bounds.midX, y: btn.bounds.midY), to: nil)
+                // Read on the main actor here: Swift 6.1 doesn't infer the
+                // closure's isolation for the nested func below.
+                let number = w.windowNumber
                 func click(_ type: NSEvent.EventType, _ n: Int) -> NSEvent? {
                     NSEvent.mouseEvent(with: type, location: p, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                       windowNumber: w.windowNumber, context: nil, eventNumber: n, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
+                                       windowNumber: number, context: nil, eventNumber: n, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)
                 }
                 guard let down = click(.leftMouseDown, 1), let up = click(.leftMouseUp, 2) else { return }
                 NSApp.postEvent(up, atStart: false)
