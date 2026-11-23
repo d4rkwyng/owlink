@@ -4,6 +4,15 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [0.5.2]
+
+### Security
+- **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now show the whole URL and open in your browser only after you confirm. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
+- **Linked documents in the preview load from their real location.** A document opened through a symbolic link takes its type and its folder for images and links from the file that was checked and read.
+
+### Removed
+- **Open in Browser** in the preview bar and View › Preview, which only applied to web pages shown in the preview.
+
 ## [0.5.1] - 2026-11-23
 
 ### Added
