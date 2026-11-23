@@ -211,6 +211,61 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertFalse(PreviewController.localLoadAllowed(web, type: .other))
         XCTAssertFalse(PreviewController.localLoadAllowed(URL(fileURLWithPath: "/etc/hosts"), type: .other))
         XCTAssertFalse(PreviewController.localLoadAllowed(URL(string: "javascript:alert(1)"), type: .other))
+
+        // Review of fc73458 (Grok SF1, Opus SF3): only the page the app is
+        // loading, as the Mac's expectedPageURL; not a sibling file a meta
+        // refresh names, nor another render's page.
+        var parts = try XCTUnwrap(URLComponents(url: page, resolvingAgainstBaseURL: false))
+        parts.queryItems = [URLQueryItem(name: "r", value: "7")]
+        let render = try XCTUnwrap(parts.url)
+        parts.queryItems = [URLQueryItem(name: "r", value: "6")]
+        let older = try XCTUnwrap(parts.url)
+        let sibling = try XCTUnwrap(URL(string: "other.html", relativeTo: page)?.absoluteURL)
+        let blank = try XCTUnwrap(URL(string: "about:blank"))
+        XCTAssertTrue(PreviewController.localLoadAllowed(render, type: .other, expected: render))
+        XCTAssertTrue(PreviewController.localLoadAllowed(blank, type: .other, expected: blank))
+        XCTAssertFalse(PreviewController.localLoadAllowed(render, type: .formSubmitted, expected: render))
+        XCTAssertFalse(PreviewController.localLoadAllowed(render, type: .reload, expected: render))
+        XCTAssertFalse(PreviewController.localLoadAllowed(sibling, type: .other, expected: render), "a refresh to a sibling file")
+        XCTAssertFalse(PreviewController.localLoadAllowed(older, type: .other, expected: render), "another render")
+        XCTAssertFalse(PreviewController.localLoadAllowed(page, type: .other, expected: render), "no ?r=")
+        XCTAssertFalse(PreviewController.localLoadAllowed(render, type: .other, expected: nil), "nothing being loaded")
+        XCTAssertFalse(PreviewController.localLoadAllowed(blank, type: .other, expected: render))
+        XCTAssertFalse(PreviewController.localLoadAllowed(render, type: .other, expected: blank))
+        XCTAssertFalse(PreviewController.localLoadAllowed(web, type: .other, expected: web))
+    }
+
+    /// The page loads the app starts still go through (the document, a
+    /// linked page, Back, Forward, This Document), while a load the page
+    /// could start by itself to another `cedric-doc:` file is cancelled
+    /// (a meta refresh to a sibling `.html`, served raw: Grok SF1, Opus SF3).
+    func testLocalPreviewLoadsOnlyThePageItIsShowing() async throws {
+        let (root, doc) = try tree()
+        let preview = PreviewController()
+        host(preview)
+        preview.loadsWeb = false
+        preview.documentURL = doc
+        func shown(_ step: String, _ text: String) async throws {
+            try await waitFor("\(step) served") { preview.servedPageHTML?.contains(text) == true }
+            try await waitFor("\(step) loaded") { preview.web.url != nil && preview.web.url == preview.expectedPageURL && !preview.web.isLoading }
+        }
+        preview.show(markdown: "# Home", palette: EditorPalettes.light)
+        try await shown("home", "Home")
+        preview.handleLink(try link("page.html", in: root), command: false)
+        try await shown("linked page", "Page")
+        preview.goBack()
+        try await shown("Back", "Home")
+        preview.goForward()
+        try await shown("Forward", "Page")
+        preview.goHome()
+        try await shown("This Document", "Home")
+        let page = try XCTUnwrap(preview.web.url)
+
+        // What a refresh the scrub missed would do: an `.other` load of a sibling file.
+        preview.web.load(URLRequest(url: try link("page.html", in: root)))
+        try await Task.sleep(nanoseconds: 500_000_000)
+        try await waitFor("settled") { !preview.web.isLoading }
+        XCTAssertEqual(preview.web.url, page, "the sibling file is not loaded")
     }
 
     // MARK: History

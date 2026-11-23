@@ -117,6 +117,39 @@ import Testing
         #expect(HTMLScrub.noScript(kept) == kept)
     }
 
+    /// Review of fc73458 (Grok SF1, Opus SF3; older than that commit): a
+    /// meta refresh hidden from the `refresh` regex. Every `<meta>` with an
+    /// `http-equiv` other than a CSP goes, read as a browser reads it.
+    @Test func metaHTTPEquivOtherThanCSPIsDropped() {
+        let bad = [
+            #"<meta http-equiv="&#114;efresh" content="0;url=other.html">"#,
+            #"<meta http-equiv="&#x52;EFRESH" content="0;url=other.html">"#,
+            #"<meta http-equiv=" refresh " content="0;url=other.html">"#,
+            #"<meta content="0;url=other.html?a>b" http-equiv="refresh">"#,
+            #"<meta x=a" y="z>" http-equiv=refresh content="0;url=other.html">"#,
+            #"<meta/http-equiv=refresh content=0;url=other.html>"#,
+            #"<META HTTP-EQUIV="Set-Cookie" content="a=b">"#,
+            #"<meta http-equiv="content-security-policy&#x20;x" content="0;url=other.html">"#,
+            #"<meta http-equiv content="0;url=other.html">"#,
+        ]
+        for html in bad {
+            for (name, s) in [("noScript", HTMLScrub.noScript(html)), ("noScriptNoRemote", HTMLScrub.noScriptNoRemote(html)),
+                              ("keepingLinks", HTMLScrub.noScriptNoRemoteKeepingLinks(html))] {
+                #expect(!s.lowercased().contains("<meta"), "\(name): \(html) -> \(s)")
+            }
+        }
+        // The rest of the document stays.
+        #expect(HTMLScrub.noScript(#"<p>a</p><meta http-equiv="&#114;efresh" content="0;url=x.html"><p>b</p>"#) == "<p>a</p><p>b</p>")
+        // A CSP (the rich-text copy scrubs a page that starts with the
+        // app's own) and metas with no http-equiv are kept.
+        let page = PreviewHTML.page(body: "<p>x</p>", palette: EditorPalettes.light, csp: MarkdownExport.csp)
+        #expect(HTMLScrub.noScriptNoRemote(page).contains(#"<meta http-equiv="Content-Security-Policy" content="\#(MarkdownExport.csp)">"#))
+        #expect(HTMLScrub.noScriptNoRemote(page).contains(#"<meta charset="utf-8">"#))
+        let keep = #"<meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'">"#
+        #expect(HTMLScrub.noScript(keep) == keep)
+        #expect(HTMLScrub.noScript("<p>http-equiv=refresh</p>") == "<p>http-equiv=refresh</p>")
+    }
+
     /// Release review 0.2.1 M1: script URLs a browser still runs although
     /// the plain text "javascript:" isn't there.
     @Test func scriptURLsInEveryForm() {

@@ -62,6 +62,11 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// A scroll share to apply once the page has loaded (and laid out).
     private var pendingFraction: Double?
     private var loaded = false
+    /// The URL of the page the latest render loads (with its `?r=`), or
+    /// about:blank: the one `.other` load the local preview allows (as the
+    /// Mac's `expectedPageURL`). A meta refresh or any other load the page
+    /// starts by itself goes elsewhere and is cancelled.
+    private(set) var expectedPageURL: URL?
     private var csvPalette = EditorPalettes.light
     private(set) var userZoom = PreviewZoom.load(AppSettings.defaults)
     private var pinchStart = 1.0
@@ -250,6 +255,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 if keepPlace, self.loaded, self.pendingFraction == nil { self.pendingFraction = self.liveFraction }
                 self.loaded = false
                 guard let baseURL else {
+                    self.expectedPageURL = URL(string: "about:blank")
                     self.web.loadHTMLString(page, baseURL: nil)
                     return
                 }
@@ -259,6 +265,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 parts?.queryItems = [URLQueryItem(name: "r", value: String(gen))]
                 var request = URLRequest(url: parts?.url ?? baseURL)
                 request.cachePolicy = .reloadIgnoringLocalCacheData
+                self.expectedPageURL = request.url
                 self.web.load(request)
             }
         }
@@ -589,7 +596,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             handleLink(url, command: Self.command(action))
             return
         }
-        decisionHandler(Self.localLoadAllowed(action.request.url, type: action.navigationType) ? .allow : .cancel)
+        let allowed = action.targetFrame?.isMainFrame != false
+            && Self.localLoadAllowed(action.request.url, type: action.navigationType, expected: expectedPageURL)
+        decisionHandler(allowed ? .allow : .cancel)
     }
 
     /// The local page's own loads: the first load of a render, nothing a
@@ -597,6 +606,17 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     static func localLoadAllowed(_ url: URL?, type: WKNavigationType) -> Bool {
         guard type == .other, let scheme = url?.scheme?.lowercased() else { return false }
         return scheme == PreviewFolder.scheme || url?.absoluteString == "about:blank"
+    }
+
+    /// `localLoadAllowed`, and only the page the app is loading
+    /// (`expected`: the render's page URL with its `?r=`, or about:blank),
+    /// not any `cedric-doc:` URL. A meta refresh the scrub missed would
+    /// otherwise load a sibling `.html` file raw, with no CSP and no scrub.
+    static func localLoadAllowed(_ url: URL?, type: WKNavigationType, expected: URL?) -> Bool {
+        guard localLoadAllowed(url, type: type), let url, let expected else { return false }
+        if expected.absoluteString == "about:blank" { return url.absoluteString == "about:blank" }
+        return PreviewScheme.isPageRequest(url, page: expected) && renderGeneration(of: url) == renderGeneration(of: expected)
+            && renderGeneration(of: url) != nil
     }
 
     /// ⌘ held (a hardware keyboard): the Mac's ⌘-click, ask to leave the app.

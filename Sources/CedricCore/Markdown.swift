@@ -1311,8 +1311,76 @@ public enum HTMLScrub {
         var s = replace(pairs, in: html, with: "")
         s = replace(singles, in: s, with: "")
         s = replace(refresh, in: s, with: "")
+        s = noHTTPEquivMeta(s)
         s = noHandlers(s)
         return s
+    }
+
+    nonisolated(unsafe) static let metaStart = regex(#"<meta(?=[\s/>]|$)"#)
+
+    /// Every `<meta>` with an `http-equiv` other than a Content Security
+    /// Policy removed (a refresh above all, however it is written:
+    /// `http-equiv="&#114;efresh"` is a refresh to a browser). The tag is
+    /// read the way a browser tokenizes it (a quote opens a value only
+    /// after `=`), and the value decoded and trimmed as WebKit does. A CSP
+    /// stays: it only restricts, and the rich-text copy scrubs a whole page
+    /// that starts with the app's own.
+    static func noHTTPEquivMeta(_ html: String) -> String {
+        guard html.range(of: "http-equiv", options: .caseInsensitive) != nil else { return html }
+        let ns = html as NSString
+        var out = "", last = 0
+        for m in metaStart.matches(in: html, range: NSRange(location: 0, length: ns.length)) where m.range.location >= last {
+            let (end, equiv) = startTag(ns, attributesFrom: NSMaxRange(m.range), named: "http-equiv")
+            guard let equiv else { continue }
+            let kind = decodeCharacterReferences(equiv).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard kind != "content-security-policy" else { continue }
+            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+            last = end
+        }
+        out += ns.substring(from: last)
+        return out
+    }
+
+    /// Reads a start tag's attributes from `start` (just after the tag
+    /// name) as the HTML tokenizer does: where the tag ends (after its
+    /// `>`, or the end of the text) and the raw value of the first
+    /// attribute called `name` (empty when it has none, nil when absent).
+    static func startTag(_ ns: NSString, attributesFrom start: Int, named name: String) -> (end: Int, value: String?) {
+        let n = ns.length
+        func isSpace(_ c: unichar) -> Bool { c == 0x20 || c == 0x09 || c == 0x0A || c == 0x0C || c == 0x0D }
+        let gt: unichar = 0x3E, slash: unichar = 0x2F, eq: unichar = 0x3D, dq: unichar = 0x22, sq: unichar = 0x27
+        var i = start
+        var found: String?
+        while i < n {
+            while i < n, isSpace(ns.character(at: i)) || ns.character(at: i) == slash { i += 1 }
+            guard i < n else { break }
+            if ns.character(at: i) == gt { return (i + 1, found) }
+            // The name: a leading `=` belongs to it.
+            let nameStart = i
+            i += 1
+            while i < n, case let c = ns.character(at: i), !isSpace(c), c != slash, c != gt, c != eq { i += 1 }
+            let attr = ns.substring(with: NSRange(location: nameStart, length: i - nameStart)).lowercased()
+            var j = i
+            while j < n, isSpace(ns.character(at: j)) { j += 1 }
+            var value = ""
+            if j < n, ns.character(at: j) == eq {
+                i = j + 1
+                while i < n, isSpace(ns.character(at: i)) { i += 1 }
+                if i < n, case let q = ns.character(at: i), q == dq || q == sq {
+                    let from = i + 1
+                    i = from
+                    while i < n, ns.character(at: i) != q { i += 1 }
+                    value = ns.substring(with: NSRange(location: from, length: i - from))
+                    if i < n { i += 1 }
+                } else {
+                    let from = i
+                    while i < n, case let c = ns.character(at: i), !isSpace(c), c != gt { i += 1 }
+                    value = ns.substring(with: NSRange(location: from, length: i - from))
+                }
+            }
+            if attr == name, found == nil { found = value }
+        }
+        return (n, found)
     }
 
     /// Every start tag without its event-handler and `ping` attributes, and
