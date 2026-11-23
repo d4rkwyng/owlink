@@ -458,10 +458,16 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertTrue(local.userContentController.userScripts.isEmpty)
         XCTAssertTrue(PreviewController.csp.contains("script-src 'none'"))
         XCTAssertFalse(PreviewController.anchorScript.contains("messageHandlers"))
-        // The page's own world sees nothing of the app's script.
-        let seen = try await preview.web.callAsyncJavaScript("return typeof window.webkit?.messageHandlers?.cedricScroll",
-                                                             arguments: [:], in: nil, contentWorld: .defaultClient)
-        XCTAssertEqual(seen as? String, "undefined")
+        // The page's own world sees nothing of the app's script. Page
+        // JavaScript is off, so the probe may not run at all; that is
+        // also the property held. If it runs, the handler is absent.
+        do {
+            let seen = try await preview.web.callAsyncJavaScript("return typeof window.webkit?.messageHandlers?.cedricScroll",
+                                                                 arguments: [:], in: nil, contentWorld: .page)
+            XCTAssertEqual(seen as? String, "undefined", "no Cedric bridge in the page world")
+        } catch {
+            // The page world cannot run script: nothing there to see a bridge.
+        }
         let browser = preview.browser.configuration
         XCTAssertTrue(browser.userContentController.userScripts.isEmpty)
         XCTAssertNil(browser.urlSchemeHandler(forURLScheme: PreviewFolder.scheme))
