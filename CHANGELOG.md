@@ -7,7 +7,7 @@ are its section below (`Scripts/changelog-section.sh`).
 ## [0.5.2]
 
 ### Security
-- **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line, points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
+- **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line (a name in non-Latin look-alike letters is shown as its plain-ASCII form and flagged), points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
 - **Linked documents in the preview load from their real location.** A document opened through a symbolic link takes its type and its folder for images and links from the file that was checked and read.
 
 ### Removed
