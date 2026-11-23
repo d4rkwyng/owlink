@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **Plain text document icon.** `.txt` files now have their own teal page with a TXT label, instead of a dark navy page that looked like the generic document icon in Finder and in the window title. Finder's 64 pt icon size now shows each type's label too.
+
 ## [0.5.1] - 2026-11-23
 
 ### Added

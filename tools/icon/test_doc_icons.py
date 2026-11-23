@@ -1,3 +1,5 @@
+import colorsys
+import io
 import os
 import tempfile
 import unittest
@@ -153,6 +155,8 @@ class DocumentIconTests(unittest.TestCase):
             for filename, _ in icons.ICONSET:
                 with Image.open(os.path.join(args[3], filename)) as image:
                     captured[filename] = image.convert('RGBA').copy()
+            with open(args[5], 'wb') as f:
+                f.write(b'icns\x00\x00\x00\x08')
 
         with tempfile.TemporaryDirectory() as out:
             with patch.object(icons, 'TYPES', [('MD', 'doc-md')]), \
@@ -164,6 +168,54 @@ class DocumentIconTests(unittest.TestCase):
             self.assertEqual(captured[filename].tobytes(), icons.doc_icon('MD', pt, px // pt).tobytes())
         self.assertNotEqual(captured['icon_16x16@2x.png'].tobytes(),
                             captured['icon_32x32.png'].tobytes())
+
+    def test_txt_is_its_own_colour_not_the_generic_navy(self):
+        def hue(text):
+            r, g, b = (v / 255 for v in icons.ci.hx(icons.STYLES[text][0])[:3])
+            return colorsys.rgb_to_hls(r, g, b)[0] * 360
+
+        self.assertEqual(icons.STYLES['TXT'][2], 'TXT')
+        self.assertNotIn('TXT', icons.RIM_TYPES)
+        for text, _ in icons.TYPES:
+            if text != 'TXT':
+                with self.subTest(text=text):
+                    d = abs(hue('TXT') - hue(text))
+                    self.assertGreaterEqual(min(d, 360 - d), 40)
+
+    def test_build_adds_labelled_64pt_element(self):
+        with tempfile.TemporaryDirectory() as out:
+            with patch.object(icons, 'TYPES', [('TXT', 'doc-txt')]):
+                icons.build(out)
+            path = os.path.join(out, 'doc-txt.icns')
+            with open(path, 'rb') as f:
+                elements = dict(icons.icns_elements(f.read()))
+            # The patched file must still be a valid .icns for macOS.
+            icons.subprocess.run(['iconutil', '-c', 'iconset', path, '-o', os.path.join(out, 'x.iconset')],
+                                 check=True)
+        self.assertIn(b'ic07', elements)
+        with Image.open(io.BytesIO(elements[b'icp6'])) as image:
+            self.assertEqual(image.convert('RGBA').tobytes(), icons.doc_icon('TXT', 64).tobytes())
+
+    def test_add_elements_replaces_existing_element(self):
+        with tempfile.TemporaryDirectory() as out:
+            path = os.path.join(out, 'x.icns')
+            with open(path, 'wb') as f:
+                f.write(b'icns\x00\x00\x00\x08')
+            icons.add_elements(path, [(b'icp6', icons.doc_icon('MD', 64))])
+            icons.add_elements(path, [(b'icp6', icons.doc_icon('TXT', 64))])
+            with open(path, 'rb') as f:
+                elements = icons.icns_elements(f.read())
+        self.assertEqual([k for k, _ in elements], [b'icp6'])
+        with Image.open(io.BytesIO(elements[0][1])) as image:
+            self.assertEqual(image.convert('RGBA').tobytes(), icons.doc_icon('TXT', 64).tobytes())
+
+    def test_shipped_icons_include_labelled_64pt_element(self):
+        for text, name in icons.TYPES:
+            with self.subTest(name=name):
+                with open(os.path.join(icons.OUT, name + '.icns'), 'rb') as f:
+                    elements = dict(icons.icns_elements(f.read()))
+                with Image.open(io.BytesIO(elements[b'icp6'])) as image:
+                    self.assertEqual(image.convert('RGBA').tobytes(), icons.doc_icon(text, 64).tobytes())
 
     def test_preview_outputs_both_finder_backgrounds(self):
         with tempfile.TemporaryDirectory() as out:
