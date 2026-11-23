@@ -15,6 +15,7 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Fixed
 - **Obsidian vault bounds.** A stray `.obsidian` folder in your home folder (or above it, or at a disk's root) no longer makes that whole folder the vault for wiki-links and embeds in the preview; the vault falls back to the document's folder. A note saved directly in your home folder no longer searches all of it for bare `[[names]]`. Open the folder in the sidebar to use it as a vault on purpose.
+- **Plain text document icon.** `.txt` files now have their own teal page with a TXT label, instead of a dark navy page that looked like the generic document icon in Finder and in the window title. Finder's 64 pt icon size now shows each type's label too.
 
 ### Removed
 - **Open in Browser** in the preview bar and View › Preview, which only applied to web pages shown in the preview.

@@ -8,8 +8,11 @@
 
 Requires Pillow and iconutil. TYPES must match Resources/document-types.txt.
 The iconset omits 512@2x: Finder does not show documents at 512 pt on Retina.
+iconutil ignores 64 pt iconset entries, so the labelled 64 pt image is added
+to each .icns afterwards as an 'icp6' element. There is no 64@2x element: on
+Retina, 64 pt uses the 128 px element, which is the labelled 128 pt art.
 """
-import argparse, os, subprocess, sys, tempfile
+import argparse, io, os, struct, subprocess, sys, tempfile
 from PIL import Image, ImageDraw, ImageFont
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -30,14 +33,18 @@ ICONSET = [
     ('icon_128x128.png', 128), ('icon_128x128@2x.png', 256), ('icon_256x256.png', 256),
     ('icon_256x256@2x.png', 512), ('icon_512x512.png', 512),
 ]
+# (icns element type, logical point size) for sizes iconutil does not pack.
+EXTRA_ELEMENTS = [(b'icp6', 64)]
 
-# White ink on every page is at least 4.5:1. The glyph name is also used
+# White ink on every page is at least 4.5:1. Families: coral for markup,
+# amber for data, indigo for code, navy for logs and the unlabelled generic
+# page, teal for plain text (TXT), which is Owlink's default Save As type. The glyph name is also used
 # for the hand-tuned 16 px master and the larger, smoothly drawn versions.
 STYLES = {
     'MD':    ('b83a26', 'hash',    'MD'),
     'HTML':  ('a83422', 'tag',     'HTML'),
     'CSS':   ('9c3820', 'star',    'CSS'),
-    'TXT':   ('27295a', 'lines',   'TXT'),
+    'TXT':   ('177370', 'lines',   'TXT'),
     'LOG':   ('3b3e7c', 'log',     'LOG'),
     '':      ('1f2148', 'dash',    ''),
     'JSON':  ('8a5a00', 'braces',  'JSON'),
@@ -106,7 +113,7 @@ PATHS = {
 X0, X1, Y0, Y1 = 0.155, 0.845, 0.06, 0.94
 F = 0.19
 RIM = ci.hx('e8e8ee')
-RIM_TYPES = {'', 'TXT', 'LOG', 'SH', 'SQL'}
+RIM_TYPES = {'', 'LOG', 'SH', 'SQL'}
 
 
 def shade(color, target, amount):
@@ -236,11 +243,42 @@ def build(out=OUT, sheet=None):
                 if key not in cache:
                     cache[key] = doc_icon(text, *key)
                 cache[key].save(os.path.join(iset, fn))
-            subprocess.run(['iconutil', '-c', 'icns', iset, '-o', os.path.join(out, name + '.icns')], check=True)
+            path = os.path.join(out, name + '.icns')
+            subprocess.run(['iconutil', '-c', 'icns', iset, '-o', path], check=True)
+        add_elements(path, [(kind, doc_icon(text, pt)) for kind, pt in EXTRA_ELEMENTS])
         made[name] = (text, {s: doc_icon(text, s) for s in (16, 32, 64, 128, 256)})
     if sheet:
         write_sheet(sheet, made)
     return made
+
+
+def icns_elements(data):
+    """[(type, payload)] for an .icns file's bytes."""
+    if data[:4] != b'icns' or struct.unpack('>I', data[4:8])[0] != len(data):
+        raise ValueError('not an icns file')
+    elements, i = [], 8
+    while i < len(data):
+        kind, length = data[i:i + 4], struct.unpack('>I', data[i + 4:i + 8])[0]
+        if length < 8 or i + length > len(data):
+            raise ValueError('truncated icns element')
+        elements.append((kind, data[i + 8:i + length]))
+        i += length
+    return elements
+
+
+def add_elements(path, images):
+    """Add PNG elements to an .icns, replacing any of the same type."""
+    with open(path, 'rb') as f:
+        elements = icns_elements(f.read())
+    kinds = {kind for kind, _ in images}
+    elements = [(k, v) for k, v in elements if k not in kinds and k != b'TOC ']
+    for kind, image in images:
+        png = io.BytesIO()
+        image.save(png, 'PNG')
+        elements.append((kind, png.getvalue()))
+    body = b''.join(k + struct.pack('>I', len(v) + 8) + v for k, v in elements)
+    with open(path, 'wb') as f:
+        f.write(b'icns' + struct.pack('>I', len(body) + 8) + body)
 
 
 def preview(out):
