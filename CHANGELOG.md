@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **Obsidian vault bounds.** A stray `.obsidian` folder in your home folder (or above it, or at a disk's root) no longer makes that whole folder the vault for wiki-links and embeds in the preview; the vault falls back to the document's folder. Open the folder in the sidebar to use it as a vault on purpose.
+
 ## [0.5.1] - 2026-11-23
 
 ### Added

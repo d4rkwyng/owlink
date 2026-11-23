@@ -808,7 +808,9 @@ links, footnotes (`[^1]`), GitHub alerts (`> [!NOTE]`, `[!TIP]`,
 checkboxes) and YAML frontmatter, which shows as a small metadata table
 (and is coloured as YAML in the editor). It also reads Obsidian's syntax:
 `[[note]]`, `[[note|alias]]` and `[[note#Heading]]` link to notes in the
-vault (the sidebar folder, else the folder holding `.obsidian/`) and open
+vault (the sidebar folder, else the nearest folder holding `.obsidian/`,
+but never your home folder, a folder above it, or a disk's root folder —
+open the folder in the sidebar to use a vault there) and open
 them in a tab, `![[image.png|300]]` shows the image, `![[note#Heading]]`
 quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 `%%comments%%` and `#tags` show as in Obsidian. Site-root images

@@ -3,8 +3,9 @@ import Foundation
 /// Resolves Obsidian `[[wikilinks]]` and `![[embeds]]` for the preview, as
 /// Obsidian does: by file name anywhere under the vault, the shortest path
 /// winning, `.md` implied for notes. The vault is the opened folder, else
-/// the nearest folder above the document holding `.obsidian/`, else the
-/// document's own folder. Files only; the name index is built once per
+/// the nearest folder above the document holding `.obsidian/` (within the
+/// bounds `mayBeVaultRoot` sets: never the home folder, a folder above it,
+/// `/`, a top-level folder or a volume root), else the document's own folder. Files only; the name index is built once per
 /// `refreshSeconds` (bounded: `maxEntries` entries, `maxDepth` levels,
 /// dot folders and `node_modules` skipped).
 public final class WikiVault: @unchecked Sendable {
@@ -22,25 +23,52 @@ public final class WikiVault: @unchecked Sendable {
     private var attachmentFolder: URL?
     private var built: Date?
 
-    public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default) {
+    public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default, home: URL? = nil) {
         self.fm = fileManager
         self.documentFolder = documentFolder.standardizedFileURL
         let folder = documentFolder.standardizedFileURL
         let opened = openedRoot?.standardizedFileURL
         let validRoot = opened.flatMap { Self.contains(folder, in: $0) ? $0 : nil }
-        self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager) ?? folder).standardizedFileURL
+        self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager, home: home) ?? folder).standardizedFileURL
     }
 
-    /// The nearest folder at or above `folder` that holds `.obsidian/`.
-    public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default) -> URL? {
+    /// The nearest folder at or above `folder` that holds `.obsidian/`, as
+    /// long as it may be a vault root (`mayBeVaultRoot`). The walk stops at
+    /// the first folder that may not: a stray `~/.obsidian` or one at a
+    /// disk's root never widens the vault to the whole home folder or disk.
+    /// (An opened folder still wins over this walk, whatever it is.)
+    public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default, home: URL? = nil) -> URL? {
+        let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
         var dir = folder.standardizedFileURL
         for _ in 0..<PreviewRoot.maxLevels {
-            guard dir.pathComponents.count >= 3 else { return nil }
+            guard mayBeVaultRoot(dir, home: home) else { return nil }
             var isDir: ObjCBool = false
             if fm.fileExists(atPath: dir.appendingPathComponent(".obsidian").path, isDirectory: &isDir), isDir.boolValue { return dir }
             dir = dir.deletingLastPathComponent()
         }
         return nil
+    }
+
+    /// Whether `dir` may be found as a vault root by the `.obsidian` walk:
+    /// not `/` or a top-level folder (`/Users`, `/Volumes`), not a volume
+    /// root (`/Volumes/<disk>` or any mount point), and not the home folder
+    /// or a folder holding it (`/Users`, …). Paths are compared both as
+    /// written and with symbolic links resolved.
+    public static func mayBeVaultRoot(_ dir: URL, home: URL) -> Bool {
+        let d = dir.standardizedFileURL
+        let candidates = [d, d.resolvingSymlinksInPath()]
+        let homes = [home.standardizedFileURL, home.standardizedFileURL.resolvingSymlinksInPath()]
+        for c in candidates {
+            let comps = c.pathComponents
+            if comps.count < 3 { return false }
+            if comps.count == 3, comps[1] == "Volumes" { return false }
+            for h in homes {
+                let hp = h.pathComponents
+                if hp.count >= comps.count, Array(hp.prefix(comps.count)) == comps { return false }
+            }
+        }
+        if let v = try? d.resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
+        return true
     }
 
     /// A `[[target]]`'s parts: the file part and the `#Heading` or `#^block` part.
