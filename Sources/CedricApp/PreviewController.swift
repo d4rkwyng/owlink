@@ -111,6 +111,18 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
     /// The last link clicked (for checks).
     private(set) var lastLinkAction: PreviewLinkAction?
+    /// A web link the user said Cancel to while page JavaScript was on, and
+    /// the page load (`pageLoads`) it came from: that page may not ask for
+    /// it again (a script `click()` loop would put the prompt straight
+    /// back). Another link still asks; a new load (an edit, a toggle,
+    /// navigating) clears it.
+    private var declinedExternal: (load: Int, url: URL)?
+    /// Web links dropped by that rule (for checks).
+    private(set) var droppedExternal = 0
+
+    func externalLinkAnswered(_ url: URL, opened: Bool) {
+        declinedExternal = !opened && allowJavaScript ? (pageLoads, url) : nil
+    }
 
     /// Serves the document's folder (and nothing else) to the page.
     private let folderFiles = DocumentFolderFiles()
@@ -609,6 +621,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             switch act {
             // The file's path came through without its `#fragment`: carry it along.
             case .openInPreview(let file): if let root { push(.local(file, root, PreviewAnchor.fragment(of: url))) }
+            case .confirmExternal(let web) where allowJavaScript && declinedExternal?.load == pageLoads && declinedExternal?.url == web:
+                droppedExternal += 1
             default: onLink?(act)
             }
         case .cancel:
@@ -621,8 +635,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// navigation action, so this is a second line, failing closed).
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
-        let scheme = response.response.url?.scheme?.lowercased() ?? ""
-        decisionHandler(PreviewNavigation.pageSchemes.contains(scheme) ? .allow : .cancel)
+        decisionHandler(PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame) ? .allow : .cancel)
     }
 
     /// No new windows: `target=_blank` and `window.open` clicks come through

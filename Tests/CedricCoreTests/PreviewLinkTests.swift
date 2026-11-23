@@ -131,6 +131,18 @@ import Testing
         #expect(decide(page.absoluteString, mainFrame: false, expected: page, loading: true) == .cancel)
         #expect(decide(page.absoluteString, mainFrame: nil, expected: page, loading: true) == .cancel)
         #expect(decide(nil, expected: page, loading: true) == .cancel)
+        // Script moving the page to a #place of itself (not a click): cancelled.
+        #expect(decide(page.absoluteString + "#x", expected: page, loading: true) == .cancel)
+    }
+
+    @Test func onlyThePagesOwnResponseIsShown() {
+        #expect(PreviewNavigation.allowsResponse(url: page, mainFrame: true))
+        #expect(PreviewNavigation.allowsResponse(url: URL(string: "about:blank"), mainFrame: true))
+        for s in ["https://example.com/", "http://example.com/", "about:srcdoc", "about:foo", "file:///etc/hosts", "data:text/html,x", "x-unknown:y"] {
+            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true), "\(s)")
+        }
+        #expect(!PreviewNavigation.allowsResponse(url: page, mainFrame: false), "no frame")
+        #expect(!PreviewNavigation.allowsResponse(url: nil, mainFrame: true))
     }
 
     @Test func noWebPageLoadsWithoutAClick() {

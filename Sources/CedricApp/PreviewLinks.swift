@@ -35,15 +35,29 @@ extension EditorWindowController {
     }
 
     private func confirmExternalLink(_ url: URL) {
-        LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window)
+        LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window) { [weak self] opened in
+            self?.preview?.externalLinkAnswered(url, opened: opened)
+        }
     }
 }
 
 /// The "Open this link?" question, shared by the Markdown preview and PDF tabs.
+/// One at a time: a link asked for while a prompt is showing is dropped, so
+/// page script clicking a link over and over can't stack prompts.
 @MainActor
 enum LinkPrompt {
-    static func confirmExternal(_ url: URL, in window: NSWindow?) {
+    /// The prompt showing now (weak: gone with its alert, so a prompt
+    /// closed without an answer never blocks the next one).
+    private static weak var current: NSWindow?
+    /// Prompts shown, and dropped because one was showing (for checks).
+    private(set) static var shown = 0
+    private(set) static var dropped = 0
+
+    static func confirmExternal(_ url: URL, in window: NSWindow?, answered: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        if current?.isVisible == true { dropped += 1; return }
+        shown += 1
         let a = NSAlert()
+        current = a.window
         a.messageText = url.scheme?.lowercased() == "mailto" ? String(localized: "Write an email?") : String(localized: "Open this link?")
         // The whole URL, so a misleading link text can't hide where it goes
         // (bidi and control characters shown as escapes).
@@ -51,7 +65,9 @@ enum LinkPrompt {
         a.addButton(withTitle: String(localized: "Open"))
         a.addButton(withTitle: String(localized: "Cancel"))
         let open: (NSApplication.ModalResponse) -> Void = { r in
-            if r == .alertFirstButtonReturn { PreviewLinkLog.open(url) }
+            let yes = r == .alertFirstButtonReturn
+            if yes { PreviewLinkLog.open(url) }
+            answered(yes)
         }
         if let w = window, w.isVisible, w.attachedSheet == nil {
             a.beginSheetModal(for: w, completionHandler: open)

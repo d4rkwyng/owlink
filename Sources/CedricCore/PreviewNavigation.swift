@@ -50,6 +50,13 @@ public enum PreviewNavigation: Equatable, Sendable {
         return .allowPage
     }
 
+    /// A navigation response is let through only for the preview's own
+    /// page in the main frame (a second line behind `decide`).
+    public static func allowsResponse(url: URL?, mainFrame: Bool) -> Bool {
+        guard mainFrame, let url else { return false }
+        return isPageScheme(url)
+    }
+
     static func isPageScheme(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), pageSchemes.contains(scheme) else { return false }
         // `about:` only as the blank page an untitled document is shown at.

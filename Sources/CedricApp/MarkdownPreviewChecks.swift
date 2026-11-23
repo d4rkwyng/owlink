@@ -698,6 +698,7 @@ extension DevChecks {
             previewJS(tab, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in next() }
         }
         var livePage: URL?
+        var promptsBefore = 0, droppedBefore = 0
         // S1: the preview stays on the live document; no web page, no tab, nothing opened.
         @MainActor func stayed(_ name: String) {
             expect(p()?.isHome == true && p()?.webView.url == livePage && livePage?.scheme == "cedric-doc" && noTab()
@@ -756,9 +757,31 @@ extension DevChecks {
                        "\(String(describing: p()?.lastLinkAction))")
                 stayed("the preview did not load the web page; Cancel opened nothing")
             },
-            click("blank web"),
+            // Page script clicking the declined link over and over: no prompt comes back.
+            { next in
+                promptsBefore = LinkPrompt.shown
+                pageJS(tab, "const w = [...document.querySelectorAll('a')].find(a => a.textContent === 'web'); for (let i = 0; i < 5; i++) w.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 1,
+                       "with JavaScript on, script re-clicking a declined web link doesn't ask again",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                promptsBefore = LinkPrompt.shown
+                droppedBefore = LinkPrompt.dropped
+            },
+            // Another web link, clicked three times at once by script: one prompt, never stacked.
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); b.click(); b.click(); 1") { _ in next() }
+            },
             webPrompt(tab, "https://example.invalid/blank", "a target=_blank web link asks first too"),
-            sync { stayed("and the preview did not load it either") },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore + 1 && LinkPrompt.dropped >= droppedBefore + 1, "one prompt at a time: the repeats are dropped, not stacked",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(LinkPrompt.dropped - droppedBefore)")
+                stayed("and the preview did not load it either")
+            },
             { next in pageJS(tab, "location.href = 'https://example.invalid/script'; 1") { _ in next() } },
             { next in
                 pageJS(tab, "window.open('https://example.invalid/popup'); const f = document.createElement('form'); f.action = 'https://example.invalid/form'; f.method = 'get'; document.body.appendChild(f); f.submit(); 1") { _ in
