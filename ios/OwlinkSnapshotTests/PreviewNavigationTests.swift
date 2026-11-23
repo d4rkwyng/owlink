@@ -247,7 +247,10 @@ final class PreviewNavigationTests: XCTestCase {
         preview.documentURL = doc
         func shown(_ step: String, _ text: String) async throws {
             try await waitFor("\(step) served") { preview.servedPageHTML?.contains(text) == true }
-            try await waitFor("\(step) loaded") { preview.web.url != nil && preview.web.url == preview.expectedPageURL && !preview.web.isLoading }
+            try await waitFor("\(step) loaded") { preview.web.url != nil && preview.web.url == preview.pageURL && !preview.web.isLoading }
+            // Review of 2887f40 (Grok NIT): once loaded, not even the page
+            // itself may load again by its own doing.
+            try await waitFor("\(step) expected page cleared") { preview.expectedPageURL == nil }
         }
         preview.show(markdown: "# Home", palette: EditorPalettes.light)
         try await shown("home", "Home")

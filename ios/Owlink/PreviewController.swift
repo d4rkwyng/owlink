@@ -65,8 +65,14 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// The URL of the page the latest render loads (with its `?r=`), or
     /// about:blank: the one `.other` load the local preview allows (as the
     /// Mac's `expectedPageURL`). A meta refresh or any other load the page
-    /// starts by itself goes elsewhere and is cancelled.
+    /// starts by itself goes elsewhere and is cancelled. Cleared once that
+    /// load finishes or fails (the Mac's `loadingShell`): after that the
+    /// page can't even reload itself.
     private(set) var expectedPageURL: URL?
+    /// The load of `expectedPageURL`, to know when it is over.
+    private var pageNavigation: WKNavigation?
+    /// The page URL of the latest render (for tests and checks).
+    private(set) var pageURL: URL?
     private var csvPalette = EditorPalettes.light
     private(set) var userZoom = PreviewZoom.load(AppSettings.defaults)
     private var pinchStart = 1.0
@@ -256,7 +262,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 self.loaded = false
                 guard let baseURL else {
                     self.expectedPageURL = URL(string: "about:blank")
-                    self.web.loadHTMLString(page, baseURL: nil)
+                    self.pageURL = self.expectedPageURL
+                    self.pageNavigation = self.web.loadHTMLString(page, baseURL: nil)
                     return
                 }
                 // A distinct URL per render, so a repeat load isn't served
@@ -266,7 +273,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 var request = URLRequest(url: parts?.url ?? baseURL)
                 request.cachePolicy = .reloadIgnoringLocalCacheData
                 self.expectedPageURL = request.url
-                self.web.load(request)
+                self.pageURL = request.url
+                self.pageNavigation = self.web.load(request)
             }
         }
     }
@@ -383,6 +391,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             return
         }
         guard webView === web else { return }
+        pageLoadEnded(navigation)
         loaded = true
         if let anchor = pendingAnchor, Self.renderGeneration(of: webView.url) == anchor.generation {
             pendingAnchor = nil
@@ -741,7 +750,17 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
     }
 
+    /// The render's own load is over: no further `.other` load is the
+    /// page's (Review of 2887f40, Grok NIT: a missed refresh could reload
+    /// the scrubbed page). A load the app starts sets it again.
+    private func pageLoadEnded(_ navigation: WKNavigation?) {
+        guard let navigation, navigation === pageNavigation else { return }
+        pageNavigation = nil
+        expectedPageURL = nil
+    }
+
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === web { pageLoadEnded(navigation); return }
         guard webView === browser else { return }
         let ns = error as NSError
         if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled { return }
