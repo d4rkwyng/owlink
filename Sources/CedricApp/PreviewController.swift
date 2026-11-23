@@ -7,9 +7,8 @@ import WebKit
 /// access are off unless the user turns them on (View menu), per tab:
 /// scripts are disabled with WKWebpagePreferences, and remote loads are
 /// blocked twice, by a WebKit content rule list and by a
-/// Content-Security-Policy in the page. Links open in the default
-/// browser only when clicked; a link to a text file (a relative `.md`)
-/// opens it in Cedric.
+/// Content-Security-Policy in the page. Documents browse here; web pages
+/// use a separate web view without the local preview's app bridge.
 ///
 /// Markdown is rendered on a background queue from a copy of the text; a
 /// newer render drops an older result. The page is loaded once; after
@@ -23,8 +22,44 @@ import WebKit
 @MainActor
 final class PreviewController: NSObject, WKNavigationDelegate {
     let webView: WKWebView
-    var allowJavaScript = false
-    var allowNetwork = false
+    let browserView: WKWebView
+    let container = NSView()
+    private enum Entry {
+        case home
+        /// A linked document, the folder it may read, and the heading
+        /// (`#fragment`) to scroll to once it has loaded.
+        case local(URL, URL, String?)
+        case web(URL)
+    }
+    private var history: [Entry] = [.home]
+    private var historyIndex = 0
+    private var home: (String, Language, EditorPalette, URL?)?
+    private var keyMonitor: KeyMonitor?
+    var onNavigationChange: (() -> Void)?
+    var onNavigationError: ((String) -> Void)?
+    var isHome: Bool { if case .home = history[historyIndex] { return true }; return false }
+    var canGoBack: Bool { historyIndex > 0 }
+    var canGoForward: Bool { historyIndex + 1 < history.count }
+    var webURL: URL? { if case .web(let url) = history[historyIndex] { return url }; return nil }
+    var navigationTitle: String {
+        switch history[historyIndex] {
+        case .home: return String(localized: "Preview")
+        case .local(let url, _, _): return url.lastPathComponent
+        case .web(let url): return "Web: \(url.host ?? "")"
+        }
+    }
+    static func browserConfiguration() -> WKWebViewConfiguration {
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
+        config.processPool = WKProcessPool()
+        return config
+    }
+    var allowJavaScript = false { didSet { if isHome { homeJavaScript = allowJavaScript } } }
+    var allowNetwork = false { didSet { if isHome { homeNetwork = allowNetwork } } }
+    /// The live document's JavaScript / Network setting, restored when
+    /// returning Home. A navigated-to local page starts with both off.
+    private var homeJavaScript = false
+    private var homeNetwork = false
     private static var blockRules: WKContentRuleList?
     private static var compiling = false
     private static var waiting: [() -> Void] = []
@@ -36,6 +71,13 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     /// The page is loading: a newer body waits for it.
     private var loadingShell = false
     private var pendingBody: String?
+    private var expectedPageURL: URL?
+    private var shellNavigation: WKNavigation?
+    /// The heading the page being loaded scrolls to when it has finished
+    /// (a local entry's fragment; set by displayEntry, used once).
+    private var pendingAnchor: String?
+    /// The anchor scrolled to last and whether it was found (for checks).
+    private(set) var lastAnchor: (fragment: String, found: Bool)?
     /// Bumped by each render; a result for an older one is dropped.
     private var generation = 0
     private let latest = RenderTicket()
@@ -94,12 +136,123 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(folderFiles, forURLScheme: DocumentFolderFiles.scheme)
         webView = WKWebView(frame: .zero, configuration: config)
+        browserView = WKWebView(frame: .zero, configuration: Self.browserConfiguration())
         super.init()
         let ucc = config.userContentController
         ucc.addUserScript(WKUserScript(source: Self.appScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         ucc.add(ScrollMessages(self), contentWorld: .defaultClient, name: "cedricScroll")
         webView.navigationDelegate = self
+        browserView.navigationDelegate = self
+        browserView.allowsBackForwardNavigationGestures = false
+        for view in [webView, browserView] {
+            view.frame = container.bounds
+            view.autoresizingMask = [.width, .height]
+            container.addSubview(view)
+        }
+        browserView.isHidden = true
         webView.setValue(false, forKey: "drawsBackground")
+        keyMonitor = KeyMonitor(NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            let handled = MainActor.assumeIsolated {
+                guard let self, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                      let window = self.container.window, window.isKeyWindow,
+                      let focused = window.firstResponder as? NSView, focused.isDescendant(of: self.container) else { return false }
+                switch event.charactersIgnoringModifiers {
+                case "[": if self.canGoBack { self.goBack() }; return true
+                case "]": if self.canGoForward { self.goForward() }; return true
+                default: return false
+                }
+            }
+            return handled ? nil : event
+        })
+    }
+
+    // Swift 6.1 has no `isolated deinit` without an experimental flag, so
+    // the deinit is nonisolated: it removes the key monitor right away on
+    // the main thread, or hops there when the last release is elsewhere.
+    deinit {
+        guard let keyMonitor else { return }
+        if Thread.isMainThread { MainActor.assumeIsolated { keyMonitor.remove() } }
+        else { DispatchQueue.main.async { MainActor.assumeIsolated { keyMonitor.remove() } } }
+    }
+
+    func renderHome(text: String, language: Language, palette: EditorPalette, folder: URL?) {
+        home = (text, language, palette, folder)
+        if isHome { show(text: text, language: language, palette: palette, baseURL: folder) }
+    }
+
+    private func push(_ entry: Entry) {
+        history.removeSubrange((historyIndex + 1)..<history.count)
+        history.append(entry)
+        historyIndex += 1
+        applyTrust(for: entry)
+        displayEntry()
+    }
+
+    func goBack() { if canGoBack { historyIndex -= 1; applyTrust(for: history[historyIndex]); displayEntry() } }
+    func goForward() { if canGoForward { historyIndex += 1; applyTrust(for: history[historyIndex]); displayEntry() } }
+    func goHome() { if !isHome { push(.home) } }
+    func trustChanged() { if case .local = history[historyIndex] { displayEntry() } }
+
+    /// The live document changed on disk: JavaScript and Network go off now
+    /// and stay off when Back/Home returns to it, whatever entry is showing.
+    func resetTrust() {
+        homeJavaScript = false
+        homeNetwork = false
+        allowJavaScript = false
+        allowNetwork = false
+    }
+
+    /// A linked local document does not inherit JavaScript/Network trust
+    /// granted for the live document. Home restores the user's setting.
+    private func applyTrust(for entry: Entry) {
+        switch entry {
+        case .home:
+            allowJavaScript = homeJavaScript
+            allowNetwork = homeNetwork
+        case .local:
+            allowJavaScript = false
+            allowNetwork = false
+        case .web:
+            break
+        }
+    }
+
+    private func displayEntry() {
+        generation += 1
+        latest.set(generation)
+        shellKey = nil
+        pendingBody = nil
+        loadingShell = false
+        browserView.stopLoading()
+        pendingAnchor = nil
+        switch history[historyIndex] {
+        case .home:
+            browserView.isHidden = true
+            webView.isHidden = false
+            if let home { show(text: home.0, language: home.1, palette: home.2, baseURL: home.3) }
+        case .local(let url, let root, let fragment):
+            browserView.isHidden = true
+            webView.isHidden = false
+            // Checked and read by the same symlink-free path, so a link
+            // swapped in between can't point the read outside `root`.
+            let target = PreviewFolder.resolved(url)
+            guard case .openInPreview = PreviewLinkAction.previewAction(for: target, folder: root, command: false, isText: Self.opensInCedric),
+                  let data = try? Data(contentsOf: target), let text = TextCodec.decode(data)?.text, let home else {
+                onNavigationError?(String(localized: "Could not read the preview document."))
+                onNavigationChange?()
+                return
+            }
+            let language = LanguageDetector.language(forFileName: url.lastPathComponent) ?? .markdown
+            // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
+            pendingAnchor = fragment
+            show(text: text, language: language, palette: home.2, baseURL: url.deletingLastPathComponent(), rootOverride: root)
+        case .web(let url):
+            webView.stopLoading()
+            webView.isHidden = true
+            browserView.isHidden = false
+            if DevEnvironment.values["CEDRIC_CHECK"] == nil { browserView.load(URLRequest(url: url)) }
+        }
+        onNavigationChange?()
     }
 
     /// Compiles the "block all remote loads" rule list once per app run.
@@ -126,11 +279,11 @@ final class PreviewController: NSObject, WKNavigationDelegate {
 
     /// Renders the document. `baseURL` is the file's folder, for relative
     /// images (the page may read files in that folder only).
-    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?) {
+    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil) {
         folderFiles.folder = folder
         // The folder open in the sidebar, when the document is inside it:
         // the last place a site-root path (`/images/x.webp`) is looked for.
-        folderFiles.openedRoot = Self.openedRoot(for: folder)
+        folderFiles.openedRoot = rootOverride ?? Self.openedRoot(for: folder)
         if let folder {
             if vault?.documentFolder != folder.standardizedFileURL || vaultOpenedRoot != folderFiles.openedRoot {
                 vault = WikiVault(documentFolder: folder, openedRoot: folderFiles.openedRoot)
@@ -140,6 +293,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
             vault = nil
         }
         folderFiles.vaultRoot = vault?.root
+        folderFiles.vault = vault
         let vault = self.vault
         let exportLinks = self.exportLinks
         let baseURL = folder.flatMap(DocumentFolderFiles.pageURL(for:))
@@ -186,7 +340,10 @@ final class PreviewController: NSObject, WKNavigationDelegate {
 
     /// The preview bar's Refresh: the next render loads the whole page
     /// again (images and linked files re-read), not just a body swap.
-    func forceReload() { shellKey = nil }
+    func forceReload() {
+        shellKey = nil
+        if !isHome { displayEntry() }
+    }
 
     /// Swaps the body into the loaded page, or loads the page.
     private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?) {
@@ -202,8 +359,9 @@ final class PreviewController: NSObject, WKNavigationDelegate {
 
     private func load(_ html: String, key: String?, baseURL: URL?) {
         pendingBody = nil
+        let gen = generation
         let go = { [weak self] in
-            guard let self else { return }
+            guard let self, self.generation == gen else { return }
             let ucc = self.webView.configuration.userContentController
             ucc.removeAllContentRuleLists()
             if !self.allowNetwork, let rules = Self.blockRules { ucc.add(rules) }
@@ -211,8 +369,9 @@ final class PreviewController: NSObject, WKNavigationDelegate {
             self.folderFiles.scriptOn = self.allowJavaScript
             self.shellKey = key
             self.loadingShell = true
+            self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
-            self.webView.loadHTMLString(html, baseURL: baseURL)
+            self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }
     }
@@ -319,6 +478,22 @@ final class PreviewController: NSObject, WKNavigationDelegate {
         window.__cedricSetY = Math.max(0, Math.min(y - 8, document.documentElement.scrollHeight - window.innerHeight));
         window.scrollTo(0, Math.max(0, y - 8));
       };
+      // Scrolls to the first of `ids` that is an element's id (or an
+      // anchor's name), its top at the top of the view (as WebKit's own
+      // fragment scroll), and pins that place. `follow`: the editor is told
+      // now, rather than by a scroll event an occluded page may deliver late.
+      window.__cedricScrollToAnchor = function(ids, follow) {
+        let e = null;
+        for (const id of ids) { e = document.getElementById(id) || document.getElementsByName(id)[0]; if (e) break; }
+        if (!e) return false;
+        const max = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+        const y = Math.max(0, Math.min(Math.round(e.getBoundingClientRect().top + window.scrollY), max));
+        quiet();
+        window.__cedricSetY = y;
+        window.scrollTo(0, y);
+        if (follow) window.webkit.messageHandlers.cedricScroll.postMessage(window.__cedricLineAt(y + 8));
+        return true;
+      };
       window.addEventListener('scroll', function() {
         // Not the scrolls Cedric makes (sync, or keeping the place after an edit).
         if (Date.now() < (window.__cedricQuietUntil || 0) || Math.abs(window.scrollY - (window.__cedricSetY ?? -1e9)) < 2) return;
@@ -333,6 +508,7 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     /// proportion), or to `fraction` of the page (HTML). Works with page
     /// JavaScript off: this runs in the app's own content world.
     func sync(line: Int, fraction: Double, markdown: Bool) {
+        guard isHome else { return }
         let js: String
         if markdown {
             js = "window.__cedricScrollTo && window.__cedricScrollTo(\(line))"
@@ -343,34 +519,115 @@ final class PreviewController: NSObject, WKNavigationDelegate {
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if webView === browserView {
+            if case .web = history[historyIndex], let url = webView.url,
+               ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                history[historyIndex] = .web(url)
+                onNavigationChange?()
+            }
+            return
+        }
+        guard navigation === shellNavigation else { return }
+        shellNavigation = nil
         loadingShell = false
+        expectedPageURL = nil
+        let anchor = pendingAnchor
+        pendingAnchor = nil
         if let body = pendingBody {
             pendingBody = nil
             bodySwaps += 1
             webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
                                         arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
         }
-        onLoaded?()
+        // (Evaluated after the patch above: one content world, in order.)
+        if let anchor { scroll(toAnchor: anchor, follow: false) }
+        if isHome { onLoaded?() }
     }
 
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { loadingShell = false }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === browserView {
+            let ns = error as NSError
+            if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled { return }
+            onNavigationError?(String(localized: "The web page could not be loaded."))
+            return
+        }
+        if webView === self.webView, navigation === shellNavigation {
+            shellNavigation = nil
+            loadingShell = false
+            expectedPageURL = nil
+        }
+    }
 
-    fileprivate func scrolledByUser(_ line: Double) { onScrolledToLine?(line) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        self.webView(webView, didFail: navigation, withError: error)
+    }
+
+    fileprivate func scrolledByUser(_ line: Double) { if isHome { onScrolledToLine?(line) } }
 
     // Links: the first load is ours; a link within the page scrolls it;
     // anything else goes to `onLink` as a PreviewLinkAction (nothing is
     // ever launched: audit H2).
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        if action.navigationType == .linkActivated, let url = action.request.url {
-            if url.fragment != nil, Self.samePage(url, webView.url) { decisionHandler(.allow); return }
-            decisionHandler(.cancel)
-            let act = PreviewLinkAction.action(for: folderFiles.linkTarget(url), folder: folderFiles.linkFolder(url), isText: Self.opensInCedric)
-            lastLinkAction = act
-            onLink?(act)
+        if webView === browserView {
+            guard let url = action.request.url, ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  !(url.host?.isEmpty ?? true) else { decisionHandler(.cancel); return }
+            if action.navigationType == .linkActivated, action.modifierFlags.contains(.command) {
+                decisionHandler(.cancel)
+                onLink?(.confirmExternal(url))
+                return
+            }
+            if action.navigationType == .linkActivated, action.targetFrame?.isMainFrame != false {
+                decisionHandler(.cancel)
+                push(.web(url))
+                return
+            }
+            decisionHandler(action.targetFrame == nil ? .cancel : .allow)
             return
         }
-        decisionHandler(action.navigationType == .other || action.navigationType == .reload ? .allow : .cancel)
+        if action.navigationType == .linkActivated, let url = action.request.url {
+            // In-page anchors stay in the page, including ⌘-click (which would
+            // otherwise treat the preview's folder URL as a file to reveal).
+            // WebKit scrolls to an exact id; Cedric's own scroll then finds a
+            // heading by its text too (`#Part` → `id="part"`), and pins the
+            // place so the editor follows once instead of bouncing it back.
+            if url.fragment != nil, Self.samePage(url, webView.url) {
+                decisionHandler(.allow)
+                if let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment, follow: isHome) }
+                return
+            }
+            decisionHandler(.cancel)
+            let root = folderFiles.linkFolder(url)
+            let act = PreviewLinkAction.previewAction(for: folderFiles.linkTarget(url), folder: root, command: action.modifierFlags.contains(.command), isText: Self.opensInCedric)
+            lastLinkAction = act
+            switch act {
+            // The file's path came through without its `#fragment`: carry it along.
+            case .openInPreview(let file): if let root { push(.local(file, root, PreviewAnchor.fragment(of: url))) }
+            case .openWebInPreview(let url): push(.web(url))
+            default: onLink?(act)
+            }
+            return
+        }
+        let allowed = loadingShell && action.targetFrame?.isMainFrame != false && action.request.url == expectedPageURL
+        decisionHandler(allowed ? .allow : .cancel)
+    }
+
+    /// Scrolls the local page to the heading `fragment` names (an exact
+    /// `id` or `name`, else the heading slug of that text), in Cedric's own
+    /// content world: no page script runs. `follow`: the editor follows (the
+    /// live document), as for a scroll by the user.
+    private func scroll(toAnchor fragment: String, follow: Bool) {
+        let candidates = PreviewAnchor.candidates(for: fragment)
+        guard !candidates.isEmpty else { return }
+        let gen = generation
+        webView.callAsyncJavaScript("return window.__cedricScrollToAnchor ? window.__cedricScrollToAnchor(ids, follow) : false",
+                                    arguments: ["ids": candidates, "follow": follow], in: nil, in: .defaultClient) { [weak self] result in
+            MainActor.assumeIsolated {
+                guard let self, self.generation == gen else { return }
+                let found = (try? result.get()).flatMap { ($0 as? NSNumber)?.boolValue } ?? false
+                self.lastAnchor = (fragment, found)
+            }
+        }
     }
 
     /// Whether `url` is the page itself plus a fragment (an in-page link).
@@ -426,6 +683,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     var openedRoot: URL?
     /// The Obsidian vault wikilinks resolve in.
     var vaultRoot: URL?
+    var vault: WikiVault?
     /// The page may run JavaScript: serve only images, fonts and CSS.
     var scriptOn = false
     private var stopped: Set<ObjectIdentifier> = []
@@ -439,7 +697,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         // With JavaScript on, only images, fonts and CSS (no dotfiles):
         // page script must not be able to read the folder's other files.
         guard let url = task.request.url, let folder,
-              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn) else {
+              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
@@ -476,7 +734,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     /// or the sidebar's or the vault's when the file is inside that.
     func linkFolder(_ url: URL) -> URL? {
         guard let file = PreviewFolder.fileURL(for: linkTarget(url)) else { return folder }
-        for root in [folder, openedRoot, vaultRoot].compactMap({ $0 }) {
+        for root in [vaultRoot, openedRoot, folder].compactMap({ $0 }) {
             let r = root.standardizedFileURL.path
             if file.path.hasPrefix(r.hasSuffix("/") ? r : r + "/") { return root }
         }
@@ -488,4 +746,12 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
 private final class TaskBox: @unchecked Sendable {
     let task: any WKURLSchemeTask
     init(_ task: any WKURLSchemeTask) { self.task = task }
+}
+
+/// The preview's ⌘[ / ⌘] key monitor, handed from the nonisolated deinit
+/// to the main thread to be removed.
+private final class KeyMonitor: @unchecked Sendable {
+    private let token: Any?
+    init(_ token: Any?) { self.token = token }
+    @MainActor func remove() { if let token { NSEvent.removeMonitor(token) } }
 }

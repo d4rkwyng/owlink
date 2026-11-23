@@ -59,11 +59,12 @@ objs[ai_s] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productName':
 objs[core_t2] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productName': 'CedricCore'}, 'CedricCore')
 
 # The package tests that exercise macOS-only parts (Process/git, the
-# Security certificate parser, XMLDocument, AppKit image tests): left out of the iOS test
+# Security certificate parser, XMLDocument, AppKit image tests, and the
+# UI-copy coverage scan of the Mac app's AppKit sources): left out of the iOS test
 # targets. They still run on the Mac (Scripts/test.sh).
 MAC_ONLY_TESTS = {
     'CedricCoreTests': ['CertificateTests.swift', 'GitSafetyTests.swift', 'SecurityReviewTests.swift',
-                        'ViewerFormatsTests.swift', 'ScriptTokenTests.swift'],
+                        'ViewerFormatsTests.swift', 'ScriptTokenTests.swift', 'UICoverageTests.swift'],
     'CedricAITests': ['LiveBuiltInTests.swift', 'DescribeImageTests.swift',
                       'KVCacheTests.swift', 'LiveKVCacheTests.swift'],
 }

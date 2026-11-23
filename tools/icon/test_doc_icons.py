@@ -1,179 +1,178 @@
+import os
+import tempfile
 import unittest
-from collections import defaultdict
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from PIL import Image, ImageDraw
 import doc_icons as icons
 
 
-def visible(im, color):
-    rgb = color[:3]
-    return [(x, y) for y in range(im.height) for x in range(im.width)
-            if im.getpixel((x, y))[3] > 128 and im.getpixel((x, y))[:3] == rgb]
-
-
-def clusters_x(points, gap=3):
-    if not points:
-        return 0
-    xs = sorted({x for x, _ in points})
-    count, prev = 1, xs[0]
-    for x in xs[1:]:
-        if x - prev > gap:
-            count += 1
-        prev = x
-    return count
-
-
-def components(points):
-    """4-connected component count."""
-    remaining = set(points)
-    n = 0
-    while remaining:
-        n += 1
-        stack = [remaining.pop()]
-        while stack:
-            x, y = stack.pop()
-            for nb in ((x+1, y), (x-1, y), (x, y+1), (x, y-1)):
-                if nb in remaining:
-                    remaining.remove(nb)
-                    stack.append(nb)
-    return n
-
-
-def longest_vertical_run(points):
-    by_col = defaultdict(list)
-    for x, y in points:
-        by_col[x].append(y)
-    best = 0
-    for ys in by_col.values():
-        ys = sorted(ys)
-        run = 1
-        for a, b in zip(ys, ys[1:]):
-            if b == a + 1:
-                run += 1
-                best = max(best, run)
-            else:
-                run = 1
-        best = max(best, run if ys else 0)
-    return best
+def luminance(color):
+    channels = [v / 255 for v in color[:3]]
+    linear = [v / 12.92 if v <= .04045 else ((v + .055) / 1.055) ** 2.4 for v in channels]
+    return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2]
 
 
 class DocumentIconTests(unittest.TestCase):
-    def test_small_badges_use_distinct_short_labels(self):
-        labels = [icons.SHORT_LABELS.get(text, text) for text, _ in icons.TYPES if text]
-        self.assertEqual(len(labels), len(set(labels)))
-        self.assertTrue(all(len(label) <= 3 for label in labels))
-        self.assertTrue(set(''.join(labels)) <= icons.GLYPHS.keys())
-        badges = [icons.doc_icon(text, 16).crop((1, 9, 15, 16)).tobytes()
-                  for text, _ in icons.TYPES if text]
-        self.assertEqual(len(badges), len(set(badges)))
+    def test_types_match_document_manifest(self):
+        path = os.path.join(icons.ROOT, 'Resources', 'document-types.txt')
+        with open(path) as f:
+            rows = [line.strip().split('|') for line in f if line.strip() and not line.startswith('#')]
+        self.assertEqual({(label if label != '*' else '', name) for label, name, *_ in rows},
+                         set(icons.TYPES))
+        self.assertEqual(len(icons.TYPES), len(set(name for _, name in icons.TYPES)))
+        self.assertEqual(set(icons.STYLES), {text for text, _ in icons.TYPES})
 
-    def test_small_badge_glyphs_are_navy_on_coral(self):
+    def test_white_ink_has_aa_contrast_on_every_page(self):
         for text, _ in icons.TYPES:
-            if not text:
-                continue
-            image = icons.doc_icon(text, 16)
-            colors = {color for _, color in image.crop((1, 9, 15, 16)).getcolors()}
-            self.assertEqual(colors, {icons.ci.NAVY, icons.ci.CORAL})
-
-    def test_16px_is_page_and_badge_only(self):
-        image = icons.doc_icon('', 16)
-        colors = {color for _, color in image.getcolors() if color[3] > 128}
-        self.assertNotIn(icons.ci.YEL, colors)
-        self.assertNotIn(icons.ci.WHITE, colors)
-        labeled = icons.doc_icon('MD', 16)
-        self.assertIn(icons.ci.CORAL, {color for _, color in labeled.getcolors()})
-
-    def test_cedric_pixel_32_is_the_mascot(self):
-        image = icons.cedric_pixel(32)
-        navy, white, yellow, chev = (visible(image, icons.ci.NAVY),
-                                     visible(image, icons.ci.WHITE),
-                                     visible(image, icons.ci.YEL),
-                                     visible(image, icons.ci.CHEV))
-        top = (image.getbbox() or (0, 0, 0, 0))[1]
-        top_navy = [(x, y) for x, y in navy if y <= top + 2]
-        self.assertGreaterEqual(clusters_x(top_navy, gap=4), 2, 'two ear tufts')
-        self.assertGreaterEqual(components(white), 2, 'two eye discs')
-        # navy pupils sit inside the white eye bounding boxes
-        xs, ys = [p[0] for p in white], [p[1] for p in white]
-        inner = [(x, y) for x, y in navy if min(xs) <= x <= max(xs) and min(ys) <= y <= max(ys)]
-        self.assertTrue(inner, 'navy pupils')
-        right_yellow = [(x, y) for x, y in yellow if x >= 16]
-        self.assertTrue(right_yellow, 'monocle on the right eye')
-        self.assertGreaterEqual(longest_vertical_run(right_yellow), 6, 'hanging monocle stem')
-        self.assertTrue(chev, 'chest chevron')
-        foot_y = max(y for _, y in yellow)
-        feet = [(x, y) for x, y in yellow if y >= foot_y - 1]
-        self.assertGreaterEqual(clusters_x(feet, gap=3), 2, 'two yellow feet')
-
-    def test_cedric_pixel_64_is_the_mascot(self):
-        image = icons.cedric_pixel(64)
-        navy, white, yellow, chev = (visible(image, icons.ci.NAVY),
-                                     visible(image, icons.ci.WHITE),
-                                     visible(image, icons.ci.YEL),
-                                     visible(image, icons.ci.CHEV))
-        top = (image.getbbox() or (0, 0, 0, 0))[1]
-        self.assertGreaterEqual(clusters_x([(x, y) for x, y in navy if y <= top + 3], gap=6), 2)
-        self.assertGreaterEqual(components(white), 2, 'two eye discs')
-        right_yellow = [(x, y) for x, y in yellow if x >= 32]
-        self.assertGreaterEqual(longest_vertical_run(right_yellow), 10, 'monocle stem')
-        self.assertTrue(chev)
-        foot_y = max(y for _, y in yellow)
-        self.assertGreaterEqual(clusters_x([(x, y) for x, y in yellow if y >= foot_y - 2], gap=4), 2)
-
-    def test_32px_composited_owl_keeps_traits_and_optional_badge(self):
-        generic = icons.doc_icon('', 32)
-        colors = {color for _, color in generic.getcolors() if color[3] > 128}
-        self.assertTrue({icons.ci.NAVY, icons.ci.WHITE, icons.ci.YEL, icons.ci.CHEV} <= colors)
-        self.assertNotIn(icons.ci.CORAL, colors)
-        labeled = icons.doc_icon('MD', 32)
-        self.assertIn(icons.ci.CORAL, {color for _, color in labeled.getcolors()})
-        # badge stays inset
-        coral = [x for y in range(32) for x in range(32)
-                 if labeled.getpixel((x, y)) == icons.ci.CORAL]
-        self.assertTrue(coral)
-        self.assertGreater(min(coral), 5)
-        self.assertLess(max(coral), 26)
-
-    def test_32px_badge_is_inset_with_distinct_short_labels(self):
-        badges = []
-        for text, _ in icons.TYPES:
-            if not text:
-                continue
-            with patch.object(icons, 'pixel_text', wraps=icons.pixel_text) as draw_text:
-                image = icons.doc_icon(text, 32)
-            self.assertEqual(draw_text.call_args.args[1], icons.SHORT_LABELS.get(text, text))
-            self.assertEqual(draw_text.call_args.args[3:5], (1, 1))
-            badges.append(image.crop((7, 24, 25, 29)).tobytes())
-        self.assertEqual(len(badges), len(set(badges)))
-
-    def test_64px_uses_short_pixel_labels_and_full_labels_start_at_128px(self):
-        badges = []
-        for text, _ in icons.TYPES:
-            if not text:
-                continue
             with self.subTest(text=text):
-                with patch.object(icons, 'pixel_text', wraps=icons.pixel_text) as draw_text:
-                    image = icons.doc_icon(text, 64)
-                self.assertEqual(draw_text.call_args.args[1], icons.SHORT_LABELS.get(text, text))
-                self.assertEqual(draw_text.call_args.args[2:5], (47, 2, 2))
-                badges.append(image.crop((10, 46, 54, 59)).tobytes())
-                for size in (128, 256, 512):
-                    with patch.object(icons, 'band', wraps=icons.band) as draw_band:
+                page = icons.ci.hx(icons.STYLES[text][0])
+                self.assertGreaterEqual((1.05 / (luminance(page) + .05)), 4.5)
+
+    def test_16pt_pages_and_glyphs_are_distinct(self):
+        images = [icons.doc_icon(text, 16).tobytes() for text, _ in icons.TYPES]
+        self.assertEqual(len(images), len(set(images)))
+        masters = [icons.PIXELS[icons.STYLES[text][1]] for text, _ in icons.TYPES]
+        self.assertEqual(len(masters), len(set(masters)))
+
+    def test_small_icons_have_white_glyphs_and_no_labels_or_owl(self):
+        for text, _ in icons.TYPES:
+            for size in (16, 32):
+                with self.subTest(text=text, size=size):
+                    with patch.object(icons, 'draw_label') as label, patch.object(icons.ci, 'owl') as owl:
+                        image = icons.doc_icon(text, size)
+                    label.assert_not_called()
+                    owl.assert_not_called()
+                    self.assertIn(icons.ci.WHITE, {color for _, color in image.getcolors(size * size)})
+                    self.assertEqual(image.getpixel((0, 0))[3], 0)
+
+    def test_white_ink_stays_clear_of_fold(self):
+        for size in (16, 32, 64, 128):
+            if size == 16:
+                fold = [(9, 2), (9, 6), (13, 6)]
+                factor = 1
+            elif size == 32:
+                fold = [(18, 2), (18, 10), (26, 10)]
+                factor = 1
+            else:
+                factor = icons.ci.SS
+                n = size * factor
+                fold = [((icons.X1 - icons.F) * n, icons.Y0 * n),
+                        ((icons.X1 - icons.F) * n, (icons.Y0 + icons.F) * n),
+                        (icons.X1 * n, (icons.Y0 + icons.F) * n)]
+            mask = Image.new('L', (size * factor, size * factor))
+            ImageDraw.Draw(mask).polygon(fold, fill=255)
+            if factor > 1:
+                mask = mask.resize((size, size), Image.Resampling.BOX)
+            for text, _ in icons.TYPES:
+                with self.subTest(text=text, size=size):
+                    image = icons.doc_icon(text, size)
+                    for y in range(size):
+                        for x in range(size):
+                            if mask.getpixel((x, y)):
+                                self.assertNotEqual(image.getpixel((x, y)), icons.ci.WHITE,
+                                                    (text, size, x, y))
+
+    def test_small_glyph_ink_stays_inside_page(self):
+        for size, page in (
+            (16, [(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)]),
+            (32, [(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)]),
+        ):
+            mask = Image.new('L', (size, size))
+            ImageDraw.Draw(mask).polygon(page, fill=255)
+            for text, _ in icons.TYPES:
+                with self.subTest(text=text, size=size):
+                    image = icons.doc_icon(text, size)
+                    for y in range(size):
+                        for x in range(size):
+                            if image.getpixel((x, y)) == icons.ci.WHITE:
+                                self.assertNotEqual(mask.getpixel((x, y)), 0, (text, size, x, y))
+
+    def test_label_font_selects_bold_variation(self):
+        self.assertIn(icons.label_font(20).getname()[1], ('Bold', 'Heavy'))
+        font = Mock()
+        font.get_variation_names.return_value = [b'Regular', b'Heavy']
+        with patch.object(icons.ImageFont, 'truetype', return_value=font):
+            self.assertIs(icons.label_font(20), font)
+            font.set_variation_by_name.assert_called_once_with('Heavy')
+            font.get_variation_names.return_value = [b'Regular']
+            with self.assertRaisesRegex(RuntimeError, 'bold SFNS'):
+                icons.label_font(20)
+        with patch.object(icons.ImageFont, 'truetype', side_effect=OSError('font unavailable')):
+            with self.assertRaisesRegex(RuntimeError, 'bold SFNS'):
+                icons.label_font(20)
+
+    def test_retina_small_icons_double_their_point_master(self):
+        for text, _ in icons.TYPES:
+            for size in (16, 32):
+                with self.subTest(text=text, size=size):
+                    expected = icons.doc_icon(text, size).resize((size * 2, size * 2), Image.Resampling.NEAREST)
+                    self.assertEqual(icons.doc_icon(text, size, 2).tobytes(), expected.tobytes())
+
+    def test_labels_start_at_64pt_and_generic_never_has_one(self):
+        for text, _ in icons.TYPES:
+            for size in (64, 128, 256):
+                with self.subTest(text=text, size=size):
+                    with patch.object(icons, 'draw_label', wraps=icons.draw_label) as label:
                         icons.doc_icon(text, size)
-                    self.assertEqual(draw_band.call_args.args[1], text)
-        self.assertEqual(len(badges), len(set(badges)))
+                    if text:
+                        self.assertEqual(label.call_args.args[1], icons.STYLES[text][2])
+                    else:
+                        label.assert_not_called()
+        self.assertEqual(icons.STYLES['SWIFT'][2], 'SWFT')
 
-    def test_16px_does_not_draw_the_owl(self):
-        with patch.object(icons.ci, 'owl', wraps=icons.ci.owl) as draw_owl:
-            icons.doc_icon('SWIFT', 16)
-            draw_owl.assert_not_called()
+    def test_large_icons_render_lower_labels_without_a_mascot(self):
+        for text, _ in icons.TYPES:
+            for size in (64, 128, 256):
+                with self.subTest(text=text, size=size):
+                    with patch.object(icons.ci, 'owl') as owl:
+                        image = icons.doc_icon(text, size)
+                    owl.assert_not_called()
+                    bottom = image.crop((0, round(46 * size / 64), size, round(57 * size / 64)))
+                    white = sum(count for count, color in bottom.getcolors(size * size) if color == icons.ci.WHITE)
+                    if text:
+                        self.assertGreater(white, 0)
+                    else:
+                        self.assertEqual(white, 0)
 
-    def test_generic_32px_keeps_owl_without_coral_badge(self):
-        image = icons.doc_icon('', 32)
-        colors = {color for _, color in image.getcolors() if color[3] > 128}
-        self.assertIn(icons.ci.NAVY, colors)
-        self.assertIn(icons.ci.YEL, colors)
-        self.assertNotIn(icons.ci.CORAL, colors)
+    def test_dark_pages_have_pale_rim(self):
+        for text in icons.RIM_TYPES:
+            for size in (16, 32):
+                with self.subTest(text=text, size=size):
+                    image = icons.doc_icon(text, size)
+                    self.assertIn(icons.RIM, {color for _, color in image.getcolors(size * size)})
+                    if size == 16:
+                        self.assertEqual(image.getpixel((15, 15))[3], 0)
+
+    def test_iconset_uses_logical_size_for_retina_images(self):
+        # Inspect the actual PNGs passed to iconutil, including both 32 px entries.
+        original = icons.TYPES
+        captured = {}
+
+        def fake_iconutil(args, check):
+            for filename, _ in icons.ICONSET:
+                with Image.open(os.path.join(args[3], filename)) as image:
+                    captured[filename] = image.convert('RGBA').copy()
+
+        with tempfile.TemporaryDirectory() as out:
+            with patch.object(icons, 'TYPES', [('MD', 'doc-md')]), \
+                 patch.object(icons.subprocess, 'run', side_effect=fake_iconutil):
+                icons.build(out)
+        self.assertEqual(icons.TYPES, original)
+        for filename, px in icons.ICONSET:
+            pt = int(filename.split('x')[0].split('_')[1])
+            self.assertEqual(captured[filename].tobytes(), icons.doc_icon('MD', pt, px // pt).tobytes())
+        self.assertNotEqual(captured['icon_16x16@2x.png'].tobytes(),
+                            captured['icon_32x32.png'].tobytes())
+
+    def test_preview_outputs_both_finder_backgrounds(self):
+        with tempfile.TemporaryDirectory() as out:
+            with patch.object(icons, 'TYPES', [('MD', 'doc-md')]):
+                icons.preview(out)
+            for theme in ('light', 'dark'):
+                for name in (f'contact-{theme}.png', f'doc-md-16-{theme}-x4.png',
+                             f'doc-md-128-{theme}.png'):
+                    self.assertTrue(os.path.isfile(os.path.join(out, name)))
 
 
 if __name__ == '__main__':

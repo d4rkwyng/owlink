@@ -6,19 +6,49 @@ import WebKit
 /// In-process checks of the Markdown preview and tools, run by
 /// Scripts/tools-check.sh like the other DevChecks.
 ///
-///   CEDRIC_CHECK=mdpreview|outline|mdexport
+///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport
 @MainActor
 extension DevChecks {
     static func markdownPreviewCheck(_ name: String, _ app: AppDelegate) -> Bool {
         switch name {
         case "mdpreview": markdownPreview(app)
+        case "previewanchor": previewAnchorCheck(app)
         case "outline": outlineCheck(app)
         case "mdexport": exportCheck(app)
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
+        case "previewnav": previewNavigationDemo(app)
         default: return false
         }
         return true
+    }
+
+    static func previewNavigationDemo(_ app: AppDelegate) {
+        guard let tab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "Home.md" }) else {
+            expect(false, "demo Home.md is open"); finish(); return
+        }
+        sized(tab)
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "A place for field notes", "demo home is shown"),
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    previewJS(tab, "Array.from(document.images).filter(i => i.complete && i.naturalWidth > 0).length") { value in
+                        expect((value as? NSNumber)?.intValue == 3, "all three demo images load", "\(value ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            snapshot("home.png", window: tab.window),
+            { next in previewJS(tab, "document.querySelector('a.wikilink').click(); 1") { _ in next() } },
+            waitForPreview(tab, contains: "The other note", "demo wikilink opens in preview"),
+            sync { expect(tab.preview?.canGoBack == true, "demo Back is enabled") },
+            snapshot("local.png", window: tab.window),
+            sync { tab.previewBarAction(.home) },
+            waitForPreview(tab, contains: "A place for field notes", "demo Home returns to the editor document"),
+            snapshot("returned-home.png", window: tab.window),
+            sync { finish() },
+        ])
     }
 
     /// Runs `code` in the preview, in Cedric's own content world (where
@@ -75,8 +105,8 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option])
                 expect(tab.previewVisible, "⌥⌘P shows the preview")
-                let want: [PreviewBarItem] = [.refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
-                expect(bar?.state.items == want, "Markdown: the bar has its eight controls", "\(bar?.state.items ?? [])")
+                let want: [PreviewBarItem] = [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+                expect(bar?.state.items == want, "Markdown: the bar has its controls", "\(bar?.state.items ?? [])")
                 for item in want {
                     guard let v = bar?.view(item) else { expect(false, "bar \(item)", "no view"); continue }
                     let tip = (v as? NSControl)?.toolTip ?? ""
@@ -107,7 +137,7 @@ extension DevChecks {
                 let view = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
                 let preview = view?.items.first { $0.title == "Preview" }?.submenu
                 let titles = preview?.items.map(\.title).filter { !$0.isEmpty } ?? []
-                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
+                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Open in Browser", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
                         "Restore File Order", "Export as HTML…", "Export as PDF…", "Allow JavaScript in Preview",
                         "Allow Network in Preview"].allSatisfy(titles.contains), "View › Preview lists the bar's actions", "\(titles)")
                 @MainActor func enabled(_ sel: Selector) -> Bool { menuItem(action: sel).map { app.validateMenuItem($0) } ?? false }
@@ -323,6 +353,18 @@ extension DevChecks {
             },
             waitForPreview(tab, contains: "Paragraph 60", "the preview shows the document"),
             { next in
+                let probe = WKWebView(frame: .zero, configuration: PreviewController.browserConfiguration())
+                probe.loadHTMLString("<html><body>isolated</body></html>", baseURL: nil)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    probe.evaluateJavaScript("typeof window.webkit?.messageHandlers?.cedricScroll") { value, error in
+                        MainActor.assumeIsolated {
+                            expect(error == nil && value as? String == "undefined", "isolated web configuration has no Cedric bridge", "\(value ?? "nil") \(String(describing: error))")
+                            next()
+                        }
+                    }
+                }
+            },
+            { next in
                 previewJS(tab, "typeof window.__cedricPatch + ',' + typeof window.__cedricScrollTo") { v in
                     expect(v as? String == "function,function", "Cedric's script runs in its own world with page JavaScript off", "\(v ?? "nil")")
                     next()
@@ -416,21 +458,49 @@ extension DevChecks {
                     poll()
                 }
             },
-            // A relative .md link opens in Cedric.
+            // A relative .md link stays in this preview and Home resumes live rendering.
             { next in
+                let count = app.tabs.count
+                tab.previewAllowsJavaScript = true
                 previewJS(tab, "document.querySelector('a[href=\"other.md\"]').click(); 1") { _ in
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                        let other = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "other.md" }
-                        expect(other != nil, "a relative .md link opens the file in a Cedric tab", app.tabs.map(\.doc.displayName).joined(separator: ","))
-                        other?.doc.markSaved()
-                        other?.window?.performClose(nil)
-                        next()
+                        tab.renderPreview()
+                        previewJS(tab, "document.body.innerText") { text in
+                            expect((text as? String)?.contains("the other file") == true, "relative Markdown opens in the preview and survives an editor render", "\(text ?? "nil")")
+                            expect(app.tabs.count == count && tab.preview?.canGoBack == true, "no tab opened; Back is enabled")
+                            expect(tab.previewAllowsJavaScript == false
+                                   && tab.preview?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                                   "a navigated document does not inherit JavaScript trust")
+                            tab.previewBarAction(.back)
+                            expect(tab.previewAllowsJavaScript, "Back to the live document restores JavaScript")
+                            tab.previewAllowsJavaScript = false
+                            expect(tab.preview?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                                   "turning JavaScript off applies to the live document")
+                            tab.previewBarAction(.forward)
+                            expect(tab.previewAllowsJavaScript == false, "Forward to the linked document starts with JavaScript off")
+                            tab.previewBarAction(.back)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                previewJS(tab, "document.body.innerText") { text in
+                                    expect((text as? String)?.contains("Very First paragraph") == true, "Back returns to the live document", "\(text ?? "nil")")
+                                    expect(tab.preview?.canGoForward == true, "Forward is enabled")
+                                    tab.previewBarAction(.forward)
+                                    tab.previewBarAction(.home)
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                        previewJS(tab, "document.body.innerText") { text in
+                                            expect((text as? String)?.contains("Very First paragraph") == true && tab.preview?.isHome == true,
+                                                   "This Document restores the live preview", "\(text ?? "nil")")
+                                            next()
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             },
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
-            // revealed, other schemes ignored, the web after a confirm.
+            // revealed, other schemes ignored, the web isolated in preview.
             { next in
                 let tabsBefore = app.tabs.count
                 PreviewLinkLog.revealed = []
@@ -475,14 +545,28 @@ extension DevChecks {
                                         click("x-apple.systempreferences:com.apple.Security") {
                                             expect(action() == .ignore("x-apple.systempreferences"), "other schemes are ignored")
                                             click("https://example.com/a?b=1") {
-                                                let sheet = tab.window?.attachedSheet
+                                                let web = tab.preview?.browserView
+                                                expect(action() == .openWebInPreview(URL(string: "https://example.com/a?b=1")!),
+                                                       "a web link opens in the isolated preview")
+                                                expect(web?.isHidden == false && tab.previewBarEnables(.openInBrowser), "web view and Open in Browser are available")
+                                                expect(web?.configuration.websiteDataStore.isPersistent == false
+                                                       && web?.configuration.userContentController.userScripts.isEmpty == true
+                                                       && web?.configuration.urlSchemeHandler(forURLScheme: "cedric-doc") == nil,
+                                                       "web view has a non-persistent store, no scripts and no document scheme")
+                                                expect(tab.preview?.csp.contains("script-src 'none'") == true,
+                                                       "local preview retains its strict CSP")
+                                                expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
+                                                tab.previewBarAction(.openInBrowser)
+                                                let sheet = tab.previewPane?.window?.attachedSheet
                                                 let shown = sheet.flatMap { s in
                                                     s.contentView.flatMap { allViews($0) }?
                                                         .compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ") }
-                                                expect(shown?.contains("https://example.com/a?b=1") == true, "a web link asks first, showing the whole URL", shown ?? "no sheet")
+                                                expect(shown?.contains("https://example.com/a?b=1") == true,
+                                                       "Open in Browser asks first, showing the whole URL", shown ?? "no sheet")
                                                 if let sheet, let cancel = allViews(sheet.contentView!).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) {
                                                     cancel.performClick(nil)
                                                 }
+                                                tab.previewBarAction(.home)
                                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                                                     MainActor.assumeIsolated {
                                                         expect(PreviewLinkLog.opened.isEmpty, "Cancel opens nothing")
@@ -520,6 +604,172 @@ extension DevChecks {
                 expect(!tab.previewDetached && tab.previewVisible, "and docks again")
             },
             { next in perfBigMarkdown(app, tab, next) },
+            sync { for t in app.tabs { t.doc.markSaved() } },
+        ])
+    }
+
+    /// Waits (polling, up to `seconds`) until the element with `id` is in
+    /// the preview's view, scrolled to (its top inside the viewport and the
+    /// page scrolled down: every target here starts well below the fold),
+    /// and `when` holds. Then, a moment later, that it is still there (no
+    /// late scroll event or editor sync moved it away).
+    static func waitForAnchor(_ tab: EditorWindowController, id: String, _ name: String, seconds: Double = 5,
+                              when: @escaping @MainActor () -> Bool = { true }) -> (@escaping () -> Void) -> Void {
+        { next in
+            let js = "(() => { const e = document.getElementById('\(id)'); if (!e) return 'none|-|' + Math.round(window.scrollY);"
+                + " const t = e.getBoundingClientRect().top;"
+                + " return ((t > -4 && t < window.innerHeight - 30 && window.scrollY > 40) ? 'in' : 'out') + '|' + Math.round(t) + '|' + Math.round(window.scrollY) })()"
+            let deadline = Date().addingTimeInterval(seconds)
+            @MainActor func poll() {
+                previewJS(tab, js) { v in
+                    let r = v as? String ?? "\(v ?? "nil")"
+                    if when(), r.hasPrefix("in|") {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                            previewJS(tab, js) { again in
+                                let r2 = again as? String ?? "nil"
+                                expect(r2.hasPrefix("in|"), name, "first \(r), then \(r2)")
+                                next()
+                            }
+                        }
+                    } else if Date() > deadline {
+                        expect(false, name, "heading #\(id): \(r) (in|top|scrollY); condition \(when())")
+                        next()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } }
+                    }
+                }
+            }
+            poll()
+        }
+    }
+
+    /// Links to headings: a same-page `#anchor` (plain, by heading text, and
+    /// ⌘-click) scrolls the live document in place; `other.md#part`, a
+    /// heading-text fragment, a `[[other#Part]]` wikilink and `page.html#sec`
+    /// open in the preview at that heading, and Back/Forward come back to it.
+    static func previewAnchorCheck(_ app: AppDelegate) {
+        var filler = ""
+        for k in 1...40 { filler += "Filler paragraph \(k) with enough words in it to take up a line or two of the preview.\n\n" }
+        _ = write("anchors/other.md", "# Other\n\n" + filler + "## Part\n\nthe part of the other file\n\n" + filler)
+        var html = "<!doctype html><html><body><h1>Page</h1>"
+        for k in 1...40 { html += "<p>html filler \(k), a line or two of words to fill the page out.</p>" }
+        html += "<h2 id=\"sec\">Sec</h2><p>the html section</p>"
+        for k in 1...40 { html += "<p>more html \(k)</p>" }
+        _ = write("anchors/page.html", html + "</body></html>")
+        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec)"
+        src += " [jump](#unique-section) [jump text](#Unique%20Section)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
+        let tab = app.open(write("anchors/notes.md", src))!
+        sized(tab)
+        let tabs = app.tabs.count
+        let p = { tab.preview }
+        @MainActor func onSource() -> Bool { tab.doc.fileURL?.lastPathComponent == "notes.md" && tab.text.hasPrefix("# Anchors") }
+        @MainActor func noTab() -> Bool { app.tabs.count == tabs }
+        var loadsBefore = 0
+        func click(_ text: String, command: Bool = false) -> (@escaping () -> Void) -> Void {
+            { next in
+                let fire = command
+                    ? "a.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, metaKey: true}))"
+                    : "a.click()"
+                previewJS(tab, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === '\(text)'); if (!a) return 'no link'; \(fire); return a.getAttribute('href') })()") { v in
+                    print("check: note: clicked \(text) → \(v ?? "nil")")
+                    next()
+                }
+            }
+        }
+        let toTop: (@escaping () -> Void) -> Void = { next in
+            previewJS(tab, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in next() }
+        }
+        let home: (@escaping () -> Void) -> Void = { next in
+            tab.previewBarAction(.home)
+            waitForPreview(tab, contains: "jump text", "This Document returns to the live document")(next)
+        }
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "the unique section", "the preview shows the document"),
+            // Same page: stays on the live document, no tab, heading in view.
+            click("jump"),
+            waitForAnchor(tab, id: "unique-section", "a same-page #anchor scrolls the live document to the heading",
+                          when: { p()?.isHome == true && noTab() }),
+            sync {
+                expect(p()?.isHome == true && noTab() && onSource(), "and stays on the live document, no tab opened")
+                expect(p()?.lastAnchor?.found == true, "Cedric found the anchor", "\(String(describing: p()?.lastAnchor))")
+            },
+            toTop,
+            click("jump text"),
+            waitForAnchor(tab, id: "unique-section", "a same-page fragment by heading text finds the heading's slug",
+                          when: { p()?.isHome == true && noTab() }),
+            toTop,
+            click("jump", command: true),
+            waitForAnchor(tab, id: "unique-section", "⌘-click on a same-page #anchor stays in the page",
+                          when: { p()?.isHome == true && noTab() }),
+            sync { expect(p()?.isHome == true && noTab() && PreviewLinkLog.revealed.isEmpty, "and reveals or opens nothing") },
+            toTop,
+            // With page JavaScript and Network on for the live document,
+            // the page's own world can't reach Cedric's scroll script or
+            // its message handler (they live in the app's content world).
+            sync { loadsBefore = (p()?.pageLoads ?? 0) + (p()?.bodySwaps ?? 0); tab.previewAllowsJavaScript = true; tab.previewAllowsNetwork = true },
+            waitForSwap(tab, "the live document re-renders with JavaScript on", since: { loadsBefore }),
+            waitForPreview(tab, contains: "jump text", "and shows the document"),
+            { next in
+                previewJS(tab, "typeof window.__cedricScrollToAnchor + ',' + typeof window.webkit?.messageHandlers?.cedricScroll") { own in
+                    pageJS(tab, "typeof window.__cedricScrollToAnchor + ',' + typeof window.webkit?.messageHandlers?.cedricScroll") { page in
+                        expect(own as? String == "function,object", "Cedric's world has the anchor script and the cedricScroll handler", "\(own ?? "nil")")
+                        expect(page as? String == "undefined,undefined",
+                               "page JavaScript can't see __cedricScrollToAnchor or the cedricScroll handler", "\(page ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            // Another document's heading.
+            click("other part"),
+            waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "other.md" }),
+            sync {
+                expect(noTab() && onSource(), "no tab opened; the editor stays on the source document", "\(app.tabs.count) tabs, \(tab.doc.fileURL?.lastPathComponent ?? "-")")
+                expect(p()?.canGoBack == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "Back is enabled; no JavaScript or Network trust carried over",
+                       "JS \(tab.previewAllowsJavaScript) Network \(tab.previewAllowsNetwork)")
+                expect(p()?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
+                       "the linked document's page runs with JavaScript off")
+                // The live document reloads from disk while the preview is
+                // away from it: Back must not turn JavaScript/Network on
+                // again for the new content.
+                tab.reloadFromDisk()
+                tab.previewBarAction(.back)
+                expect(p()?.isHome == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "after a reload from disk while navigated away, Back keeps JavaScript and Network off",
+                       "JS \(tab.previewAllowsJavaScript) Network \(tab.previewAllowsNetwork)")
+                tab.previewBarAction(.forward)
+                tab.previewBarAction(.home)
+                expect(p()?.isHome == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "and This Document keeps them off too")
+                tab.previewBarAction(.back)
+                tab.previewBarAction(.back)
+            },
+            waitForPreview(tab, contains: "jump text", "Back returns to the source document"),
+            sync { expect(p()?.isHome == true && p()?.canGoForward == true, "on the live document, Forward enabled"); tab.previewBarAction(.forward) },
+            waitForAnchor(tab, id: "part", "Forward returns to the linked document at the heading again",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "other.md" }),
+            home,
+            click("text part"),
+            waitForAnchor(tab, id: "part", "other.md#Part (heading text) opens at the heading",
+                          when: { p()?.isHome == false && noTab() }),
+            home,
+            { next in
+                previewJS(tab, "document.querySelector('a.wikilink').getAttribute('href')") { v in
+                    expect((v as? String)?.hasSuffix("/anchors/other.md#part") == true, "[[other#Part]] links to the heading's slug", "\(v ?? "nil")")
+                    next()
+                }
+            },
+            click("wiki part"),
+            waitForAnchor(tab, id: "part", "a [[other#Part]] wikilink opens at the heading",
+                          when: { p()?.isHome == false && noTab() }),
+            home,
+            click("html part"),
+            waitForAnchor(tab, id: "sec", "page.html#sec opens in the preview at the element",
+                          when: { p()?.isHome == false && p()?.navigationTitle == "page.html" && noTab() }),
+            sync { expect(onSource() && PreviewLinkLog.revealed.isEmpty && PreviewLinkLog.opened.isEmpty, "nothing revealed or opened outside the preview") },
+            home,
             sync { for t in app.tabs { t.doc.markSaved() } },
         ])
     }

@@ -257,7 +257,7 @@ extension DevChecks {
     static func macBasics(_ app: AppDelegate) {
         let restore = keepDefaults(["fontName", "fontSize", EditorTheme.defaultsKey, "wrapLines", "showInvisibles", "showLineNumbers",
                                     "highlightOccurrences", "autoCloseBrackets", "checkSpellingWhileTyping", "tabWidth", "indentWithTabs",
-                                    "quitWhenLastWindowCloses", SettingsPane.defaultsKey])
+                                    "quitWhenLastWindowCloses", "reopenFilesFromLastSession", SettingsPane.defaultsKey])
         let a = app.open(write("a.txt", "alpha\n"))!
         let b = app.open(write("b.txt", "beta\n"))!
         sized(a)
@@ -299,7 +299,8 @@ extension DevChecks {
                 let moved = ["Wrap lines", "Show invisibles", "Show line numbers", "Highlight occurrences",
                              "Auto-close brackets and quotes", "Check spelling while typing", "Check grammar in prose"]
                 expect(moved.allSatisfy(titles.contains), "Settings has checkboxes for the View and Edit menu toggles", "\(titles.sorted())")
-                expect(["Show git changes in the gutter", "Ask Cedric", "Quit when the last window closes"].allSatisfy(titles.contains),
+                expect(["Show git changes in the gutter", "Ask Cedric", "Quit when the last window closes",
+                        "Reopen files from last session"].allSatisfy(titles.contains),
                        "…and keeps the preferences without a menu")
                 expect(!titles.contains("Save") && !titles.contains("Cancel"), "no Save or Cancel anywhere in Settings")
                 let viewTitles = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu?.items.map(\.title) ?? []
@@ -317,6 +318,15 @@ extension DevChecks {
                 expect(Settings.shared.quitWhenLastWindowCloses && s.quitOnLastClose.state == .on, "Quit when the last window closes: on by default")
                 s.quitOnLastClose.performClick(nil)
                 expect(!Settings.shared.quitWhenLastWindowCloses, "its checkbox turns it off")
+                UserDefaults.standard.removeObject(forKey: "reopenFilesFromLastSession")
+                let systemKeepsWindows = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)?["NSQuitAlwaysKeepsWindows"] as? Bool
+                let reopenByDefault = SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: systemKeepsWindows)
+                s.refresh()
+                expect(Settings.shared.reopenFilesFromLastSession == reopenByDefault
+                       && s.reopenLastSession.state == (reopenByDefault ? .on : .off),
+                       "Reopen files from last session: on by default unless macOS closes windows")
+                s.reopenLastSession.performClick(nil)
+                expect(Settings.shared.reopenFilesFromLastSession == !reopenByDefault, "its checkbox changes the effective policy")
                 expect(!app.quitsOnLastClose, "the checks themselves never quit on a last close")
                 s.indentKind.selectItem(at: 1)
                 s.changed(s.indentKind)

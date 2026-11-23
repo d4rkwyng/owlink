@@ -41,6 +41,29 @@ extension DevChecks {
         func row(_ rel: String) -> Int { node(rel).map { sidebar.outline.row(forItem: $0) } ?? -1 }
         func tab(named n: String) -> EditorWindowController? { app.tabs.first { $0.doc.fileURL?.lastPathComponent == n } }
         func toggleItem() -> NSMenuItem? { menuItem(action: #selector(AppDelegate.toggleFolderSidebarMenu(_:))) }
+        func checkSplit(_ split: NSSplitView, content: NSView, folder: FolderSidebar?, width: CGFloat, _ name: String) {
+            // Do not call layoutIfNeeded here: that can hide a missing
+            // adjustSubviews() after the sidebar is removed.
+            let panes = split.arrangedSubviews
+            let expected = folder.map { [$0, content] } ?? [content]
+            let order = panes.count == expected.count && zip(panes, expected).allSatisfy { pair in pair.0 === pair.1 }
+            let left = folder.map { $0.frame.maxX + split.dividerThickness } ?? 0
+            let folderWidth = folder.map { abs($0.frame.minX) <= 2 && abs($0.frame.width - width) <= 2 } ?? true
+            expect(order && folderWidth && abs(content.frame.minX - left) <= 2 &&
+                   abs(content.frame.maxX - split.bounds.width) <= 2 &&
+                   abs(content.frame.width - (split.bounds.width - left)) <= 2,
+                   name, "split=\(split.bounds) panes=\(panes.map(\.frame)) saved width=\(width)")
+        }
+        func checkEditor(_ tab: EditorWindowController, folder: FolderSidebar?, width: CGFloat, _ name: String) {
+            checkSplit(tab.split, content: tab.editorArea, folder: folder, width: width, name)
+            let scroll = tab.scrollView.convert(tab.scrollView.bounds, to: tab.split)
+            let gutter = tab.gutter.convert(tab.gutter.bounds, to: tab.split)
+            let left = folder.map { $0.frame.maxX + tab.split.dividerThickness } ?? 0
+            expect(abs(gutter.minX - left) <= 2 && abs(scroll.maxX - tab.editorArea.frame.maxX) <= 2 &&
+                   abs(scroll.minX - (left + gutter.width)) <= 2,
+                   "\(name): gutter and scroll fill the editor",
+                   "gutter=\(gutter) scroll=\(scroll) editor=\(tab.editorArea.frame) left=\(left)")
+        }
         /// The row's drawn name colour (nil if the row has no view).
         func nameColor(_ rel: String) -> NSColor? {
             let r = row(rel)
@@ -82,6 +105,9 @@ extension DevChecks {
         let right = String(UnicodeScalar(UInt16(NSRightArrowFunctionKey))!)
         var tabsBefore = 0
         var redockMs = 0.0
+        var savedWrap = true
+        var savedReadableWidth: Bool?
+        var listingsBeforeRefresh = 0
 
         run([
             sync {
@@ -119,7 +145,43 @@ extension DevChecks {
                 expect(FolderWatcher.running == 1 && s.isWatching, "one FSEvents stream while shown", "\(FolderWatcher.running)")
                 expect(toggleItem().map { app.validateMenuItem($0) && $0.title == "Hide Folder Sidebar" && $0.state == .off } == true,
                        "View › Hide Folder Sidebar enabled (Show/Hide, no checkmark)", toggleItem()?.title ?? "-")
+                guard let actions = s.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" }) as? NSPopUpButton,
+                      let menu = actions.menu else {
+                    expect(false, "the folder-actions pull-down"); return
+                }
+                expect(actions.accessibilityLabel() == String(localized: "Folder Actions") &&
+                       actions.toolTip == String(localized: "Folder Actions"), "folder-actions has a VoiceOver label and tooltip")
+                let expectedMenu = ["", "New File…", "New Folder…", "|", "Rename", "Move to Trash…", "|",
+                                    "Reveal in Finder", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
+                                    "Refresh", "Collapse All", "|", "Show Hidden Files", "|", "Open Folder…", "|", "Close Folder"]
+                @MainActor func checkMenu(_ name: String) {
+                    s.updateHeaderMenu()
+                    let titles = menu.items.map { $0.isSeparatorItem ? "|" : $0.title }
+                    expect(titles == expectedMenu, name, "\(titles)")
+                }
+                func enabled(_ title: String) -> Bool? { menu.items.first { $0.title == title }?.isEnabled }
+                s.outline.deselectAll(nil)
+                checkMenu("header menu titles and separators")
+                expect(enabled("New File…") == true && enabled("New Folder…") == true && enabled("Rename") == false &&
+                       enabled("Move to Trash…") == false && enabled("Reveal in Finder") == true &&
+                       enabled("Open Enclosing Folder") == false && enabled("Copy Path") == true &&
+                       enabled("Find in Folder…") == true && enabled("Refresh") == true &&
+                       enabled("Collapse All") == false && enabled("Open Folder…") == true &&
+                       enabled("Close Folder") == true && menu.items.first { $0.title == "Show Hidden Files" }?.state == .off,
+                       "header menu enablement with no selected row")
+                s.outline.selectRowIndexes([row("alpha.txt")], byExtendingSelection: false)
+                s.updateHeaderMenu()
+                expect(enabled("Rename") == true && enabled("Move to Trash…") == true && enabled("Open Enclosing Folder") == false,
+                       "a root file enables Rename and Trash, not Open Enclosing Folder")
+                s.outline.selectRowIndexes([row("docs")], byExtendingSelection: false)
+                s.updateHeaderMenu()
+                expect(enabled("Rename") == true && enabled("Move to Trash…") == true && enabled("Open Enclosing Folder") == false,
+                       "a selected folder enables Rename and Trash, not Open Enclosing Folder")
+                s.outline.deselectAll(nil)
+                listingsBeforeRefresh = s.listings
+                s.refresh(nil)
             },
+            until("header Refresh re-lists loaded folders") { sidebar.listings > listingsBeforeRefresh },
             snapshot("folder-root.png"),
             { next in
                 // Expand src: a click on its disclosure triangle.
@@ -147,6 +209,12 @@ extension DevChecks {
             sync {
                 expect(sidebar.outline.isItemExpanded(node("docs")), "→ on a selected folder expands it")
                 expect(names(node("docs")) == ["readme.md"], "docs' file", "\(names(node("docs")))")
+                sidebar.outline.selectRowIndexes([row("docs/readme.md")], byExtendingSelection: false)
+                sidebar.updateHeaderMenu()
+                let enclosing = sidebar.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" })
+                    .flatMap { ($0 as? NSPopUpButton)?.menu?.items.first { $0.title == "Open Enclosing Folder" } }
+                expect(enclosing?.isEnabled == true, "a file below the root enables Open Enclosing Folder")
+                sidebar.outline.deselectAll(nil)
                 tabsBefore = app.tabs.count
                 clickRow(row("src/a.swift"), "a.swift")
             },
@@ -224,6 +292,26 @@ extension DevChecks {
                 let widths = subs.map { Int($0.frame.width) }
                 expect(widths.allSatisfy { $0 >= 150 }, "no pane collapsed", "\(widths)")
                 expect(t.previewVisible, "previewVisible with the folder sidebar docked")
+                let s = sidebar
+                let savedWidth = s.width
+                s.hide()
+                let remaining = t.split.arrangedSubviews
+                expect(remaining.count == 3 && remaining[0] === t.editorArea && remaining[1] === t.previewPane &&
+                       remaining[2] === app.findInFiles && abs(remaining[0].frame.minX) <= 2 &&
+                       abs(remaining[2].frame.maxX - t.split.bounds.width) <= 2 &&
+                       zip(remaining, remaining.dropFirst()).allSatisfy {
+                           abs($0.0.frame.maxX + t.split.dividerThickness - $0.1.frame.minX) <= 2
+                       }, "hiding with preview and Find in Files leaves no gap", "\(remaining.map(\.frame))")
+                s.show(in: t)
+                let restored = t.split.arrangedSubviews
+                expect(restored.count == 4 && restored[0] === s && restored[1] === t.editorArea &&
+                       restored[2] === t.previewPane && restored[3] === app.findInFiles &&
+                       abs(s.frame.minX) <= 2 && abs(s.frame.width - savedWidth) <= 2 &&
+                       abs(restored[3].frame.maxX - t.split.bounds.width) <= 2 &&
+                       zip(restored, restored.dropFirst()).allSatisfy {
+                           abs($0.0.frame.maxX + t.split.dividerThickness - $0.1.frame.minX) <= 2
+                       },
+                       "showing with other panes restores the sidebar without a gap")
             },
             snapshot("folder-with-preview.png"),
             sync {
@@ -243,6 +331,7 @@ extension DevChecks {
                 expect(t.split.arrangedSubviews.count == 1 && t.split.arrangedSubviews.first === t.editorArea, "…and gone from the other tab's split")
                 expect(t.split.holdingPriorityForSubview(at: 0) == .defaultLow, "the other tab's editor keeps the default holding priority",
                        "\(t.split.holdingPriorityForSubview(at: 0).rawValue)")
+                checkEditor(t, folder: nil, width: 0, "re-docking gives the old tab its room back")
             },
             sync {
                 // At the 0.2.0 VM's window size (900 wide): Find in Files docks
@@ -299,20 +388,39 @@ extension DevChecks {
                        "closed again (Find in Files' close path): the sidebar keeps its width", "\(sidebar.frame.width)")
                 a.window?.setContentSize(NSSize(width: 1200, height: 720))
             },
+            snapshot("folder-sidebar-open.png"),
             sync {
                 // ⌃⌘1: hidden, the stream stopped.
-                focus(tab(named: "a.swift")!)
+                let a = tab(named: "a.swift")!
+                focus(a)
+                savedWrap = a.wrapsLines
+                savedReadableWidth = a.editing.readableWidth
+                a.forceWrapForPerf(true)
                 key("1", [.control, .command])
                 expect(sidebar.isShown == false && sidebar.superview == nil, "⌃⌘1 hides the sidebar")
+                checkEditor(a, folder: nil, width: 0, "hiding gives the editor its room back")
                 expect(FolderWatcher.running == 0 && !sidebar.isWatching, "hidden: no FSEvents stream", "\(FolderWatcher.running)")
                 expect(toggleItem().map { app.validateMenuItem($0) && $0.title == "Show Folder Sidebar" && $0.state == .off } == true,
                        "View › Show Folder Sidebar still enabled", toggleItem()?.title ?? "-")
                 try? "later\n".write(to: proj.appendingPathComponent("docs/later.md"), atomically: false, encoding: .utf8)
             },
+            snapshot("folder-sidebar-hidden.png"),
             sync {
-                key("1", [.control, .command])
                 let a = tab(named: "a.swift")!
+                // Readable Width after the hide snapshot, while the sidebar
+                // is still hidden, so the inset is computed for the full width.
+                a.setReadableWidth(true)
+                if let column = a.textView.readableColumnWidth {
+                    let inset = ReadableWidth.inset(viewWidth: Double(a.textView.bounds.width), column: Double(column))
+                    expect(abs(a.textView.textContainerInset.width - CGFloat(inset)) <= 1,
+                           "hiding updates the readable-width inset")
+                } else { expect(false, "readable width is active") }
+                a.editing.readableWidth = savedReadableWidth
+                a.applyReadableWidth()
+                a.forceWrapForPerf(savedWrap)
+                key("1", [.control, .command])
                 expect(sidebar.isShown && sidebar.superview === a.split, "⌃⌘1 shows it again in the tab")
+                checkEditor(a, folder: sidebar, width: sidebar.width, "showing restores the sidebar width and shrinks the editor")
                 expect(FolderWatcher.running == 1, "showing starts the stream again", "\(FolderWatcher.running)")
             },
             until("shown again: what changed while hidden is listed") { node("docs/later.md") != nil },
@@ -334,17 +442,46 @@ extension DevChecks {
             sync {
                 // Close Folder (the × in the header): gone, no stream, menu item off.
                 let s = sidebar
+                s.updateHeaderMenu()
+                let collapse = s.subviews.first(where: { $0.identifier?.rawValue == "folder-actions" })
+                    .flatMap { ($0 as? NSPopUpButton)?.menu?.items.first { $0.title == "Collapse All" } }
+                expect(collapse?.isEnabled == true, "Collapse All is enabled when folders are expanded")
+                s.collapseAll(nil)
+                expect(!(s.outline.isItemExpanded(node("src")) || s.outline.isItemExpanded(node("docs"))),
+                       "Collapse All collapses expanded folder rows")
                 guard let close = s.subviews.first(where: { $0.identifier?.rawValue == "folder-close" }) as? NSButton else {
                     expect(false, "the close button"); return
                 }
+                expect(close.accessibilityLabel() == String(localized: "Close Folder"), "the close button has a VoiceOver label")
+                expect(s.outline.accessibilityLabel() == String(localized: "Folder"), "the folder outline has a VoiceOver label")
                 click(close, at: NSPoint(x: close.bounds.midX, y: close.bounds.midY))
                 if FolderSidebar.shared != nil {
                     print("check: note: synthetic click on × not taken; sending its action")
                     close.performClick(nil)
                 }
                 expect(FolderSidebar.shared == nil && s.superview == nil && FolderWatcher.running == 0, "Close Folder removes the sidebar and its stream")
+                checkEditor(tab(named: "a.swift")!, folder: nil, width: 0, "header close gives the editor its room back")
                 expect(toggleItem().map { app.validateMenuItem($0) } == false, "Show Folder Sidebar disabled again")
                 expect(app.folderSessionState == nil, "session: no folder")
+            },
+            sync {
+                let a = tab(named: "a.swift")!
+                focus(a)
+                app.openFolder(proj)
+                checkEditor(a, folder: sidebar, width: FolderSidebar.defaultWidth, "opening a folder after header close restores the layout")
+                app.closeFolder()
+                checkEditor(a, folder: nil, width: 0, "Close Folder gives the editor its room back")
+                app.openFolder(proj)
+                checkEditor(a, folder: sidebar, width: FolderSidebar.defaultWidth, "opening a folder after Close Folder restores the layout")
+                app.closeFolder()
+                app.openFolder(proj, state: SessionFolder(path: proj.path, width: 310))
+                let s = sidebar
+                checkEditor(a, folder: s, width: 310, "a saved non-default sidebar width is restored")
+                s.hide()
+                checkEditor(a, folder: nil, width: 0, "hiding a wider sidebar gives the editor its room back")
+                s.show(in: a)
+                checkEditor(a, folder: s, width: 310, "showing again keeps the saved non-default width")
+                app.closeFolder()
             },
             // A folder with NO .git in it or anywhere above it (the 0.2.0 VM
             // hang: GitIgnore's walk up never ended outside a repository).
@@ -460,6 +597,18 @@ extension DevChecks {
                 expect(viewerSplit?.arrangedSubviews.count == 2 && sidebar.frame.width > 100 &&
                        (viewerSplit?.arrangedSubviews.last?.frame.width ?? 0) > 100,
                        "viewer and sidebar both have room")
+                if let split = viewerSplit, let content = split.arrangedSubviews.last {
+                    let s = sidebar
+                    let savedWidth = s.width
+                    s.hide()
+                    checkSplit(split, content: content, folder: nil, width: 0, "hiding gives the viewer its room back")
+                    s.show(in: viewer)
+                    checkSplit(split, content: content, folder: s, width: savedWidth, "showing restores the viewer sidebar layout")
+                    s.close()
+                    checkSplit(split, content: content, folder: nil, width: 0, "closing gives the viewer its room back")
+                    s.show(in: viewer)
+                    checkSplit(split, content: content, folder: s, width: savedWidth, "reopening restores the viewer sidebar layout")
+                } else { expect(false, "viewer split and content exist") }
                 let item = NSMenuItem()
                 item.representedObject = n
                 sidebar.renameItem(item)

@@ -164,6 +164,17 @@ public enum SessionReopenPolicy {
     }
 }
 
+/// Filters tabs that cannot be restored because their file was moved or
+/// deleted. Unsaved buffers and untitled tabs remain eligible.
+public enum SessionRestoreList {
+    public static func openTabs(_ tabs: [SessionTab], fileExists: (String) -> Bool) -> [SessionTab] {
+        tabs.filter { tab in
+            guard let path = tab.path, !tab.hasBuffer else { return true }
+            return fileExists(path)
+        }
+    }
+}
+
 /// The folder sidebar as it was: its folder, whether it showed, its width
 /// and the folders expanded in it (paths relative to the folder, parents
 /// first, at most `expandedLimit`).

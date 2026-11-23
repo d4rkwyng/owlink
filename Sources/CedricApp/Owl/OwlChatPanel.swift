@@ -20,9 +20,15 @@ final class OwlChatStore {
     /// The last engine's context budget, for the scopes offered before the
     /// engine is made; till then the smallest (Apple Intelligence's).
     private(set) var contextBudget = 5_000
+    private(set) var engineTitle: String?
+    private var engineTitleSettings: LocalAISettings?
     let gate = OwlToolGate.bundled()
 
     func history(_ id: UUID) -> [OwlChatEntry] { histories[id] ?? [] }
+    func displayTitle(settings: LocalAISettings) -> String {
+        if engineTitleSettings == settings, let engineTitle { return engineTitle }
+        return OwlChatEngines.displayTitle(settings: settings)
+    }
     func append(_ e: OwlChatEntry, to id: UUID) { histories[id, default: []].append(e) }
     func replaceLast(_ e: OwlChatEntry, in id: UUID) {
         guard var h = histories[id], !h.isEmpty else { return }
@@ -43,13 +49,22 @@ final class OwlChatStore {
             let piece = DevEnvironment.values["CEDRIC_OWL_CHAT_FAKE_DELAY"].flatMap(Double.init) ?? min(0.08, max(0.01, d / 10))
             let e = FakeChatEngine(delay: piece)
             contextBudget = e.contextBudget
+            engineTitle = e.title
+            engineTitleSettings = nil
             return e
         }
         guard let s = AskCedricEngine.settings() else { return nil }
-        if let c = cached, c.settings == s { contextBudget = c.engine.contextBudget; return c.engine }
+        if let c = cached, c.settings == s {
+            contextBudget = c.engine.contextBudget
+            engineTitle = c.engine.title
+            engineTitleSettings = s
+            return c.engine
+        }
         guard let e = await OwlChatEngines.make(settings: s) else { return nil }
         cached = (s, e)
         contextBudget = e.contextBudget
+        engineTitle = e.title
+        engineTitleSettings = s
         return e
     }
 
@@ -173,6 +188,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var pendingText = ""
     private var flushTimer: Timer?
     private var streamed = ""
+    private var typingTimer: Timer?
+    private var typingDots = "."
+    private var typingIndicatorActive = false
     private var pendingInlineNote: String?
     private var scopes: [OwlChatScope] = []
     /// Requests asked (checks).
@@ -214,6 +232,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let about = NSTextField(labelWithString: String(localized: "Asking about:"))
         about.font = .systemFont(ofSize: 11)
         about.textColor = .secondaryLabelColor
+        scopePopup.setAccessibilityLabel(String(localized: "Asking about"))
         scopePopup.controlSize = .small
         scopePopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         scopePopup.target = self
@@ -280,6 +299,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         cardsScroll.isHidden = true
 
         input.placeholderString = String(localized: "Ask about this text…")
+        input.setAccessibilityLabel(String(localized: "Question for Cedric"))
         input.font = .systemFont(ofSize: 12)
         input.target = self
         input.action = #selector(send(_:))
@@ -434,6 +454,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     var isShown: Bool { panel.isVisible }
 
     func close() {
+        stopTypingIndicator(renderAfter: false)
         stop(nil)
         hiddenWithTab = false
         unfollow()
@@ -443,6 +464,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        stopTypingIndicator(renderAfter: false)
         stop(nil)
         hiddenWithTab = false
         // Closed by its own close button or Escape (not `close()`): stop
@@ -492,7 +514,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             footer.stringValue = String(localized: "On this Mac · test engine")
         } else if let chat = AskCedricEngine.settings() {
             let place = chat.backend.usesServer ? (chat.baseURL.host ?? "this Mac") : String(localized: "this Mac")
-            footer.stringValue = String(localized: "On \(place) · \(LocalAIOwlBridge.shortTitle(chat.backend))")
+            footer.stringValue = String(localized: "On \(place) · \(OwlChatStore.shared.displayTitle(settings: chat))")
         } else {
             footer.stringValue = String(localized: "No AI engine yet: set one up in Cedric AI Settings.")
         }
@@ -506,6 +528,20 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         // Opening (or a check refreshing the panel) catches cards up. Typing
         // does not come through here.
         refreshCards()
+    }
+
+    /// Keep the footer on the resolved engine, including an auto-picked server model.
+    private func showEngineTitle(_ engine: any OwlChatEngine) {
+        if AskCedricEngine.fakeDelay != nil {
+            footer.stringValue = String(localized: "On this Mac · test engine")
+        } else {
+            let place = engine.usesServer ? (AskCedricEngine.settings()?.baseURL.host ?? String(localized: "this Mac")) : String(localized: "this Mac")
+            footer.stringValue = String(localized: "On \(place) · \(engine.title)")
+        }
+        if chunkedReviewRunning, let reviewProgress {
+            footerBeforeReview = footer.stringValue
+            footer.stringValue = reviewProgress
+        }
     }
 
     private var isProse: Bool {
@@ -567,7 +603,16 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             all.append(NSAttributedString(string: String(localized: "Ask a question, or pick a quick action. Cedric sees only what the chip above says, and nothing leaves this Mac or your network.") + "\n",
                                           attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
         }
-        for e in h { all.append(attributed(e)) }
+        for (index, entry) in h.enumerated() {
+            if index == h.count - 1, entry.role == .owl, entry.text.isEmpty, running, typingIndicatorActive {
+                all.append(attributed(OwlChatEntry(role: .owl, text: typingDots)))
+            } else {
+                all.append(attributed(entry))
+            }
+        }
+        transcript.setAccessibilityLabel(typingIndicatorActive
+            ? String(localized: "Cedric is writing")
+            : String(localized: "Conversation"))
         storage.setAttributedString(all)
         transcript.scrollToEndOfDocument(nil)
     }
@@ -709,8 +754,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         if !showQuestion, history.last?.role == .user { history.removeLast() }
         if showQuestion { OwlChatStore.shared.append(OwlChatEntry(role: .user, text: question), to: id) }
         OwlChatStore.shared.append(OwlChatEntry(role: .owl, text: ""), to: id)
-        render()
         running = true
+        startTypingIndicator()
+        render()
         tab.contextBar?.refreshStates()
         asks += 1
         streamed = ""
@@ -723,6 +769,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 self.finish(nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
                 return
             }
+            self.showEngineTitle(engine)
             let tools = OwlChatStore.shared.useTools(engine)
             if inline, action == .rewrite, (!tools || !OwlChatStore.shared.gate.allowsTools(engine.scoreKey)) {
                 self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
@@ -803,10 +850,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                     self.scopePopup.item(at: index)?.title = label
                 }
                 let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, model: engine.scoreKey,
-                                                              describeError: Self.describe) { [weak self] part, total in
+                                                              describeError: Self.describe) { [weak self] _, _ in
                     DispatchQueue.main.async { MainActor.assumeIsolated {
                         guard let self, self.running, self.chunkedReviewRunning else { return }
-                        let progress = String(localized: "Reviewing part \(part) of \(total)")
+                        let progress = String(localized: "Reviewing…")
                         self.reviewProgress = progress
                         self.footer.stringValue = progress
                     } }
@@ -853,7 +900,13 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         switch ev {
         case .text(let t):
             tab?.owl?.chatCue(.streaming)
+            let firstText = typingIndicatorActive && !t.isEmpty
+            if firstText { stopTypingIndicator() }
             pendingText += t
+            if firstText {
+                flush()
+                return
+            }
             if flushTimer == nil {
                 let timer = Timer(timeInterval: 1.0 / 30, repeats: false) { [weak self] _ in
                     MainActor.assumeIsolated { self?.flush() }
@@ -907,8 +960,32 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
+    private func startTypingIndicator() {
+        stopTypingIndicator(renderAfter: false)
+        typingIndicatorActive = true
+        typingDots = "."
+        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.typingIndicatorActive else { return }
+                self.typingDots = self.typingDots.count == 3 ? "." : self.typingDots + "."
+                self.render()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        typingTimer = timer
+    }
+
+    private func stopTypingIndicator(renderAfter: Bool = true) {
+        typingTimer?.invalidate()
+        typingTimer = nil
+        guard typingIndicatorActive else { return }
+        typingIndicatorActive = false
+        transcript.setAccessibilityLabel(String(localized: "Conversation"))
+        if renderAfter { render() }
+    }
+
     /// A flush timer or a request is pending (checks: none once closed).
-    var hasTimers: Bool { flushTimer != nil || task != nil }
+    var hasTimers: Bool { flushTimer != nil || typingTimer != nil || task != nil }
 
     /// Times streamed text reached the transcript during this answer (checks).
     private(set) var flushes = 0
@@ -917,6 +994,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private func finish(_ outcome: OwlChatOutcome?, error: String?, stopped: Bool = false, failed: Bool = false) {
         guard running else { return }
+        stopTypingIndicator(renderAfter: false)
         flush()
         running = false
         chunkedReviewRunning = false
@@ -954,7 +1032,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func stop(_ sender: Any?) {
         guard running else { return }
         task?.cancel()
-        if chunkedReviewRunning { return }
+        if chunkedReviewRunning {
+            stopTypingIndicator()
+            return
+        }
         finish(nil, error: String(localized: "Stopped."))
     }
 

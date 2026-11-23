@@ -192,9 +192,10 @@ final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemVa
         let act = PreviewLinkAction.pdfAction(for: url)
         lastLinkAction = act
         switch act {
-        case .confirmExternal(let u), .openWebInPreview(let u): LinkPrompt.confirmExternal(u, in: window)
+        case .confirmExternal(let u): LinkPrompt.confirmExternal(u, in: window)
         case .revealInFinder(let u): PreviewLinkLog.reveal(u)
         case .openInCedric(let u), .openInPreview(let u): PreviewLinkLog.reveal(u) // never for a PDF; reveal at most
+        case .openWebInPreview: break // never for a PDF
         case .ignore: NSSound.beep()
         }
     }
@@ -806,7 +807,11 @@ final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemVa
     /// File › Close Window (⇧⌘W): every tab in this window.
     @objc func closeWindow(_ sender: Any?) {
         guard let w = window else { return }
-        for win in w.tabbedWindows ?? [w] { win.performClose(nil) }
+        (NSApp.delegate as? AppDelegate)?.closeDocumentWindows(in: w)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        (NSApp.delegate as? AppDelegate)?.shouldCloseDocumentWindow(sender) ?? true
     }
 
     func windowWillClose(_ notification: Notification) {

@@ -610,11 +610,25 @@ first shown (no WebKit work at launch). Markdown goes through
 - Network: off unless View › Allow Network in Preview: a compiled
   `WKContentRuleList` blocks http(s), ws(s) and ftp loads, and a
   Content-Security-Policy meta tag is injected as a second layer.
-- Non-persistent website data store; clicked links open in the browser.
+- Non-persistent website data store. Local Markdown and HTML links navigate
+  inside the preview, with Back, Forward and This Document; editor renders
+  resume on return. Other local files keep the text-open/reveal-only rules.
+  A link's `#fragment` stays with the history entry (`Entry.local`); after
+  the page's load finishes, Cedric's own script (app content world, page
+  JavaScript still off) scrolls to the element whose `id`/`name` is the
+  fragment, else its heading slug (`PreviewAnchor.candidates`). Same-page
+  `#` links go through WebKit and the same script, which pins the scroll
+  so a late scroll event or the editor sync can't move it back.
+- HTTP(S) pages use a separate web view with a non-persistent store, no
+  app scripts, message handlers or document scheme, and no local-file
+  navigation. Open in Browser and ⌘-click retain the full-URL confirmation.
+- Bare image names in Markdown and HTML use the bounded `WikiVault` index
+  after a relative lookup, preferring the configured Obsidian attachment
+  folder; resolved files remain confined to the vault.
 
 The preview bar (`PreviewBar` in `PreviewPane.swift`) sits in the pane's
 24 pt header, docked or detached. Which controls a preview gets is
-`PreviewBarItem.items(for:certificate:)` in CedricCore (Markdown: refresh,
+`PreviewBarItem.items(for:certificate:)` in CedricCore (Markdown: navigation, refresh,
 sync, zoom −/+, export, JavaScript, network, detach; HTML the same without
 export; CSV: row count, Unsort, refresh, sync, zoom, detach; the
 Certificate panel: refresh, detach). The tab recomputes a
@@ -644,6 +658,8 @@ always to the right of the editor, so there is no side to store. Restore
 runs in `AfterFirstFrame` for both, so a restored preview costs nothing
 before the first frame and nothing at all when there is none. Sessions
 saved before `previewShown` decode it as nil, which means not shown.
+An iOS port would reuse the CedricCore resolver and implement navigation
+and an isolated web view in the iOS preview controller.
 
 **CSV / TSV grid** (`CSVPreview`): `CSV.parse` (CedricCore, RFC 4180,
 UTF-16 offsets) on a background queue from an immutable copy of the text
@@ -1068,7 +1084,8 @@ folder's wait marker as it opens it (the `cli` check).
   resizes or a panel docks, whatever the holding priorities, so the
   sidebar puts its width back after any resize that isn't the user
   dragging its divider (a mouse event in that window, not a live window
-  resize). A divider drag is kept and saved.
+  resize). A divider drag is kept and saved. Removing the sidebar adjusts
+  the old split so its remaining panes fill the freed space.
 - **Lazy listing.** Only expanded folders are listed: `FolderTree.list`
   reads one level with `contentsOfDirectory` and the directory, hidden,
   package and symlink keys, on a background queue. Folders first, then
@@ -2143,15 +2160,17 @@ Accepted; staples; checks with `spctl -a -vv`; and zips the stapled app.
   signing nor notarization sees it.
 
 **On GitHub.** `.github/workflows/release.yml` runs on a `v*` tag push (or by hand with a
-tag) on `macos-15`: checks the five secrets, builds the release notes from
+tag) on `macos-26`: checks the five secrets, builds the release notes from
 `CHANGELOG.md` (`Scripts/changelog-section.sh`, after Tankard's), restores the SwiftPM
 artifact cache, resolves packages, imports the certificate, runs `Scripts/test.sh`, then
 `Scripts/release.sh` with `CEDRIC_VERSION` from the tag, and attaches `Owlink-<version>.zip` to the
-release. A tag with a suffix (`v0.1.0-rc1`) makes a draft prerelease. `notary-result.json`
+release. Every release it makes is a draft, final tags included, so nothing is public until
+the owner publishes it by hand; a tag with a suffix (`v0.1.0-rc1`) is also a prerelease.
+`notary-result.json`
 and `notary-log.json` are kept as the workflow artifact `notary-<tag>` (90 days) with
 `if: always()`, so a failed notarization leaves Apple's issues list behind. Actions are
 pinned by commit SHA. `.github/workflows/tests.yml` runs `Scripts/test.sh` on pushes to
-`main` and `release-*` and on pull requests, and logs `swift --version`.
+`main`, `release-*` and `release/**` and on pull requests, and logs `swift --version`.
 
 The llama.cpp binary target (a 65 MB zip from the llama.cpp GitHub releases) has hung
 while fetching on the build Mac. Both workflows cache SwiftPM's global artifact cache

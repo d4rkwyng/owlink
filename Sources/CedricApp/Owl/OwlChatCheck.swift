@@ -238,6 +238,9 @@ enum OwlChatCheck {
     static func owlInChat(_ tab: EditorWindowController, _ chat: OwlChatPanel, out: String, then: @escaping @MainActor () -> Void) {
         guard let o = tab.owl, let window = tab.window else { check(false, "the tab has its owl"); OwlCheck.finish(out); return }
         let v = o.owl
+        check(chat.scopePopup.accessibilityLabel() == String(localized: "Asking about")
+              && chat.input.accessibilityLabel() == String(localized: "Question for Cedric"),
+              "Ask Cedric's scope pop-up and input have VoiceOver labels")
         check(!hasOwlView(chat.panel.contentView), "the panel has no owl of its own")
         // 0.2.1: the panel is a floating panel of its own, not a child window.
         check(chat.panel.parent == nil && chat.panel.isFloatingPanel && window.childWindows?.contains(chat.panel) != true,

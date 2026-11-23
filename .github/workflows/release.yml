@@ -3,7 +3,8 @@ name: Release
 # Builds a universal "Owlink.app", signs it with the owner's Developer ID
 # (hardened runtime, secure timestamp; llama.framework first, then the app),
 # notarizes and staples it, and attaches Owlink-<version>.zip to the GitHub Release
-# for the tag. A tag with a suffix (v0.1.0-rc1) makes a draft prerelease.
+# for the tag. Every release it makes is a DRAFT (final tags too): the owner
+# publishes it by hand. A tag with a suffix (v0.1.0-rc1) is also a prerelease.
 #
 # Needs these repository secrets (Settings → Secrets and variables → Actions):
 #   CERT_P12_BASE64    base64 of the exported "Developer ID Application" .p12
@@ -133,7 +134,8 @@ jobs:
           tag_name: ${{ env.TAG }}
           files: dist/Owlink-*.zip
           body_path: ${{ runner.temp }}/release-notes.md
-          # A tag with a suffix (v0.1.0-rc1) is a test build: a draft
-          # release, never "latest", so the cask and users don't see it.
-          draft: ${{ contains(env.TAG, '-') }}
+          # Always a draft, final tags included: nothing is public (or
+          # "latest" for the cask) until the owner publishes it by hand.
+          # A tag with a suffix (v0.1.0-rc1) is a test build: also a prerelease.
+          draft: true
           prerelease: ${{ contains(env.TAG, '-') }}

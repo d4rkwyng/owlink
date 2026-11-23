@@ -34,7 +34,7 @@ grep -q "no conflicts" "$OUT/shortcuts.txt" || fail=1
 # unbundled binary, Cedric the app).
 crash_reports() { ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -E '^Cedric(App)?-.*\.ips$' | sort; }
 crash_reports > "$W/crashes-before.txt"
-for c in recent texttool findinfiles compare follow large highlight lineops bookmarks closedtab closedraw jsonwhole colours autoedit counts indent print macbasics filterlines encodings cli dropfile spellstep grammar detachpreview csvpreview git mdlists mdformat mdtable mdpaste langindent mdpreview mdsite previewbar outline mdexport cert binary diskconflict help closenotice menus replaceinfiles folder multicaret statuszoom folding split defaulteditor settings palette quickopen contextbar; do
+for c in recent texttool findinfiles compare follow large highlight lineops bookmarks closedtab closedraw jsonwhole colours autoedit counts indent print macbasics filterlines encodings cli dropfile spellstep grammar detachpreview csvpreview git mdlists mdformat mdtable mdpaste langindent mdpreview previewanchor mdsite previewbar outline mdexport cert binary diskconflict help closenotice menus replaceinfiles folder multicaret statuszoom folding split defaulteditor settings palette quickopen contextbar; do
     echo "== $c"
     if ! env CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
         | grep -E "^check:" | tee "$OUT/$c.txt"; then fail=1; fi

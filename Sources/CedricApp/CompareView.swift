@@ -18,7 +18,7 @@ final class CompareWindowController: NSWindowController, NSWindowDelegate {
         window.tabbingMode = .preferred
         window.tabbingIdentifier = "CedricEditor"
         window.isRestorable = false
-        window.title = "\(leftName) ↔ \(rightName)"
+        window.title = String(localized: "\(leftName) ↔ \(rightName)")
         let counts = Dictionary(grouping: rows, by: \.kind).mapValues(\.count)
         window.subtitle = String(localized: "\(counts[.added] ?? 0) added, \(counts[.removed] ?? 0) removed, \(counts[.changed] ?? 0) changed")
         super.init(window: window)

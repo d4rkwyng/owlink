@@ -18,11 +18,13 @@ enum PreviewLinkLog {
 extension EditorWindowController {
     func previewLink(_ action: PreviewLinkAction) {
         switch action {
-        case .openInCedric(let url), .openInPreview(let url):
+        case .openInPreview, .openWebInPreview:
+            break // handled by PreviewController
+        case .openInCedric(let url):
             (NSApp.delegate as? AppDelegate)?.open(url)
         case .revealInFinder(let url):
             PreviewLinkLog.reveal(url)
-        case .confirmExternal(let url), .openWebInPreview(let url):
+        case .confirmExternal(let url):
             confirmExternalLink(url)
         case .ignore(let why):
             let text = why == "missing"
@@ -33,7 +35,7 @@ extension EditorWindowController {
     }
 
     private func confirmExternalLink(_ url: URL) {
-        LinkPrompt.confirmExternal(url, in: window)
+        LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window)
     }
 }
 

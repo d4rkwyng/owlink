@@ -33,12 +33,34 @@ func tempDir() -> URL {
         #expect(restored.allTabs.count == 3)
     }
 
+    @Test func restoreListSkipsMissingCleanFilesButKeepsBuffersAndUntitledTabs() {
+        let missing = SessionTab(path: "/moved/notes.txt")
+        let buffered = SessionTab(path: "/moved/draft.txt", hasBuffer: true)
+        let existing = SessionTab(path: "/present/readme.txt")
+        let untitled = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        let tabs = [missing, buffered, existing, untitled]
+        let open = SessionRestoreList.openTabs(tabs) { $0 == "/present/readme.txt" }
+        #expect(open == [buffered, existing, untitled])
+    }
+
     @Test func reopenPolicyUsesExplicitPreferenceBeforeSystemSetting() {
         #expect(SessionReopenPolicy.shouldReopen(explicit: true, systemKeepsWindows: false))
         #expect(!SessionReopenPolicy.shouldReopen(explicit: false, systemKeepsWindows: true))
         #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: true))
         #expect(!SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: false))
         #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: nil))
+    }
+
+    @Test func policyOffParksOpenTabsOntoTheClosedListAndKeepsBuffers() {
+        var closed = [SessionTab(path: "/old/done.txt")]
+        let buffered = SessionTab(path: "/open/draft.txt", hasBuffer: true)
+        let clean = SessionTab(path: "/open/readme.txt")
+        for tab in [buffered, clean] {
+            let r = ClosedTabs.push(tab, onto: closed)
+            closed = r.list
+        }
+        #expect(closed.map(\.path) == ["/old/done.txt", "/open/draft.txt", "/open/readme.txt"])
+        #expect(closed.first { $0.path == "/open/draft.txt" }?.hasBuffer == true)
     }
 
     @Test func pruneRemovesOrphanBuffers() throws {

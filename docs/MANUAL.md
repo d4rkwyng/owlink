@@ -63,12 +63,18 @@ it, and for at most the 100 most recent such tabs; then it is deleted
 (see [Privacy](#privacy-and-what-stays-on-this-mac)).
 The first time in a launch that a file tab with unsaved edits is closed,
 the tab in front says the file wasn't written, with **Save Now**.
-Closing the last document window (text, PDF, image or Office tab) quits Owlink.
-It is a close like any other: the tab goes to Reopen Closed Tab (⇧⌘T) with
-its unsaved text kept, and the next launch opens an empty Untitled tab.
-Quit (⌘Q) with tabs open brings them all back next launch.
+**Settings › General › Reopen files from last session** is on by default.
+Until you change it, Owlink follows macOS's “Close windows when quitting an
+application” setting. When it is on, quitting (⌘Q) or closing the last
+document window (text, PDF, image or Office tab) restores those open tabs on
+the next launch, with their saved window frame, selection, sidebar folder and
+split or preview state. With it off, those files do not reopen; they go to
+Reopen Closed Tab (⇧⌘T), and unsaved text is kept there. Opening a file from
+Finder still restores the rest of the session and focuses that file, without
+opening a duplicate tab. Moved or deleted files are skipped.
 Detached previews, Settings and panels don't keep Owlink running.
-Settings › General › "Quit when the last window closes" turns this off.
+Settings › General › "Quit when the last window closes" turns last-window quit
+off (the app stays open with no document window).
 
 ### Fast to open
 
@@ -736,14 +742,14 @@ Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
 **Document icons.** Files whose default app you set to Owlink show in
-Finder as a white page with Cedric and a coral label with the type (TXT,
-MD, JSON, YAML, SWIFT, PY, JS, TS, SH, LOG, CSV, XML, HTML, CSS, TOML,
-INI, SQL, PS1). Finder shows them:
+Finder as type-coloured pages with white symbols and, in larger views, short
+type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
+HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
 - only for types you chose Owlink for, in Settings or with Get Info ›
   Change All. A type that opens in Owlink without your choice (Markdown,
-  JSON, YAML on a Mac with no other editor) shows the page and owl
-  without a label until you choose it; **Use Owlink for All Text Files**
+  JSON, YAML on a Mac with no other editor) shows the generic page with a
+  white line and no label until you choose it; **Use Owlink for All Text Files**
   does that for every type;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the

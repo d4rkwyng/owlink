@@ -196,12 +196,24 @@ final class Settings {
     }
 
     /// "Quit when the last window closes": closing the last document
-    /// window (text, PDF, image or Office tab) quits after closing it like
-    /// any other tab (in Reopen Closed Tab, not reopened next launch). On by default.
+    /// window (text, PDF, image or Office tab) quits the app. When Reopen
+    /// files from last session is on, those tabs come back next launch; when
+    /// it is off, they go to Reopen Closed Tab. On by default.
     var quitWhenLastWindowCloses: Bool {
         // bool(forKey:): a `-quitWhenLastWindowCloses NO` argument is a string.
         get { defaults.object(forKey: "quitWhenLastWindowCloses") == nil || defaults.bool(forKey: "quitWhenLastWindowCloses") }
         set { defaults.set(newValue, forKey: "quitWhenLastWindowCloses"); NotificationCenter.default.post(name: .cedricSettingsChanged, object: nil) }
+    }
+
+    /// Settings › "Reopen files from last session". Until explicitly set,
+    /// follows the system's "Close windows when quitting an application".
+    var reopenFilesFromLastSession: Bool {
+        get {
+            let system = defaults.persistentDomain(forName: UserDefaults.globalDomain)?["NSQuitAlwaysKeepsWindows"] as? Bool
+            return SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: "reopenFilesFromLastSession") as? Bool,
+                                                    systemKeepsWindows: system)
+        }
+        set { defaults.set(newValue, forKey: "reopenFilesFromLastSession"); changed() }
     }
 
     /// Settings › "Show git changes in the gutter": change bars against

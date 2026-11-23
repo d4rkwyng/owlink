@@ -5,6 +5,7 @@ public enum PreviewBarItem: String, CaseIterable, Sendable {
     /// CSV: "N rows" and the button that puts the grid back in file order.
     case rowCount, sortReset
     case refresh, syncScroll, zoomOut, zoomIn
+    case back, forward, home, openInBrowser
     /// Markdown: Export ▸ HTML / PDF.
     case export
     case allowJavaScript, allowNetwork
@@ -16,8 +17,8 @@ public enum PreviewBarItem: String, CaseIterable, Sendable {
         if certificate { return [.refresh, .detach] }
         switch language {
         case .csv: return [.rowCount, .sortReset, .refresh, .syncScroll, .zoomOut, .zoomIn, .detach]
-        case .markdown: return [.refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
-        default: return [.refresh, .syncScroll, .zoomOut, .zoomIn, .allowJavaScript, .allowNetwork, .detach]
+        case .markdown: return [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+        default: return [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .allowJavaScript, .allowNetwork, .detach]
         }
     }
 
