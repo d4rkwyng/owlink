@@ -92,10 +92,16 @@ import Testing
         let text = s as NSString
         let idx = LineIndex(text)
         let engine = HighlightEngine(language: .json)
-        let start = Date()
-        let t = engine.tokens(forLines: (idx.lineCount - 60)..<idx.lineCount, in: text, index: idx)
-        let elapsed = Date().timeIntervalSince(start)
-        #expect(!t.isEmpty)
-        #expect(elapsed < 0.05)
+        // Best of 5: other tests sharing the runner only ever add time, and
+        // one 50 ms bound on a single run fails on a descheduled thread. A
+        // full-file scan of 10 MB is far slower than 50 ms on every try.
+        var elapsed = Double.infinity
+        for _ in 0..<5 {
+            let start = Date()
+            let t = engine.tokens(forLines: (idx.lineCount - 60)..<idx.lineCount, in: text, index: idx)
+            elapsed = min(elapsed, Date().timeIntervalSince(start))
+            #expect(!t.isEmpty)
+        }
+        #expect(elapsed < 0.05, "best of 5: \(elapsed) s")
     }
 }
