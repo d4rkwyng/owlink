@@ -10,6 +10,12 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line (a name in non-Latin look-alike letters is shown as its plain-ASCII form and flagged), points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
 - **Linked documents in the preview load from their real location.** A document opened through a symbolic link takes its type and its folder for images and links from the file that was checked and read.
 
+### Changed
+- **Reopen files from last session is on unless you turn it off in Owlink.** macOS's “Close windows when quitting an application” setting no longer turns it off. With it off, tabs with unsaved text (including untitled tabs) still reopen after a quit or closing the last window, instead of going to Reopen Closed Tab, where unsaved text is deleted after 30 days. A `-reopenFilesFromLastSession NO` launch argument now works.
+
+### Fixed
+- **Obsidian vault bounds.** A stray `.obsidian` folder in your home folder (or above it, or at a disk's root) no longer makes that whole folder the vault for wiki-links and embeds in the preview; the vault falls back to the document's folder. A note saved directly in your home folder no longer searches all of it for bare `[[names]]`. Open the folder in the sidebar to use it as a vault on purpose.
+
 ### Removed
 - **Open in Browser** in the preview bar and View › Preview, which only applied to web pages shown in the preview.
 

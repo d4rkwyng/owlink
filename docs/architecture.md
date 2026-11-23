@@ -685,21 +685,34 @@ one) and `edgeDelimiters` (every line a `| … |` pipe row). The parser and
 `fieldOffset` both follow it, so a click still lands in the right field.
 Table-driven samples in `CSVDialectTests`.
 
-**Closing the last window** (`AppDelegate.isClosingLastDocument`,
-`quitAfterLastClose`): a document tab's `onClose` (text, PDF, image,
-Office, certificate) asks, before the tab leaves its list, whether no other
-document tab exists and no restored tab is still pending. The tab is then
-hot-closed like any other (`rememberClosed`/`rememberClosedViewer`: in the
-closed list, unsaved text in its buffer), and only then does the quit path
-run (`prepareToQuit`: synchronous session save, waiters released) and
-`NSApp.terminate` on the next turn. So the next launch has no open tab
-(an empty Untitled one) and ⇧⌘T brings the closed one back; Quit (⌘Q)
-alone keeps every open tab open. Other windows
+**Closing the last window** (`AppDelegate.shouldCloseDocumentWindow`,
+`closeDocumentWindows`, `isClosingLastDocument`, `quitAfterLastClose`): a
+close that will quit the app quits with the tabs still open, like Quit
+(⌘Q), reopen on or off. A document tab's `windowShouldClose` (text, PDF,
+image, Office, certificate) asks `shouldCloseDocumentWindow` first: in the
+only window group, when the tab is the last document tab (⌘W on the last
+tab) or the red close button is closing the whole tab group
+(`isClosingWholeWindow`: the current event is a click on that button),
+it runs the quit path (`prepareToQuit`: synchronous session save with
+every open tab and its unsaved buffer, waiters released), cancels the
+close and calls `NSApp.terminate` on the next turn. File › Close Window
+(⇧⌘W) on the only window does the same (`closeDocumentWindows`). Launch
+then applies `SessionReopenPolicy.plan`: reopen on (the default), every
+tab comes back; reopen off, tabs with unsaved text come back as open tabs
+and only clean ones are parked on the closed list, so unsaved text never
+falls under `ClosedTabs.keepDays` / `unsavedLimit` because of a quit.
+Tabs ⌘W closed earlier, while other tabs were open, were hot-closed like
+any close. `onClose`'s `quitAfterLastClose` is only a fallback for a close
+that skipped `windowShouldClose`; that tab is hot-closed. Other windows
 (detached previews, Settings, panels, the owl) don't count.
 `applicationShouldTerminateAfterLastWindowClosed` gives the same answer
 for AppKit's own case (e.g. Settings closed last). Off before launch has
 finished, under the dev hooks (unless `CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1`)
-and with the setting off. File › Close Window on the only window hot-closes each tab, then quits.
+and with the setting off. AppKit closes a whole tab group only for a real
+click on the red button (`performClick` closes only the front tab); `Scripts/session-check.sh` step 8d posts such a click
+(`CEDRIC_TEST_CLOSE_BUTTON`). Known gap: if `isClosingWholeWindow` missed
+that click, the group's other tabs would be hot-closed before the last
+one quits.
 
 ## Editor tools
 

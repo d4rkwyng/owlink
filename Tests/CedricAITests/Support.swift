@@ -321,11 +321,12 @@ final class Box<T>: @unchecked Sendable {
     func mutate(_ f: (inout T) -> Void) { lock.withLock { f(&_value) } }
 }
 
-/// Polls `cond` (real time) until true or ~8 s pass. It returns as soon as
-/// `cond` holds, so the window only matters when a busy CI runner stalls
-/// the work for seconds (2 s ran out in runs 44451577951, 44453003629).
-func eventually(_ cond: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<1_600 {
+/// Polls `cond` (real time) until true or ~`seconds` pass (8 by default).
+/// It returns as soon as `cond` holds, so the window only matters when a
+/// busy CI runner stalls the work for seconds (2 s ran out in runs
+/// 44451577951, 44453003629).
+func eventually(seconds: Double = 8, _ cond: @Sendable () async -> Bool) async -> Bool {
+    for _ in 0..<Int(seconds * 200) {
         if await cond() { return true }
         try? await Task.sleep(nanoseconds: 5_000_000)
     }

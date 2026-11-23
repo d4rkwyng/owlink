@@ -157,10 +157,50 @@ public struct Session: Codable, Equatable, Sendable {
 
 /// Whether the last session's open tabs should be restored at launch.
 public enum SessionReopenPolicy {
-    /// An explicit Owlink preference wins; otherwise follow the system's
-    /// "Close windows when quitting an application" setting.
-    public static func shouldReopen(explicit: Bool?, systemKeepsWindows: Bool?) -> Bool {
-        explicit ?? systemKeepsWindows ?? true
+    /// The preference's defaults key (Settings › General › Reopen files
+    /// from last session).
+    public static let key = "reopenFilesFromLastSession"
+
+    /// Owlink's own preference, on until the user turns it off. (0.5.1
+    /// followed macOS's global NSQuitAlwaysKeepsWindows while it was unset:
+    /// anyone with that set to false had their whole session, unsaved text
+    /// included, parked in Reopen Closed Tab without choosing it.)
+    public static func shouldReopen(explicit: Bool?) -> Bool {
+        explicit ?? true
+    }
+
+    /// The preference as stored in `defaults`: nil when unset. Read with
+    /// `bool(forKey:)`, so a `-reopenFilesFromLastSession NO` launch
+    /// argument (a string) counts as well as a stored Bool.
+    public static func explicitPreference(in defaults: UserDefaults) -> Bool? {
+        defaults.object(forKey: key) == nil ? nil : defaults.bool(forKey: key)
+    }
+
+    public static func shouldReopen(in defaults: UserDefaults) -> Bool {
+        shouldReopen(explicit: explicitPreference(in: defaults))
+    }
+
+    /// What launch does with the last session's windows. With reopen on,
+    /// all of them come back. With it off, only tabs with unsaved text come
+    /// back as open tabs (that text is nowhere else, and on the closed
+    /// list it would fall under `ClosedTabs.keepDays` / `unsavedLimit`);
+    /// every other tab goes to `park`, for File › Reopen Closed Tab. The
+    /// selected tab stays selected when it comes back, else the first one.
+    public static func plan(_ windows: [SessionWindow], reopen: Bool) -> (windows: [SessionWindow], park: [SessionTab]) {
+        guard !reopen else { return (windows, []) }
+        var kept: [SessionWindow] = []
+        var park: [SessionTab] = []
+        for w in windows {
+            let selectedID = w.tabs.indices.contains(w.selectedTab) ? w.tabs[w.selectedTab].id : nil
+            let unsaved = w.tabs.filter(\.hasBuffer)
+            park += w.tabs.filter { !$0.hasBuffer }
+            guard !unsaved.isEmpty else { continue }
+            var nw = w
+            nw.tabs = unsaved
+            nw.selectedTab = unsaved.firstIndex { $0.id == selectedID } ?? 0
+            kept.append(nw)
+        }
+        return (kept, park)
     }
 }
 
