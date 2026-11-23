@@ -213,6 +213,7 @@ final class FoldingController: NSObject, NSTextContentStorageDelegate {
     func layoutPills(index: LineIndex, font: UIFont, foreground: UIColor, background: UIColor) {
         guard let tv = textView else { return }
         var used = 0
+        let content = Self.pillContentRect(tv)
         if !state.isEmpty, index.length == tv.textStorage.length, let vr = SyntaxColorizer.visibleRange(tv) {
             let lo = vr.location, hi = NSMaxRange(vr)
             for h in state.hidden where h.location > 0 {
@@ -234,13 +235,39 @@ final class FoldingController: NSObject, NSTextContentStorageDelegate {
                 let b = pills[used]
                 used += 1
                 b.configure(label: Self.label(for: h, index), header: header, hidden: h, font: font, foreground: foreground, background: background)
-                let size = b.intrinsicContentSize
-                let height = min(max(caret.height, 14), size.height)
-                b.frame = CGRect(x: caret.maxX + 8, y: caret.midY - height / 2, width: size.width, height: height)
+                b.frame = Self.pillFrame(caret: caret, size: b.intrinsicContentSize, content: content)
                 b.isHidden = false
             }
         }
         for b in pills[used...] { b.isHidden = true }
+    }
+
+    /// Where pills may go, in the text view's coordinates: the text
+    /// container's horizontal extent (right of the gutter, left of the right
+    /// inset, which is Readable Width's margin when that is on). Unwrapped,
+    /// the container is wider than the view; the text's content width bounds it.
+    static func pillContentRect(_ tv: UITextView) -> CGRect {
+        let inset = tv.textContainerInset
+        let minX = inset.left
+        var maxX = max(tv.bounds.width, tv.contentSize.width) - inset.right
+        let container = tv.textContainer.size.width
+        if container.isFinite, container > 0 { maxX = min(maxX, minX + container) }
+        return CGRect(x: minX, y: -.greatestFiniteMagnitude / 4, width: max(0, maxX - minX), height: .greatestFiniteMagnitude / 2)
+    }
+
+    /// A pill's frame: `gap` after the header's last glyph (`caret`, its
+    /// end-of-line caret rect), centred on that line. When that would run
+    /// past `content`'s right edge, the pill moves left until its right edge
+    /// meets it (over the header's last characters; the line below is other
+    /// text, so it never wraps there), and never left of `content` (the
+    /// gutter); wider than `content`, it narrows to fit.
+    static func pillFrame(caret: CGRect, size: CGSize, content: CGRect, gap: CGFloat = 8) -> CGRect {
+        let height = min(max(caret.height, 14), size.height)
+        let width = min(size.width, content.width)
+        var x = caret.maxX + gap
+        if x + width > content.maxX { x = content.maxX - width }
+        x = max(x, content.minX)
+        return CGRect(x: x, y: caret.midY - height / 2, width: width, height: height)
     }
 
     @objc private func pillTapped(_ sender: FoldPillButton) {

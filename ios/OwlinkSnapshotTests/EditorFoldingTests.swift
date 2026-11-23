@@ -313,6 +313,80 @@ final class EditorFoldingTests: XCTestCase {
         XCTAssertFalse((e.textView.accessibilityCustomActions ?? []).contains { $0.name.hasPrefix(String(localized: "Unfold line")) })
     }
 
+    // MARK: Pill placement
+
+    func testPillFrameClampsInsideContent() {
+        let content = CGRect(x: 40, y: 0, width: 300, height: 1000)
+        let size = CGSize(width: 60, height: 18)
+        // Room after the line: 8 pt after the last glyph, centred on it.
+        XCTAssertEqual(FoldingController.pillFrame(caret: CGRect(x: 100, y: 50, width: 2, height: 20), size: size, content: content),
+                       CGRect(x: 110, y: 51, width: 60, height: 18))
+        // No room: the right edge meets the content's right edge, same line.
+        XCTAssertEqual(FoldingController.pillFrame(caret: CGRect(x: 320, y: 50, width: 2, height: 20), size: size, content: content),
+                       CGRect(x: 280, y: 51, width: 60, height: 18))
+        // Wider than the content: never under the gutter, narrowed to fit.
+        XCTAssertEqual(FoldingController.pillFrame(caret: CGRect(x: 60, y: 50, width: 2, height: 20), size: CGSize(width: 400, height: 18),
+                                                   content: content),
+                       CGRect(x: 40, y: 51, width: 300, height: 18))
+    }
+
+    /// iPhone width (390 pt, compact), lines wrapped: headers whose last
+    /// glyph sits anywhere along the line, some right at the edge. Every
+    /// pill stays inside the text container (right inset, or Readable
+    /// Width's margin, included), right of the gutter, on its header's line,
+    /// and takes the tap.
+    func testLongFoldedHeaderPillStaysInsideIPhoneWidth() throws {
+        let wrap = AppSettings.wrap
+        AppSettings.wrap = true
+        defer { AppSettings.wrap = wrap }
+        var text = ""
+        for k in 0..<36 {
+            text += "    mutating func hoot\(String(repeating: "o", count: k))() -> String {\n        \"hoo\"\n    }\n"
+        }
+        for readable in [false, true] {
+            let e = editor(text)
+            e.traitOverrides.horizontalSizeClass = .compact
+            if readable { e.toggleReadableWidth() }
+            e.view.frame = CGRect(x: 0, y: 0, width: 390, height: 4000)
+            e.view.layoutIfNeeded()
+            e.textView.textLayoutManager?.textViewportLayoutController.layoutViewport()
+            e.foldAll()
+            e.view.layoutIfNeeded()
+            e.layoutGutter()
+            let tv = e.textView
+            let f = try XCTUnwrap(e.folding)
+            let pills = f.visiblePills
+            XCTAssertEqual(pills.count, 36, "readable \(readable)")
+            let inset = tv.textContainerInset
+            // The gutter draws in the left inset: right of it is clear of the gutter.
+            let minX = inset.left, maxX = tv.bounds.width - inset.right
+            XCTAssertLessThan(maxX, 390, "readable \(readable)")
+            var clamped = 0
+            for b in pills {
+                let r = b.frame
+                XCTAssertGreaterThanOrEqual(r.minX, minX - 0.5, "line \(b.headerLine + 1) readable \(readable) \(r)")
+                XCTAssertLessThanOrEqual(r.maxX, maxX + 0.5, "line \(b.headerLine + 1) readable \(readable) \(r)")
+                XCTAssertGreaterThan(r.width, 0)
+                XCTAssertEqual(r.width, b.intrinsicContentSize.width, accuracy: 0.5)
+                // On the header's last line fragment.
+                let end = NSMaxRange(e.lineIndex.contentRange(ofLine: b.headerLine))
+                let caret = tv.caretRect(for: try XCTUnwrap(tv.position(from: tv.beginningOfDocument, offset: end)))
+                XCTAssertEqual(r.midY, caret.midY, accuracy: 0.5)
+                if caret.maxX + 8 + b.intrinsicContentSize.width > maxX { clamped += 1 }
+                // Tappable: the pill is what a touch at its centre hits.
+                XCTAssertTrue(tv.hitTest(CGPoint(x: r.midX, y: r.midY), with: nil) === b, "line \(b.headerLine + 1) readable \(readable)")
+            }
+            // Some headers end where the old placement ran off the edge.
+            XCTAssertGreaterThan(clamped, 0, "readable \(readable)")
+            // VoiceOver still opens it.
+            let last = try XCTUnwrap(pills.last)
+            let header = last.headerLine
+            XCTAssertTrue(last.accessibilityActivate())
+            XCTAssertFalse(f.state.headerLines(e.lineIndex).contains(header))
+            XCTAssertEqual(tv.text, text)
+        }
+    }
+
     func testLanguagesThatDontFold() {
         for (language, ext) in [(Language.plain, "txt"), (.csv, "csv"), (.diff, "diff"), (.html, "html")] {
             let e = editor("a {\n  b\n}\n# h\n  x\n", language, ext: ext)
