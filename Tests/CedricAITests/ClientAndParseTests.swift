@@ -302,51 +302,54 @@ import CedricCore
 
     /// A slow model: the whole answer takes far longer than `timeout`, but
     /// a chunk keeps coming well inside the idle limit, so it all arrives.
-    /// On virtual time (`StreamClock`): the gaps are exactly 0.1-0.2 s
-    /// against a 1 s idle limit however busy the runner is (on wall-clock
-    /// time, stalls of 2-3 s on GitHub's macOS runners failed this with 3 s
-    /// limits: release run 45208720302). The answer takes 4.3 s against a
-    /// 3 s first-byte deadline, and the stub has the client's deadline loop
-    /// look at the clock at that point, so a first-byte deadline that ended
-    /// the whole stream, or an idle limit that a chunk didn't reset, still
-    /// fails this every time.
+    ///
+    /// On virtual time (`StreamClock`): on wall-clock time, with 3 s limits
+    /// against 0.2 s gaps, stalls of 2-3 s on GitHub's macOS runners failed
+    /// this (release run 45208720302). Now each gap is exactly 1 s against
+    /// a 2 s idle limit however busy the runner is, and the answer takes
+    /// 33.1 s against a 30 s first-byte deadline (`timeout`); the stub has
+    /// the client's deadline loop look at the clock at that point, so a
+    /// first-byte deadline that ended the whole stream, or an idle limit
+    /// that a chunk didn't reset, fails this every time. Why 30 s: URLSession
+    /// also uses `timeout` as a real-time limit between chunks, so it must
+    /// stay far above any stall of the runner.
     @Test func chatStreamSlowDribbleOutlivesTheFirstByteDeadline() async throws {
         let clock = StreamClock()
         let server = StubServer()
         server.route("/v1/chat/completions") { _, _ in
-            StubServer.Response(body: Data(), delay: 0.1, chunks: Self.deltas(20), every: 0.2, clock: clock)
+            StubServer.Response(body: Data(), delay: 0.1, chunks: Self.deltas(32), every: 1.0, clock: clock)
         }
-        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3.0, session: server.session)
-        client.streamIdleLimit = 1.0
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
+        client.streamIdleLimit = 2.0
         client.streamClock = clock.read
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
-        #expect(clock.now - start > 3.2, "ran past the first-byte deadline")
-        #expect(clock.touchReads >= 21, "each chunk touched the watch")
-        #expect(acc.content.hasPrefix("w0 w1 ") && acc.content.hasSuffix("w19 "))
+        #expect(clock.now - start > 32, "ran past the first-byte deadline")
+        #expect(clock.touchReads >= 33, "each chunk touched the watch")
+        #expect(acc.content.hasPrefix("w0 w1 ") && acc.content.hasSuffix("w31 "))
     }
 
-    /// A plain JSON body dribbled a few bytes at a time with no newline,
+    /// A plain JSON body dribbled two bytes at a time with no newline,
     /// each chunk well inside the idle limit, for far longer than it: every
-    /// chunk keeps the stream alive. Virtual time, as above: 0.15 s gaps
-    /// against a 1 s idle limit, exactly; the body takes about 4 s (past
-    /// the 3 s first-byte deadline too), so an idle limit that only
-    /// newlines reset still fails this every time.
+    /// chunk keeps the stream alive. Virtual time, as above: 1 s gaps
+    /// against a 2 s idle limit, exactly; the body takes about 38 s (past
+    /// the 30 s first-byte deadline too), so an idle limit that only
+    /// newlines reset fails this every time.
     @Test func chatStreamNewlineFreeDribbleDoesNotTimeOut() async throws {
         let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"slow and steady"}}]}"#.utf8)
-        let chunks = stride(from: 0, to: body.count, by: 3).map { body.subdata(in: $0..<min(body.count, $0 + 3)) }
+        let chunks = stride(from: 0, to: body.count, by: 2).map { body.subdata(in: $0..<min(body.count, $0 + 2)) }
         let clock = StreamClock()
         let server = StubServer()
         server.route("/v1/chat/completions") { _, _ in
-            StubServer.Response(body: Data(), delay: 0.05, chunks: chunks, every: 0.15, clock: clock)
+            StubServer.Response(body: Data(), delay: 0.05, chunks: chunks, every: 1.0, clock: clock)
         }
-        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3.0, session: server.session)
-        client.streamIdleLimit = 1.0
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
+        client.streamIdleLimit = 2.0
         client.streamClock = clock.read
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
-        #expect(chunks.count >= 24)
-        #expect(clock.now - start > 3.0, "ran well past the idle limit")
+        #expect(chunks.count >= 36)
+        #expect(clock.now - start > 35, "ran well past the idle limit and the first-byte deadline")
         #expect(clock.touchReads >= chunks.count, "each chunk touched the watch, with no newline in it")
         #expect(acc.content == "slow and steady")
     }
