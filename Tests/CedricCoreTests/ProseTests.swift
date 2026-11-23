@@ -224,7 +224,6 @@ import Testing
         let t0 = Date()
         for _ in 0..<10 { _ = ProseDetector.isProse(big, language: .plain) }
         let took = Date().timeIntervalSince(t0)
-        print("prose-detection-timing 10 runs \(took) s")
         #expect(took < 10, "10 detections on a big file: \(took) s")
     }
 

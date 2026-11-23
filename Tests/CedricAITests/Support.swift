@@ -120,6 +120,8 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     ///   at the full virtual length of the answer: a deadline that passed
     ///   (first byte, or an idle limit a chunk didn't reset) is seen there,
     ///   whatever the real timing, and ends the stream with `.timedOut`.
+///   If that read doesn't come within 30 s, the last chunk is never sent
+///   and the load fails instead.
     /// A touch that never comes (a reader that doesn't touch on this kind of
     /// chunk) is waited for 5 s once, then the rest plays without waiting,
     /// so that regression fails in seconds instead of hanging.
@@ -142,8 +144,16 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
             let last = i == response.chunks.count - 1
             if last {
                 let seen = clock.deadlineReads
-                _ = await clock.wait(atMost: 30) { $0.deadlineReads > seen }
+                let sampled = await clock.wait(atMost: 30) { $0.deadlineReads > seen }
                 if Task.isCancelled { return }
+                // The deadline loop never saw the final time: the last
+                // chunk is withheld and the load fails, so the test
+                // can't pass without that check having run.
+                guard sampled else {
+                    proto.client?.urlProtocol(proto, didFailWithError: URLError(.resourceUnavailable, userInfo: [
+                        NSLocalizedDescriptionKey: "stub: the deadline loop didn't read the clock before the last chunk"]))
+                    return
+                }
             }
             let touched = clock.touchReads
             proto.client?.urlProtocol(proto, didLoad: chunk)

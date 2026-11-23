@@ -104,7 +104,13 @@ import Testing
             """, home: h)
         #expect(out == late)
         // The app takes about 30 ms to fill the file it made.
-        let slept = (try? String(contentsOfFile: h + "/.slept", encoding: .utf8)).flatMap(Double.init) ?? 0
+        // Parsed in the POSIX locale: "0.05" whatever the process locale.
+        let slept: Double = (try? String(contentsOfFile: h + "/.slept", encoding: .utf8)).flatMap { text in
+            let scanner = Scanner(string: text)
+            scanner.locale = Locale(identifier: "en_US_POSIX")
+            guard let value = scanner.scanDouble(), scanner.isAtEnd else { return nil }
+            return value
+        } ?? 0
         #expect(slept > 0.03, "waits longer than the app takes to fill its file: \(slept) s")
     }
 
