@@ -105,6 +105,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var markedLine: Int?
     private let lineNumberGutter = LineNumberGutter()
     private var colorizer: SyntaxColorizer!
+    /// The highlighter's engine (Fix Typos… reads its tokens for SpellScope).
+    var highlightEngine: HighlightEngine { colorizer.engine }
+    /// Fix Typos…, while its card is up.
+    var spellStep: SpellStepController?
     let owl = EditorOwl()
     let hintBar = OwlHintBar()
     private let statusBar = UIView()
@@ -495,6 +499,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         layoutOwl()
         layoutDivider()
         layoutGutter()
+        spellStep?.position()
         updateUnwrappedContentSize()
         updateWritingInset()
         if writingLayoutSize != textView.bounds.size {
@@ -776,7 +781,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, ask, check]
+        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, fixTyposAction(), ask, check]
         if let checkScript = checkScriptAction() { first.append(checkScript) }
         if hasEditorPreview {
             let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
@@ -833,6 +838,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     // MARK: Text
 
     private func loadText() {
+        // The text is replaced: Fix Typos…'s offsets no longer match it.
+        spellStep?.close()
         clearEditorHighlights()
         loading = true
         let sel = textView.selectedRange
@@ -891,6 +898,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
+        spellStep?.textEdited(oldRange, newLength: edited.length)
         let oldLines = lineIndex.lineCount
         // Bookmarks follow their lines, measured against the old text
         // (applyTextEdits then puts structured edits' own set in place).
@@ -1688,6 +1696,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         document.language.choose(l)
         colorizer.setLanguage(l)
+        if !spellingChecksThisDocument { spellStep?.close() }
         applySettings()
         updateStatus()
         updateBarButtons()
@@ -3813,6 +3822,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             || action == #selector(clearBookmarksMenu(_:)) { return !bookmarks.isEmpty }
         if action == #selector(showStatistics) { return true }
         if action == #selector(toggleCheckSpelling) || action == #selector(toggleCheckGrammar) { return true }
+        if action == #selector(fixTypos) { return spellingChecksThisDocument && textView.window != nil }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
         if action == #selector(explainSelection) || action == #selector(rewriteSelection) {
             return canInlineAssist(action == #selector(explainSelection) ? .explain : .rewrite, selection: textView.selectedRange)

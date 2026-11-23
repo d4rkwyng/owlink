@@ -75,8 +75,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         ])
         builder.insertChild(tools, atEndOfMenu: .edit)
         builder.insertChild(UIMenu(options: .displayInline, children: [copyHTML, copyRich]), atEndOfMenu: .edit)
-        // Edit › Spelling and Grammar: the Mac's two settings (checkmarks via validate).
+        // Edit › Spelling and Grammar: Fix Typos… (⌥⌘;) and the Mac's two settings (checkmarks via validate).
         let proofing = [
+            UIKeyCommand(title: String(localized: "Fix Typos…"), action: #selector(EditorViewController.fixTypos),
+                         input: ";", modifierFlags: [.command, .alternate]),
             UICommand(title: String(localized: "Check Spelling While Typing"), action: #selector(EditorViewController.toggleCheckSpelling)),
             UICommand(title: String(localized: "Check Grammar in Prose"), action: #selector(EditorViewController.toggleCheckGrammar)),
         ]
