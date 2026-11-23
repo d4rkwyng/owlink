@@ -4,7 +4,7 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [0.5.2]
+## [0.5.2] - 2026-11-23
 
 ### Security
 - **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line (a name in non-Latin look-alike letters is shown as its plain-ASCII form and flagged), points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
@@ -284,6 +284,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
 [0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
 [0.5.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.0
 [0.4.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.4.1
