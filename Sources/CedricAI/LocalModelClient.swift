@@ -81,6 +81,10 @@ public struct LocalModelClient: Sendable {
     public var streamIdleLimit: TimeInterval = 30
     /// Streams only: a safety cap on one whole answer.
     public var streamCap: TimeInterval = 15 * 60
+    /// Streams only: the clock the first-byte, idle and cap deadlines are
+    /// measured on (monotonic seconds). Tests put a virtual one in, so a
+    /// stalled CI runner can't make a dribble look like a stall.
+    var streamClock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     public init(baseURL: URL, timeout: TimeInterval = 20, session: URLSession? = nil) {
         self.baseURL = baseURL
