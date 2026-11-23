@@ -205,15 +205,13 @@ final class Settings {
         set { defaults.set(newValue, forKey: "quitWhenLastWindowCloses"); NotificationCenter.default.post(name: .cedricSettingsChanged, object: nil) }
     }
 
-    /// Settings › "Reopen files from last session". Until explicitly set,
-    /// follows the system's "Close windows when quitting an application".
+    /// Settings › "Reopen files from last session". On until the user turns
+    /// it off here (SessionReopenPolicy: not macOS's global
+    /// NSQuitAlwaysKeepsWindows, and a `-reopenFilesFromLastSession NO`
+    /// launch argument counts). Off or on, unsaved text reopens.
     var reopenFilesFromLastSession: Bool {
-        get {
-            let system = defaults.persistentDomain(forName: UserDefaults.globalDomain)?["NSQuitAlwaysKeepsWindows"] as? Bool
-            return SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: "reopenFilesFromLastSession") as? Bool,
-                                                    systemKeepsWindows: system)
-        }
-        set { defaults.set(newValue, forKey: "reopenFilesFromLastSession"); changed() }
+        get { SessionReopenPolicy.shouldReopen(in: defaults) }
+        set { defaults.set(newValue, forKey: SessionReopenPolicy.key); changed() }
     }
 
     /// Settings › "Show git changes in the gutter": change bars against

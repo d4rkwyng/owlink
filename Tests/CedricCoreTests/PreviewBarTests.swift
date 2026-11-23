@@ -5,7 +5,7 @@ import Testing
 @Suite struct PreviewBarTests {
     @Test func markdownHasEveryWebControlAndExport() {
         let items = PreviewBarItem.items(for: .markdown, certificate: false)
-        #expect(items == [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach])
+        #expect(items == [.back, .forward, .home, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach])
     }
 
     @Test func htmlHasNoExport() {

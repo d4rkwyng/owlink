@@ -49,7 +49,9 @@ open it, and move Owlink to Applications. Owlink doesn't update itself:
 
 ### Tabs that come back
 
-Native macOS window tabs. Quitting never asks to
+Native macOS window tabs. A tab with unsaved edits shows a trailing • after
+its name (and the close button's edited dot) until you save, revert, or undo
+back to the saved text. Quitting never asks to
 save: every tab, including untitled tabs and unsaved changes, is restored on
 the next launch, as Notepad++ does. Unsaved text is autosaved to
 `~/Library/Application Support/Cedric/Session/` about 1.5 seconds after you
@@ -63,13 +65,15 @@ it, and for at most the 100 most recent such tabs; then it is deleted
 (see [Privacy](#privacy-and-what-stays-on-this-mac)).
 The first time in a launch that a file tab with unsaved edits is closed,
 the tab in front says the file wasn't written, with **Save Now**.
-**Settings › General › Reopen files from last session** is on by default.
-Until you change it, Owlink follows macOS's “Close windows when quitting an
-application” setting. When it is on, quitting (⌘Q) or closing the last
+**Settings › General › Reopen files from last session** is on by default
+(macOS's “Close windows when quitting an application” setting doesn't change
+it; only this one does). When it is on, quitting (⌘Q) or closing the last
 document window (text, PDF, image or Office tab) restores those open tabs on
 the next launch, with their saved window frame, selection, sidebar folder and
 split or preview state. With it off, those files do not reopen; they go to
-Reopen Closed Tab (⇧⌘T), and unsaved text is kept there. Opening a file from
+Reopen Closed Tab (⇧⌘T). Tabs with unsaved text (including untitled tabs)
+still reopen after a quit (or closing the last window), so that text is never left to the closed list's
+30-day limit. Opening a file from
 Finder still restores the rest of the session and focuses that file, without
 opening a duplicate tab. Moved or deleted files are skipped.
 Detached previews, Settings and panels don't keep Owlink running.
@@ -85,7 +89,9 @@ M-series Mac.
 ### Mac file basics
 
 Save All (⌥⌘S), Revert to Saved (undoable with ⌘Z),
-Close Window (⇧⌘W: every tab in the window, each hot-closed; on the last window, then quits, ⇧⌘T has the tabs), and the
+Close Window (⇧⌘W: every tab in the window, each hot-closed; on the last
+window it quits with those tabs still open, so they come back like after ⌘Q:
+see [Tabs that come back](#tabs-that-come-back)), and the
 system Services in the app menu.
 
 ### Float on Top
@@ -808,7 +814,9 @@ links, footnotes (`[^1]`), GitHub alerts (`> [!NOTE]`, `[!TIP]`,
 checkboxes) and YAML frontmatter, which shows as a small metadata table
 (and is coloured as YAML in the editor). It also reads Obsidian's syntax:
 `[[note]]`, `[[note|alias]]` and `[[note#Heading]]` link to notes in the
-vault (the sidebar folder, else the folder holding `.obsidian/`) and open
+vault (the sidebar folder, else the nearest folder holding `.obsidian/`,
+but never your home folder, a folder above it, or a disk's root folder —
+open the folder in the sidebar to use a vault there) and open
 them in a tab, `![[image.png|300]]` shows the image, `![[note#Heading]]`
 quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 `%%comments%%` and `#tags` show as in Obsidian. Site-root images

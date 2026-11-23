@@ -38,7 +38,7 @@ extension PreviewController: PreviewRenderer {
 
     var zoom: Double {
         get { Double(webView.pageZoom) }
-        set { webView.pageZoom = CGFloat(newValue); browserView.pageZoom = CGFloat(newValue) }
+        set { webView.pageZoom = CGFloat(newValue) }
     }
 
     func refresh() { forceReload() }
@@ -57,7 +57,6 @@ struct PreviewBarState: Equatable {
     var canGoBack = false
     var canGoForward = false
     var canGoHome = false
-    var canOpenInBrowser = false
 }
 
 /// The quick-actions bar in the preview's header: SF Symbol buttons (with
@@ -157,7 +156,6 @@ final class PreviewBar: NSView {
             case .back: b.isEnabled = s.canGoBack
             case .forward: b.isEnabled = s.canGoForward
             case .home: b.isEnabled = s.canGoHome
-            case .openInBrowser: b.isEnabled = s.canOpenInBrowser
             default: b.isEnabled = true
             }
         }
@@ -175,7 +173,6 @@ final class PreviewBar: NSView {
         case .back: return ("chevron.left", String(localized: "Back"), String(localized: "Back in preview"), false)
         case .forward: return ("chevron.right", String(localized: "Forward"), String(localized: "Forward in preview"), false)
         case .home: return ("house", String(localized: "This Document"), String(localized: "Return to this document"), false)
-        case .openInBrowser: return ("safari", String(localized: "Open in Browser"), String(localized: "Open this web page in the browser"), false)
         case .refresh: return ("arrow.clockwise", String(localized: "Refresh"), String(localized: "Refresh the preview"), false)
         case .syncScroll:
             return ("arrow.up.arrow.down", String(localized: "Sync Scrolling"),

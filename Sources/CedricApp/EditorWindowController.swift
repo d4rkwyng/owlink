@@ -256,6 +256,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             let line = index.line(containing: offset)
             return NSRange(location: index.starts[line], length: index.lineLength(line))
         }
+        doc.currentText = { [weak self] in self?.textView.textStorage?.mutableString }
         setText(text)
         applyAppearance()
         PerfTrace.mark("apply_appearance")
@@ -454,6 +455,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if didApplyAppearance {
             doc.noteBufferReplacement()
             owlChat?.documentBufferReplaced()
+        } else {
+            // Opening: the text undo comes back to (a clean tab only).
+            doc.rebaseIfClean()
         }
         // The storage already has `editorFont`. Crossing the large-document
         // boundary (either way) leaves `textView.font` on the previous face,
@@ -761,9 +765,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     func updateTitle() {
         guard let window else { return }
-        window.title = doc.displayName
+        let name = doc.displayName, dirty = doc.isDirty
+        // Unsaved: a trailing • on the title, so on the tab's label too
+        // (a background tab's edited dot is easy to miss), beside the
+        // close button's own edited dot. VoiceOver hears "Edited".
+        window.title = EditedIndicator.windowTitle(displayName: name, isDirty: dirty)
+        window.setAccessibilityTitle(EditedIndicator.accessibilityTitle(displayName: name, isDirty: dirty,
+                                                                        edited: String(localized: "Edited")))
         window.representedURL = doc.fileURL
-        window.isDocumentEdited = doc.isDirty
+        window.isDocumentEdited = dirty
         window.tab.toolTip = doc.fileURL?.path
         previewWindow?.updateTitle()
     }
@@ -947,7 +957,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     /// Encoding and line endings apply on save: the tab becomes unsaved.
     private func markConverted() {
-        doc.noteChange()
+        doc.noteFormatChange()
         updateTitle()
         updateStatus()
         onChange?(self)
@@ -984,6 +994,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             showError(error)
             return false
         }
+        // Typing after a save starts a new undo step, so ⌘Z comes back to
+        // the saved text (and the tab is clean again) instead of past it.
+        for pane in panes { pane.textView.breakUndoCoalescing() }
         if doc.languageChoice.saved(fileName: url.lastPathComponent, content: textView.string) { languageChanged() }
         hideDiskBar()
         (NSApp.delegate as? AppDelegate)?.noteRecent(url)
@@ -1478,7 +1491,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         s.canGoBack = web?.canGoBack ?? false
         s.canGoForward = web?.canGoForward ?? false
         s.canGoHome = web.map { !$0.isHome } ?? false
-        s.canOpenInBrowser = web?.webURL != nil
         if let web, pane.titleLabel.stringValue != web.navigationTitle {
             pane.titleLabel.stringValue = web.navigationTitle
             pane.needsLayout = true
@@ -1501,7 +1513,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .back: return s.canGoBack
         case .forward: return s.canGoForward
         case .home: return s.canGoHome
-        case .openInBrowser: return s.canOpenInBrowser
         default: return true
         }
     }
@@ -1513,8 +1524,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .back: preview?.goBack()
         case .forward: preview?.goForward()
         case .home: preview?.goHome()
-        case .openInBrowser:
-            if let url = preview?.webURL { LinkPrompt.confirmExternal(url, in: previewPane?.window) }
         case .refresh:
             pane.renderer.refresh()
             renderPreview()
