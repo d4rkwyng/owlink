@@ -33,6 +33,38 @@ import Testing
         #expect(s.contains("src=dot.png") && !s.lowercased().contains("alert(1)"))
         // The rich-text scrub is unchanged: no remote href there.
         #expect(!HTMLScrub.noScriptNoRemote(html).contains("example.com/ok"))
+
+        // Review of fc73458 (Opus SF1): a stray quote makes the tag regex
+        // read the next element as part of the `<a>`; its href still goes.
+        let fooled = [
+            #"<svg><a x=a"><image href="https://t.example/p.png" y=""></svg>"#,
+            #"<svg><a x=a"><use href="https://t.example/u.svg#x" y=""></svg>"#,
+            #"<a x=a'><img src=dot.png><image href='https://t.example/q.png' y=''>"#,
+        ]
+        for f in fooled {
+            let out = HTMLScrub.noScriptNoRemoteKeepingLinks(f)
+            #expect(!out.contains("t.example"), "\(f) -> \(out)")
+        }
+        // Fail safe: a `<` in an earlier attribute costs a real link its href.
+        #expect(!HTMLScrub.noScriptNoRemoteKeepingLinks(#"<a title="<b>" href="https://example.com/ok">x</a>"#).contains("example.com"))
+    }
+
+    /// Review of fc73458 (Grok SF4): a kept link's `rel` can't ask WebKit
+    /// to fetch or resolve ahead of a tap; other keywords stay.
+    @Test func previewLinksLoseFetchingRel() {
+        let cases: [(String, String)] = [
+            (#"<a rel="prefetch" href="https://example.com/a">a</a>"#, #"<a  href="https://example.com/a">a</a>"#),
+            (#"<a href="https://example.com/a" rel="noopener PreConnect dns-prefetch nofollow">a</a>"#,
+             #"<a href="https://example.com/a" rel="noopener nofollow">a</a>"#),
+            (#"<a href="https://example.com/a" rel='preload modulepreload prerender'>a</a>"#, #"<a href="https://example.com/a" >a</a>"#),
+            (#"<a/rel=prefetch href="https://example.com/a">a</a>"#, #"<a/ href="https://example.com/a">a</a>"#),
+            (#"<area href="https://example.com/a" rel="pre&#102;etch">"#, #"<area href="https://example.com/a" >"#),
+        ]
+        for (html, want) in cases {
+            #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(html) == want, "\(html)")
+        }
+        let plain = #"<a href="https://example.com/a" rel="noopener noreferrer">a</a>"#
+        #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(plain) == plain)
     }
 
     /// Review of fc73458 (Grok MUST-FIX 1, Opus SF2): a kept link's `ping`

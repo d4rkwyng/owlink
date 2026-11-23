@@ -1293,6 +1293,10 @@ public enum HTMLScrub {
     nonisolated(unsafe) static let links = regex(#"<link\b[^>]*>"#)
     /// The start of an `<a>` or `<area>` tag (matched anchored on a tag).
     nonisolated(unsafe) static let linkTag = regex(#"<(?:a|area)(?=[\s/>])"#)
+    /// A `rel` attribute (group 1 the value with its quotes).
+    nonisolated(unsafe) static let relAttr = regex(#"(?<=[\s/"'])rel(?=[\s/>=]|$)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?"#)
+    /// `rel` keywords that fetch ahead of a tap (or resolve a host).
+    static let fetchingRel: Set<String> = ["prefetch", "preload", "prerender", "modulepreload", "preconnect", "dns-prefetch"]
     nonisolated(unsafe) static let remoteCSS = regex(#"(@import\s+)?url\(\s*["']?\s*(?:https?:|ftp:|//)[^)]*\)|@import\s+["']\s*(?:https?:|ftp:|//)[^"']*["']"#)
 
     static func replace(_ r: NSRegularExpression, in s: String, with t: String) -> String {
@@ -1406,7 +1410,14 @@ public enum HTMLScrub {
     /// `<area>`) to the web stays. A link loads nothing by itself: a tap
     /// is decided by the page's owner (the iOS preview opens it in its
     /// isolated browser, or asks first). Images, frames, `xlink:href`,
-    /// `srcset`, stylesheets and CSS `url()` still go.
+    /// `srcset`, stylesheets and CSS `url()` still go, and so do `rel`
+    /// keywords that fetch ahead (`prefetch`, `preconnect`, …).
+    ///
+    /// The tag regex reads any quote as opening a value, a browser only one
+    /// after `=`: in `<a x=a"><image href="https://…">` it takes the
+    /// `<image>` for part of the `<a>`. So an href is kept only when no `<`
+    /// lies between the link's start and the attribute (a real
+    /// `<a title="<b>" href=…>` just loses its href: safe).
     public static func noScriptNoRemoteKeepingLinks(_ html: String) -> String {
         var s = noScript(html)
         s = replace(links, in: s, with: "")
@@ -1416,12 +1427,45 @@ public enum HTMLScrub {
         var out = "", last = 0
         for m in remoteAttr.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
             let name = ns.substring(with: m.range).drop(while: \.isWhitespace).prefix { $0 != "=" && !$0.isWhitespace }.lowercased()
-            let inLink = linkTags.contains { NSLocationInRange(m.range.location, $0) && NSMaxRange(m.range) <= NSMaxRange($0) }
+            let inLink = linkTags.contains { tag in
+                NSLocationInRange(m.range.location, tag) && NSMaxRange(m.range) <= NSMaxRange(tag)
+                    && !ns.substring(with: NSRange(location: tag.location + 1, length: m.range.location - tag.location - 1)).contains("<")
+            }
             if name == "href", inLink { continue }
             out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
             last = NSMaxRange(m.range)
         }
         out += ns.substring(from: last)
-        return replace(remoteCSS, in: out, with: "none")
+        return replace(remoteCSS, in: noFetchingRel(out), with: "none")
+    }
+
+    /// Every start tag with the `fetchingRel` keywords taken out of its
+    /// `rel` (the attribute goes when nothing else is left). The value is
+    /// read decoded, as a browser reads it (`pre&#102;etch`).
+    static func noFetchingRel(_ html: String) -> String {
+        let ns = html as NSString
+        var out = "", last = 0
+        for m in tags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
+            let tag = ns.substring(with: m.range)
+            guard tag.range(of: "rel", options: .caseInsensitive) != nil else { continue }
+            let tns = tag as NSString
+            var clean = "", tlast = 0
+            for r in relAttr.matches(in: tag, range: NSRange(location: 0, length: tns.length)) {
+                var value = r.range(at: 1).location == NSNotFound ? "" : tns.substring(with: r.range(at: 1))
+                if let q = value.first, q == "\"" || q == "'" { value = String(value.dropFirst().dropLast()) }
+                let words = decodeCharacterReferences(value).split(whereSeparator: \.isWhitespace).map(String.init)
+                let keep = words.filter { !fetchingRel.contains($0.lowercased()) }
+                guard keep.count < words.count else { continue }
+                clean += tns.substring(with: NSRange(location: tlast, length: r.range.location - tlast))
+                if !keep.isEmpty { clean += "rel=\"" + Markdown.escape(keep.joined(separator: " ")) + "\"" }
+                tlast = NSMaxRange(r.range)
+            }
+            guard tlast > 0 else { continue }
+            clean += tns.substring(from: tlast)
+            out += ns.substring(with: NSRange(location: last, length: m.range.location - last)) + clean
+            last = NSMaxRange(m.range)
+        }
+        out += ns.substring(from: last)
+        return out
     }
 }
