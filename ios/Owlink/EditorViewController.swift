@@ -99,12 +99,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// A jump forces numbers on for this tab without changing the setting.
     private var jumpShowsLineNumbers = false
     private var lastLineNumbersSetting = AppSettings.lineNumbers
-    /// Bookmarks keep the numbers on too, so their markers show.
-    private var showLineNumbers: Bool { AppSettings.lineNumbers || jumpShowsLineNumbers || !bookmarks.isEmpty }
+    /// Bookmarks and folds keep the numbers on too, so their markers show.
+    private var showLineNumbers: Bool { AppSettings.lineNumbers || jumpShowsLineNumbers || !bookmarks.isEmpty || hasFolds }
     /// 1-based line drawn stronger in the gutter, the one just jumped to.
     private var markedLine: Int?
     private let lineNumberGutter = LineNumberGutter()
     private var colorizer: SyntaxColorizer!
+    /// The highlighter's engine (its tokens find brackets for folding).
+    var highlightEngine: HighlightEngine { colorizer.engine }
     let owl = EditorOwl()
     let hintBar = OwlHintBar()
     private let statusBar = UIView()
@@ -148,6 +150,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// edits (storageEdited, applyTextEdits) and are not kept on close or
     /// reload.
     var bookmarks = Bookmarks()
+    /// Code folding (Folding.swift): nil until the first fold. Not kept on
+    /// close or reload.
+    var folding: FoldingController?
     private(set) var generation = 0
     var markdownPasteboardReader: () -> (urls: [URL], string: String?) = {
         let pasteboard = UIPasteboard.general
@@ -445,6 +450,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // stay on screen while the text scrolls.
         split.addSubview(lineNumberGutter)
         lineNumberGutter.onTapLine = { [weak self] line in self?.toggleBookmark(line: line - 1) }
+        lineNumberGutter.onTapFold = { [weak self] line in self?.toggleFold(line: line - 1) ?? false }
         // Frame-based, placed in viewDidLayoutSubviews: the owl and his bubble.
         view.addSubview(owlSprite)
         view.addSubview(hintBar)
@@ -790,7 +796,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
         return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), formatMenu(),
+                writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu(),
                 UIMenu(options: .displayInline, children: [settings])]
     }
 
@@ -836,6 +842,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         clearEditorHighlights()
         loading = true
         let sel = textView.selectedRange
+        folding?.reset()
         textView.text = document.text
         invisiblesOverlay.textChanged()
         let font = AppSettings.font(for: document.language.language, traits: traitCollection)
@@ -891,6 +898,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
+        folding?.textEdited(oldRange: oldRange, newLength: edited.length, storage: textStorage)
         let oldLines = lineIndex.lineCount
         // Bookmarks follow their lines, measured against the old text
         // (applyTextEdits then puts structured edits' own set in place).
@@ -912,6 +920,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             updateWritingInset()
             applyProseChecking()
             if !writing.isOff { showWritingPaused(reason) }
+            // Large mode turns folding off, as on the Mac (after the edit).
+            DispatchQueue.main.async { [weak self] in self?.foldingContextChanged() }
         }
         markdownFenceIndex.invalidate(fromLine: first)
         colorizer?.textDidChange(firstLine: first, lastLine: lineIndex.line(containing: NSMaxRange(edited)),
@@ -1336,6 +1346,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     func textViewDidChangeSelection(_ textView: UITextView) {
+        folding?.selectionChanged(byKey: self.textView.keyNavigating)
         scheduleWritingUpdate(center: false)
         scheduleEditorHighlights()
         contextBar?.refreshInlineSelectionStates()
@@ -1686,6 +1697,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             if focusOn { exitFocusPreview() }
             if previewOn { togglePreview() }
         }
+        if l != document.language.language { foldingContextChanged() }
         document.language.choose(l)
         colorizer.setLanguage(l)
         applySettings()
@@ -1884,6 +1896,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         clearFocusRendering()
         updateWritingInset()
         applyProseChecking()
+        if reason != nil { foldingContextChanged() }
         if reason == nil { scheduleWritingUpdate() }
         else if !writing.isOff { showWritingPaused(reason!) }
     }
@@ -3737,6 +3750,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     func layoutGutter() {
         let font = UIFont.monospacedSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) * 0.85), weight: .regular)
         let (width, insets) = layoutTextInsets()
+        folding?.layoutPills(index: lineIndex, font: .systemFont(ofSize: max(9, font.pointSize - 1)),
+                             foreground: UIColor(hex: palette.gutterForeground), background: UIColor(hex: palette.gutterBackground))
         guard showLineNumbers else {
             lineNumberGutter.isHidden = true
             return
@@ -3754,8 +3769,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         lineNumberGutter.highlight = markedLine
         lineNumberGutter.bookmarked = Set(bookmarks.lines.map { $0 + 1 })
         lineNumberGutter.bookmarkColor = UIColor(hex: palette.caret)
+        lineNumberGutter.foldColumn = foldColumnWidth
+        lineNumberGutter.foldColor = UIColor(hex: palette.gutterForeground)
+        lineNumberGutter.foldedColor = UIColor(hex: palette.foreground)
         guard let vr = SyntaxColorizer.visibleRange(textView), lineIndex.length == textView.textStorage.length else {
             lineNumberGutter.rows = []
+            lineNumberGutter.foldMarks = [:]
             lineNumberGutter.setNeedsDisplay()
             return
         }
@@ -3763,22 +3782,38 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let last = lineIndex.line(containing: min(lineIndex.length, NSMaxRange(vr)))
         var rows: [LineNumberGutter.Row] = []
         rows.reserveCapacity(last - first + 1)
-        for i in first...last {
+        let foldState = folding?.state ?? FoldState()
+        var i = first
+        while i <= last {
+            defer { i += 1 }
+            // Folded lines aren't laid out: no numbers (the Mac numbers
+            // layout fragments). Skip to the line after the hidden text.
+            if !foldState.isEmpty, let h = foldState.hiddenRange(containing: lineIndex.starts[i]) {
+                let end = NSMaxRange(h), next = lineIndex.line(containing: end)
+                guard lineIndex.starts[next] == end, next > i else { break }
+                i = next - 1
+                continue
+            }
             guard let pos = textView.position(from: textView.beginningOfDocument, offset: lineIndex.starts[i]) else { continue }
             let y = textView.caretRect(for: pos).midY - textView.bounds.minY
             guard y >= 0, y <= textView.bounds.height else { continue }
             rows.append(LineNumberGutter.Row(line: i + 1, midY: y))
         }
         lineNumberGutter.rows = rows
+        lineNumberGutter.foldMarks = foldColumnWidth > 0
+            ? Dictionary(uniqueKeysWithValues: foldMarks(lines: rows.map { $0.line - 1 }).map { ($0.key + 1, $0.value) }) : [:]
         lineNumberGutter.setNeedsDisplay()
     }
+
+    /// The gutter's fold column: only for a language that folds.
+    private var foldColumnWidth: CGFloat { foldingAvailable ? LineNumberGutter.foldColumnWidth : 0 }
 
     /// The text's side insets for the gutter and Readable Width; set before
     /// anything reads textContainerInset (the unwrapped content width).
     @discardableResult
     private func layoutTextInsets() -> (CGFloat, (left: CGFloat, right: CGFloat, gutterX: CGFloat)) {
         let font = UIFont.monospacedSystemFont(ofSize: max(10, (textView.font?.pointSize ?? 13) * 0.85), weight: .regular)
-        let width = showLineNumbers ? LineNumberGutter.width(lineCount: lineIndex.lineCount, font: font) : 0
+        let width = showLineNumbers ? LineNumberGutter.width(lineCount: lineIndex.lineCount, font: font) + foldColumnWidth : 0
         let insets = textInsets(gutterWidth: width)
         var edge = textView.textContainerInset
         if abs(edge.left - insets.left) > 0.5 || abs(edge.right - insets.right) > 0.5 {
@@ -3811,6 +3846,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(toggleBookmarkMenu(_:)) { return true }
         if action == #selector(nextBookmarkMenu(_:)) || action == #selector(previousBookmarkMenu(_:))
             || action == #selector(clearBookmarksMenu(_:)) { return !bookmarks.isEmpty }
+        if Self.foldingActions.contains(action) { return foldingMenuState.fold }
+        if action == #selector(unfoldMenu(_:)) { return foldingMenuState.unfold }
+        if action == #selector(unfoldAllMenu(_:)) { return foldingMenuState.unfoldAll }
         if action == #selector(showStatistics) { return true }
         if action == #selector(toggleCheckSpelling) || action == #selector(toggleCheckGrammar) { return true }
         if action == #selector(checkScriptForRisks) { return canCheckScript }
@@ -4341,6 +4379,13 @@ final class EditorDocumentTextView: UITextView {
     var onTypewriterScroll: (() -> Bool)?
     private var keyboardEdit = false
     private(set) var isPasting = false
+    /// An arrow (or Home, End, Page Up / Down) key is down: selection
+    /// changes are key moves (folding skips hidden text rather than opening it).
+    private(set) var keyNavigating = false
+    private static let navigationKeys: Set<UIKeyboardHIDUsage> = [
+        .keyboardLeftArrow, .keyboardRightArrow, .keyboardUpArrow, .keyboardDownArrow,
+        .keyboardHome, .keyboardEnd, .keyboardPageUp, .keyboardPageDown,
+    ]
 
     override var keyCommands: [UIKeyCommand]? {
         guard markdownKeysEnabled?() == true else { return super.keyCommands }
@@ -4395,8 +4440,19 @@ final class EditorDocumentTextView: UITextView {
         super.scrollRangeToVisible(range)
     }
 
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.key.map { Self.navigationKeys.contains($0.keyCode) } ?? false }) { keyNavigating = true }
+        super.pressesBegan(presses, with: event)
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        super.pressesCancelled(presses, with: event)
+        keyNavigating = false
+    }
+
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         super.pressesEnded(presses, with: event)
+        keyNavigating = false
         if presses.contains(where: { press in
             guard let key = press.key else { return false }
             return [.keyboardLeftArrow, .keyboardRightArrow, .keyboardUpArrow, .keyboardDownArrow, .keyboardDeleteForward].contains(key.keyCode)

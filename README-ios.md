@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.4.5 (13), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.4.6 (14), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -48,6 +48,7 @@ Source files can be added in Xcode or Finder: `ios/Owlink`,
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
 - Mark All / Clear Marks (the ⋯ menu, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
 - Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
+- Code folding (0.4.6), as on the Mac: Fold, Unfold, Fold All, Unfold All and Fold to Level 1–3 are in the ⋯ menu's Folding submenu (and on iPad Text › Folding, with `⌥⌘←`, `⌥⌘→`, `⌥⇧⌘←` and `⌥⇧⌘→`). Languages that fold show ▾ beside each foldable line in the gutter and ▸ on a folded one; tap it to fold or unfold, or tap the "⋯ N lines" pill. Folded text is only hidden: save, undo, find, copy, print and export see all of it, and arrow keys step over a fold. Plain text, CSV, diffs, batch, .reg, HTML and XML don't fold, and a large document turns folding off. Folds aren't kept when the document closes.
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
   and Find TODOs in the edit and document menus. Results stay on the device.
 - Statistics: word count in the status line, document and selection counts,

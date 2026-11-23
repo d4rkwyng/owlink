@@ -310,6 +310,20 @@ unchanged storage, typing at and in a fold, undo, Find, Go to Line, F2,
 Markdown, Python, plain text and large mode, with snapshots in dark and
 light.
 
+**iOS (0.4.6, ios/Owlink/Folding.swift).** The same hiding: a
+`FoldingController` per editor, made on the first fold, as the
+`NSTextContentStorage` delegate of the editor's TextKit 2 `UITextView`
+(the previous delegate is kept and asked too). Line helpers shared with it
+are in CedricCore/FoldLines.swift (`FoldLinesTests`). The ⋯ menu's Folding
+submenu and iPad Text › Folding hold the commands; the line-number gutter
+gets a 14 pt fold column (▾ on every foldable line, as there is no hover;
+▸ on folded ones) and skips hidden lines; the "⋯ N lines" pill is a button
+in the text view. UIKit reports a selection change after the fact, so a
+key move is told apart by an arrow, Home, End or Page key being down
+(`EditorDocumentTextView.keyNavigating`). Folds keep the gutter on (as
+bookmarks do). There is no per-document session on iOS, so folds aren't
+restored. `EditorFoldingTests` (snapshot target, no window needed).
+
 **Not done.** Split view shares folds between panes (hiding is per
 content storage; per-pane folds would need per-layout-manager element
 filtering, which the delegate doesn't offer). HTML/XML tag folding; JavaScript regex literals aren't

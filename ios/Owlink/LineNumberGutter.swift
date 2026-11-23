@@ -21,6 +21,15 @@ final class LineNumberGutter: UIView {
     var bookmarkColor: UIColor = .tintColor
     /// A tap on a row: its 1-based line (toggles its bookmark).
     var onTapLine: ((Int) -> Void)?
+    /// Folding: the column at the right edge (0: the language doesn't
+    /// fold), the 1-based lines' marks (▾ can fold, ▸ folded), and a tap in
+    /// the column (false: nothing folds there; the tap toggles the bookmark).
+    static let foldColumnWidth: CGFloat = 14
+    var foldColumn: CGFloat = 0
+    var foldMarks: [Int: FoldMark] = [:]
+    var foldColor: UIColor = .secondaryLabel
+    var foldedColor: UIColor = .label
+    var onTapFold: ((Int) -> Bool)?
 
     /// Width for `lineCount` lines in `font`, with room to breathe on the right.
     static func width(lineCount: Int, font: UIFont) -> CGFloat {
@@ -52,9 +61,46 @@ final class LineNumberGutter: UIView {
     /// The 1-based lines shown with a bookmark marker (for tests).
     var markedRows: [Int] { rows.map(\.line).filter { bookmarked.contains($0) } }
 
+    /// The 1-based lines shown with a fold mark, and which (for tests).
+    var foldMarkedRows: [Int: FoldMark] {
+        guard foldColumn > 0 else { return [:] }
+        return foldMarks.filter { m in m.value != .none && rows.contains { $0.line == m.key } }
+    }
+
+    /// Whether `x` is in the fold column (a little wider for a finger).
+    func inFoldColumn(_ x: CGFloat) -> Bool { foldColumn > 0 && x >= bounds.width - foldColumn - 6 }
+
     @objc private func tapped(_ tap: UITapGestureRecognizer) {
-        guard tap.state == .ended, let line = line(at: tap.location(in: self)) else { return }
+        guard tap.state == .ended else { return }
+        handleTap(at: tap.location(in: self))
+    }
+
+    /// A tap at `p`: a mark in the fold column folds or unfolds its line,
+    /// anything else toggles the line's bookmark.
+    func handleTap(at p: CGPoint) {
+        guard let line = line(at: p) else { return }
+        if inFoldColumn(p.x), foldMarks[line].map({ $0 != .none }) == true, onTapFold?(line) == true { return }
         onTapLine?(line)
+    }
+
+    /// A fold triangle: pointing right on a folded line, down on one that can fold.
+    private func drawFoldMark(_ m: FoldMark, midY: CGFloat) {
+        let cx = bounds.width - foldColumn / 2 - 1
+        let s: CGFloat = 3.5
+        let p = UIBezierPath()
+        if m == .folded {
+            p.move(to: CGPoint(x: cx - s * 0.7, y: midY - s))
+            p.addLine(to: CGPoint(x: cx + s * 0.9, y: midY))
+            p.addLine(to: CGPoint(x: cx - s * 0.7, y: midY + s))
+            foldedColor.setFill()
+        } else {
+            p.move(to: CGPoint(x: cx - s, y: midY - s * 0.6))
+            p.addLine(to: CGPoint(x: cx + s, y: midY - s * 0.6))
+            p.addLine(to: CGPoint(x: cx, y: midY + s * 0.9))
+            foldColor.setFill()
+        }
+        p.close()
+        p.fill()
     }
 
     override func draw(_ rect: CGRect) {
@@ -79,7 +125,9 @@ final class LineNumberGutter: UIView {
                 UIBezierPath(roundedRect: CGRect(x: 2, y: row.midY - tall / 2 + 1, width: 5, height: tall - 2), cornerRadius: 2).fill()
             }
             let s = String(row.line) as NSString
-            s.draw(in: CGRect(x: 2, y: row.midY - h / 2, width: bounds.width - 8, height: h + 1), withAttributes: attrs)
+            let right: CGFloat = foldColumn > 0 ? foldColumn + 2 : 8
+            s.draw(in: CGRect(x: 2, y: row.midY - h / 2, width: bounds.width - right, height: h + 1), withAttributes: attrs)
+            if foldColumn > 0, let m = foldMarks[row.line], m != .none { drawFoldMark(m, midY: row.midY) }
         }
     }
 }

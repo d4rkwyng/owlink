@@ -1,0 +1,297 @@
+import XCTest
+import UIKit
+import CedricCore
+
+/// Code folding without a drawn window: the controller's state and its
+/// TextKit 2 hiding, the gutter's fold column, and the menu's enablement.
+@MainActor
+final class EditorFoldingTests: XCTestCase {
+    // Lines: 0 "func a() {", 1 "    one()", 2 "    if x {", 3 "        two()", 4 "    }", 5 "}", 6 "tail", 7 "".
+    private let swift = "func a() {\n    one()\n    if x {\n        two()\n    }\n}\ntail\n"
+
+    private func textView(_ text: String) -> EditorDocumentTextView {
+        let tv = EditorDocumentTextView(usingTextLayoutManager: true)
+        tv.frame = CGRect(x: 0, y: 0, width: 600, height: 800)
+        tv.text = text
+        return tv
+    }
+
+    private func editor(_ text: String, _ language: Language = .swift, ext: String = "swift") -> EditorViewController {
+        let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext))
+        doc.language.choose(language)
+        doc.text = text
+        let editor = EditorViewController(document: doc)
+        editor.loadViewIfNeeded()
+        return editor
+    }
+
+    private func caret(_ editor: EditorViewController, line: Int) {
+        editor.textView.selectedRange = NSRange(location: editor.lineIndex.starts[line], length: 0)
+    }
+
+    /// The offsets of the paragraphs TextKit enumerates (asks the delegate).
+    private func enumeratedParagraphs(_ tv: UITextView) -> [Int] {
+        guard let cm = tv.textLayoutManager?.textContentManager else { return [] }
+        var out: [Int] = []
+        cm.enumerateTextElements(from: cm.documentRange.location) { e in
+            if let r = e.elementRange { out.append(cm.offset(from: cm.documentRange.location, to: r.location)) }
+            return true
+        }
+        return out
+    }
+
+    private func regions(_ text: String) -> [FoldRegion] {
+        FoldScanner(language: .swift, text: text as NSString, index: LineIndex(text as NSString)).allRegions()
+    }
+
+    // MARK: The controller
+
+    func testFoldHidesParagraphsAndLeavesTextAlone() throws {
+        let tv = textView(swift)
+        let index = LineIndex(swift as NSString)
+        let cs = try XCTUnwrap(tv.textLayoutManager?.textContentManager as? NSTextContentStorage)
+        let before = cs.delegate
+        let allParagraphs = enumeratedParagraphs(tv)
+        XCTAssertTrue(allParagraphs.contains(index.starts[3]))
+        let f = FoldingController(textView: tv)
+        f.fold([FoldRegion(header: 2, last: 3)], index: index)
+        XCTAssertTrue(f.isInstalled)
+        XCTAssertTrue(cs.delegate === f)
+        XCTAssertEqual(f.state.folds, [NSRange(location: index.starts[3], length: index.starts[4] - index.starts[3])])
+        XCTAssertEqual(enumeratedParagraphs(tv), allParagraphs.filter { $0 != index.starts[3] })
+        // Only hidden: the storage (save, copy, find, print, export) has all of it.
+        XCTAssertEqual(tv.text, swift)
+        XCTAssertEqual((tv.text as NSString).substring(with: NSRange(location: index.starts[1], length: index.starts[6] - index.starts[1])),
+                       "    one()\n    if x {\n        two()\n    }\n}\n")
+        f.unfold(f.state.folds)
+        XCTAssertTrue(f.isEmpty)
+        XCTAssertFalse(f.isInstalled)
+        XCTAssertTrue(cs.delegate === before)
+        XCTAssertEqual(enumeratedParagraphs(tv), allParagraphs)
+    }
+
+    func testNestedFoldsAndUnfoldAll() {
+        let tv = textView(swift)
+        let index = LineIndex(swift as NSString)
+        let all = enumeratedParagraphs(tv)
+        let f = FoldingController(textView: tv)
+        f.fold(regions(swift), index: index)
+        XCTAssertEqual(f.state.folds.count, 2)
+        XCTAssertEqual(f.state.headerLines(index), [0, 2])
+        XCTAssertEqual(enumeratedParagraphs(tv), all.filter { !(index.starts[1]..<index.starts[5]).contains($0) })
+        // The outer pill opens the outer fold; the inner stays folded.
+        f.unfold(f.state.folds(startingAt: index.starts[1]))
+        XCTAssertEqual(f.state.headerLines(index), [2])
+        f.fold(regions(swift), index: index)
+        f.unfoldAll()
+        XCTAssertTrue(f.isEmpty)
+        XCTAssertEqual(tv.text, swift)
+    }
+
+    func testCaretInFoldedTextMovesToHeader() {
+        let tv = textView(swift)
+        let index = LineIndex(swift as NSString)
+        tv.selectedRange = NSRange(location: index.starts[3] + 4, length: 0)
+        let f = FoldingController(textView: tv)
+        f.fold([FoldRegion(header: 2, last: 3)], index: index)
+        XCTAssertEqual(tv.selectedRange, NSRange(location: index.starts[3] - 1, length: 0))
+    }
+
+    func testKeyMovesSkipAndOtherSelectionsReveal() {
+        let tv = textView(swift)
+        let index = LineIndex(swift as NSString)
+        let f = FoldingController(textView: tv)
+        let headerEnd = index.starts[3] - 1
+        tv.selectedRange = NSRange(location: headerEnd, length: 0)
+        f.selectionChanged(byKey: false)
+        f.fold([FoldRegion(header: 2, last: 3)], index: index)
+        // → from the end of the header lands in the fold: it skips past.
+        tv.selectedRange = NSRange(location: index.starts[3], length: 0)
+        f.selectionChanged(byKey: true)
+        XCTAssertEqual(tv.selectedRange, NSRange(location: index.starts[4], length: 0))
+        XCTAssertFalse(f.isEmpty)
+        // ← from the line after: back to the end of the header.
+        tv.selectedRange = NSRange(location: index.starts[4] - 1, length: 0)
+        f.selectionChanged(byKey: true)
+        XCTAssertEqual(tv.selectedRange, NSRange(location: headerEnd, length: 0))
+        // A selection that covers the whole fold leaves it folded.
+        tv.selectedRange = NSRange(location: index.starts[2], length: index.starts[5] - index.starts[2])
+        f.selectionChanged(byKey: false)
+        XCTAssertFalse(f.isEmpty)
+        // Find or Go to Line landing inside opens it.
+        tv.selectedRange = NSRange(location: index.starts[3] + 2, length: 3)
+        f.selectionChanged(byKey: false)
+        XCTAssertTrue(f.isEmpty)
+        XCTAssertEqual(tv.selectedRange, NSRange(location: index.starts[3] + 2, length: 3))
+    }
+
+    func testEditsShiftOrOpenFolds() {
+        let tv = textView(swift)
+        let index = LineIndex(swift as NSString)
+        let f = FoldingController(textView: tv)
+        f.fold([FoldRegion(header: 2, last: 3)], index: index)
+        let fold = f.state.folds[0]
+        // Typing above shifts it.
+        tv.textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: "// x\n")
+        f.textEdited(oldRange: NSRange(location: 0, length: 0), newLength: 5, storage: tv.textStorage)
+        XCTAssertEqual(f.state.folds, [NSRange(location: fold.location + 5, length: fold.length)])
+        // Typing below leaves it.
+        let end = tv.textStorage.length
+        tv.textStorage.replaceCharacters(in: NSRange(location: end - 5, length: 0), with: "z")
+        f.textEdited(oldRange: NSRange(location: end - 5, length: 0), newLength: 1, storage: tv.textStorage)
+        XCTAssertEqual(f.state.folds, [NSRange(location: fold.location + 5, length: fold.length)])
+        // Typing inside opens it.
+        let inside = fold.location + 5 + 2
+        tv.textStorage.replaceCharacters(in: NSRange(location: inside, length: 0), with: "q")
+        f.textEdited(oldRange: NSRange(location: inside, length: 0), newLength: 1, storage: tv.textStorage)
+        XCTAssertTrue(f.isEmpty)
+    }
+
+    func testPillLabels() {
+        let index = LineIndex(swift as NSString)
+        XCTAssertEqual(FoldingController.label(for: NSRange(location: index.starts[3], length: index.starts[4] - index.starts[3]), index),
+                       "⋯ 1 line")
+        XCTAssertEqual(FoldingController.label(for: NSRange(location: index.starts[1], length: index.starts[5] - index.starts[1]), index),
+                       "⋯ 4 lines")
+    }
+
+    // MARK: The gutter
+
+    func testGutterFoldColumnTapsFoldOrBookmark() {
+        let g = LineNumberGutter(frame: CGRect(x: 0, y: 0, width: 50, height: 200))
+        g.rows = [.init(line: 1, midY: 10), .init(line: 2, midY: 30), .init(line: 3, midY: 50)]
+        g.foldMarks = [1: .open, 3: .folded]
+        var folded: [Int] = [], bookmarked: [Int] = []
+        g.onTapFold = { folded.append($0); return true }
+        g.onTapLine = { bookmarked.append($0) }
+        // No fold column (plain text): marks aren't shown, taps bookmark.
+        XCTAssertEqual(g.foldMarkedRows, [:])
+        g.handleTap(at: CGPoint(x: 45, y: 10))
+        XCTAssertEqual(folded, [])
+        XCTAssertEqual(bookmarked, [1])
+        g.foldColumn = LineNumberGutter.foldColumnWidth
+        XCTAssertEqual(g.foldMarkedRows, [1: .open, 3: .folded])
+        g.handleTap(at: CGPoint(x: 45, y: 10))
+        g.handleTap(at: CGPoint(x: 45, y: 50))
+        XCTAssertEqual(folded, [1, 3])
+        // The number itself, or a line with no mark, still toggles a bookmark.
+        g.handleTap(at: CGPoint(x: 10, y: 10))
+        g.handleTap(at: CGPoint(x: 45, y: 30))
+        XCTAssertEqual(bookmarked, [1, 1, 2])
+        // Nothing folds after all: the bookmark.
+        g.onTapFold = { _ in false }
+        g.handleTap(at: CGPoint(x: 45, y: 50))
+        XCTAssertEqual(bookmarked, [1, 1, 2, 3])
+    }
+
+    // MARK: The editor and its menu
+
+    private func menuItems(_ editor: EditorViewController) -> [String: UIAction] {
+        var out: [String: UIAction] = [:]
+        func walk(_ e: [UIMenuElement]) {
+            for x in e {
+                if let a = x as? UIAction, let id = a.accessibilityIdentifier { out[id] = a }
+                if let m = x as? UIMenu { walk(m.children) }
+            }
+        }
+        walk(editor.foldingMenu().children)
+        return out
+    }
+
+    private func enabled(_ editor: EditorViewController) -> Set<String> {
+        Set(menuItems(editor).filter { !$0.value.attributes.contains(.disabled) }.keys)
+    }
+
+    func testMenuHasEveryCommand() {
+        let ids = Set(menuItems(editor(swift)).keys)
+        XCTAssertEqual(ids, ["editor.menu.fold", "editor.menu.unfold", "editor.menu.foldAll", "editor.menu.unfoldAll",
+                             "editor.menu.foldToLevel1", "editor.menu.foldToLevel2", "editor.menu.foldToLevel3"])
+        XCTAssertTrue(editor(swift).moreMenuItems().contains { ($0 as? UIMenu)?.title == String(localized: "Folding") })
+    }
+
+    func testMenuEnablementFollowsState() {
+        let e = editor(swift)
+        XCTAssertEqual(enabled(e), ["editor.menu.fold", "editor.menu.foldAll", "editor.menu.foldToLevel1",
+                                    "editor.menu.foldToLevel2", "editor.menu.foldToLevel3"])
+        XCTAssertFalse(e.canPerformAction(#selector(EditorViewController.unfoldAllMenu(_:)), withSender: nil))
+        caret(e, line: 3)
+        e.foldAtCaret()
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [2])
+        // The caret went to the header line, so Unfold applies there.
+        XCTAssertEqual(e.caretLine, 2)
+        XCTAssertTrue(enabled(e).isSuperset(of: ["editor.menu.unfold", "editor.menu.unfoldAll"]))
+        XCTAssertTrue(e.canPerformAction(#selector(EditorViewController.unfoldAllMenu(_:)), withSender: nil))
+        e.unfoldAtCaret()
+        XCTAssertFalse(e.hasFolds)
+        XCTAssertEqual(e.textView.text, swift)
+    }
+
+    func testFoldAllAndLevels() {
+        let e = editor(swift)
+        e.foldAll()
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [0, 2])
+        e.foldAll(level: 2)
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [2])
+        e.unfoldAll()
+        XCTAssertFalse(e.hasFolds)
+        // A gutter mark toggles one region.
+        XCTAssertTrue(e.toggleFold(line: 0))
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [0])
+        XCTAssertTrue(e.toggleFold(line: 0))
+        XCTAssertFalse(e.hasFolds)
+        XCTAssertFalse(e.toggleFold(line: 6))
+        XCTAssertEqual(e.textView.text, swift)
+    }
+
+    func testGutterMarks() {
+        let e = editor(swift)
+        XCTAssertEqual(e.foldMarks(lines: Array(0..<8)), [0: .open, 2: .open])
+        _ = e.toggleFold(line: 2)
+        XCTAssertEqual(e.foldMarks(lines: [0, 2, 5]), [0: .open, 2: .folded])
+    }
+
+    func testLanguagesThatDontFold() {
+        for (language, ext) in [(Language.plain, "txt"), (.csv, "csv"), (.diff, "diff"), (.html, "html")] {
+            let e = editor("a {\n  b\n}\n# h\n  x\n", language, ext: ext)
+            XCTAssertFalse(e.foldingAvailable, "\(language)")
+            XCTAssertTrue(enabled(e).isEmpty, "\(language)")
+            XCTAssertEqual(e.foldMarks(lines: [0, 1, 2, 3]), [:])
+            XCTAssertFalse(e.toggleFold(line: 0))
+            e.foldAll()
+            XCTAssertFalse(e.hasFolds)
+        }
+    }
+
+    func testMarkdownHeadingsFold() {
+        let md = "# A\ntext\n## B\nmore\n```\n# not a heading\n```\n# C\n"
+        let e = editor(md, .markdown, ext: "md")
+        e.foldAll()
+        XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [0, 2])
+        XCTAssertEqual(e.textView.text, md)
+    }
+
+    func testLanguageChangeAndLargeModeTurnFoldingOff() {
+        let e = editor(swift)
+        e.foldAll()
+        XCTAssertTrue(e.hasFolds)
+        e.setLanguage(.plain)
+        XCTAssertFalse(e.hasFolds)
+        XCTAssertFalse(e.foldingAvailable)
+
+        let long = "func a() {\n" + String(repeating: "x", count: LargeDocument.lineThreshold + 10) + "\n}\n"
+        let big = editor(long)
+        XCTAssertFalse(big.foldingAvailable)
+        XCTAssertTrue(enabled(big).isEmpty)
+        big.foldAll()
+        XCTAssertFalse(big.hasFolds)
+    }
+
+    func testReloadDropsFolds() {
+        let e = editor(swift)
+        e.foldAll()
+        e.document.text = swift + "more\n"
+        e.document.onReload?()
+        XCTAssertFalse(e.hasFolds)
+        XCTAssertEqual(e.folding?.isInstalled, false)
+    }
+}
