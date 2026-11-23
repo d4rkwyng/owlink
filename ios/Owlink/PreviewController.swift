@@ -589,6 +589,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     /// The last link decided (for tests and checks).
     private(set) var lastLinkAction: PreviewLinkAction?
+    /// The page last served to the local preview (for tests and checks).
+    var servedPageHTML: String? { files.pageHTML }
 
     /// A clicked link in the document's page. A `cedric-doc:` link counts
     /// only as the file `PreviewFiles.linkTarget` confines it to (the
@@ -785,9 +787,13 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         case .local(let file, let root, let fragment):
             browser.isHidden = true
             web.isHidden = false
-            // The same rules again (the file may have changed since the click).
-            guard case .openInPreview = PreviewLinkAction.previewAction(for: file, folder: root, command: false, isText: Self.opensInOwlink),
-                  let data = try? Data(contentsOf: file), let text = TextCodec.decode(data)?.text else {
+            // The same rules again (the file may have changed since the
+            // click), checked and read by the same symlink-free path, so a
+            // link swapped in between can't point the read outside `root`
+            // (as on the Mac). A symlink is judged by its target's name too.
+            let target = PreviewFolder.resolved(file)
+            guard case .openInPreview = PreviewLinkAction.previewAction(for: target, folder: root, command: false, isText: Self.opensInOwlink),
+                  let data = try? Data(contentsOf: target), let text = TextCodec.decode(data)?.text else {
                 notice(String(localized: "Could not read the preview document."))
                 break
             }

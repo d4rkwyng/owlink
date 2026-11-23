@@ -102,6 +102,63 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertTrue(page.hasPrefix("<meta http-equiv=\"Content-Security-Policy\" content=\"\(PreviewController.csp)\">"))
     }
 
+    /// A linked document is checked and read by its resolved path (Mac
+    /// 87519e6): a symlink named like Markdown but pointing at a plain
+    /// text file (the editor's, not the preview's) is judged by its target
+    /// and refused; before, the link's own name let it render.
+    func testLinkedDocumentIsCheckedAndReadByItsResolvedPath() throws {
+        let (root, doc) = try tree()
+        let fm = FileManager.default
+        try fm.createSymbolicLink(at: root.appendingPathComponent("alias.md"), withDestinationURL: root.appendingPathComponent("notes.txt"))
+        try fm.createSymbolicLink(at: root.appendingPathComponent("good.md"), withDestinationURL: root.appendingPathComponent("other.md"))
+        let preview = PreviewController()
+        preview.loadsWeb = false
+        preview.documentURL = doc
+        preview.show(markdown: "x", palette: EditorPalettes.light)
+        preview.push(.local(root.appendingPathComponent("good.md"), root, nil))
+        XCTAssertNil(preview.lastNotice, "a symlink to a note inside the folder still renders")
+        preview.goHome()
+        preview.push(.local(root.appendingPathComponent("alias.md"), root, nil))
+        XCTAssertEqual(preview.lastNotice, String(localized: "Could not read the preview document."),
+                       "a .md symlink to a .txt is judged by the .txt")
+    }
+
+    /// No page JavaScript or network for the local preview, whatever the
+    /// way a page got there: a link, Back, Forward, This Document, or the
+    /// document re-rendered after a change on disk (Mac 92f1c7e, 4c5bbfe:
+    /// iOS has no JavaScript/Network switch, so there is nothing to restore).
+    func testJavaScriptAndNetworkStayOffAcrossNavigationAndReloads() async throws {
+        let (root, doc) = try tree()
+        let preview = PreviewController()
+        host(preview)
+        preview.loadsWeb = false
+        preview.documentURL = doc
+        func check(_ step: String) async throws {
+            try await waitFor("\(step) served") { preview.servedPageHTML != nil }
+            XCTAssertFalse(preview.web.configuration.defaultWebpagePreferences.allowsContentJavaScript, step)
+            let page = try XCTUnwrap(preview.servedPageHTML, step)
+            XCTAssertTrue(page.contains("script-src 'none'"), step)
+            XCTAssertTrue(page.contains("connect-src 'none'"), step)
+            XCTAssertFalse(page.contains("<script"), step)
+        }
+        preview.show(markdown: "# Home\n\n<script>x()</script>", palette: EditorPalettes.light)
+        try await check("home")
+        preview.handleLink(try link("page.html", in: root), command: false)
+        try await waitFor("linked page") { preview.servedPageHTML?.contains("Page") == true }
+        try await check("linked HTML")
+        preview.goBack()
+        try await waitFor("back home") { preview.servedPageHTML?.contains("Home") == true }
+        try await check("Back")
+        preview.goForward()
+        try await waitFor("forward") { preview.servedPageHTML?.contains("Page") == true }
+        try await check("Forward")
+        // The document changes on disk while away, then This Document.
+        preview.show(markdown: "# Changed\n\n<script>y()</script>", palette: EditorPalettes.light)
+        preview.goHome()
+        try await waitFor("This Document") { preview.servedPageHTML?.contains("Changed") == true }
+        try await check("This Document after a reload")
+    }
+
     // MARK: Policies
 
     func testIsolatedPolicyCancelsLocalAndOtherSchemes() throws {
