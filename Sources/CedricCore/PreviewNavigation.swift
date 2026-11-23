@@ -72,8 +72,9 @@ public enum PreviewNavigation: Equatable, Sendable {
 
     static func isPageScheme(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(), pageSchemes.contains(scheme) else { return false }
-        // `about:` only as the blank page an untitled document is shown at.
-        return scheme != "about" || url.absoluteString.lowercased().hasPrefix("about:blank")
+        // `about:` only as the blank page an untitled document is shown at
+        // (exactly: not `about:blankevil`), plus an in-page fragment.
+        return scheme != "about" || split(url).page == "about:blank"
     }
 
     /// Whether `url` is the page itself plus a fragment (an in-page link).

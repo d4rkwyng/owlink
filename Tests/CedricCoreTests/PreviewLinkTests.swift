@@ -151,6 +151,21 @@ import Testing
         #expect(decide(page.absoluteString + "#x", expected: page, loading: true) == .cancel)
     }
 
+    // Grok 4.7 NIT: `about:` is a page scheme only as exactly the blank
+    // page (plus a fragment), never another name that starts with it.
+    @Test func aboutIsAPageSchemeOnlyAsExactlyBlank() {
+        for s in ["about:blank", "ABOUT:BLANK", "about:blank#x", "about:blank%23x"] {
+            #expect(PreviewNavigation.isPageScheme(URL(string: s)!), "\(s)")
+        }
+        for s in ["about:blankevil", "about:blank-x", "about:blanks#x", "about:blankevil%23x", "about:blank?x", "about:blank/x", "about:srcdoc", "about:"] {
+            guard let u = URL(string: s) else { continue }
+            #expect(!PreviewNavigation.isPageScheme(u), "\(s)")
+            #expect(!PreviewNavigation.allowsResponse(url: u, mainFrame: true), "\(s)")
+            #expect(decide(url: u, page: u, expected: u, loading: true) == .cancel, "\(s)")
+            #expect(decide(url: u, click: true, page: URL(string: "about:blank")) == .route, "\(s)")
+        }
+    }
+
     @Test func onlyThePagesOwnResponseIsShown() {
         #expect(PreviewNavigation.allowsResponse(url: page, mainFrame: true))
         #expect(PreviewNavigation.allowsResponse(url: URL(string: "about:blank"), mainFrame: true))
