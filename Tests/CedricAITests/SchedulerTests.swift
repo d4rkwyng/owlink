@@ -36,8 +36,9 @@ import CedricCore
         await rig.scheduler.contextChanged(context(gen: 1, doc: doc))
         #expect(await eventually { rig.clock.pendingSleepers == 1 })
         await rig.scheduler.updateConfig(.init(pauseDelay: 30, minInterval: 90, timeout: 20, automatic: false))
-        try? await Task.sleep(nanoseconds: 40_000_000)
-        #expect(rig.clock.pendingSleepers == 0)
+        // Polled, not a fixed 40 ms: the retimed wait ends on its own task,
+        // which a busy runner can start late.
+        #expect(await eventually { rig.clock.pendingSleepers == 0 })
         #expect(rig.provider.calls.isEmpty)
         await rig.scheduler.updateConfig(.init(pauseDelay: 1, minInterval: 10, timeout: 20, automatic: true))
         await rig.advance(1)

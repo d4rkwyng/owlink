@@ -196,16 +196,16 @@ import Testing
             let ctx = OwlContext(fileName: name, language: language, text: text, textStart: 0, visibleRange: NSRange(location: 0, length: 0),
                                  selection: nil, documentID: UUID(), editGeneration: 0)
             let lines = RulesHintProvider.lines(ns)
-            var times: [TimeInterval] = []
-            for _ in 0..<7 {
-                let start = Date()
+            // The best of 7 in this thread's CPU time, scaled by how slow the
+            // machine is right now (see `Timing`). Even the best of 7 on the
+            // wall clock came out at 63–165 ms on a slow macos-26 runner
+            // (run 45258714905), against 1–6 ms on a dev Mac.
+            let r = Timing.best(of: 7) {
                 Self.rules.languageHints(ctx, facts: Self.timingFacts, text: ns, lines: lines) { _, _, _, _, _, _ in }
-                times.append(Date().timeIntervalSince(start))
             }
-            // The best of 7: other tests running in parallel only ever add time.
-            let best = times.min()!
-            print("owl-rules-timing \(lang) \(String(format: "%.2f", best * 1000)) ms")
-            #expect(best < Self.budget, "\(lang): \(best * 1000) ms per window")
+            print("owl-rules-timing \(lang) \(r.description)")
+            #expect(r.scaled < Self.budget, "\(lang): \(r.description) per window")
+            #expect(r.wall < Self.wallGuard, "\(lang): \(r.description) per window")
         }
     }
 
@@ -227,6 +227,9 @@ import Testing
         return 0.005
         #endif
     }
+
+    /// The wall clock's bound, against a blow-up only: 40 times the budget.
+    static var wallGuard: TimeInterval { 40 * budget }
 
     // MARK: Clean corpus
 

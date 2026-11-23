@@ -84,21 +84,28 @@ import Testing
     // MARK: 4. Markdown on crafted input
 
     /// Renders on a thread with a main-thread-sized stack (as Copy as HTML
-    /// does; the preview's own queue is checked in release builds); seconds.
-    static func timedRender(_ s: String) -> (html: String, seconds: Double) {
-        final class Box: @unchecked Sendable { var html = ""; var seconds = 0.0 }
+    /// does; the preview's own queue is checked in release builds). Returns
+    /// wall-clock seconds, the render thread's CPU seconds, and that
+    /// thread's `Timing.slowdown()`: the larger of the two measured just
+    /// before and just after the render, since a render of several seconds
+    /// may move between fast and slow cores.
+    static func timedRender(_ s: String) -> (html: String, seconds: Double, cpu: Double, slowdown: Double) {
+        final class Box: @unchecked Sendable { var html = ""; var seconds = 0.0; var cpu = 0.0; var slowdown = 1.0 }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         let t = Thread {
-            let start = Date()
+            let before = Timing.slowdown()
+            let start = Date(), cpuStart = Timing.threadCPU()
             box.html = Markdown.render(s)
+            box.cpu = Timing.threadCPU() - cpuStart
             box.seconds = Date().timeIntervalSince(start)
+            box.slowdown = max(before, Timing.slowdown())
             done.signal()
         }
         t.stackSize = 16 << 20
         t.start()
         done.wait()
-        return (box.html, box.seconds)
+        return (box.html, box.seconds, box.cpu, box.slowdown)
     }
 
     /// Generous: a debug build on a loaded CI runner. Before the fix these
@@ -137,7 +144,14 @@ import Testing
         let list = (0..<2000).map { String(repeating: "  ", count: $0) + "- item\($0)" }.joined(separator: "\n")
         let r = Self.timedRender(list)
         // 4 MB of input: about 0.7 s in a release build, several in a debug one.
-        #expect(r.seconds < 30, "2 000-deep list: \(r.seconds) s")
+        // The render thread's CPU time, scaled by the slowdown measured on
+        // that thread (see `Timing`), not the wall clock: on a slow macos-26
+        // runner the wall clock reached 42 s (run 45258714905). The 30 s
+        // budget is unchanged. The wall clock keeps a wide bound against a
+        // blow-up; the uncapped renderer took 45 s in a release build.
+        let scaled = r.cpu / r.slowdown
+        #expect(scaled < 30, "2 000-deep list: \(scaled) s scaled (\(r.cpu) s CPU, slowdown \(r.slowdown)×, wall \(r.seconds) s)")
+        #expect(r.seconds < 120, "2 000-deep list: \(r.seconds) s wall")
         let uls = r.html.components(separatedBy: "<ul").count - 1
         #expect(uls == MarkdownRenderer.maxNesting + 1, "lists nest \(MarkdownRenderer.maxNesting) deep, then text: \(uls)")
         #expect(r.html.contains("item1999"), "the deeper items are still shown, as text")
