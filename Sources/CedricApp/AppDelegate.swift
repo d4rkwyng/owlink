@@ -128,9 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         quitsOnLastClose && tabs.isEmpty && viewerTabs.isEmpty
     }
 
-    /// No "save changes?" on quit: unsaved text is kept in the session (and
-    /// comes back with the open tabs when reopen is on, or in Reopen Closed
-    /// Tab when it is off).
+    /// No "save changes?" on quit: unsaved text is kept in the session and
+    /// comes back as open tabs next launch, reopen on or off (with it off,
+    /// only clean files go to Reopen Closed Tab: SessionReopenPolicy.plan).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Closing the last window already saved (quitAfterLastClose / a
         // last-window terminate started from windowShouldClose).
@@ -198,8 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// open, then terminate instead of tearing them down one by one. With
     /// reopen off too: launch then parks the files and reopens unsaved
     /// text (SessionReopenPolicy.plan), where hot-closing each tab would
-    /// leave that text to the closed list's 30-day / 100-tab limits. Returns `false` when the close should be cancelled
-    /// because quit is already under way.
+    /// leave that text to the closed list's 30-day / 100-tab limits.
+    /// Returns `false` when the close should be cancelled because quit is
+    /// already under way.
     func shouldCloseDocumentWindow(_ window: NSWindow) -> Bool? {
         guard !terminating else { return false }
         guard quitsOnLastClose else { return nil }
@@ -225,7 +226,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     /// The red close button on a tabbed window closes the whole group;
-    /// a tab's own close, or ⌘W, closes only that tab.
+    /// a tab's own close, or ⌘W, closes only that tab. AppKit closes the
+    /// group only for a real click (performClick closes just the front
+    /// tab), and every tab's windowShouldClose
+    /// then sees that click as the current event (session-check step 8d).
+    /// Known gap: if this ever missed it, the group's other tabs would be
+    /// hot-closed onto the closed list before the last one quits.
     private func isClosingWholeWindow(_ window: NSWindow) -> Bool {
         let group = window.tabbedWindows ?? [window]
         guard group.count > 1 else { return false }
@@ -382,9 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self.tabs.removeAll { $0 === t }
             // Hot close: remembered for Reopen Closed Tab, unsaved text and all.
             self.rememberClosed(t)
-            // The last document window: quit. Reopen-on keeps this from
-            // usually being reached (windowShouldClose already terminated
-            // with the tabs still open). Reopen-off: the tab stays closed.
+            // The last document window: quit. Only a fallback, for a close
+            // that skipped windowShouldClose (shouldCloseDocumentWindow
+            // already terminated with the tabs still open, reopen on or
+            // off); this tab was hot-closed above and stays closed.
             if last { self.quitAfterLastClose() }
         }
         tabs.append(tab)
