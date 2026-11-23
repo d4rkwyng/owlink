@@ -261,3 +261,37 @@ import Testing
         #expect(PreviewAnchor.fragment(of: link) == "the-part" && PreviewFolder.fileURL(for: link)?.path == file.path)
     }
 }
+
+/// 0.5.2 S1 security read: after a Cancel with page JavaScript on, that
+/// page load asks nothing more, whatever URL its script "clicks".
+@Suite struct ExternalLinkGateTests {
+    @Test func aCancelWithScriptOnSilencesThatLoad() {
+        var g = ExternalLinkGate()
+        #expect(g.asks(load: 3, scriptCanClick: true))
+        g.answered(opened: false, load: 3, scriptCanClick: true)
+        // Any link from the same load (a new URL each time) is dropped.
+        #expect(!g.asks(load: 3, scriptCanClick: true))
+        // A new load (an edit, Refresh, navigating) asks again.
+        #expect(g.asks(load: 4, scriptCanClick: true))
+        #expect(g.asks(load: 2, scriptCanClick: true))
+    }
+
+    @Test func withoutScriptEveryClickAsks() {
+        var g = ExternalLinkGate()
+        g.answered(opened: false, load: 1, scriptCanClick: false)
+        #expect(g.declinedLoad == nil && g.asks(load: 1, scriptCanClick: false))
+        // Declined with script on, then the same load number with script off
+        // (only the user can click then): asks.
+        g.answered(opened: false, load: 1, scriptCanClick: true)
+        #expect(g.asks(load: 1, scriptCanClick: false))
+    }
+
+    @Test func openingDoesNotSilence() {
+        var g = ExternalLinkGate()
+        g.answered(opened: true, load: 5, scriptCanClick: true)
+        #expect(g.asks(load: 5, scriptCanClick: true))
+        // A later Cancel on a new load silences only that load.
+        g.answered(opened: false, load: 6, scriptCanClick: true)
+        #expect(g.asks(load: 5, scriptCanClick: true) && !g.asks(load: 6, scriptCanClick: true) && g.asks(load: 7, scriptCanClick: true))
+    }
+}

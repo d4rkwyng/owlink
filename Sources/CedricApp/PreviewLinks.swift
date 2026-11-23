@@ -35,8 +35,11 @@ extension EditorWindowController {
     }
 
     private func confirmExternalLink(_ url: URL) {
+        // The load and script setting the link was asked from (the page
+        // may reload while the prompt is up).
+        let load = preview?.pageLoads ?? 0, script = preview?.allowJavaScript ?? false
         LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window) { [weak self] opened in
-            self?.preview?.externalLinkAnswered(url, opened: opened)
+            self?.preview?.externalLinkAnswered(opened: opened, load: load, scriptCanClick: script)
         }
     }
 }
@@ -62,9 +65,22 @@ enum LinkPrompt {
         // The whole URL, so a misleading link text can't hide where it goes
         // (bidi and control characters shown as escapes).
         a.informativeText = PromptText.visible(url.absoluteString)
-        a.addButton(withTitle: String(localized: "Open"))
-        a.addButton(withTitle: String(localized: "Cancel"))
+        // Cancel is the default: Return (a newline typed while page script
+        // raised the prompt) and Escape both answer Cancel; Open takes a
+        // deliberate click (or Tab and Space).
+        let openButton = a.addButton(withTitle: String(localized: "Open"))
+        let cancelButton = a.addButton(withTitle: String(localized: "Cancel"))
+        openButton.keyEquivalent = ""
+        cancelButton.keyEquivalent = "\r"
+        let alertWindow = a.window
+        // A button has one key equivalent: Escape is caught for the alert's window here.
+        var escape: Any? = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak cancelButton] e in
+            guard e.window === alertWindow, e.keyCode == 53 else { return e }
+            cancelButton?.performClick(nil)
+            return nil
+        }
         let open: (NSApplication.ModalResponse) -> Void = { r in
+            if let m = escape { NSEvent.removeMonitor(m); escape = nil }
             let yes = r == .alertFirstButtonReturn
             if yes { PreviewLinkLog.open(url) }
             answered(yes)

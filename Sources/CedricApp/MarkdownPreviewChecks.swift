@@ -632,9 +632,14 @@ extension DevChecks {
     /// ⌘-click) scrolls the live document in place; `other.md#part`, a
     /// heading-text fragment, a `[[other#Part]]` wikilink and `page.html#sec`
     /// open in the preview at that heading, and Back/Forward come back to it.
+    /// How `webPrompt` answers: the Cancel button, or the Return or Escape key.
+    enum PromptAnswer { case cancelButton, returnKey, escapeKey }
+
     /// Waits (up to 3 s) for the external-link prompt on the tab's preview,
-    /// expects it to show `url` whole, and answers Cancel.
-    static func webPrompt(_ tab: EditorWindowController, _ url: String, _ name: String) -> (@escaping () -> Void) -> Void {
+    /// expects it to show `url` whole with Cancel as the default button
+    /// (Return) and Open with no key, and answers Cancel (by button or key).
+    static func webPrompt(_ tab: EditorWindowController, _ url: String, _ name: String,
+                          answer: PromptAnswer = .cancelButton) -> (@escaping () -> Void) -> Void {
         { next in
             @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
             let window = tab.previewPane?.window ?? tab.window
@@ -648,8 +653,42 @@ extension DevChecks {
                 let views = sheet.contentView.map(allViews) ?? []
                 let shown = views.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
                 expect(shown.contains("Open this link?") && shown.contains(url), name, shown)
-                views.compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }?.performClick(nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { MainActor.assumeIsolated { next() } }
+                let buttons = views.compactMap { $0 as? NSButton }
+                // NSAlert hands Return to the window's default button cell.
+                let defaultTitle = (sheet.defaultButtonCell as? NSButtonCell)?.title
+                let keys = buttons.filter { !$0.title.isEmpty }.map { "\($0.title)=\($0.keyEquivalent.unicodeScalars.map { String($0.value, radix: 16) })" }
+                expect(defaultTitle == "Cancel" && buttons.first { $0.title == "Open" }?.keyEquivalent == "",
+                       "Cancel is the prompt's default button (Return); Open has no key",
+                       "default \(defaultTitle ?? "none"); " + keys.joined(separator: " "))
+                let openedBefore = PreviewLinkLog.opened.count
+                func key(_ chars: String, _ code: UInt16) -> NSEvent? {
+                    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                     windowNumber: sheet.windowNumber, context: nil, characters: chars,
+                                     charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+                }
+                switch answer {
+                case .cancelButton: buttons.first { $0.title == "Cancel" }?.performClick(nil)
+                case .returnKey:
+                    // A key Return reaches the default button only in the key
+                    // window; when Owlink isn't the active app, press the
+                    // default button instead (what Return does) and say so.
+                    if sheet.isKeyWindow, let e = key("\r", 36) { NSApp.postEvent(e, atStart: false) }
+                    else {
+                        print("check: note: the prompt isn't the key window (Owlink not active): Return pressed as the default button")
+                        sheet.defaultButtonCell?.performClick(nil)
+                    }
+                case .escapeKey: if let e = key("\u{1b}", 53) { NSApp.postEvent(e, atStart: false) }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    MainActor.assumeIsolated {
+                        if answer != .cancelButton {
+                            expect(window?.attachedSheet == nil && PreviewLinkLog.opened.count == openedBefore,
+                                   answer == .returnKey ? "Return answers Cancel: nothing opens" : "Escape answers Cancel: nothing opens",
+                                   "sheet \(window?.attachedSheet != nil) opened \(PreviewLinkLog.opened.map(\.absoluteString))")
+                        }
+                        next()
+                    }
+                }
             }
             poll()
         }
@@ -772,16 +811,61 @@ extension DevChecks {
                 promptsBefore = LinkPrompt.shown
                 droppedBefore = LinkPrompt.dropped
             },
+            // Another web link from the same page load: dropped too (a script
+            // can't loop the prompt by changing the URL).
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 2,
+                       "after a Cancel with JavaScript on, another web link from the same page load doesn't ask either",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
+            },
+            // A new page load asks again.
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown"),
+            sync { livePage = p()?.webView.url; promptsBefore = LinkPrompt.shown; droppedBefore = LinkPrompt.dropped },
             // Another web link, clicked three times at once by script: one prompt, never stacked.
             { next in
                 pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); b.click(); b.click(); 1") { _ in next() }
             },
-            webPrompt(tab, "https://example.invalid/blank", "a target=_blank web link asks first too"),
+            webPrompt(tab, "https://example.invalid/blank", "after a reload, a target=_blank web link asks again", answer: .returnKey),
             sync {
                 expect(LinkPrompt.shown == promptsBefore + 1 && LinkPrompt.dropped >= droppedBefore + 1, "one prompt at a time: the repeats are dropped, not stacked",
                        "shown \(LinkPrompt.shown - promptsBefore) dropped \(LinkPrompt.dropped - droppedBefore)")
                 stayed("and the preview did not load it either")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
             },
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page again", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
+            sync { livePage = p()?.webView.url },
+            click("web"),
+            webPrompt(tab, "https://example.invalid/s1?q=1", "a click asks again on the next load", answer: .escapeKey),
+            sync { stayed("Escape opened nothing") },
             { next in pageJS(tab, "location.href = 'https://example.invalid/script'; 1") { _ in next() } },
             { next in
                 pageJS(tab, "window.open('https://example.invalid/popup'); const f = document.createElement('form'); f.action = 'https://example.invalid/form'; f.method = 'get'; document.body.appendChild(f); f.submit(); 1") { _ in
