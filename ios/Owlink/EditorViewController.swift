@@ -109,6 +109,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     var highlightEngine: HighlightEngine { colorizer.engine }
     /// Fix Typos…, while its card is up.
     var spellStep: SpellStepController?
+    /// Each refreshSpellingMarks(): whether the system's checking was
+    /// toggled to redraw the underlines (for the tests).
+    private(set) var spellingMarkRefreshes: [Bool] = []
     let owl = EditorOwl()
     let hintBar = OwlHintBar()
     private let statusBar = UIView()
@@ -1241,7 +1244,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Markdown that includes fenced code and markup (the Mac skips those).
     func applyProseChecking() {
         let on = proseCheckingApplies
-        let spelling: UITextSpellCheckingType = on && AppSettings.checkSpellingWhileTyping ? .yes : .no
+        let spelling = systemSpelling
         var changed = textView.spellCheckingType != spelling
         textView.spellCheckingType = spelling
         if #available(iOS 27.0, *) {
@@ -1250,6 +1253,26 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             textView.grammarCheckingType = grammar
         }
         if changed, textView.isFirstResponder { textView.reloadInputViews() }
+    }
+
+    /// The system's spelling underlines by the settings: on only for prose
+    /// with "Check spelling while typing" on.
+    var systemSpelling: UITextSpellCheckingType {
+        proseCheckingApplies && AppSettings.checkSpellingWhileTyping ? .yes : .no
+    }
+
+    /// After Ignore All or Learn Word (the Mac's recheckMarks): the system's
+    /// underlines are checked again, so a learned word loses its mark.
+    /// Nothing to do where the system doesn't check (code, data, large mode,
+    /// the setting off); checking is never left off where it should be on.
+    func refreshSpellingMarks() {
+        let wanted = systemSpelling
+        let toggled = wanted == .yes && textView.spellCheckingType == .yes
+        if toggled {
+            textView.spellCheckingType = .no
+            textView.spellCheckingType = .yes
+        }
+        spellingMarkRefreshes.append(toggled)
     }
 
     @objc func toggleCheckSpelling() { AppSettings.checkSpellingWhileTyping.toggle() }

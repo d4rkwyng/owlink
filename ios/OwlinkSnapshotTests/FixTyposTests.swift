@@ -236,6 +236,70 @@ final class FixTyposTests: XCTestCase {
         XCTAssertEqual(s.current?.word, "zorb")
     }
 
+    // MARK: The system's underlines
+
+    func testIgnoreAllAndLearnWordRefreshTheSystemUnderlines() throws {
+        AppSettings.defaults.set(true, forKey: AppSettings.Key.checkSpellingWhileTyping)
+        let md = editor("A zorb, a wrod and a qux.\n")
+        md.applyProseChecking()
+        XCTAssertEqual(md.textView.spellCheckingType, .yes)
+        let checker = FakeChecker(["zorb": [], "wrod": ["word"], "qux": []])
+        let s = try XCTUnwrap(md.startFixTypos(checker: checker))
+        XCTAssertEqual(md.spellingMarkRefreshes, [])
+        s.ignoreAll()
+        XCTAssertEqual(checker.ignored, ["zorb"])
+        XCTAssertEqual(md.spellingMarkRefreshes, [true], "toggled off and on again")
+        XCTAssertEqual(md.textView.spellCheckingType, .yes)
+        s.learn()
+        XCTAssertEqual(checker.learned, ["wrod"])
+        XCTAssertEqual(md.spellingMarkRefreshes, [true, true])
+        XCTAssertEqual(md.textView.spellCheckingType, .yes)
+        // Skip doesn't recheck.
+        s.skip()
+        XCTAssertEqual(md.spellingMarkRefreshes, [true, true])
+        s.done()
+
+        // Code: the system doesn't check, and isn't turned on.
+        let swift = editor("// A zorb and a wrod\n", fileName: "main.swift")
+        XCTAssertEqual(swift.textView.spellCheckingType, .no)
+        let c = try XCTUnwrap(swift.startFixTypos(checker: FakeChecker(["zorb": [], "wrod": ["word"]])))
+        c.ignoreAll()
+        c.learn()
+        XCTAssertEqual(swift.spellingMarkRefreshes, [false, false])
+        XCTAssertEqual(swift.textView.spellCheckingType, .no)
+        c.done()
+
+        // Prose with the setting off: stays off.
+        AppSettings.defaults.set(false, forKey: AppSettings.Key.checkSpellingWhileTyping)
+        let off = editor("A zorb.\n", fileName: "notes.txt")
+        off.applyProseChecking()
+        XCTAssertEqual(off.textView.spellCheckingType, .no)
+        let o = try XCTUnwrap(off.startFixTypos(checker: FakeChecker(["zorb": []])))
+        o.learn()
+        XCTAssertEqual(off.spellingMarkRefreshes, [false])
+        XCTAssertEqual(off.textView.spellCheckingType, .no)
+        o.done()
+    }
+
+    func testLearnWordWithTheSystemCheckerRefreshesTheUnderlines() throws {
+        let language = TextCheckerSpelling.language(for: nil)
+        guard language.hasPrefix("en") else { throw XCTSkip("No English checker in this simulator (\(language)).") }
+        AppSettings.defaults.set(true, forKey: AppSettings.Key.checkSpellingWhileTyping)
+        let word = "Quorblax"
+        XCTAssertFalse(UITextChecker.hasLearnedWord(word))
+        let e = editor("Some \(word) here.\n")
+        e.applyProseChecking()
+        let s = try XCTUnwrap(e.startFixTypos())
+        XCTAssertEqual(s.current?.word, word)
+        // Learn Word writes to the device's dictionary: forgotten again in tearDown.
+        learnedForReal.append(word)
+        s.learn()
+        XCTAssertTrue(UITextChecker.hasLearnedWord(word), "in the device's dictionary")
+        XCTAssertEqual(e.spellingMarkRefreshes, [true])
+        XCTAssertEqual(e.textView.spellCheckingType, .yes)
+        s.done()
+    }
+
     // MARK: The editor going
 
     private func assertClosed(_ s: SpellStepController, _ e: EditorViewController, file: StaticString = #filePath, line: UInt = #line) {

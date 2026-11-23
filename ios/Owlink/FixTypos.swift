@@ -10,7 +10,9 @@ protocol SpellStepChecking: AnyObject {
     func misspellings(in text: String) -> [NSRange]
     /// Suggestions for `word`, best first.
     func guesses(for word: String) -> [String]
-    /// Ignore All: not flagged again by this checker.
+    /// Ignore All: not flagged again by this checker. (UITextChecker's ignore
+    /// list is per instance, and UITextView's own checker isn't reachable
+    /// through public API: its underlines keep an ignored word.)
     func ignore(_ word: String)
     /// Learn Word: added to the user's on-device dictionary.
     func learn(_ word: String)
@@ -346,6 +348,7 @@ final class SpellStepController {
         guard let c = stepper.current else { return }
         checker.ignore(c.word)
         stepper.ignoreAll()
+        editor?.refreshSpellingMarks()
         showNext()
     }
 
@@ -353,6 +356,7 @@ final class SpellStepController {
         guard let c = stepper.current else { return }
         checker.learn(c.word)
         stepper.ignoreAll()
+        editor?.refreshSpellingMarks()
         showNext()
     }
 
