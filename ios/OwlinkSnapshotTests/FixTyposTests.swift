@@ -428,4 +428,28 @@ final class FixTyposTests: XCTestCase {
         XCTAssertTrue(s.stepper.isFinished)
         s.done()
     }
+
+    // MARK: With code folding (0.4.6)
+
+    func testAWordInsideAFoldOpensItAndChangesTheRightText() throws {
+        // Lines: 0 "# One", 1 "Teh intro.", 2 "", 3 "# Two", 4 "A wrod here.", 5 "".
+        let e = editor("# One\nTeh intro.\n\n# Two\nA wrod here.\n")
+        XCTAssertTrue(e.toggleFold(line: 3))
+        let f = try XCTUnwrap(e.folding)
+        XCTAssertFalse(f.isEmpty)
+        let checker = FakeChecker(["Teh": ["The"], "wrod": ["word"]])
+        let s = try XCTUnwrap(e.startFixTypos(checker: checker))
+        // The first word is outside the fold: it stays folded.
+        XCTAssertEqual(s.current?.word, "Teh")
+        XCTAssertFalse(f.isEmpty)
+        s.change()
+        // The next one is hidden: reaching it opens the fold, selected.
+        XCTAssertEqual(s.current?.word, "wrod")
+        XCTAssertTrue(f.isEmpty)
+        XCTAssertEqual((e.textView.text as NSString).substring(with: e.textView.selectedRange), "wrod")
+        s.change()
+        XCTAssertEqual(e.textView.text, "# One\nThe intro.\n\n# Two\nA word here.\n")
+        XCTAssertTrue(s.stepper.isFinished)
+        s.done()
+    }
 }

@@ -17,6 +17,19 @@ in Xcode (a change made in Xcode is lost the next time the script runs).
 Source files can be added in Xcode or Finder: `ios/Owlink`,
 `ios/OwlinkUITests` and `Tests/*` are synchronized folders.
 
+## New in 0.4.6 (14)
+
+- **Code folding**, as on the Mac: the ⋯ menu's Folding submenu (and iPad
+  Text › Folding), fold marks in the line-number gutter, and a "⋯ N lines"
+  pill that unfolds. Folded text is only hidden; save, undo, find, copy,
+  print and export see all of it.
+- **Fix Typos…** (the ⋯ menu, and iPad Edit › Spelling and Grammar, ⌥⌘;)
+  steps through misspelled words one at a time with the on-device checker:
+  Change, Change All, Skip, Ignore All, Learn Word and Done. A word inside a
+  fold opens the fold when Fix Typos reaches it.
+
+Details for both are under What it does below.
+
 ## What it does
 
 - Text menu and touch line commands, indentation conversion, and cancellable keep/delete lines matching.
