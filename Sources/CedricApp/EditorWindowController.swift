@@ -1478,7 +1478,6 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         s.canGoBack = web?.canGoBack ?? false
         s.canGoForward = web?.canGoForward ?? false
         s.canGoHome = web.map { !$0.isHome } ?? false
-        s.canOpenInBrowser = web?.webURL != nil
         if let web, pane.titleLabel.stringValue != web.navigationTitle {
             pane.titleLabel.stringValue = web.navigationTitle
             pane.needsLayout = true
@@ -1513,8 +1512,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         case .back: preview?.goBack()
         case .forward: preview?.goForward()
         case .home: preview?.goHome()
-        case .openInBrowser:
-            if let url = preview?.webURL { LinkPrompt.confirmExternal(url, in: previewPane?.window) }
+        case .openInBrowser: break // no web page is ever shown in the preview (S1)
         case .refresh:
             pane.renderer.refresh()
             renderPreview()

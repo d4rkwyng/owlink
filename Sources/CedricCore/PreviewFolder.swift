@@ -103,9 +103,11 @@ public enum PageBreaks {
 /// opens in Cedric, any other local file is only shown in Finder, and
 /// every other scheme is ignored.
 public enum PreviewLinkAction: Equatable, Sendable {
+    /// A Markdown or HTML file inside the document's folder: shown in the preview.
     case openInPreview(URL)
-    case openWebInPreview(URL)
-    /// http, https or mailto: ask first, showing the whole URL.
+    /// http, https or mailto: ask first, showing the whole URL, then hand it
+    /// to the system. A web page never loads inside the preview (0.5.2 S1),
+    /// where the JavaScript and Network settings could not apply to it.
     case confirmExternal(URL)
     /// A text file inside the document's folder (symbolic links resolved).
     case openInCedric(URL)
@@ -117,13 +119,13 @@ public enum PreviewLinkAction: Equatable, Sendable {
     public static let externalSchemes: Set<String> = ["http", "https", "mailto"]
 
     /// Preview browsing uses the same confinement and special-file rules as
-    /// the editor/PDF routes; command-click keeps the external prompt.
+    /// the editor/PDF routes. Only local Markdown and HTML open in the
+    /// preview (⌘-click opens them in a tab instead); web and mail links
+    /// always ask first, clicked or ⌘-clicked.
     public static func previewAction(for url: URL, folder: URL?, command: Bool, isText: (URL) -> Bool,
                                      fileManager fm: FileManager = .default) -> PreviewLinkAction {
         let action = action(for: url, folder: folder, isText: isText, fileManager: fm)
         switch action {
-        case .confirmExternal(let u) where !command && u.scheme?.lowercased() != "mailto":
-            return .openWebInPreview(u)
         case .openInCedric(let u) where !command:
             let language = LanguageDetector.language(forFileName: u.lastPathComponent)
             return language == .markdown || language == .html ? .openInPreview(u) : action

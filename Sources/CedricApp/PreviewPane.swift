@@ -38,7 +38,7 @@ extension PreviewController: PreviewRenderer {
 
     var zoom: Double {
         get { Double(webView.pageZoom) }
-        set { webView.pageZoom = CGFloat(newValue); browserView.pageZoom = CGFloat(newValue) }
+        set { webView.pageZoom = CGFloat(newValue) }
     }
 
     func refresh() { forceReload() }

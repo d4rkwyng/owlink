@@ -1,0 +1,69 @@
+import Foundation
+
+/// What the Markdown/HTML preview's web view does with a navigation
+/// (0.5.2 S1). The preview only ever shows Cedric's own page, loaded with
+/// `loadHTMLString` at a `cedric-doc:` (or `about:blank`) base URL; the
+/// JavaScript and Network settings are applied to that page. So:
+///
+/// - the main-frame load of that page, while Cedric is loading it, is
+///   allowed, and nothing else that isn't a click;
+/// - a clicked link to a `#place` in the page itself stays in the page;
+/// - any other clicked link (`target=_blank` too) is cancelled and decided
+///   by `PreviewLinkAction`, which asks before a web page opens in the
+///   browser: a web page never loads in the preview;
+/// - everything else is cancelled: redirects, meta refresh, `location =`
+///   from page script, form submits, frames and iframes, new windows, and
+///   any scheme but the page's own.
+///
+/// Images, styles and fonts are subresources, not navigations: the
+/// Network setting (content rule list and CSP) governs those.
+public enum PreviewNavigation: Equatable, Sendable {
+    /// Cedric's own page load.
+    case allowPage
+    /// A link to a place in the page: allowed, then scrolled to by Cedric.
+    case scrollInPage
+    /// A clicked link elsewhere: cancelled, then routed by `PreviewLinkAction`.
+    case route
+    /// Cancelled.
+    case cancel
+
+    /// The schemes the preview's own page may have. Anything else (http,
+    /// https, file, data, blob, javascript, an unknown scheme) is never
+    /// shown in the preview.
+    public static let pageSchemes: Set<String> = [PreviewFolder.scheme, "about"]
+
+    /// - Parameters:
+    ///   - url: the request's URL.
+    ///   - linkClick: WebKit calls it `.linkActivated` (a click, or page script's `a.click()`).
+    ///   - mainFrame: `targetFrame?.isMainFrame`: nil for a new window.
+    ///   - page: the page now shown (`webView.url`).
+    ///   - expectedPage: the base URL of the page Cedric is loading.
+    ///   - loadingShell: Cedric is loading its page now.
+    public static func decide(url: URL?, linkClick: Bool, mainFrame: Bool?, page: URL?,
+                              expectedPage: URL?, loadingShell: Bool) -> PreviewNavigation {
+        guard let url else { return .cancel }
+        if linkClick {
+            if url.fragment != nil, isPageScheme(url), samePage(url, page) { return .scrollInPage }
+            return .route
+        }
+        guard loadingShell, mainFrame == true, isPageScheme(url), let expectedPage, url == expectedPage else { return .cancel }
+        return .allowPage
+    }
+
+    static func isPageScheme(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), pageSchemes.contains(scheme) else { return false }
+        // `about:` only as the blank page an untitled document is shown at.
+        return scheme != "about" || url.absoluteString.lowercased().hasPrefix("about:blank")
+    }
+
+    /// Whether `url` is the page itself plus a fragment (an in-page link).
+    public static func samePage(_ url: URL, _ page: URL?) -> Bool {
+        func strip(_ u: URL) -> String {
+            var c = URLComponents(url: u, resolvingAgainstBaseURL: false)
+            c?.fragment = nil
+            return c?.string ?? u.absoluteString
+        }
+        guard let page else { return url.absoluteString.lowercased().hasPrefix("about:blank#") }
+        return strip(url) == strip(page)
+    }
+}

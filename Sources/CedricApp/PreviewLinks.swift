@@ -18,7 +18,7 @@ enum PreviewLinkLog {
 extension EditorWindowController {
     func previewLink(_ action: PreviewLinkAction) {
         switch action {
-        case .openInPreview, .openWebInPreview:
+        case .openInPreview:
             break // handled by PreviewController
         case .openInCedric(let url):
             (NSApp.delegate as? AppDelegate)?.open(url)

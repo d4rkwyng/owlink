@@ -50,8 +50,11 @@ import Testing
             PreviewLinkAction.previewAction(for: url, folder: root, command: command, isText: { isText($0) || LanguageDetector.language(forFileName: $0.lastPathComponent) != nil })
         }
         let web = try #require(URL(string: "https://example.com/a?b=1"))
-        #expect(route(web) == .openWebInPreview(web))
+        // S1: a plain click on a web link asks too; it never opens in the preview.
+        #expect(route(web) == .confirmExternal(web))
         #expect(route(web, command: true) == .confirmExternal(web))
+        let plain = try #require(URL(string: "http://example.com/"))
+        #expect(route(plain) == .confirmExternal(plain))
         let mail = try #require(URL(string: "mailto:a@example.com"))
         #expect(route(mail) == .confirmExternal(mail))
         let md = root.appendingPathComponent("doc.md"), html = root.appendingPathComponent("page.html")
@@ -65,6 +68,72 @@ import Testing
         #expect(route(root.appendingPathComponent("escape.md")) == .revealInFinder(root.appendingPathComponent("escape.md")))
         #expect(route(t.appendingPathComponent("outside.md")) == .revealInFinder(t.appendingPathComponent("outside.md")))
         #expect(route(try #require(URL(string: "smb://host/share"))) == .ignore("smb"))
+    }
+}
+
+/// 0.5.2 S1: the preview's web view only ever shows Cedric's own page.
+/// No web page (or any other scheme) loads in it, whatever starts the
+/// navigation; a click is routed (web links ask, then open in the browser).
+@Suite struct PreviewNavigationTests {
+    let page = URL(string: "cedric-doc://doc/tmp/notes/")!
+
+    func decide(_ s: String?, click: Bool = false, mainFrame: Bool? = true, page: URL? = nil,
+                expected: URL? = nil, loading: Bool = false) -> PreviewNavigation {
+        PreviewNavigation.decide(url: s.flatMap(URL.init(string:)), linkClick: click, mainFrame: mainFrame,
+                                 page: page ?? self.page, expectedPage: expected, loadingShell: loading)
+    }
+
+    @Test func onlyCedricsOwnPageLoads() {
+        #expect(decide(page.absoluteString, expected: page, loading: true) == .allowPage)
+        #expect(decide("about:blank", page: URL(string: "about:blank"), expected: URL(string: "about:blank"), loading: true) == .allowPage)
+        // Not while Cedric isn't loading, not another URL, not in a frame or a new window.
+        #expect(decide(page.absoluteString, expected: page, loading: false) == .cancel)
+        #expect(decide("cedric-doc://doc/tmp/other/", expected: page, loading: true) == .cancel)
+        #expect(decide(page.absoluteString, mainFrame: false, expected: page, loading: true) == .cancel)
+        #expect(decide(page.absoluteString, mainFrame: nil, expected: page, loading: true) == .cancel)
+        #expect(decide(nil, expected: page, loading: true) == .cancel)
+    }
+
+    @Test func noWebPageLoadsWithoutAClick() {
+        // Redirects, meta refresh, `location =`, form submits, frames, new windows:
+        // whatever the scheme, in any frame, loading or not, even if expected.
+        let remote = ["https://example.com/", "http://example.com/x", "HTTPS://EXAMPLE.COM/", "ws://example.com/",
+                      "ftp://example.com/", "file:///etc/hosts", "data:text/html,hi", "blob:https://example.com/1",
+                      "javascript:alert(1)", "about:srcdoc", "x-unknown:thing", "smb://h/s"]
+        for s in remote {
+            for frame in [true, false, nil] as [Bool?] {
+                for loading in [true, false] {
+                    #expect(decide(s, mainFrame: frame, expected: URL(string: s), loading: loading) == .cancel,
+                            "\(s) frame \(String(describing: frame)) loading \(loading)")
+                }
+            }
+        }
+    }
+
+    @Test func clicksAreRoutedNeverLoaded() {
+        // A click on a web link, in the page or a new window (target=_blank),
+        // is routed: PreviewLinkAction asks before the browser opens it.
+        for s in ["https://example.com/a?b=1", "http://example.com/", "https://example.com/#x", "mailto:a@example.com",
+                  "x-unknown:thing", "file:///etc/hosts", "cedric-doc://doc/tmp/notes/other.md"] {
+            for frame in [true, false, nil] as [Bool?] {
+                #expect(decide(s, click: true, mainFrame: frame) == .route, "\(s)")
+            }
+        }
+        #expect(PreviewLinkAction.previewAction(for: URL(string: "https://example.com/a")!, folder: nil, command: false, isText: { _ in false })
+                == .confirmExternal(URL(string: "https://example.com/a")!))
+    }
+
+    @Test func inPageAnchorsStayInThePage() {
+        #expect(decide(page.absoluteString + "#part", click: true) == .scrollInPage)
+        #expect(decide("about:blank#part", click: true, page: URL(string: "about:blank")) == .scrollInPage)
+        // A fragment on another page, or on a web page "the same" as an http(s) page, is routed.
+        #expect(decide("cedric-doc://doc/tmp/notes/other.md#part", click: true) == .route)
+        let web = URL(string: "https://example.com/a")!
+        #expect(decide("https://example.com/a#x", click: true, page: web) == .route)
+        // Without a page, only about:blank's own fragments.
+        #expect(PreviewNavigation.samePage(URL(string: "about:blank#x")!, nil))
+        #expect(!PreviewNavigation.samePage(URL(string: "about:srcdoc#x")!, nil))
+        #expect(!PreviewNavigation.samePage(URL(string: "https://example.com/#x")!, nil))
     }
 }
 
