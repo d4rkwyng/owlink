@@ -155,7 +155,19 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             key(String(localized: "Previous Bookmark"), #selector(EditorViewController.previousBookmarkMenu(_:)), f2, .shift),
             key(String(localized: "Clear Bookmarks"), #selector(EditorViewController.clearBookmarksMenu(_:)), f2, [.command, .shift]),
         ])
-        builder.insertSibling(UIMenu(title: String(localized: "Text"), children: [line, indentation, bookmarks]), afterMenu: .edit)
+        // The Mac's shortcuts: ⌥⌘← / ⌥⌘→, with ⇧ for all.
+        let left = UIKeyCommand.inputLeftArrow, right = UIKeyCommand.inputRightArrow
+        let folding = UIMenu(title: String(localized: "Folding"), children: [
+            key(String(localized: "Fold"), #selector(EditorViewController.foldMenu(_:)), left, [.command, .alternate]),
+            key(String(localized: "Unfold"), #selector(EditorViewController.unfoldMenu(_:)), right, [.command, .alternate]),
+            key(String(localized: "Fold All"), #selector(EditorViewController.foldAllMenu(_:)), left, [.command, .alternate, .shift]),
+            key(String(localized: "Unfold All"), #selector(EditorViewController.unfoldAllMenu(_:)), right, [.command, .alternate, .shift]),
+            UIMenu(options: .displayInline, children: (1...3).map { (level: Int) in
+                UICommand(title: String(localized: "Fold to Level \(level)"), action: #selector(EditorViewController.foldToLevelMenu(_:)),
+                          propertyList: level)
+            }),
+        ])
+        builder.insertSibling(UIMenu(title: String(localized: "Text"), children: [line, indentation, bookmarks, folding]), afterMenu: .edit)
         let markdown = UIMenu(title: String(localized: "Markdown"), children: [
             key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
             key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),
