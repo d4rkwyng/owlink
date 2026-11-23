@@ -49,6 +49,30 @@ import Testing
         #expect(!HTMLScrub.noScriptNoRemoteKeepingLinks(#"<a title="<b>" href="https://example.com/ok">x</a>"#).contains("example.com"))
     }
 
+    /// Review of fc73458 (Grok SF2, Opus SF4): a remote URL attribute after
+    /// a `/` or a closing quote (no space) is one a browser loads too.
+    @Test func remoteAttributesAfterEverySeparator() {
+        let cases = [
+            #"<img/src=https://t.example/p.gif>"#,
+            #"<img/src="https://t.example/p.gif">"#,
+            #"<img alt=""src=https://t.example/p.gif>"#,
+            #"<img alt=''src='https://t.example/p.gif'>"#,
+            #"<body/background=https://t.example/bg.png>"#,
+            #"<svg><image/href=https://t.example/i.png /></svg>"#,
+            #"<img alt="x"srcset="https://t.example/a 2x">"#,
+            #"<video/poster=//t.example/v.png></video>"#,
+        ]
+        for html in cases {
+            #expect(!HTMLScrub.noScriptNoRemote(html).contains("t.example"), "\(html) -> \(HTMLScrub.noScriptNoRemote(html))")
+            #expect(!HTMLScrub.noScriptNoRemoteKeepingLinks(html).contains("t.example"), "\(html) -> \(HTMLScrub.noScriptNoRemoteKeepingLinks(html))")
+        }
+        // A link's own href written the same ways still stays in the preview.
+        #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(#"<a title="t"href="https://example.com/ok">x</a>"#).contains("https://example.com/ok"))
+        #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(#"<a/href=https://example.com/ok>x</a>"#).contains("https://example.com/ok"))
+        // Local sources are left alone.
+        #expect(HTMLScrub.noScriptNoRemote(#"<img/src=dot.png><img alt=""src="a.png">"#) == #"<img/src=dot.png><img alt=""src="a.png">"#)
+    }
+
     /// Review of fc73458 (Grok SF4): a kept link's `rel` can't ask WebKit
     /// to fetch or resolve ahead of a tap; other keywords stay.
     @Test func previewLinksLoseFetchingRel() {

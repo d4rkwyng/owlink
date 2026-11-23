@@ -1289,7 +1289,10 @@ public enum HTMLScrub {
     /// or a closing quote, as browsers read them. Group 1 is everything up
     /// to the value, group 2 the value with its quotes.
     nonisolated(unsafe) static let urlAttr = regex(#"((?<=[\s/"'])(?:href|src|action|formaction|xlink:href)\s*=\s*)("[^"]*"|'[^']*'|[^\s>]*)"#)
-    nonisolated(unsafe) static let remoteAttr = regex(#"\s(?:src|href|srcset|background|poster|data|xlink:href)\s*=\s*("\s*(?:https?:|ftp:|//)[^"]*"|'\s*(?:https?:|ftp:|//)[^']*'|(?:https?:|ftp:|//)[^\s>]*)"#)
+    /// A remote URL attribute, after the same separators as `urlAttr`:
+    /// whitespace (taken with the match), a `/` (`<img/src=…>`) or a
+    /// closing quote (`<img alt=""src=…>`).
+    nonisolated(unsafe) static let remoteAttr = regex(#"(?:\s|(?<=[/"']))(?:src|href|srcset|background|poster|data|xlink:href)\s*=\s*("\s*(?:https?:|ftp:|//)[^"]*"|'\s*(?:https?:|ftp:|//)[^']*'|(?:https?:|ftp:|//)[^\s>]*)"#)
     nonisolated(unsafe) static let links = regex(#"<link\b[^>]*>"#)
     /// The start of an `<a>` or `<area>` tag (matched anchored on a tag).
     nonisolated(unsafe) static let linkTag = regex(#"<(?:a|area)(?=[\s/>])"#)
