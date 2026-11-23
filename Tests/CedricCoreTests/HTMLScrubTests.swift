@@ -35,6 +35,32 @@ import Testing
         #expect(!HTMLScrub.noScriptNoRemote(html).contains("example.com/ok"))
     }
 
+    /// Review of fc73458 (Grok MUST-FIX 1, Opus SF2): a kept link's `ping`
+    /// would POST to its URLs on a tap, before the app decides the tap.
+    /// Every scrub drops the whole attribute, however it is written.
+    @Test func pingIsDroppedByEveryScrub() {
+        let cases = [
+            #"<a href="https://example.com/ok" ping="https://t.example/p1 https://t.example/p2">x</a>"#,
+            #"<a href="https://example.com/ok" ping='https://t.example/p'>x</a>"#,
+            #"<a href="https://example.com/ok" ping=https://t.example/p>x</a>"#,
+            #"<a href="https://example.com/ok" PING = "https://t.example/p">x</a>"#,
+            #"<a/ping=https://t.example/p href="https://example.com/ok">x</a>"#,
+            #"<a href="https://example.com/ok"ping="https://t.example/p">x</a>"#,
+            #"<a title='t'ping='https://t.example/p'href="https://example.com/ok">x</a>"#,
+            #"<area shape=rect href="https://example.com/ok" ping="https://t.example/p">"#,
+        ]
+        for html in cases {
+            for (name, s) in [("noScript", HTMLScrub.noScript(html)), ("noScriptNoRemote", HTMLScrub.noScriptNoRemote(html)),
+                              ("keepingLinks", HTMLScrub.noScriptNoRemoteKeepingLinks(html))] {
+                #expect(!s.lowercased().contains("ping") && !s.contains("t.example"), "\(name): \(html) -> \(s)")
+            }
+            #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(html).contains("https://example.com/ok"), "the link itself stays: \(html)")
+        }
+        // Only the attribute named `ping`: others and the text are left alone.
+        let kept = #"<a href="https://example.com/ok" data-ping="1" pinged="2">ping me</a>"#
+        #expect(HTMLScrub.noScript(kept) == kept)
+    }
+
     /// Release review 0.2.1 M1: script URLs a browser still runs although
     /// the plain text "javascript:" isn't there.
     @Test func scriptURLsInEveryForm() {

@@ -1281,6 +1281,10 @@ public enum HTMLScrub {
     /// An `on…=` handler inside a tag: after whitespace, a `/` (`<svg/onload=…>`)
     /// or a closing quote (`<a href="x"onclick=…>`), as browsers read them.
     nonisolated(unsafe) static let handlers = regex(#"(?<=[\s/"'])on[a-z0-9_-]*\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#)
+    /// A `ping` attribute (hyperlink auditing: a tap on the link POSTs to
+    /// each URL listed, out of sight), the whole attribute, after the same
+    /// separators as `handlers` (`<a/ping=…>`, `<a href="x"ping=…>`).
+    nonisolated(unsafe) static let ping = regex(#"(?<=[\s/"'])ping(?=[\s/>=]|$)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s>]*))?"#)
     /// A URL attribute inside a tag, after whitespace, a `/` (`<a/href=…>`)
     /// or a closing quote, as browsers read them. Group 1 is everything up
     /// to the value, group 2 the value with its quotes.
@@ -1295,7 +1299,7 @@ public enum HTMLScrub {
         r.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: t)
     }
 
-    /// No script, frames, handlers or script URLs.
+    /// No script, frames, handlers, `ping` or script URLs.
     public static func noScript(_ html: String) -> String {
         var s = replace(pairs, in: html, with: "")
         s = replace(singles, in: s, with: "")
@@ -1304,15 +1308,15 @@ public enum HTMLScrub {
         return s
     }
 
-    /// Every start tag without its event-handler attributes, and with any
-    /// script URL replaced by `"#"` (text between tags is left alone).
+    /// Every start tag without its event-handler and `ping` attributes, and
+    /// with any script URL replaced by `"#"` (text between tags is left alone).
     static func noHandlers(_ html: String) -> String {
         let ns = html as NSString
         var out = ""
         var last = 0
         for m in tags.matches(in: html, range: NSRange(location: 0, length: ns.length)) {
             out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
-            out += noScriptURLs(replace(handlers, in: ns.substring(with: m.range), with: ""))
+            out += noScriptURLs(replace(ping, in: replace(handlers, in: ns.substring(with: m.range), with: ""), with: ""))
             last = m.range.location + m.range.length
         }
         out += ns.substring(from: last)
