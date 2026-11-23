@@ -71,6 +71,45 @@ import Testing
     }
 }
 
+/// 0.5.1 S3: a linked preview document is read from the very path that
+/// was checked, so a symbolic link swapped after the check can't make the
+/// preview read a file outside the folder.
+@Suite struct PreviewDocumentReadTests {
+    func isText(_ u: URL) -> Bool { LanguageDetector.language(forFileName: u.lastPathComponent) != nil }
+
+    @Test func theCheckedPathIsThePathRead() throws {
+        let t = try makeTree(["doc/real.md", "outside/secret.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let fm = FileManager.default
+        let doc = t.appendingPathComponent("doc")
+        let real = doc.appendingPathComponent("real.md"), secret = t.appendingPathComponent("outside/secret.md")
+        try "inside".write(to: real, atomically: true, encoding: .utf8)
+        try "secret".write(to: secret, atomically: true, encoding: .utf8)
+        let link = doc.appendingPathComponent("link.md")
+        try fm.createSymbolicLink(at: link, withDestinationURL: real)
+
+        // The race: right after the check, before the read, the link is
+        // swapped to point outside the folder.
+        var read: [URL] = []
+        let got = PreviewLinkAction.previewDocument(at: link, root: doc, isText: isText) { path in
+            try? fm.removeItem(at: link)
+            try? fm.createSymbolicLink(at: link, withDestinationURL: secret)
+            read.append(path)
+            return try? Data(contentsOf: path)
+        }
+        #expect(got.map { String(decoding: $0.data, as: UTF8.self) } == "inside", "the swapped link's target is never read")
+        #expect(got?.file == PreviewFolder.resolved(real), "the page's file is the checked, resolved path")
+        #expect(read == [PreviewFolder.resolved(real)], "exactly the checked path is read")
+
+        // The link now points outside the folder: refused, and nothing is read.
+        var readOutside = false
+        #expect(PreviewLinkAction.previewDocument(at: link, root: doc, isText: isText) { _ in readOutside = true; return nil } == nil)
+        #expect(!readOutside, "a link out of the folder is not read")
+        // The real file, and its default read.
+        #expect(PreviewLinkAction.previewDocument(at: real, root: doc, isText: isText).map { String(decoding: $0.data, as: UTF8.self) } == "inside")
+    }
+}
+
 /// 0.5.2 S1: the preview's web view only ever shows Cedric's own page.
 /// No web page (or any other scheme) loads in it, whatever starts the
 /// navigation; a click is routed (web links ask, then open in the browser).

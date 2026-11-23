@@ -163,6 +163,20 @@ public enum PreviewLinkAction: Equatable, Sendable {
 }
 
 extension PreviewLinkAction {
+    /// The document a linked preview page shows (0.5.1 S3): `url` with its
+    /// symbolic links resolved once, that path checked (a Markdown or HTML
+    /// file inside `root`) and that same path read, so a link swapped
+    /// after the check can't point the read outside `root`. `file` is that
+    /// path (its kind and folder are the page's). Nil when it isn't one.
+    /// `read` is the file read (a test swaps a link inside it).
+    public static func previewDocument(at url: URL, root: URL, isText: (URL) -> Bool,
+                                       read: (URL) -> Data? = { try? Data(contentsOf: $0) }) -> (file: URL, data: Data)? {
+        let target = PreviewFolder.resolved(url)
+        guard case .openInPreview = previewAction(for: target, folder: root, command: false, isText: isText),
+              let data = read(target) else { return nil }
+        return (target, data)
+    }
+
     /// A link clicked in a PDF: stricter than the Markdown preview's, as a
     /// PDF has no folder of its own. http, https and mailto ask first; a
     /// `file:` link is only shown in Finder, never opened (not even a text
