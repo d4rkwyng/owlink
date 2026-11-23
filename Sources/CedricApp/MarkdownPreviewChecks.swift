@@ -704,17 +704,31 @@ extension DevChecks {
                           when: { p()?.isHome == true && noTab() }),
             sync { expect(p()?.isHome == true && noTab() && PreviewLinkLog.revealed.isEmpty, "and reveals or opens nothing") },
             toTop,
-            // Page JavaScript and Network on for the live document.
+            // With page JavaScript and Network on for the live document,
+            // the page's own world can't reach Cedric's scroll script or
+            // its message handler (they live in the app's content world).
             sync { loadsBefore = (p()?.pageLoads ?? 0) + (p()?.bodySwaps ?? 0); tab.previewAllowsJavaScript = true; tab.previewAllowsNetwork = true },
             waitForSwap(tab, "the live document re-renders with JavaScript on", since: { loadsBefore }),
             waitForPreview(tab, contains: "jump text", "and shows the document"),
+            { next in
+                previewJS(tab, "typeof window.__cedricScrollToAnchor + ',' + typeof window.webkit?.messageHandlers?.cedricScroll") { own in
+                    pageJS(tab, "typeof window.__cedricScrollToAnchor + ',' + typeof window.webkit?.messageHandlers?.cedricScroll") { page in
+                        expect(own as? String == "function,object", "Cedric's world has the anchor script and the cedricScroll handler", "\(own ?? "nil")")
+                        expect(page as? String == "undefined,undefined",
+                               "page JavaScript can't see __cedricScrollToAnchor or the cedricScroll handler", "\(page ?? "nil")")
+                        next()
+                    }
+                }
+            },
             // Another document's heading.
             click("other part"),
             waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
                           when: { p()?.isHome == false && p()?.navigationTitle == "other.md" }),
             sync {
                 expect(noTab() && onSource(), "no tab opened; the editor stays on the source document", "\(app.tabs.count) tabs, \(tab.doc.fileURL?.lastPathComponent ?? "-")")
-                expect(p()?.canGoBack == true && tab.previewAllowsJavaScript == false, "Back is enabled; no JavaScript trust carried over")
+                expect(p()?.canGoBack == true && tab.previewAllowsJavaScript == false && tab.previewAllowsNetwork == false,
+                       "Back is enabled; no JavaScript or Network trust carried over",
+                       "JS \(tab.previewAllowsJavaScript) Network \(tab.previewAllowsNetwork)")
                 expect(p()?.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript == false,
                        "the linked document's page runs with JavaScript off")
                 // The live document reloads from disk while the preview is
