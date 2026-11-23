@@ -217,10 +217,13 @@ final class EditorFoldingTests: XCTestCase {
         caret(e, line: 3)
         e.foldAtCaret()
         XCTAssertEqual(e.folding?.state.headerLines(e.lineIndex), [2])
-        // The caret went to the header line, so Unfold applies there.
         XCTAssertEqual(e.caretLine, 2)
         XCTAssertTrue(enabled(e).isSuperset(of: ["editor.menu.unfold", "editor.menu.unfoldAll"]))
         XCTAssertTrue(e.canPerformAction(#selector(EditorViewController.unfoldAllMenu(_:)), withSender: nil))
+        // Unfold stays enabled when the caret is not on a header, as on the Mac.
+        caret(e, line: 6)
+        XCTAssertTrue(enabled(e).contains("editor.menu.unfold"))
+        caret(e, line: 2)
         e.unfoldAtCaret()
         XCTAssertFalse(e.hasFolds)
         XCTAssertEqual(e.textView.text, swift)

@@ -389,11 +389,13 @@ extension EditorViewController {
     static let foldingActions: Set<Selector> = [#selector(foldMenu(_:)), #selector(foldAllMenu(_:)), #selector(foldToLevelMenu(_:))]
     static let unfoldingActions: Set<Selector> = [#selector(unfoldMenu(_:)), #selector(unfoldAllMenu(_:))]
 
-    /// What the Folding commands may do now: (fold, unfold at the caret, unfold all).
+    /// What the Folding commands may do now: (fold, unfold, unfold all).
+    /// Unfold is enabled whenever anything is folded, as on the Mac;
+    /// unfoldAtCaret() decides what to open.
     var foldingMenuState: (fold: Bool, unfold: Bool, unfoldAll: Bool) {
         let available = foldingAvailable
         let folded = available && hasFolds
-        return (available, folded && folding?.state.folds(header: caretLine, lineIndex).isEmpty == false, folded)
+        return (available, folded, folded)
     }
 
     /// The ⋯ menu's Folding submenu; disabled where the language doesn't

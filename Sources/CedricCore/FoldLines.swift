@@ -18,12 +18,14 @@ extension FoldRegion {
 extension FoldState {
     /// Header line of each fold (the line before its hidden text), ascending, once each.
     public func headerLines(_ index: LineIndex) -> [Int] {
+        // Folds are already ordered; consecutive ranges that share a
+        // header are adjacent, so last is enough (as on the Mac).
         var out: [Int] = []
         for f in folds where f.location > 0 && f.location <= index.length {
             let l = index.line(containing: f.location - 1)
-            if !out.contains(l) { out.append(l) }
+            if out.last != l { out.append(l) }
         }
-        return out.sorted()
+        return out
     }
 
     /// The folds whose header is `line`.
