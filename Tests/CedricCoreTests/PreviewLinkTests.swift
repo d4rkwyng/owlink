@@ -118,8 +118,24 @@ import Testing
 
     func decide(_ s: String?, click: Bool = false, mainFrame: Bool? = true, page: URL? = nil,
                 expected: URL? = nil, loading: Bool = false) -> PreviewNavigation {
-        PreviewNavigation.decide(url: s.flatMap(URL.init(string:)), linkClick: click, mainFrame: mainFrame,
+        decide(url: s.flatMap(URL.init(string:)), click: click, mainFrame: mainFrame, page: page, expected: expected, loading: loading)
+    }
+
+    func decide(url: URL?, click: Bool = false, mainFrame: Bool? = true, page: URL? = nil,
+                expected: URL? = nil, loading: Bool = false) -> PreviewNavigation {
+        PreviewNavigation.decide(url: url, linkClick: click, mainFrame: mainFrame,
                                  page: page ?? self.page, expectedPage: expected, loadingShell: loading)
+    }
+
+    /// `s` the way WebKit hands a navigation's URL to the policy delegate:
+    /// an NSURL made from the bytes of the URL string WebKit built
+    /// (CFURLCreateAbsoluteURLWithBytes), never re-parsed by `URL(string:)`.
+    /// So a click on `#x` in an about:blank page is `about:blank#x` on every
+    /// macOS (seen on macOS 27: absoluteString `about:blank#x`), and an href
+    /// written `about:blank%23x` stays `about:blank%23x`.
+    static func webKitURL(_ s: String) -> URL {
+        let bytes = Array(s.utf8)
+        return CFURLCreateAbsoluteURLWithBytes(nil, bytes, bytes.count, CFStringBuiltInEncodings.UTF8.rawValue, nil, true)! as URL
     }
 
     @Test func onlyCedricsOwnPageLoads() {
@@ -176,35 +192,54 @@ import Testing
 
     @Test func inPageAnchorsStayInThePage() {
         #expect(decide(page.absoluteString + "#part", click: true) == .scrollInPage)
-        #expect(decide("about:blank#part", click: true, page: URL(string: "about:blank")) == .scrollInPage)
+        #expect(decide(url: Self.webKitURL(page.absoluteString + "#part"), click: true) == .scrollInPage)
+        #expect(decide(url: Self.webKitURL("about:blank#part"), click: true, page: URL(string: "about:blank")) == .scrollInPage)
+        // The main frame only: a #place in a frame or a new window (nil) is routed.
+        for frame in [false, nil] as [Bool?] {
+            #expect(decide(page.absoluteString + "#part", click: true, mainFrame: frame) == .route, "\(String(describing: frame))")
+            #expect(decide(url: Self.webKitURL("about:blank#part"), click: true, mainFrame: frame, page: URL(string: "about:blank")) == .route)
+        }
         // A fragment on another page, or on a web page "the same" as an http(s) page, is routed.
         #expect(decide("cedric-doc://doc/tmp/notes/other.md#part", click: true) == .route)
         let web = URL(string: "https://example.com/a")!
         #expect(decide("https://example.com/a#x", click: true, page: web) == .route)
         // Without a page, only about:blank's own fragments.
-        #expect(PreviewNavigation.samePage(URL(string: "about:blank#x")!, nil))
+        #expect(PreviewNavigation.samePage(Self.webKitURL("about:blank#x"), nil))
         #expect(!PreviewNavigation.samePage(URL(string: "about:srcdoc#x")!, nil))
         #expect(!PreviewNavigation.samePage(URL(string: "https://example.com/#x")!, nil))
     }
 
     // macOS 15 Foundation reads `URL(string: "about:blank#x")` as
     // `about:blank%23x` (no fragment); macOS 26 as `about:blank` + `#x`.
-    // `about:blank%23x` is built the macOS 15 way on any macOS, so each
-    // runner covers both spellings.
+    // `split`, `samePage` and `PreviewAnchor` read both spellings the same.
+    // `decide` goes by what WebKit hands it (webKitURL): a real `#x` click
+    // keeps its `#` on every macOS, and a literal `about:blank%23x` href is
+    // another page, routed (security read NIT 1).
     @Test func aboutBlankAnchorsAreTheSameOnEveryFoundation() {
         let blank = URL(string: "about:blank")!
         for s in ["about:blank#part", "about:blank%23part", "ABOUT:BLANK%23part"] {
-            let u = URL(string: s)!
-            #expect(PreviewNavigation.split(u).page.lowercased() == "about:blank" && PreviewNavigation.split(u).fragment == "part", "\(s) → \(u.absoluteString)")
-            #expect(decide(s, click: true, page: blank) == .scrollInPage, "\(s)")
-            #expect(decide(s, click: true) == .route, "\(s) on a cedric-doc page is another page")
-            #expect(PreviewNavigation.samePage(u, nil) && PreviewNavigation.samePage(u, blank), "\(s)")
-            #expect(PreviewAnchor.fragment(of: u) == "part", "\(s)")
+            for u in [URL(string: s)!, Self.webKitURL(s)] {
+                #expect(PreviewNavigation.split(u).page.lowercased() == "about:blank" && PreviewNavigation.split(u).fragment == "part", "\(s) → \(u.absoluteString)")
+                #expect(decide(url: u, click: true) == .route, "\(s) on a cedric-doc page is another page")
+                #expect(PreviewNavigation.samePage(u, nil) && PreviewNavigation.samePage(u, blank), "\(s)")
+                #expect(PreviewAnchor.fragment(of: u) == "part", "\(s)")
+            }
         }
-        // Already on an anchor of the blank page, either spelling.
+        // A real click on #part in the blank page (WebKit's URL): stays in the page.
+        #expect(decide(url: Self.webKitURL("about:blank#part"), click: true, page: blank) == .scrollInPage)
+        #expect(decide(url: Self.webKitURL("ABOUT:BLANK#part"), click: true, page: blank) == .scrollInPage)
+        // An href written about:blank%23part: a cross-document load in
+        // WebKit, so not an in-page anchor; routed (and so cancelled).
+        for s in ["about:blank%23part", "ABOUT:BLANK%23part", "about:blank%2523part"] {
+            #expect(Self.webKitURL(s).absoluteString == s, "WebKit's URL keeps the %23 as written")
+            #expect(decide(url: Self.webKitURL(s), click: true, page: blank) == .route, "\(s)")
+            #expect(decide(url: Self.webKitURL(s), click: true, page: URL(string: "about:blank%23a")) == .route, "\(s)")
+        }
+        // Already on an anchor of the blank page (webView.url), either spelling.
         for page in ["about:blank#a", "about:blank%23a"] {
-            #expect(decide("about:blank%23b", click: true, page: URL(string: page)) == .scrollInPage, "\(page)")
-            #expect(decide("about:blank#b", click: true, page: URL(string: page)) == .scrollInPage, "\(page)")
+            for p in [URL(string: page), Self.webKitURL(page)] {
+                #expect(decide(url: Self.webKitURL("about:blank#b"), click: true, page: p) == .scrollInPage, "\(page)")
+            }
         }
         #expect(PreviewAnchor.fragment(of: URL(string: "about:blank%23The%20Part")!) == "The Part")
         #expect(PreviewAnchor.fragment(of: URL(string: "about:blank%23")!) == nil)
