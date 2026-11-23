@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [0.5.2]
+
+### Added
+- **Unsaved edits are marked.** A dirty tab and its window title show a trailing •, and the close button keeps the usual macOS edited dot. The mark clears when you save, revert, or undo back to the last saved text.
+
 ## [0.5.1] - 2026-11-23
 
 ### Added

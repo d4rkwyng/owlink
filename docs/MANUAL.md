@@ -49,7 +49,9 @@ open it, and move Owlink to Applications. Owlink doesn't update itself:
 
 ### Tabs that come back
 
-Native macOS window tabs. Quitting never asks to
+Native macOS window tabs. A tab with unsaved edits shows a trailing • after
+its name (and the close button's edited dot) until you save, revert, or undo
+back to the saved text. Quitting never asks to
 save: every tab, including untitled tabs and unsaved changes, is restored on
 the next launch, as Notepad++ does. Unsaved text is autosaved to
 `~/Library/Application Support/Cedric/Session/` about 1.5 seconds after you
