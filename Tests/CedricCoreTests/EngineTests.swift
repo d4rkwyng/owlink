@@ -92,16 +92,16 @@ import Testing
         let text = s as NSString
         let idx = LineIndex(text)
         let engine = HighlightEngine(language: .json)
-        // Best of 5: other tests sharing the runner only ever add time, and
-        // one 50 ms bound on a single run fails on a descheduled thread. A
-        // full-file scan of 10 MB is far slower than 50 ms on every try.
-        var elapsed = Double.infinity
-        for _ in 0..<5 {
-            let start = Date()
+        // Best of 5 in this thread's CPU time, scaled by how slow the machine
+        // is right now (see `Timing`): the wall clock also counts waiting for
+        // a core, and a slow runner slows every try. A full-file scan of 10 MB
+        // is far slower than 50 ms on every try. The wall clock keeps a wide
+        // bound against a blow-up.
+        let r = Timing.best(of: 5) {
             let t = engine.tokens(forLines: (idx.lineCount - 60)..<idx.lineCount, in: text, index: idx)
-            elapsed = min(elapsed, Date().timeIntervalSince(start))
             #expect(!t.isEmpty)
         }
-        #expect(elapsed < 0.05, "best of 5: \(elapsed) s")
+        #expect(r.scaled < 0.05, "best of 5: \(r.description)")
+        #expect(r.wall < 2, "best of 5: \(r.description)")
     }
 }

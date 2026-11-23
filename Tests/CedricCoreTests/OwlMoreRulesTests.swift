@@ -275,22 +275,18 @@ import Testing
         // The worst case the owl can hand them: 8 KB of dense code and of prose.
         let code = String(String(repeating: "f(a[\"(\"], {b: `${c}`}) // “x”\n", count: 400).utf16.prefix(OwlContextWindow.byteCap))!
         let prose = String(String(repeating: "the the word.  Next one. ", count: 400).utf16.prefix(OwlContextWindow.byteCap))!
-        // Best of 10 per kind, not the mean of all 20: other tests sharing
-        // the runner only ever add time, and one descheduling in a 20-check
-        // mean pushed it to 53.5 ms on GitHub's macos-15 runner (run
-        // 45249676267). The 50 ms bound is unchanged (single-digit ms locally); a
-        // rule that blows up on a full 8 KB window misses it on every try.
-        var bestCode = Double.infinity, bestProse = Double.infinity
-        for _ in 0..<10 {
-            var start = Date()
-            _ = check(code, language: "javascript", fileName: "a.js")
-            bestCode = min(bestCode, Date().timeIntervalSince(start))
-            start = Date()
-            _ = check(prose)
-            bestProse = min(bestProse, Date().timeIntervalSince(start))
-        }
-        #expect(bestCode < 0.05, "code: best of 10 \(bestCode * 1000) ms per check")
-        #expect(bestProse < 0.05, "prose: best of 10 \(bestProse * 1000) ms per check")
+        // Best of 10 per kind, not the mean of all 20: one descheduling in a
+        // 20-check mean pushed it to 53.5 ms on GitHub's macos-15 runner (run
+        // 45249676267). In this thread's CPU time, scaled by how slow the
+        // machine is right now (see `Timing`): on a slow runner every try is
+        // slow. The 50 ms bound is unchanged (single-digit ms locally); a rule
+        // that blows up on a full 8 KB window misses it on every try. The wall
+        // clock keeps a wide bound against a blow-up.
+        let codeTime = Timing.best(of: 10) { _ = check(code, language: "javascript", fileName: "a.js") }
+        let proseTime = Timing.best(of: 10) { _ = check(prose) }
+        #expect(codeTime.scaled < 0.05, "code: best of 10 \(codeTime.description) per check")
+        #expect(proseTime.scaled < 0.05, "prose: best of 10 \(proseTime.description) per check")
+        #expect(codeTime.wall < 2 && proseTime.wall < 2, "code: \(codeTime.description); prose: \(proseTime.description)")
     }
 
     func windowContext(_ text: String, language: String, textStart: Int = 0) -> OwlContext {

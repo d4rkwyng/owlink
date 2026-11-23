@@ -104,16 +104,13 @@ import Testing
 
     @Test func aHugeLineIsScannedOnlyNearTheCaret() {
         let big = String(repeating: "word ", count: 200_000) as NSString   // one 1 M-character paragraph
-        // Best of 5, as other tests sharing the runner only add time; the
-        // length check below is the bound that holds on any machine.
-        var best = Double.infinity
+        // Best of 5 in this thread's CPU time, scaled by how slow the machine
+        // is right now (see `Timing`), with a wide wall-clock bound against a
+        // blow-up. The length check below is the bound that holds on any machine.
         var r = NSRange()
-        for _ in 0..<5 {
-            let t = Date()
-            r = FocusRange.paragraph(in: big, caret: 500_000)
-            best = min(best, Date().timeIntervalSince(t))
-        }
-        #expect(best < 0.05, "best of 5: \(best) s")
+        let time = Timing.best(of: 5) { r = FocusRange.paragraph(in: big, caret: 500_000) }
+        #expect(time.scaled < 0.05, "best of 5: \(time.description)")
+        #expect(time.wall < 2, "best of 5: \(time.description)")
         #expect(r.length <= 3 * FocusRange.scanLimit)
         #expect(NSLocationInRange(500_000, r))
         // Typing on in the same paragraph: the clipped window stays put
