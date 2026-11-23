@@ -10,6 +10,9 @@ are its section below (`Scripts/changelog-section.sh`).
 - **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line (a name in non-Latin look-alike letters is shown as its plain-ASCII form and flagged), points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
 - **Linked documents in the preview load from their real location.** A document opened through a symbolic link takes its type and its folder for images and links from the file that was checked and read.
 
+### Added
+- **Unsaved edits are marked.** A dirty tab and its window title show a trailing •, and the close button keeps the usual macOS edited dot. The mark clears when you save, revert, or undo back to the last saved text.
+
 ### Changed
 - **Reopen files from last session is on unless you turn it off in Owlink.** macOS's “Close windows when quitting an application” setting no longer turns it off. With it off, tabs with unsaved text (including untitled tabs) still reopen after a quit or closing the last window, instead of going to Reopen Closed Tab, where unsaved text is deleted after 30 days. A `-reopenFilesFromLastSession NO` launch argument now works.
 

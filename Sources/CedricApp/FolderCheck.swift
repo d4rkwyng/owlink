@@ -659,7 +659,7 @@ extension DevChecks {
                            imageTab.fileURL.path == renamed.appendingPathComponent("picture.tiff").path,
                            "open text and viewer tabs follow a folder rename")
                     expect(textTab.text == "unsaved text" && textTab.doc.isDirty &&
-                           textTab.window?.title == "note.txt" && imageTab.window?.representedURL == imageTab.fileURL,
+                           textTab.window?.title == "note.txt •" && imageTab.window?.representedURL == imageTab.fileURL,
                            "folder rename preserves unsaved text and updates window metadata")
                     _ = try FolderActions.rename(renamed, name: "explorer-moved-away")
                     app.folderItemTrashed(renamed, directory: true)

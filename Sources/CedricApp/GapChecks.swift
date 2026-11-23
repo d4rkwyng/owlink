@@ -397,7 +397,8 @@ extension DevChecks {
             },
             { next in DispatchQueue.main.async { next() } },
             sync {
-                expect(a.text == "qalpha1\n" && a.doc.isDirty, "⇧⌘Z redoes it (an edit like any other)", "dirty \(a.doc.isDirty) \(a.text.debugDescription)")
+                expect(a.text == "qalpha1\n" && !a.doc.isDirty, "⇧⌘Z redoes it, back to the saved text: clean again",
+                       "dirty \(a.doc.isDirty) \(a.text.debugDescription)")
             },
             sync {
                 // Close Window: a second window with two tabs.

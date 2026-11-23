@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|closedraw|jsonwhole|colours|autoedit|counts
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -25,6 +25,7 @@ extension DevChecks {
         case "help": helpCheck(app)
         case "closenotice": closeNoticeCheck(app)
         case "menus": menusCheck(app)
+        case "editedtitle": editedTitle(app)
         default: return gapCheck(name, app)
         }
         return true
