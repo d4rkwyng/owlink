@@ -1287,6 +1287,8 @@ public enum HTMLScrub {
     nonisolated(unsafe) static let urlAttr = regex(#"((?<=[\s/"'])(?:href|src|action|formaction|xlink:href)\s*=\s*)("[^"]*"|'[^']*'|[^\s>]*)"#)
     nonisolated(unsafe) static let remoteAttr = regex(#"\s(?:src|href|srcset|background|poster|data|xlink:href)\s*=\s*("\s*(?:https?:|ftp:|//)[^"]*"|'\s*(?:https?:|ftp:|//)[^']*'|(?:https?:|ftp:|//)[^\s>]*)"#)
     nonisolated(unsafe) static let links = regex(#"<link\b[^>]*>"#)
+    /// The start of an `<a>` or `<area>` tag (matched anchored on a tag).
+    nonisolated(unsafe) static let linkTag = regex(#"<(?:a|area)(?=[\s/>])"#)
     nonisolated(unsafe) static let remoteCSS = regex(#"(@import\s+)?url\(\s*["']?\s*(?:https?:|ftp:|//)[^)]*\)|@import\s+["']\s*(?:https?:|ftp:|//)[^"']*["']"#)
 
     static func replace(_ r: NSRegularExpression, in s: String, with t: String) -> String {
@@ -1394,5 +1396,28 @@ public enum HTMLScrub {
         s = replace(remoteAttr, in: s, with: "")
         s = replace(remoteCSS, in: s, with: "none")
         return s
+    }
+
+    /// `noScriptNoRemote`, except that a link's own `href` (`<a>`,
+    /// `<area>`) to the web stays. A link loads nothing by itself: a tap
+    /// is decided by the page's owner (the iOS preview opens it in its
+    /// isolated browser, or asks first). Images, frames, `xlink:href`,
+    /// `srcset`, stylesheets and CSS `url()` still go.
+    public static func noScriptNoRemoteKeepingLinks(_ html: String) -> String {
+        var s = noScript(html)
+        s = replace(links, in: s, with: "")
+        let ns = s as NSString
+        let linkTags = tags.matches(in: s, range: NSRange(location: 0, length: ns.length))
+            .map(\.range).filter { linkTag.firstMatch(in: s, options: .anchored, range: $0) != nil }
+        var out = "", last = 0
+        for m in remoteAttr.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            let name = ns.substring(with: m.range).drop(while: \.isWhitespace).prefix { $0 != "=" && !$0.isWhitespace }.lowercased()
+            let inLink = linkTags.contains { NSLocationInRange(m.range.location, $0) && NSMaxRange(m.range) <= NSMaxRange($0) }
+            if name == "href", inLink { continue }
+            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+            last = NSMaxRange(m.range)
+        }
+        out += ns.substring(from: last)
+        return replace(remoteCSS, in: out, with: "none")
     }
 }

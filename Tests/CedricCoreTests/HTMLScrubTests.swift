@@ -22,6 +22,19 @@ import Testing
         #expect(s.contains("src=dot.png") && s.contains(">link</a>"))
     }
 
+    /// The iOS preview: a link to the web stays a link (a tap the app
+    /// decides); nothing else remote is kept.
+    @Test func previewKeepsLinksButNoRemoteLoads() {
+        let html = "<link rel=stylesheet href='https://t/css'><style>@import url('https://t/i'); p{background:url(http://t/bg)}</style><p style=\"background:url('//t/x')\">p</p><img src=\"https://tracker.example/p.gif\"><img src=dot.png><img srcset=\"https://t/a 2x\"><a href=\"https://example.com/ok\">link</a> <a title=\"t\" HREF='http://example.com/two'>two</a> <a/href=//example.com/three>three</a> <map><area shape=rect href=\"https://example.com/area\"></map><svg><a xlink:href=\"https://t/x\">s</a><image href=\"https://t/img\"/><use href=\"https://t/use\"/></svg><a href=\"https://example.com/ok\"><img src=\"https://t/badge\"></a><abbr href=\"https://t/abbr\">a</abbr><p>see href=\"https://example.com/text\"</p><a href=\"javascript:alert(1)\">j</a>"
+        let s = HTMLScrub.noScriptNoRemoteKeepingLinks(html)
+        #expect(!s.contains("https://t") && !s.contains("http://t") && !s.contains("//t/") && !s.contains("tracker"), "\(s)")
+        #expect(s.contains("<a href=\"https://example.com/ok\">link</a>"), "\(s)")
+        #expect(s.contains("HREF='http://example.com/two'") && s.contains("href=//example.com/three") && s.contains("href=\"https://example.com/area\""), "\(s)")
+        #expect(s.contains("src=dot.png") && !s.lowercased().contains("alert(1)"))
+        // The rich-text scrub is unchanged: no remote href there.
+        #expect(!HTMLScrub.noScriptNoRemote(html).contains("example.com/ok"))
+    }
+
     /// Release review 0.2.1 M1: script URLs a browser still runs although
     /// the plain text "javascript:" isn't there.
     @Test func scriptURLsInEveryForm() {
@@ -58,6 +71,7 @@ import Testing
             #expect(!s.lowercased().contains("alert(1)") && !s.lowercased().contains("msgbox(1)"), "\(html) -> \(s)")
             #expect(s.contains("\"#\""), "the link is kept, pointing nowhere: \(s)")
             #expect(HTMLScrub.noScriptNoRemote(html).contains("\"#\""))
+            #expect(HTMLScrub.noScriptNoRemoteKeepingLinks(html).contains("\"#\""))
         }
         // Not script URLs: kept as written.
         let good = [

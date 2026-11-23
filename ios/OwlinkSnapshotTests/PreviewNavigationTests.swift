@@ -102,6 +102,24 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertTrue(page.hasPrefix("<meta http-equiv=\"Content-Security-Policy\" content=\"\(PreviewController.csp)\">"))
     }
 
+    /// A web link in the document stays a link in the served page (a tap
+    /// reaches `handleLink`: the isolated browser, Open in Browser asks
+    /// first); a remote image or stylesheet is still dropped.
+    func testServedPageKeepsWebLinksButNoRemoteLoads() async throws {
+        let (_, doc) = try tree()
+        let preview = PreviewController()
+        host(preview)
+        preview.loadsWeb = false
+        preview.documentURL = doc
+        preview.show(markdown: "[site](https://example.com/owlink) ![t](https://tracker.example/p.gif)\n\n<link rel=stylesheet href=\"https://t.example/c.css\">\n",
+                     palette: EditorPalettes.light)
+        try await waitFor("served") { preview.servedPageHTML?.contains("site") == true }
+        let page = try XCTUnwrap(preview.servedPageHTML)
+        XCTAssertTrue(page.contains("<a href=\"https://example.com/owlink\">site</a>"), page)
+        XCTAssertFalse(page.contains("tracker.example"))
+        XCTAssertFalse(page.contains("t.example"))
+    }
+
     /// A linked document is checked and read by its resolved path (Mac
     /// 87519e6): a symlink named like Markdown but pointing at a plain
     /// text file (the editor's, not the preview's) is judged by its target

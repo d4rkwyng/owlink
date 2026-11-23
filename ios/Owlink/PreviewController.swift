@@ -217,8 +217,10 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             vault?.prepareIndex()
             var body: String
             switch source {
-            case .markdown(let markdown): body = HTMLScrub.noScriptNoRemote(Markdown.render(markdown, options: .preview(vault: vault)))
-            case .html(let html): body = HTMLScrub.noScriptNoRemote(html)
+            // Web links keep their address (a tap opens the isolated
+            // browser); nothing else remote is kept.
+            case .markdown(let markdown): body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: .preview(vault: vault)))
+            case .html(let html): body = HTMLScrub.noScriptNoRemoteKeepingLinks(html)
             }
             let readable: Bool
             if let cachedAccess {
