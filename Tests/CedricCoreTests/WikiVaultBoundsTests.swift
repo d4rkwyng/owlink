@@ -17,6 +17,20 @@ import Testing
         #expect(vault.resolve("/Secrets/key") == nil)
     }
 
+    @Test func aNoteSavedStraightInHomeDoesNotIndexAllOfHome() throws {
+        let t = try makeTree(["home/note.md", "home/Beside.md", "home/Documents/Private/secret.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let home = t.appendingPathComponent("home")
+        let vault = WikiVault(documentFolder: home, home: home)
+        #expect(vault.indexDepth == 1)
+        #expect(vault.resolve("Beside")?.lastPathComponent == "Beside.md", "the folder's own notes still resolve")
+        #expect(vault.resolve("secret") == nil, "a bare name doesn't search the rest of home")
+        // An ordinary folder keeps the full depth.
+        #expect(WikiVault(documentFolder: t.appendingPathComponent("home/Documents"), home: home).indexDepth == WikiVault.maxDepth)
+        // Opening the home folder on purpose keeps the full index.
+        #expect(WikiVault(documentFolder: home, openedRoot: home, home: home).indexDepth == WikiVault.maxDepth)
+    }
+
     @Test func anObsidianAboveHomeIsNotAVault() throws {
         let t = try makeTree(["users/.obsidian/x", "users/me/Notes/doc.md"])
         defer { try? FileManager.default.removeItem(at: t) }

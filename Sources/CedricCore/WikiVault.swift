@@ -22,6 +22,12 @@ public final class WikiVault: @unchecked Sendable {
     private var index: [String: [URL]] = [:]
     private var attachmentFolder: URL?
     private var built: Date?
+    /// How many folder levels the name index reads: `maxDepth`, or 1 (the
+    /// root's own files) when the root is only the document's folder and
+    /// that folder may not be a vault root (a note saved straight in `~`
+    /// or at a disk's root): bare names then don't search the whole home
+    /// folder or disk.
+    public let indexDepth: Int
 
     public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default, home: URL? = nil) {
         self.fm = fileManager
@@ -29,7 +35,10 @@ public final class WikiVault: @unchecked Sendable {
         let folder = documentFolder.standardizedFileURL
         let opened = openedRoot?.standardizedFileURL
         let validRoot = opened.flatMap { Self.contains(folder, in: $0) ? $0 : nil }
-        self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager, home: home) ?? folder).standardizedFileURL
+        let found = validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager, home: home)
+        self.root = (found ?? folder).standardizedFileURL
+        let confined = found == nil && !Self.mayBeVaultRoot(folder, home: home ?? URL(fileURLWithPath: NSHomeDirectory()))
+        self.indexDepth = confined ? 1 : Self.maxDepth
     }
 
     /// The nearest folder at or above `folder` that holds `.obsidian/`, as
@@ -155,7 +164,7 @@ public final class WikiVault: @unchecked Sendable {
     private func currentIndex() -> ([String: [URL]], URL?) {
         lock.lock(); defer { lock.unlock() }
         if let built, Date().timeIntervalSince(built) < Self.refreshSeconds { return (index, attachmentFolder) }
-        index = Self.buildIndex(root, fm)
+        index = Self.buildIndex(root, fm, depth: indexDepth)
         attachmentFolder = nil
         let config = root.appendingPathComponent(".obsidian/app.json")
         if Self.contains(config, in: root),
@@ -190,7 +199,7 @@ public final class WikiVault: @unchecked Sendable {
         return Date().timeIntervalSince(built) < Self.refreshSeconds
     }
 
-    static func buildIndex(_ root: URL, _ fm: FileManager) -> [String: [URL]] {
+    static func buildIndex(_ root: URL, _ fm: FileManager, depth maxDepth: Int = WikiVault.maxDepth) -> [String: [URL]] {
         var idx: [String: [URL]] = [:]
         var count = 0
         var queue: [(URL, Int)] = [(root, 0)]
