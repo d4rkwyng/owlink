@@ -422,8 +422,12 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         let (a, b, req) = (a, b, req)
         let first = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
         #expect(await eventually { rt.attempts.value == 1 })
+        // Released on every path, so a failed expectation can't leave a
+        // request waiting on the fake load.
+        defer { rt.release() }
         let second = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // The second request has reached the gate (not just had time to).
+        #expect(await eventually { await host.waitingRequests == 1 })
         #expect(rt.attempts.value == 1, "no second load while the first is in flight")
         #expect(await host.loadAttempts == 1)
         rt.release()
@@ -443,8 +447,11 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         let (a, b, req) = (a, b, req)
         let first = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
         #expect(await eventually { rt.attempts.value == 1 && clock.pendingSleepers >= 1 })
+        defer { rt.release() }
         let second = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
-        try? await Task.sleep(nanoseconds: 150_000_000)
+        // The second request is waiting on the first load before the
+        // watchdog fires (a sleep here let it race the clock).
+        #expect(await eventually { await host.waitingRequests == 1 })
         #expect(rt.attempts.value == 1, "no second load while the first is in flight")
         clock.advance(BuiltInWatchdog.seconds + 1)
         await #expect(throws: BuiltInError.loadTimedOut(seconds: Int(BuiltInWatchdog.seconds))) { try await first.value }
@@ -462,5 +469,135 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) }
         #expect(rt.attempts.value == 2)
         #expect(await host.loadedPath == b)
+    }
+
+    /// A request generating with model A holds it: a request for model B
+    /// waits until A's generation is done, then frees A and loads B. The
+    /// fake fails a generation that reaches it after its free, as
+    /// LlamaModel does (the free runs first on llama.cpp's queue:
+    /// `notInstalled`). Before the fix, B freed A at once and A's request
+    /// failed.
+    @Test func aSwitchWaitsForTheOldModelsGeneration() async throws {
+        let rt = StrictRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        let (a, b, req) = (a, b, req)
+        defer { rt.loadGate.open(); rt.generateGate.open() }
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) }
+        // A's next request is leased and on its way to the queue.
+        rt.generateGate.close()
+        let useA = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
+        #expect(await eventually { rt.count("gen-start serial-a.gguf") == 2 })
+        let toB = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
+        // B's request has reached the host (or, before the fix, freed A
+        // and started loading B).
+        #expect(await eventually { await host.waitingRequests == 1 || rt.count("load-start serial-b.gguf") == 1 })
+        #expect(!rt.events.value.contains("unload serial-a.gguf"), "A freed while a request was using it")
+        #expect(rt.count("load-start serial-b.gguf") == 0)
+        rt.generateGate.open()
+        _ = try await useA.value
+        _ = try await toB.value
+        #expect(rt.count("gen-freed serial-a.gguf") == 0)
+        #expect(rt.order("gen-end serial-a.gguf", before: "unload serial-a.gguf"))
+        #expect(rt.order("unload serial-a.gguf", before: "load-start serial-b.gguf"))
+        #expect(await host.loadedPath == b)
+        #expect(await host.unloadCount == 1)
+    }
+
+    /// Codex's ordering: A's request and B's both wait on A's load. When it
+    /// ends, B may resume first; it must not free A before A's request has
+    /// generated with it.
+    @Test func aRequestWaitingOnItsLoadKeepsTheModelForItsGeneration() async throws {
+        let rt = StrictRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        let (a, b, req) = (a, b, req)
+        defer { rt.loadGate.open(); rt.generateGate.open() }
+        rt.loadGate.close()
+        let useA = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
+        #expect(await eventually { rt.count("load-start serial-a.gguf") == 1 })
+        let toB = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
+        #expect(await eventually { await host.waitingRequests == 1 })
+        rt.loadGate.open()
+        _ = try await useA.value
+        _ = try await toB.value
+        #expect(rt.count("gen-freed serial-a.gguf") == 0)
+        #expect(rt.order("gen-end serial-a.gguf", before: "unload serial-a.gguf"))
+        #expect(rt.order("unload serial-a.gguf", before: "load-start serial-b.gguf"))
+        #expect(await host.loadedPath == b)
+    }
+
+    /// Settings "Unload" during a generation: the model leaves the host at
+    /// once (no new request gets it) and is freed when that generation ends.
+    @Test func anUnloadDuringAGenerationFreesWhenItEnds() async throws {
+        let rt = StrictRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        let (a, req) = (a, req)
+        defer { rt.loadGate.open(); rt.generateGate.open() }
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) }
+        rt.generateGate.close()
+        let useA = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
+        #expect(await eventually { rt.count("gen-start serial-a.gguf") == 2 })
+        await host.unload()
+        #expect(await host.loadedPath == nil)
+        #expect(rt.count("unload serial-a.gguf") == 0)
+        rt.generateGate.open()
+        _ = try await useA.value
+        #expect(await eventually { rt.count("unload serial-a.gguf") == 1 })
+        #expect(rt.order("gen-end serial-a.gguf", before: "unload serial-a.gguf"))
+        #expect(rt.count("gen-freed serial-a.gguf") == 0)
+    }
+}
+
+/// A gate a fake waits at until it is open.
+final class TestGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen: Bool
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(open: Bool = true) { isOpen = open }
+    func close() { lock.withLock { isOpen = false } }
+    func open() {
+        let w: [CheckedContinuation<Void, Never>] = lock.withLock { isOpen = true; defer { waiters = [] }; return waiters }
+        w.forEach { $0.resume() }
+    }
+    func pass() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let wait: Bool = lock.withLock { if !isOpen { waiters.append(c) }; return !isOpen }
+            if !wait { c.resume() }
+        }
+    }
+}
+
+/// Models that fail a generation reaching them after their free, as
+/// LlamaModel's does (`run` on a freed context throws `notInstalled`),
+/// with gates before the load and before the generation reaches the
+/// "queue", and a log of what happened in order.
+final class StrictRuntime: BuiltInRuntime, @unchecked Sendable {
+    final class Model: LoadedModel, @unchecked Sendable {
+        let name: String
+        let runtime: StrictRuntime
+        let freed = Box(false)
+        init(name: String, runtime: StrictRuntime) { self.name = name; self.runtime = runtime }
+        func generate(_ request: GenerationRequest) async throws -> GenerationResult {
+            runtime.log("gen-start \(name)")
+            await runtime.generateGate.pass()
+            if freed.value { runtime.log("gen-freed \(name)"); throw BuiltInError.notInstalled }
+            runtime.log("gen-end \(name)")
+            return GenerationResult(text: #"{"hints":[]}"#)
+        }
+        func unload() { freed.mutate { $0 = true }; runtime.log("unload \(name)") }
+    }
+    let events = Box<[String]>([])
+    let loadGate = TestGate(), generateGate = TestGate()
+    func log(_ e: String) { events.mutate { $0.append(e) } }
+    func count(_ e: String) -> Int { events.value.filter { $0 == e }.count }
+    /// The last `first` comes before the first `second` (both present).
+    func order(_ first: String, before second: String) -> Bool {
+        let ev = events.value
+        guard let i = ev.lastIndex(of: first), let j = ev.firstIndex(of: second) else { return false }
+        return i < j
+    }
+    func load(modelAt url: URL) async throws -> any LoadedModel {
+        log("load-start \(url.lastPathComponent)")
+        await loadGate.pass()
+        return Model(name: url.lastPathComponent, runtime: self)
     }
 }

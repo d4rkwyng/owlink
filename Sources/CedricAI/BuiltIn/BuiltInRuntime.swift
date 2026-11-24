@@ -148,6 +148,25 @@ public actor BuiltInModelHost {
     /// queue: a second load would only wait behind it).
     private var stuck: (attempt: Int, task: Task<any LoadedModel, Error>)?
     private var active = 0
+    /// Leases on a loaded model, by model: generations that hold it from
+    /// the moment `lease(at:)` returns it until their work has finished.
+    /// A held model is never freed: a switch to another model waits, and
+    /// an unload (Settings, idle) only takes it out of `loaded` and frees
+    /// it when the last lease ends (`retiring`).
+    private var users: [ObjectIdentifier: Int] = [:]
+    /// Requests that will lease the model at a path once its load ends
+    /// (the one that started the load and any that joined it). Between the
+    /// load publishing and them resuming, they count as users, so another
+    /// request can't drop the model first.
+    private var joiners: [URL: Int] = [:]
+    /// Dropped while leased: freed when the last lease ends. No load
+    /// starts while one is here (one model in memory at a time).
+    private var retiring: [ObjectIdentifier: any LoadedModel] = [:]
+    /// Requests waiting for a lease to end or a joiner to resume.
+    private var userWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Requests suspended in `lease(at:)` waiting for another load or for
+    /// the old model's users. For tests: the request has reached the gate.
+    public private(set) var waitingRequests = 0
     private var lastUse: TimeInterval = 0
     private var idleTimer: Task<Void, Never>?
     /// For tests and the log.
@@ -186,7 +205,8 @@ public actor BuiltInModelHost {
             lastUse = clock.now
             armIdleTimer()
         }
-        let model = try await model(at: path)
+        let model = try await lease(at: path)
+        defer { release(model) }
         try Task.checkCancellation()
         if let onText { return try await model.generate(request, onText: onText) }
         return try await model.generate(request)
@@ -204,7 +224,17 @@ public actor BuiltInModelHost {
         _ = try await BuiltInLoad.$intent.withValue(.launch) { try await self.model(at: path) }
     }
 
-    /// Loads (or reuses) the model at `path`, dropping any other one.
+    /// Loads (or reuses) the model at `path`, dropping any other one, and
+    /// returns it without a lease: the caller must not generate with it
+    /// while other requests may switch models (`generate` leases).
+    public func model(at path: URL) async throws -> any LoadedModel {
+        let model = try await lease(at: path)
+        release(model)
+        return model
+    }
+
+    /// Loads (or reuses) the model at `path`, dropping any other one, and
+    /// returns it leased: it stays loaded until `release(_:)`.
     /// Refuses an automatic request unless the model is already in memory,
     /// and any request while the engine is unhealthy (except one explicit
     /// retry, once the stuck load has stopped).
@@ -216,26 +246,90 @@ public actor BuiltInModelHost {
     /// unloading it (llama.cpp's exit registry still held it), and if both
     /// hung, each replaced the watchdog's record of the stuck load and
     /// either one finishing cleared it while the other still ran.
-    public func model(at path: URL) async throws -> any LoadedModel {
+    ///
+    /// A switch waits for the old model's users: requests generating with
+    /// it, and requests whose load of it just ended but that haven't
+    /// resumed yet. Before, a request for B waiting behind A's load could
+    /// resume first and free A before A's own request reached llama.cpp's
+    /// queue, which then failed with `notInstalled`.
+    private func lease(at path: URL) async throws -> any LoadedModel {
         let intent = BuiltInLoad.intent
         while true {
-            if let loaded, loaded.path == path { return loaded.model }
+            if let loaded, loaded.path == path {
+                users[ObjectIdentifier(loaded.model), default: 0] += 1
+                return loaded.model
+            }
+            if loading == nil, oldModelBusy {
+                // Refusals that don't depend on the old model don't wait
+                // for it (and use no retry: `admit` runs after the wait).
+                if intent == .automatic || stuck != nil { try admit(intent) }
+                await waitForUsers()
+                try Task.checkCancellation()
+                continue
+            }
             try admit(intent)
-            guard let other = loading else { break }
-            if other.path == path { return try await other.task.value }
-            // Ends after that load's bookkeeping (`runLoad`): `loading` is
-            // clear and its model published or its stuck load recorded.
-            _ = await other.task.result
-            try Task.checkCancellation()
+            if let other = loading {
+                if other.path == path {
+                    try await join(other.task, path: path)
+                } else {
+                    // Ends after that load's bookkeeping (`runLoad`): `loading` is
+                    // clear and its model published or its stuck load recorded.
+                    waitingRequests += 1
+                    _ = await other.task.result
+                    waitingRequests -= 1
+                    try Task.checkCancellation()
+                }
+                continue
+            }
+            // No suspension from here to `loading` being set: this is the one load.
+            if let old = loaded { drop(old) }   // no users: `oldModelBusy` was false
+            loadAttempts += 1
+            let attempt = loadAttempts
+            // Actor-isolated: it can't start before `loading` is set below.
+            let task = Task { try await self.runLoad(attempt: attempt, path: path) }
+            loading = (attempt, path, task)
+            try await join(task, path: path)
         }
-        // No suspension from here to `loading` being set: this is the one load.
-        if let old = loaded { drop(old) }
-        loadAttempts += 1
-        let attempt = loadAttempts
-        // Actor-isolated: it can't start before `loading` is set below.
-        let task = Task { try await self.runLoad(attempt: attempt, path: path) }
-        loading = (attempt, path, task)
-        return try await task.value
+    }
+
+    /// Waits for the load of `path` as one of its joiners; the caller
+    /// then loops and leases the published model.
+    private func join(_ task: Task<any LoadedModel, Error>, path: URL) async throws {
+        joiners[path, default: 0] += 1
+        let result = await task.result
+        joiners[path, default: 1] -= 1
+        if joiners[path] == 0 { joiners[path] = nil }
+        wakeUserWaiters()
+        _ = try result.get()
+    }
+
+    /// Ends a lease from `lease(at:)`. The last lease on a dropped model frees it.
+    private func release(_ model: any LoadedModel) {
+        let id = ObjectIdentifier(model)
+        let n = (users[id] ?? 1) - 1
+        users[id] = n > 0 ? n : nil
+        if n <= 0, let old = retiring.removeValue(forKey: id) { old.unload() }
+        wakeUserWaiters()
+    }
+
+    /// A load can't start yet: the loaded model has users, or a dropped
+    /// one is still in use.
+    private var oldModelBusy: Bool {
+        if !retiring.isEmpty { return true }
+        guard let loaded else { return false }
+        return users[ObjectIdentifier(loaded.model), default: 0] > 0 || joiners[loaded.path, default: 0] > 0
+    }
+
+    private func waitForUsers() async {
+        waitingRequests += 1
+        await withCheckedContinuation { userWaiters.append($0) }
+        waitingRequests -= 1
+    }
+
+    private func wakeUserWaiters() {
+        let w = userWaiters
+        userWaiters = []
+        w.forEach { $0.resume() }
     }
 
     /// Load attempt `attempt`, under the watchdog: publishes the model, or
@@ -264,11 +358,13 @@ public actor BuiltInModelHost {
         return model
     }
 
+    /// Takes `old` out of memory: now, or when its last lease ends.
     private func drop(_ old: (path: URL, model: any LoadedModel)) {
         loaded = nil
         unloadCount += 1
         session.markUnloaded()
-        old.model.unload()
+        let id = ObjectIdentifier(old.model)
+        if users[id, default: 0] > 0 { retiring[id] = old.model } else { old.model.unload() }
     }
 
     private func admit(_ intent: BuiltInLoadIntent) throws {
@@ -317,7 +413,9 @@ public actor BuiltInModelHost {
         if stuck?.attempt == attempt { stuck = nil }
     }
 
-    /// Frees the model now (Settings "Unload", a model deleted, idle).
+    /// Frees the model now (Settings "Unload", a model deleted, idle), or,
+    /// if a generation is using it, as soon as that ends; no new request
+    /// gets it either way.
     public func unload() {
         guard let old = loaded else { return }
         drop(old)
