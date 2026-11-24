@@ -273,9 +273,10 @@ public enum DocumentWrite {
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
-        guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
-            throw writeError(EBUSY, url)
-        }
+        guard st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else { throw writeError(EBUSY, url) }
+        // The checked file itself is a pipe, socket or device: nothing a
+        // save can write a document into (not "changed while saving").
+        guard st.st_mode & S_IFMT == S_IFREG else { throw writeError(ENXIO, url) }
         // The checked regular file: back to ordinary blocking I/O.
         let flags = fcntl(fd, F_GETFL)
         guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }

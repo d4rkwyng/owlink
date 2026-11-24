@@ -1072,7 +1072,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         do {
             try doc.write(textView.string, to: url)
         } catch {
-            showError(error)
+            showSaveError(error, saving: url, offer: .saveAs)
             return false
         }
         // Typing after a save starts a new undo step, so ⌘Z comes back to
@@ -1098,6 +1098,40 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func showError(_ error: Error) {
         let a = NSAlert(error: error)
         if let window { a.beginSheetModal(for: window) } else { a.runModal() }
+    }
+
+    /// A failed save, export or copy (SaveFailure): the reason in plain
+    /// words, that the text is still in the tab, and Save As… (Save a
+    /// Copy… for a copy) with Cancel; an export gets OK.
+    func showSaveError(_ error: Error, saving url: URL, offer: SaveFailure.Offer) {
+        let text = SaveFailure.text(for: error, saving: url, offer: offer)
+        let a = NSAlert()
+        a.alertStyle = .warning
+        a.messageText = text.message
+        a.informativeText = text.detail
+        let again: (() -> Void)?
+        switch offer {
+        case .saveAs:
+            a.addButton(withTitle: String(localized: "Save As…"))
+            again = { [weak self] in _ = self?.saveAs() }
+        case .saveCopy:
+            a.addButton(withTitle: String(localized: "Save a Copy…"))
+            again = { [weak self] in self?.saveCopy() }
+        case .none:
+            a.addButton(withTitle: String(localized: "OK"))
+            again = nil
+        }
+        if again != nil { a.addButton(withTitle: String(localized: "Cancel")) }
+        // The panel opens after the sheet has gone.
+        let answer: (NSApplication.ModalResponse) -> Void = { r in
+            guard r == .alertFirstButtonReturn, let again else { return }
+            DispatchQueue.main.async { again() }
+        }
+        if let window {
+            a.beginSheetModal(for: window, completionHandler: answer)
+        } else {
+            answer(a.runModal())
+        }
     }
 
     /// Reloads from disk if the file changed and the tab has no unsaved
@@ -1236,7 +1270,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             showError(NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Couldn’t encode the copy.")]))
             return
         }
-        do { try DocumentWrite.write(data, to: url) } catch { showError(error) }
+        do { try DocumentWrite.write(data, to: url) } catch { showSaveError(error, saving: url, offer: .saveCopy) }
     }
 
     // MARK: Owl

@@ -10,7 +10,8 @@ import CedricCore
 /// won't write over it and Apply stays off. Reload (the Changed on disk
 /// bar) and Revert to Saved on a dirty tab whose file went 0444 take the
 /// file's text, stay read-only and undo back to the unsaved edits. A
-/// Finder-locked file is read-only too.
+/// Finder-locked file is read-only too. Then a save that fails says why
+/// (SaveFailureCheck.swift).
 extension DevChecks {
     static func readOnlyCheck(_ name: String, _ app: AppDelegate) -> Bool {
         guard name == "readonly" else { return false }
@@ -170,7 +171,7 @@ extension DevChecks {
                 // Leave nothing unsaved or read-only behind.
                 chmod(file.path, 0o644)
             },
-        ])
+        ] + saveFailureSteps(app))
         return true
     }
 }

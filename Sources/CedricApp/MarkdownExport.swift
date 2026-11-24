@@ -63,14 +63,14 @@ extension EditorWindowController {
         let done: (NSApplication.ModalResponse) -> Void = { [weak self] r in
             guard r == .OK, let url = panel.url else { return }
             MarkdownPDFExport.run(markdown: text, folder: folder, title: self?.exportBaseName ?? "", to: url) { error in
-                if let error { self?.showError(error) }
+                if let error { self?.showSaveError(error, saving: url, offer: .none) }
             }
         }
         if let w = window { panel.beginSheetModal(for: w, completionHandler: done) } else { done(panel.runModal()) }
     }
 
     private func writeExport(_ data: Data, to url: URL) {
-        do { try DocumentWrite.write(data, to: url) } catch { showError(error) }
+        do { try DocumentWrite.write(data, to: url) } catch { showSaveError(error, saving: url, offer: .none) }
     }
 
     /// Edit › Copy as HTML: the rendered HTML of the selection (or the
