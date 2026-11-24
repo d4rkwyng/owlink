@@ -452,15 +452,19 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
     }
 
-    /// Settings opened over the Ask Cedric sheet (iPhone: from the •••
-    /// menu above it), closed, Ask Cedric closed, then the back chevron.
+    /// Settings opened over the Ask Cedric sheet (from the ••• menu above
+    /// it), closed, Ask Cedric closed, then the back chevron. On every
+    /// device: the sheet stops at half height, undimmed, with ••• in view
+    /// above it (iPhone; an iPad's popped-out sheet too). XCUITest may
+    /// count the sheet's container as covering the button, so the tap
+    /// goes to its coordinate, as a finger's would.
     func testSettingsOverAskCedricThenBack() throws {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
-        if device == "ipad" { throw XCTSkip("the iPad's Ask Cedric is docked: testSettingsOpensWithCedricOpen") }
         openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
         let more = app.navigationBars.buttons["More"].firstMatch
-        guard more.exists else { throw XCTSkip("••• covered by the sheet") }
+        XCTAssertTrue(more.waitForExistence(timeout: 5), "no ••• above Ask Cedric's sheet")
         more.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         menuItem(app, "Settings").tap()
         XCTAssertTrue(settingsShown(app), "Settings didn't open with Ask Cedric open")
