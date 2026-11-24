@@ -38,6 +38,9 @@ enum AppSettings {
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
+        /// The Markdown preview's front matter block was left open (the
+        /// reader's last tap on it); unset: collapsed.
+        static let previewFrontMatterExpanded = "previewFrontMatterExpanded"
         /// Same key as the Mac (Settings › "Reopen files from last session").
         static let reopenFilesFromLastSession = "reopenFilesFromLastSession"
         /// The Mac's find bar does not remember its Regex box; the phone does.
@@ -51,7 +54,7 @@ enum AppSettings {
     static let launchResetKeys = [Key.fontSize, Key.fontName, Key.wrap, Key.lineNumbers, Key.showInvisibles, Key.showContextBar, Key.owlHints, Key.theme,
                                   Key.saveAutomatically, Key.openReadOnly, Key.reopenFilesFromLastSession,
                                   Key.owlPlacement, Key.owlManualPlacement, Key.focusUnit,
-                                  Key.checkSpellingWhileTyping, Key.checkGrammarInProse]
+                                  Key.checkSpellingWhileTyping, Key.checkGrammarInProse, Key.previewFrontMatterExpanded]
 
     /// 15 pt on large screens (an iPad, an unfolded iPhone Duo), 13 on
     /// phone-sized ones: by size class, not device idiom (the Duo is a
@@ -83,6 +86,12 @@ enum AppSettings {
     @MainActor static var fontSize: Double {
         get { chosenFontSize ?? defaultFontSize }
         set { defaults.set(min(max(newValue, fontSizes.lowerBound), fontSizes.upperBound), forKey: Key.fontSize); post() }
+    }
+
+    /// Not posted as a change: the preview reads it at each render.
+    static var previewFrontMatterExpanded: Bool {
+        get { defaults.bool(forKey: Key.previewFrontMatterExpanded) }
+        set { defaults.set(newValue, forKey: Key.previewFrontMatterExpanded) }
     }
 
     static var wrap: Bool {

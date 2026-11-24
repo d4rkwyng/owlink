@@ -182,6 +182,12 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         render(.markdown(markdown), palette: palette, document: documentURL, rootOverride: nil, keepPlace: true)
     }
 
+    /// The front matter block's state is kept when the preview goes too.
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        recordFrontMatterState()
+    }
+
     private enum Source {
         case markdown(String)
         case html(String)
@@ -190,6 +196,35 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// Renders `source` for `document` (its folder is the page's base) in
     /// the local preview: scripts stripped, the strict CSP, JavaScript off.
     private func render(_ source: Source, palette: EditorPalette, document: URL?, rootOverride: URL?, keepPlace: Bool) {
+        // The front matter block as the reader left it on the page now
+        // (a tap opens or closes it), kept for this render and the next.
+        recordFrontMatterState { [weak self] in
+            self?.renderNow(source, palette: palette, document: document, rootOverride: rootOverride, keepPlace: keepPlace)
+        }
+    }
+
+    /// Reads whether the page's front matter `<details>` is open, from the
+    /// app's own content world (`.defaultClient`, as the anchor scroll
+    /// does): a read, with no handler or bridge into the page, which runs
+    /// no script of its own. A change is kept as the preference the next
+    /// render (and the next document) opens the block from. Then `then`,
+    /// at once when there's no loaded page with front matter.
+    func recordFrontMatterState(then: @escaping () -> Void = {}) {
+        guard loaded, !showingCSV, files.pageHTML?.contains("<details class=\"frontmatter\"") == true else { then(); return }
+        web.callAsyncJavaScript(Self.frontMatterStateScript, arguments: [:], in: nil, in: .defaultClient) { result in
+            if case .success(let value) = result, let open = value as? Bool, open != AppSettings.previewFrontMatterExpanded {
+                AppSettings.previewFrontMatterExpanded = open
+            }
+            then()
+        }
+    }
+
+    static let frontMatterStateScript = """
+    const d = document.querySelector('details.frontmatter');
+    return d ? d.open : null;
+    """
+
+    private func renderNow(_ source: Source, palette: EditorPalette, document: URL?, rootOverride: URL?, keepPlace: Bool) {
         showingCSV = false
         csv?.view.isHidden = true
         web.isHidden = false
@@ -213,6 +248,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         let baseURL = folder.flatMap(PreviewFolder.pageURL(for:))
         let accessKey = "\(folder?.path ?? "-")|\(opened?.path ?? "-")"
         let cachedAccess = folderAccess?.key == accessKey ? folderAccess?.readable : nil
+        let frontMatterExpanded = AppSettings.previewFrontMatterExpanded
         let hint = "<p class=\"preview-hint\"><a href=\"\(Self.grantURL)\">" + Markdown.escape(String(localized: "Open the folder to see its images")) + "</a></p>\n"
         queue.async { [weak self] in
             // Warm the vault's name index here, off the main thread, so the
@@ -222,7 +258,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             switch source {
             // Web links keep their address (a tap asks, then the system
             // opens it); nothing else remote is kept.
-            case .markdown(let markdown): body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: .preview(vault: vault)))
+            case .markdown(let markdown): body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: .preview(vault: vault, frontMatterExpanded: frontMatterExpanded)))
             case .html(let html): body = HTMLScrub.noScriptNoRemoteKeepingLinks(html)
             }
             let readable: Bool

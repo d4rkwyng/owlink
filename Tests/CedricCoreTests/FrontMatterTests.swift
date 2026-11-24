@@ -1,0 +1,92 @@
+import Testing
+@testable import CedricCore
+
+/// YAML front matter in the preview (0.5.2 (17)): one collapsed line,
+/// "Front matter · <title>", a `<details>` that opens without page script;
+/// open when the reader left it open; nested values as nested tables and
+/// lists, never YAML text; everything escaped.
+@Suite struct FrontMatterTests {
+    let doc = """
+    ---
+    title: "Owls of the World"
+    date: 2026-11-23
+    hero:
+      icon: owl.png
+      alt: A barn owl
+      links:
+        - text: Home
+          url: /
+        - text: About
+          url: /about
+    tags: [birds, night]
+    ---
+    # Owls
+    """
+
+    @Test func collapsedByDefaultWithTheTitleInTheSummary() {
+        let html = Markdown.render(doc, options: .preview(vault: nil))
+        #expect(html.hasPrefix("<details class=\"frontmatter\" data-line=\"0\">\n<summary>Front matter · Owls of the World</summary>\n"))
+        #expect(!html.hasPrefix("<details class=\"frontmatter\" data-line=\"0\" open>"))
+        #expect(html.contains("</details>\n<h1 data-line=\"13\" id=\"owls\">Owls</h1>"))
+    }
+
+    @Test func openWhenThePreferenceSaysSo() {
+        let html = Markdown.render(doc, options: .preview(vault: nil, frontMatterExpanded: true))
+        #expect(html.hasPrefix("<details class=\"frontmatter\" data-line=\"0\" open>\n<summary>"))
+        // Export and print: open (no one to tap a printed page).
+        #expect(Markdown.render(doc, options: .export(vault: nil)).hasPrefix("<details class=\"frontmatter\" data-line=\"0\" open>"))
+    }
+
+    @Test func withoutATitleJustFrontMatter() {
+        let html = Markdown.render("---\nauthor: Sam\n---\nText\n")
+        #expect(html.contains("<summary>Front matter</summary>"))
+        #expect(Markdown.render("---\ntitle: \"\"\n---\n").contains("<summary>Front matter</summary>"))
+    }
+
+    @Test func nestedMapsAndListsAreTablesAndLists() {
+        let html = Markdown.render(doc)
+        #expect(html.contains("<tr><th>title</th><td>Owls of the World</td></tr>"))
+        #expect(html.contains("<tr><th>date</th><td>2026-11-23</td></tr>"))
+        let hero = "<tr><th>hero</th><td><table class=\"fm-map\"><tbody>"
+            + "<tr><th>icon</th><td>owl.png</td></tr><tr><th>alt</th><td>A barn owl</td></tr>"
+            + "<tr><th>links</th><td><ul class=\"fm-list\">"
+            + "<li><table class=\"fm-map\"><tbody><tr><th>text</th><td>Home</td></tr><tr><th>url</th><td>/</td></tr></tbody></table></li>"
+            + "<li><table class=\"fm-map\"><tbody><tr><th>text</th><td>About</td></tr><tr><th>url</th><td>/about</td></tr></tbody></table></li>"
+            + "</ul></td></tr></tbody></table></td></tr>"
+        #expect(html.contains(hero), "\(html)")
+        #expect(html.contains("<tr><th>tags</th><td><ul class=\"fm-list\"><li>birds</li><li>night</li></ul></td></tr>"))
+        // No raw YAML left over.
+        #expect(!html.contains("- text:") && !html.contains("icon: owl.png"))
+    }
+
+    @Test func parserShapes() {
+        #expect(FrontMatter.parse(["a: 1", "b:", "  - x", "  - y"]) == .map([("a", .scalar("1")), ("b", .list([.scalar("x"), .scalar("y")]))]))
+        // A list at the key's own indent, block text, a flow map.
+        #expect(FrontMatter.parse(["k:", "- 1", "- 2"]) == .map([("k", .list([.scalar("1"), .scalar("2")]))]))
+        #expect(FrontMatter.parse(["t: |", "  one", "  two"]) == .map([("t", .scalar("one\ntwo"))]))
+        #expect(FrontMatter.parse(["m: {a: 1, b: 'x, y'}"]) == .map([("m", .map([("a", .scalar("1")), ("b", .scalar("x, y"))]))]))
+        #expect(FrontMatter.parse(["- a", "- b"]) == .list([.scalar("a"), .scalar("b")]))
+        #expect(FrontMatter.title(FrontMatter.parse(["Title: Hi"])) == "Hi")
+        // Very deep nesting stops, as text, without running away.
+        let deep = (0..<40).map { String(repeating: " ", count: $0 * 2) + "k\($0):" } + [String(repeating: " ", count: 80) + "end"]
+        if case .map = FrontMatter.parse(deep) {} else { Issue.record("deep front matter isn't a map") }
+    }
+
+    @Test func everythingIsEscaped() {
+        let evil = """
+        ---
+        title: "<script>alert(1)</script>"
+        "<b>key</b>": <img src=x onerror=alert(1)>
+        list:
+          - <iframe src="https://evil">
+          - x: "&amp; <svg/onload=1>"
+        ---
+        """
+        let html = Markdown.render(evil, options: .preview(vault: nil))
+        #expect(!html.contains("<script") && !html.contains("<img") && !html.contains("<iframe") && !html.contains("<svg") && !html.contains("<b>"))
+        #expect(html.contains("<summary>Front matter · &lt;script&gt;alert(1)&lt;/script&gt;</summary>"))
+        #expect(html.contains("<th>&lt;b&gt;key&lt;/b&gt;</th><td>&lt;img src=x onerror=alert(1)&gt;</td>"))
+        #expect(html.contains("<li>&lt;iframe src=&quot;https://evil&quot;&gt;</li>"))
+        #expect(html.contains("<td>&amp;amp; &lt;svg/onload=1&gt;</td>"))
+    }
+}

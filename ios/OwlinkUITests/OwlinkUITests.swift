@@ -511,4 +511,21 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after a swipe down")
     }
 
+    /// The preview's front matter: one line, a disclosure VoiceOver reads
+    /// with "Front matter" and the title; a tap opens it.
+    func testFrontMatterCollapsedAndExpanded() throws {
+        let app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        let web = showPreview(app)
+        let summary = web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'Front matter' AND label CONTAINS 'Owls of the World'")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "no Front matter · title summary")
+        print("FRONTMATTER-SUMMARY type=\(summary.elementType.rawValue) label=\(summary.label) value=\(String(describing: summary.value))")
+        XCTAssertTrue([.button, .disclosureTriangle].contains(summary.elementType), "the summary isn't a button: \(summary.elementType.rawValue)")
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists, "the values show while collapsed")
+        shoot("front-matter-collapsed")
+        summary.tap()
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
+        shoot("front-matter-expanded")
+    }
 }

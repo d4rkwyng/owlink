@@ -3031,6 +3031,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard hasEditorPreview else { return }
         // ⇧⌘P in Focus Preview: back to the text.
         if focusOn { exitFocusPreview(); return }
+        // Hiding it: the front matter block's state is kept first.
+        if previewOn { preview?.recordFrontMatterState() }
         previewOn.toggle()
         if previewOn { makePreview() }
         if document.language.language == .csv {

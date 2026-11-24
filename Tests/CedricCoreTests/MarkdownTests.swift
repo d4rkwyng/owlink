@@ -120,10 +120,12 @@ func md(_ s: String) -> String {
 @Suite struct MarkdownGapsTests {
     @Test func yamlFrontmatterIsAMetadataTableNotARuleAndHeading() {
         let html = Markdown.render("---\ntitle: \"Hello\"\ntags: [a, b]\nnested:\n  - x\n---\n# Doc\n")
-        #expect(html.hasPrefix("<table class=\"frontmatter\" data-line=\"0\">"))
+        // 0.5.2 (17): a collapsed <details> block (FrontMatterTests), the
+        // flow and block lists as lists rather than their YAML text.
+        #expect(html.hasPrefix("<details class=\"frontmatter\" data-line=\"0\">"))
         #expect(html.contains("<tr><th>title</th><td>Hello</td></tr>"))
-        #expect(html.contains("<tr><th>tags</th><td>[a, b]</td></tr>"))
-        #expect(html.contains("<tr><th>nested</th><td>  - x</td></tr>"))
+        #expect(html.contains("<tr><th>tags</th><td><ul class=\"fm-list\"><li>a</li><li>b</li></ul></td></tr>"))
+        #expect(html.contains("<tr><th>nested</th><td><ul class=\"fm-list\"><li>x</li></ul></td></tr>"))
         #expect(!html.contains("<hr") && !html.contains("<h2"))
         #expect(html.contains("<h1 data-line=\"6\" id=\"doc\">Doc</h1>"))
         // Not at the top, or never closed: a thematic break as before.

@@ -47,6 +47,12 @@ public enum PreviewHTML {
         table.frontmatter { font-size: 12px; margin: 0 0 1.2em; color: \(hex(p.color(for: .comment))); }
         table.frontmatter th { text-align: left; font-weight: 600; color: \(hex(p.color(for: .key))); vertical-align: top; }
         table.frontmatter td { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+        details.frontmatter { font-size: 12px; margin: 0 0 1.2em; color: \(hex(p.color(for: .comment))); }
+        details.frontmatter > summary { cursor: pointer; font-weight: 600; color: \(hex(p.color(for: .key))); padding: 2px 0; }
+        details.frontmatter > table.frontmatter { margin: .4em 0 0; }
+        table.fm-map { font-size: inherit; margin: 0; }
+        table.fm-map th { text-align: left; font-weight: 600; color: \(hex(p.color(for: .key))); vertical-align: top; }
+        ul.fm-list { margin: 0; padding-left: 1.2em; }
         li:has(> input[type=checkbox]) { list-style: none; }
         li > input[type=checkbox] { margin: 0 .4em 0 -1.3em; }
         .markdown-alert { padding: .1em 1em; margin: 1em 0; border-left: 4px solid var(--alert); }

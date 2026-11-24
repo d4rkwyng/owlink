@@ -31,18 +31,30 @@ public enum Markdown {
         /// relative to the document's folder, not by a `cedric-doc:` URL,
         /// and an unresolved wikilink is plain text.
         public var exportLinks = false
-        public init(highlightCode: Bool = false, obsidian: Bool = false, vault: WikiVault? = nil, exportLinks: Bool = false) {
+        /// YAML front matter is a collapsed `<details>` block ("Front
+        /// matter · title"); true renders it open (the reader's last
+        /// choice, or a page that leaves the app). Works with page
+        /// JavaScript off: `<details>` opens by itself.
+        public var frontMatterExpanded = false
+        public init(highlightCode: Bool = false, obsidian: Bool = false, vault: WikiVault? = nil, exportLinks: Bool = false,
+                    frontMatterExpanded: Bool = false) {
             self.highlightCode = highlightCode
             self.obsidian = obsidian
             self.vault = vault
             self.exportLinks = exportLinks
+            self.frontMatterExpanded = frontMatterExpanded
         }
         /// The live preview's (and export's) options.
         public static let preview = Options(highlightCode: true, obsidian: true)
         /// `preview`, resolving wikilinks in `vault`.
-        public static func preview(vault: WikiVault?) -> Options { Options(highlightCode: true, obsidian: true, vault: vault) }
-        /// `preview(vault:)` for export (see `exportLinks`).
-        public static func export(vault: WikiVault?) -> Options { Options(highlightCode: true, obsidian: true, vault: vault, exportLinks: true) }
+        public static func preview(vault: WikiVault?, frontMatterExpanded: Bool = false) -> Options {
+            Options(highlightCode: true, obsidian: true, vault: vault, frontMatterExpanded: frontMatterExpanded)
+        }
+        /// `preview(vault:)` for export (see `exportLinks`). The front
+        /// matter is open: a printed or exported page has no one to tap it.
+        public static func export(vault: WikiVault?) -> Options {
+            Options(highlightCode: true, obsidian: true, vault: vault, exportLinks: true, frontMatterExpanded: true)
+        }
     }
 
     public static func render(_ source: String, options: Options = Options()) -> String {
@@ -141,25 +153,35 @@ final class MarkdownRenderer {
         return nil
     }
 
-    /// The frontmatter as a small key/value table (nested values verbatim).
+    /// The frontmatter as a collapsible block: `<details>`, closed unless
+    /// `frontMatterExpanded`, its summary "Front matter · <title>" (the
+    /// `title` key's value when there is one), then the values as a
+    /// key/value table, nested maps as nested tables and lists as lists.
+    /// Every key and value is escaped.
     func frontmatter(_ lines: ArraySlice<String>) -> String {
-        var rows: [(String, String)] = []
-        for line in lines {
-            if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
-            if let f = line.first, f != " ", f != "\t", f != "-", f != "#", let colon = line.firstIndex(of: ":"),
-               line.index(after: colon) == line.endIndex || line[line.index(after: colon)] == " " {
-                var value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-                if value.count >= 2, let q = value.first, q == "\"" || q == "'", value.last == q { value = String(value.dropFirst().dropLast()) }
-                rows.append((String(line[..<colon]), value))
-            } else if !rows.isEmpty {
-                rows[rows.count - 1].1 += (rows[rows.count - 1].1.isEmpty ? "" : "\n") + line
-            } else {
-                rows.append(("", line))
-            }
+        let value = FrontMatter.parse(lines)
+        var summary = String(localized: "Front matter")
+        if let title = FrontMatter.title(value) { summary += " · " + title }
+        var out = "<details class=\"frontmatter\" data-line=\"0\"\(options.frontMatterExpanded ? " open" : "")>\n"
+        out += "<summary>\(escape(summary))</summary>\n"
+        switch value {
+        case .map: out += frontmatterHTML(value, top: true)
+        default: out += "<table class=\"frontmatter\">\n<tbody>\n<tr><td>\(frontmatterHTML(value, top: false))</td></tr>\n</tbody>\n</table>\n"
         }
-        var out = "<table class=\"frontmatter\" data-line=\"0\">\n<tbody>\n"
-        for (k, v) in rows { out += "<tr><th>\(escape(k))</th><td>\(escape(v))</td></tr>\n" }
-        return out + "</tbody>\n</table>\n"
+        return out + "</details>\n"
+    }
+
+    private func frontmatterHTML(_ value: FrontMatter.Value, top: Bool) -> String {
+        switch value {
+        case .scalar(let s):
+            return escape(s)
+        case .list(let items):
+            return "<ul class=\"fm-list\">" + items.map { "<li>\(frontmatterHTML($0, top: false))</li>" }.joined() + "</ul>"
+        case .map(let pairs):
+            var out = top ? "<table class=\"frontmatter\">\n<tbody>\n" : "<table class=\"fm-map\"><tbody>"
+            for (k, v) in pairs { out += "<tr><th>\(escape(k))</th><td>\(frontmatterHTML(v, top: false))</td></tr>" + (top ? "\n" : "") }
+            return out + (top ? "</tbody>\n</table>\n" : "</tbody></table>")
+        }
     }
 
     // MARK: Definitions
