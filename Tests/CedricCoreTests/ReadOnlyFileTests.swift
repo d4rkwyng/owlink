@@ -209,9 +209,8 @@ import Testing
     }
 
     /// A folder the user may write in but not read (0300) can't be opened
-    /// as a handle: the save checks and writes by its resolved path
-    /// instead, still refusing a read-only file. (An iOS grant to the
-    /// file alone takes the same path.)
+    /// for reading: the save opens it for search only and still checks
+    /// and writes through it, refusing a read-only file.
     @Test func aFolderThatCantBeReadStillSavesAndRefusesReadOnlyFiles() throws {
         let url = try file("doc.md", "before\n")
         let dir = url.deletingLastPathComponent()
@@ -226,6 +225,54 @@ import Testing
         #expect(try String(contentsOf: url, encoding: .utf8) == "after\n")
         #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
         #expect(mode(locked) == 0o444)
+    }
+
+    /// The 0300 folder's save, raced (Codex review round 2, 0.5.4): it
+    /// checked and wrote by the folder's resolved path, so a folder on
+    /// that path moved away and replaced by a link to a folder holding a
+    /// read-only file of the same name, between the check and the write,
+    /// had a writable file checked and the read-only one replaced (the
+    /// rename needs only the folder's permission). The save now holds
+    /// the checked folder open (search only) for the write.
+    @Test func anUnreadableFolderReplacedByALinkAfterTheCheckStillWritesTheCheckedFolder() throws {
+        let anchor = try file("anchor.md", "anchor\n")
+        defer { cleanUp(anchor) }
+        let base = anchor.deletingLastPathComponent()
+        let fm = FileManager.default
+        let good = base.appendingPathComponent("good"), moved = base.appendingPathComponent("moved")
+        let bad = base.appendingPathComponent("bad")
+        try fm.createDirectory(at: good, withIntermediateDirectories: false)
+        try fm.createDirectory(at: bad, withIntermediateDirectories: false)
+        defer {
+            _ = chmod(good.path, 0o755); _ = chmod(moved.path, 0o755)
+            cleanUp(moved.appendingPathComponent("doc.md")); cleanUp(bad.appendingPathComponent("doc.md"))
+            try? fm.removeItem(at: good); try? fm.removeItem(at: moved)
+        }
+        let url = good.appendingPathComponent("doc.md"), locked = bad.appendingPathComponent("doc.md")
+        try Data("writable\n".utf8).write(to: url)
+        try Data("read-only\n".utf8).write(to: locked)
+        #expect(chmod(locked.path, 0o444) == 0)
+        #expect(chmod(good.path, 0o300) == 0)
+        let probe = open(good.path, O_RDONLY | O_DIRECTORY)
+        if probe >= 0 { close(probe) }
+        #expect(probe == -1, "the folder can't be opened for reading")
+        #expect(FileWriteAccess.blocked(at: url) == nil)
+
+        try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {
+            // Between the check and the write: the checked folder moves
+            // away and a link to the read-only file's folder takes its place.
+            #expect(rename(good.path, moved.path) == 0)
+            #expect(symlink("bad", good.path) == 0)
+        }
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n", "the read-only file is untouched")
+        #expect(mode(locked) == 0o444)
+        #expect(try fm.destinationOfSymbolicLink(atPath: good.path) == "bad")
+        #expect(chmod(moved.path, 0o755) == 0)
+        #expect(try String(contentsOf: moved.appendingPathComponent("doc.md"), encoding: .utf8) == "saved\n",
+                "the checked folder's file got the save")
+        // No temporary file is left in either folder.
+        #expect(try fm.contentsOfDirectory(atPath: moved.path) == ["doc.md"])
+        #expect(try fm.contentsOfDirectory(atPath: bad.path) == ["doc.md"])
     }
 
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {

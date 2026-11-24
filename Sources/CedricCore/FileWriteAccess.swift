@@ -125,15 +125,8 @@ public enum DocumentWrite {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
-            let dirPath = target.deletingLastPathComponent().path
             let name = target.lastPathComponent
-            let dir = open(dirPath, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-            guard dir >= 0 else {
-                let code = errno
-                guard code == EACCES || code == EPERM else { throw writeError(code, url) }
-                try writeByPath(data, to: target, url: url, afterCheck: afterCheck)
-                return
-            }
+            let dir = try openFolder(target.deletingLastPathComponent().path, url: url)
             defer { close(dir) }
             var st = stat()
             if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFLNK { continue }
@@ -141,42 +134,35 @@ public enum DocumentWrite {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
             afterCheck?()
-            if try replace(name, in: dir, with: data, url: url) { return }
-            // No new file allowed in the folder: as below, by path.
-            try writeByPath(data, to: target, url: url, afterCheck: nil)
+            try replace(name, in: dir, with: data, url: url)
             return
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
     }
 
-    /// When the folder can't be opened or written in directly (one this
-    /// user may write in but not read, or an iOS grant to the file alone):
-    /// the check and Foundation's atomic write go by path, with the
-    /// folder's links (`realpath`) resolved once for both, as close as a
-    /// path gets to the folder handle.
-    private static func writeByPath(_ data: Data, to target: URL, url: URL, afterCheck: (() -> Void)?) throws {
-        var resolved = target
-        if let real = realpath(target.deletingLastPathComponent().path, nil) {
-            resolved = URL(fileURLWithPath: String(cString: real), isDirectory: true).appendingPathComponent(target.lastPathComponent)
-            free(real)
+    /// The folder a save checks and writes through. One this user may
+    /// write in but not read (0300) is opened for search only
+    /// (`O_SEARCH`), which is all `fstatat`, `openat` and `renameat`
+    /// need. A folder that can't be opened at all fails the save: 0.5.4
+    /// before review then checked and wrote by path, and a folder on that
+    /// path replaced by a link in between had the check pass on a
+    /// writable file and the rename replace a read-only one elsewhere.
+    private static func openFolder(_ path: String, url: URL) throws -> Int32 {
+        var dir = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        if dir < 0, errno == EACCES || errno == EPERM {
+            dir = open(path, O_EXEC | O_DIRECTORY | O_CLOEXEC)
         }
-        if let reason = FileWriteAccess.blocked(target: resolved) {
-            throw ReadOnlyFileError(url: url, reason: reason)
-        }
-        afterCheck?()
-        try data.write(to: resolved, options: .atomic)
+        guard dir >= 0 else { throw writeError(errno, url) }
+        return dir
     }
 
     /// Writes `data` to a new file in `dir` and renames it over `name`.
-    /// False, with nothing written, when the folder refuses a new file.
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
+    /// A folder that refuses a new file fails the save (no write by path:
+    /// see `openFolder`).
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
-        guard fd >= 0 else {
-            let code = errno
-            if code == EACCES || code == EPERM { return false }
-            throw writeError(code, url)
-        }
+        guard fd >= 0 else { throw writeError(errno, url) }
         var renamed = false
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
         do {
@@ -198,7 +184,6 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
-        return true
     }
 
     private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {
