@@ -48,38 +48,58 @@ class DocumentIconTests(unittest.TestCase):
                     self.assertIn(icons.ci.WHITE, {color for _, color in image.getcolors(size * size)})
                     self.assertEqual(image.getpixel((0, 0))[3], 0)
 
+    def fold_mask(self, size, factor=1):
+        """Pixels wholly inside the fold at size * factor px."""
+        if size in (16, 32):
+            mask = Image.new('L', (size, size))
+            ImageDraw.Draw(mask).polygon(icons.SMALL_FOLD[size], fill=255)
+            return mask
+        n = size * icons.ci.SS
+        mask = Image.new('L', (n, n))
+        ImageDraw.Draw(mask).polygon([((icons.X1 - icons.F) * n, icons.Y0 * n),
+                                      ((icons.X1 - icons.F) * n, (icons.Y0 + icons.F) * n),
+                                      (icons.X1 * n, (icons.Y0 + icons.F) * n)], fill=255)
+        return mask if factor == icons.ci.SS else mask.resize((size, size), Image.Resampling.BOX)
+
+    def assert_fold_has_no_light_ink(self, image, mask, text, size, tolerance):
+        # Compare the lightest channel with the fold colour, so a Lanczos
+        # blend of white ink fails as well as pure white.
+        fold = min(icons.shade(icons.ci.hx(icons.STYLES[text][0]), 255, .16)[:3])
+        pixels, inside = image.load(), mask.load()
+        for y in range(mask.height):
+            for x in range(mask.width):
+                if inside[x, y] == 255:
+                    self.assertLessEqual(min(pixels[x, y][:3]) - fold, tolerance,
+                                         (text, size, x, y, pixels[x, y]))
+
     def test_white_ink_stays_clear_of_fold(self):
-        for size in (16, 32, 64, 128):
-            if size == 16:
-                fold = [(9, 2), (9, 6), (13, 6)]
-                factor = 1
-            elif size == 32:
-                fold = [(18, 2), (18, 10), (26, 10)]
-                factor = 1
-            else:
-                factor = icons.ci.SS
-                n = size * factor
-                fold = [((icons.X1 - icons.F) * n, icons.Y0 * n),
-                        ((icons.X1 - icons.F) * n, (icons.Y0 + icons.F) * n),
-                        (icons.X1 * n, (icons.Y0 + icons.F) * n)]
-            mask = Image.new('L', (size * factor, size * factor))
-            ImageDraw.Draw(mask).polygon(fold, fill=255)
-            if factor > 1:
-                mask = mask.resize((size, size), Image.Resampling.BOX)
+        # Shipped pixels: 16/32 are drawn on the pixel grid; 64 and up are
+        # Lanczos downsamples. Seams where the fold meets the outline ring by
+        # at most a few levels; a blended glyph stroke is far above 16.
+        for size in (16, 32, 64, 128, 256):
+            mask = self.fold_mask(size)
             for text, _ in icons.TYPES:
                 with self.subTest(text=text, size=size):
-                    image = icons.doc_icon(text, size)
-                    for y in range(size):
-                        for x in range(size):
-                            if mask.getpixel((x, y)):
-                                self.assertNotEqual(image.getpixel((x, y)), icons.ci.WHITE,
-                                                    (text, size, x, y))
+                    self.assert_fold_has_no_light_ink(icons.doc_icon(text, size), mask, text, size, 16)
+
+    def test_supersampled_glyph_stays_clear_of_fold(self):
+        # Before the downsample the fold is one flat colour, so no glyph ink at all.
+        for size in (64, 128, 256):
+            mask = self.fold_mask(size, icons.ci.SS)
+            for text, _ in icons.TYPES:
+                with self.subTest(text=text, size=size):
+                    c = icons.ci.Canvas(size)
+                    icons.page(c, text)
+                    _, glyph, label = icons.STYLES[text]
+                    icons.draw_glyph(c.im, glyph, c.n, bool(label))
+                    self.assert_fold_has_no_light_ink(c.im, mask, text, size, 0)
 
     def test_small_glyph_ink_stays_inside_page(self):
         for size, page in (
-            (16, [(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)]),
+            (16, [(3, 2), (9, 2), (13, 6), (13, 13), (3, 13)]),
             (32, [(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)]),
         ):
+            self.assertEqual(page, icons.SMALL_PAGE[size])
             mask = Image.new('L', (size, size))
             ImageDraw.Draw(mask).polygon(page, fill=255)
             for text, _ in icons.TYPES:
@@ -143,8 +163,22 @@ class DocumentIconTests(unittest.TestCase):
                 with self.subTest(text=text, size=size):
                     image = icons.doc_icon(text, size)
                     self.assertIn(icons.RIM, {color for _, color in image.getcolors(size * size)})
-                    if size == 16:
-                        self.assertEqual(image.getpixel((15, 15))[3], 0)
+
+    def test_finder_sizes_keep_every_canvas_edge_transparent(self):
+        # Finder list view (16 pt) clipped the page and fold when they touched
+        # the canvas edge. Check every edge pixel, including Retina images.
+        for text, name in icons.TYPES:
+            for size, scale in ((16, 1), (16, 2), (32, 1), (32, 2), (64, 1)):
+                with self.subTest(name=name, size=size, scale=scale):
+                    alpha = icons.doc_icon(text, size, scale).getchannel('A')
+                    n = alpha.width
+                    self.assertEqual(alpha.size, (size * scale, size * scale))
+                    edge = {(x, y) for i in range(n) for x, y in ((i, 0), (i, n - 1), (0, i), (n - 1, i))}
+                    touching = sorted(p for p in edge if alpha.getpixel(p))
+                    self.assertEqual(touching, [], (name, size, scale))
+                    # The page still fills most of the canvas.
+                    l, t, r, b = alpha.getbbox()
+                    self.assertGreaterEqual(min(r - l, b - t), .7 * n, (name, size, scale))
 
     def test_iconset_uses_logical_size_for_retina_images(self):
         # Inspect the actual PNGs passed to iconutil, including both 32 px entries.

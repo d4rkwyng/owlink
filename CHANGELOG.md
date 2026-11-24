@@ -12,6 +12,7 @@ are its section below (`Scripts/changelog-section.sh`).
 ### Fixed
 - **Long questions to LM Studio and Ollama are no longer cut off silently.** Ask Cedric reads the context the server runs the model with (LM Studio's loaded context, Ollama's loaded context or `num_ctx`, else their 4,096-token default) and sends no more than fits, splitting a whole-file review into parts when needed. A server that doesn't say keeps the previous limit.
 - **The preview accepts only the page it is loading.** A response for any other page in the preview, such as another document's or a blank page, is refused, also between loads.
+- **Small document icons are no longer cut off.** In Finder's list view and other small sizes, Owlink's document icons (most visibly `.log`) no longer have the page's right edge, fold, top or bottom clipped. Every type now keeps a clear margin at 16, 32 and 64 pt, on Retina too.
 
 ## [0.5.2] - 2026-11-23
 
