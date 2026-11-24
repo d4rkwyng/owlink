@@ -293,6 +293,53 @@ import Testing
         #expect(inEdit.hardIssue?.check == .script && inEdit.hardIssue?.line == 3)
     }
 
+    @Test func aPartialFixOfABrokenJSONDocumentStaysClean() {
+        // The parser stopped at the missing value; filling it in uncovers the
+        // trailing comma that was already there. Not the edit's: Apply stays on.
+        let before = "{ \"a\": , \"items\": [1,] }"
+        let after = "{ \"a\": 1, \"items\": [1,] }"
+        let c = OwlEditValidation.validate(language: "json", fileName: "a.json", before: before, after: after,
+                                           original: "\"a\": ,", replacement: "\"a\": 1,", script: nil)
+        #expect(c == .clean)
+        // The same over several lines, with the old error on a later line.
+        let mb = "{\n  \"a\": ,\n  \"items\": [1,]\n}\n"
+        let ma = "{\n  \"a\": 1,\n  \"items\": [1,]\n}\n"
+        let m = OwlEditValidation.validate(language: "json", fileName: "a.json", before: mb, after: ma,
+                                           original: "  \"a\": ,\n", replacement: "  \"a\": 1,\n", firstLine: 2, script: nil)
+        #expect(m == .clean)
+    }
+
+    @Test func aNewInvalidValueWithTheSameWordingCounts() {
+        // Both "Invalid value", but the new one is where the edit typed it.
+        let before = "{\"a\": 1,\n\"b\": ,\n\"c\": 3}\n"
+        let after = "{\"a\": x,\n\"b\": ,\n\"c\": 3}\n"
+        #expect(OwlEditValidation.comparable(OwlEditValidation.jsonError(before)!.message)
+                == OwlEditValidation.comparable(OwlEditValidation.jsonError(after)!.message))
+        let c = OwlEditValidation.validate(language: "json", fileName: "a.json", before: before, after: after,
+                                           original: "1", replacement: "x", script: nil)
+        #expect(c.hardIssue?.check == .json)
+        #expect(c.hardIssue?.line == 1)
+    }
+
+    @Test func serializationErrorsHaveALineAndAnOffset() {
+        let e = OwlEditValidation.jsonError("{\n \"é\": 1,\n \"b\": x }")
+        #expect(e?.line == 3)
+        #expect(e?.offset == ("{\n \"é\": 1,\n \"b\": " as NSString).length)
+        // An older system's wording: no line in the message, so from the offset.
+        let ns = NSError(domain: NSCocoaErrorDomain, code: 3840, userInfo: [NSDebugDescriptionErrorKey: "Invalid value around character 9."])
+        let old = OwlEditValidation.syntaxError(from: ns, fallback: "x", in: "{\"a\":\n  ,}")
+        #expect(old.message == "Invalid value")
+        #expect(old.offset == 9 && old.line == 2)
+        #expect(OwlEditValidation.trailingComma("[1,\n2,]")?.offset == 5)
+    }
+
+    @Test func aFinalNewlineEndsTheLastEditedLine() {
+        #expect(OwlEditValidation.lines("a\n", firstLine: 3) == 3...3)
+        #expect(OwlEditValidation.lines("a\nb", firstLine: 3) == 3...4)
+        #expect(OwlEditValidation.lines("", firstLine: 3) == 3...3)
+        #expect(OwlEditValidation.lines("a\nb\n", firstLine: 1) == 1...2)
+    }
+
     /// Always "Unexpected token": on the line of the first "bad", else line 1.
     struct FakeLineScript: OwlScriptSyntaxChecker {
         func syntaxError(in script: String) -> OwlSyntaxError? {

@@ -16,9 +16,11 @@ import Foundation
 public struct OwlSyntaxError: Sendable, Equatable {
     public var message: String
     public var line: Int?
+    /// UTF-16 offset in the checked text, when the parser says exactly where.
+    public var offset: Int?
 
-    public init(message: String, line: Int? = nil) {
-        self.message = message; self.line = line
+    public init(message: String, line: Int? = nil, offset: Int? = nil) {
+        self.message = message; self.line = line; self.offset = offset
     }
 }
 
@@ -140,23 +142,23 @@ public enum OwlEditValidation {
         var issues: [OwlEditIssue] = []
         let ext = ((fileName ?? "") as NSString).pathExtension.lowercased()
 
-        // The lines the edit covers, before (`original`) and after (`replacement`).
-        func lines(_ fragment: String) -> ClosedRange<Int> {
-            firstLine...(firstLine + fragment.utf16.reduce(0) { $0 + ($1 == 10 ? 1 : 0) })
-        }
         // Single-verdict parsers. When the document already failed before,
-        // the after error still counts if it is a different complaint
-        // (line numbers aside), or if it is in the replacement and the
-        // before error wasn't in the text the edit replaced.
+        // the after error counts only if it is in the edit (see `isInEdit`)
+        // and is a different complaint (numbers aside) or the before error
+        // wasn't in the text the edit replaced. Anything less certain
+        // fails open: a parser stops at its first error, so a partial fix
+        // of a broken document uncovers an old error elsewhere, and that
+        // must not turn Apply off.
+        let region = changedRegions(before, after)
         func parser(_ check: OwlEditIssue.Check, _ run: (String) -> OwlSyntaxError?) -> OwlSyntaxError? {
             guard !after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let e = run(after) else { return nil }
             let counts: Bool
             if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 counts = true
             } else if let b = run(before) {
-                let inEdit = e.line.map { lines(replacement).contains($0) } ?? false
-                let beforeInEdit = b.line.map { lines(original).contains($0) } ?? false
-                counts = comparable(e.message) != comparable(b.message) || (inEdit && !beforeInEdit)
+                let inEdit = isInEdit(e, text: after, region: region.after, fragment: replacement, firstLine: firstLine)
+                let beforeInEdit = isInEdit(b, text: before, region: region.before, fragment: original, firstLine: firstLine)
+                counts = inEdit && (comparable(e.message) != comparable(b.message) || !beforeInEdit)
             } else {
                 counts = true
             }
@@ -192,6 +194,44 @@ public enum OwlEditValidation {
         return OwlEditCheck(issues: issues.filter { $0.severity == .hard } + issues.filter { $0.severity == .warning })
     }
 
+    // MARK: Where an error is
+
+    /// The lines a fragment starting on `firstLine` covers. A final newline
+    /// ends the fragment's last line; it doesn't start another one.
+    static func lines(_ fragment: String, firstLine: Int) -> ClosedRange<Int> {
+        var newlines = fragment.utf16.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+        if newlines > 0, fragment.utf16.last == 10 { newlines -= 1 }
+        return firstLine...(firstLine + newlines)
+    }
+
+    /// What differs between `before` and `after` (UTF-16; past the common
+    /// prefix and before the common suffix), in each text. Always inside
+    /// the edit's replacement, so it never claims more than the edit did.
+    static func changedRegions(_ before: String, _ after: String) -> (before: NSRange, after: NSRange) {
+        let a = Array(before.utf16), b = Array(after.utf16)
+        var p = 0
+        while p < a.count, p < b.count, a[p] == b[p] { p += 1 }
+        var s = 0
+        while s < a.count - p, s < b.count - p, a[a.count - 1 - s] == b[b.count - 1 - s] { s += 1 }
+        return (NSRange(location: p, length: a.count - p - s), NSRange(location: p, length: b.count - p - s))
+    }
+
+    /// The error is in the edit: its offset falls in the changed region
+    /// (or on the first character after it, past white space: a parser
+    /// reports a deletion at the next token); without an offset, its line
+    /// is one the fragment covers. Neither known: not in the edit.
+    static func isInEdit(_ e: OwlSyntaxError, text: String, region: NSRange, fragment: String, firstLine: Int) -> Bool {
+        if let o = e.offset {
+            let u = text.utf16
+            var end = NSMaxRange(region)
+            var k = u.index(u.startIndex, offsetBy: min(end, u.count))
+            while k < u.endIndex, [32, 9, 10, 13].contains(u[k]) { end += 1; k = u.index(after: k) }
+            return o >= region.location && o <= end
+        }
+        guard let line = e.line else { return false }
+        return lines(fragment, firstLine: firstLine).contains(line)
+    }
+
     // MARK: Parsers
 
     /// JSONSerialization's complaint, or nil when `text` is JSON. Newer
@@ -201,7 +241,7 @@ public enum OwlEditValidation {
         do {
             _ = try JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])
         } catch {
-            return syntaxError(from: error, fallback: String(localized: "not valid JSON"))
+            return syntaxError(from: error, fallback: String(localized: "not valid JSON"), in: text)
         }
         return trailingComma(text)
     }
@@ -224,7 +264,7 @@ public enum OwlEditValidation {
                 while j < u.count, [32, 9, 10, 13].contains(u[j]) { if u[j] == 10 { l += 1 }; j += 1 }
                 if j < u.count, u[j] == 93 || u[j] == 125 {
                     let closer = u[j] == 93 ? "]" : "}"
-                    return OwlSyntaxError(message: String(localized: "trailing comma before “\(closer)”"), line: line)
+                    return OwlSyntaxError(message: String(localized: "trailing comma before “\(closer)”"), line: line, offset: i)
                 }
             }
             i += 1
@@ -238,7 +278,7 @@ public enum OwlEditValidation {
             _ = try PropertyListSerialization.propertyList(from: Data(text.utf8), options: [], format: nil)
             return nil
         } catch {
-            return syntaxError(from: error, fallback: String(localized: "not a valid property list"))
+            return syntaxError(from: error, fallback: String(localized: "not a valid property list"), in: text)
         }
     }
 
@@ -272,18 +312,34 @@ public enum OwlEditValidation {
         func parser(_ parser: XMLParser, validationErrorOccurred validationError: Error) { if first == nil { first = validationError } }
     }
 
-    static func syntaxError(from error: Error, fallback: String) -> OwlSyntaxError {
+    /// The parser's message, its line, and (JSONSerialization's
+    /// `NSJSONSerializationErrorIndex`, a UTF-8 offset) where in `text`.
+    /// A message that says "around character N" and no line gets its line
+    /// from that offset.
+    static func syntaxError(from error: Error, fallback: String, in text: String) -> OwlSyntaxError {
         let ns = error as NSError
         let raw = (ns.userInfo[NSDebugDescriptionErrorKey] as? String) ?? ns.localizedDescription
         let message = cleanMessage(raw)
-        return OwlSyntaxError(message: message.isEmpty ? fallback : message, line: lineNumber(in: raw))
+        var offset: Int?
+        let byteIndex = (ns.userInfo["NSJSONSerializationErrorIndex"] as? Int) ?? characterNumber(in: raw)
+        if let byteIndex, byteIndex >= 0 {
+            let head = String(decoding: text.utf8.prefix(byteIndex), as: UTF8.self)
+            offset = head.utf16.count
+        }
+        let line = lineNumber(in: raw) ?? offset.map { o in
+            1 + text.utf16.prefix(o).reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+        }
+        return OwlSyntaxError(message: message.isEmpty ? fallback : message, line: line, offset: offset)
     }
 
-    /// One line, no trailing period, the "around line N, column M" part
-    /// left to `line`.
+    /// One line, no trailing period, the "around line N, column M" (or
+    /// "around character N") part left to `line`.
     static func cleanMessage(_ s: String) -> String {
         var t = s.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
         if let r = t.range(of: #"\s*(around|at) line \d+(, column \d+)?\.?"#, options: [.regularExpression, .caseInsensitive]) {
+            t.removeSubrange(r)
+        }
+        if let r = t.range(of: #"\s*around character \d+\.?"#, options: [.regularExpression, .caseInsensitive]) {
             t.removeSubrange(r)
         }
         while t.hasSuffix(".") { t.removeLast() }
@@ -294,6 +350,12 @@ public enum OwlEditValidation {
     /// tell a different complaint from the same one moved by the edit.
     static func comparable(_ message: String) -> String {
         cleanMessage(message).replacingOccurrences(of: #"\d+"#, with: "#", options: .regularExpression)
+    }
+
+    /// N in an older JSONSerialization's "around character N".
+    static func characterNumber(in s: String) -> Int? {
+        guard let r = s.range(of: #"character \d+"#, options: [.regularExpression, .caseInsensitive]) else { return nil }
+        return Int(s[r].dropFirst(10))
     }
 
     static func lineNumber(in s: String) -> Int? {
