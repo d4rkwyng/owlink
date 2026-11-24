@@ -375,11 +375,92 @@ import Testing
         #expect(events.all.last == .appended("after\n"))
     }
 
+    /// Lets every check the tail has queued run, and every event it sent
+    /// reach `events`: no sleeps. The tail's queue is serial (`isWatching`
+    /// waits on it), and so is the callback queue.
+    func settle(_ tail: FileTail, _ callbacks: DispatchQueue) {
+        _ = tail.isWatching
+        callbacks.sync {}
+    }
+
+    func appendBytes(_ url: URL, _ bytes: [UInt8]) throws {
+        let fh = try FileHandle(forWritingTo: url)
+        try fh.seekToEnd()
+        try fh.write(contentsOf: Data(bytes))
+        try fh.close()
+    }
+
+    /// Follow's first read and a reset share one decode: a character cut
+    /// in half at the end is left out, and the offset stops before it.
+    @Test func decodeWholeLeavesAHalfCharacterOut() throws {
+        let le = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61, 0x00, 0x62]), as: .utf16LE))
+        #expect(le.0.text == "a" && le.1 == 4)
+        let be = try #require(FileTail.decodeWhole(Data([0xFE, 0xFF, 0x00, 0x61, 0x00]), as: .utf16BE))
+        #expect(be.0.text == "a" && be.1 == 4)
+        let bomAndHalf = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61]), as: .utf16LE))
+        #expect(bomAndHalf.0.text == "" && bomAndHalf.1 == 2)
+        let even = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61, 0x00]), as: .utf16LE))
+        #expect(even.0.text == "a" && even.1 == 4)
+        // UTF-8 cut inside "é" (c3 a9).
+        let u8 = try #require(FileTail.decodeWhole(Data([0x61, 0xC3]), as: .utf8))
+        #expect(u8.0.text == "a" && u8.1 == 1)
+    }
+
+    /// Codex 0.5.4 review: Follow started on a UTF-16 file cut mid-character
+    /// failed to decode it (odd UTF-16 is refused), kept the stale text,
+    /// and followed from the full size, so the next append was read out of
+    /// alignment. Started where decodeWhole stops, the tail completes the
+    /// character from the append.
+    @Test func followStartedOnAUTF16FileCutMidCharacter() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        // BOM, "ab", half of "c".
+        let data = Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00, 0x63])
+        try data.write(to: url)
+        let (first, used) = try #require(FileTail.decodeWhole(data, as: .utf16LE))
+        #expect(first.text == "ab" && used == 6)
+        let events = Events()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(used), callbackQueue: callbacks) { events.add($0) }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(events.all.isEmpty, "the half character alone shows nothing")
+        try appendBytes(url, [0x00, 0x64, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("cd")])
+    }
+
+    /// An append of an odd number of UTF-16 bytes keeps the odd byte for
+    /// the next one (Foundation decodes it by dropping the byte).
+    @Test func aUTF16AppendWithAnOddByteKeepsIt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        try Data([0xFF, 0xFE]).write(to: url)
+        let events = Events()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 2, callbackQueue: callbacks) { events.add($0) }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, [0x61, 0x00, 0x62])
+        tail.poll()
+        settle(tail, callbacks)
+        try appendBytes(url, [0x00, 0x63, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("bc")])
+    }
+
     /// A followed UTF-16 log replaced by one cut mid-character (odd size,
     /// the writer still busy): the reset shows the whole characters and
-    /// keeps the half for the next append. TextCodec refuses odd UTF-16
-    /// (it dropped the last byte), so the reset holds it back itself.
-    @Test func aUTF16ResetCutMidCharacterKeepsTheHalf() async throws {
+    /// keeps the half for the next append.
+    @Test func aUTF16ResetCutMidCharacterKeepsTheHalf() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -387,23 +468,24 @@ import Testing
         let start = Data([0xFF, 0xFE]) + "start\n".data(using: .utf16LittleEndian)!
         try start.write(to: url)
         let events = Events()
-        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(start.count), callbackQueue: DispatchQueue(label: "t")) { events.add($0) }
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(start.count), callbackQueue: callbacks) { events.add($0) }
         tail.start()
         defer { tail.stop() }
-        try await Task.sleep(nanoseconds: 100_000_000)
+        settle(tail, callbacks)
+        #expect(events.all.isEmpty)
 
         // Replaced (a new file renamed over it): BOM, "ab", half of "c".
         let next = dir.appendingPathComponent("next.log")
         try Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00, 0x63]).write(to: next)
         #expect(rename(next.path, url.path) == 0)
-        await waitFor(events, count: 1)
-        #expect(events.all.first == .reset("ab"))
-        let fh = try FileHandle(forWritingTo: url)
-        try fh.seekToEnd()
-        try fh.write(contentsOf: Data([0x00, 0x64, 0x00]))
-        try fh.close()
-        await waitFor(events, count: 2)
-        #expect(Self.shown(events.all) == "abcd")
+        tail.poll()
+        settle(tail, callbacks)
+        try #require(events.all == [.reset("ab")])
+        try appendBytes(url, [0x00, 0x64, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.reset("ab"), .appended("cd")])
     }
 
     /// 0.2.1 review M5: closing a followed tab stops its tail (EditorWindowController.windowWillClose);

@@ -135,18 +135,17 @@ public final class FileTail: @unchecked Sendable {
             inode = st.inode
             if replaced || source == nil { watch() }
             guard let data = try? Data(contentsOf: url) else { return }
-            offset = UInt64(data.count)
-            pending = Data()
-            // UTF-16 cut mid-character (odd size, the writer still busy):
-            // hold the half back for the next append, which TextCodec's
-            // refusal of odd UTF-16 would otherwise turn into UTF-8 noise.
-            var whole = data
-            if encoding == .utf16LE || encoding == .utf16BE, whole.count % 2 != 0 {
-                pending = whole.suffix(1)
-                whole = whole.dropLast()
+            // The same decode Follow starts with: a character cut in half
+            // at the end (the writer still busy) waits for the next append.
+            if let (d, used) = Self.decodeWhole(data, as: encoding) {
+                offset = UInt64(used)
+                pending = Data()
+                emit(.reset(d.text))
+            } else {
+                offset = UInt64(data.count)
+                pending = Data()
+                emit(.reset(String(decoding: data, as: UTF8.self)))
             }
-            let text = TextCodec.decode(whole, as: encoding)?.text ?? String(decoding: whole, as: UTF8.self)
-            emit(.reset(text))
             return
         }
         guard st.size > offset, let fh = try? FileHandle(forReadingFrom: url) else { return }
@@ -155,17 +154,13 @@ public final class FileTail: @unchecked Sendable {
             try fh.seek(toOffset: offset)
             guard let chunk = try fh.read(upToCount: Int(st.size - offset)), !chunk.isEmpty else { return }
             offset += UInt64(chunk.count)
-            var bytes = pending + chunk
+            let bytes = pending + chunk
             pending = Data()
             // Hold back a character cut in half at the end.
             var text: String?
-            for cut in 0...min(3, bytes.count) {
-                if let s = String(data: bytes.prefix(bytes.count - cut), encoding: encoding.foundation) {
-                    text = s
-                    pending = bytes.suffix(cut)
-                    bytes = bytes.prefix(bytes.count - cut)
-                    break
-                }
+            if let (s, used) = Self.decodePrefix(bytes, encoding, { String(data: $0, encoding: encoding.foundation) }) {
+                text = s
+                pending = bytes.suffix(bytes.count - used)
             }
             guard var s = text, !s.isEmpty else { return }
             // A CR at the very end may be the first half of a CRLF.
@@ -178,6 +173,27 @@ public final class FileTail: @unchecked Sendable {
         } catch {
             return
         }
+    }
+
+    /// Decodes the longest prefix of `bytes` that ends on a whole character:
+    /// the text and how many bytes it used. UTF-16 never counts an odd
+    /// byte (Foundation would decode it by dropping it, and the next
+    /// append would start out of alignment).
+    static func decodePrefix<T>(_ bytes: Data, _ encoding: TextEncoding, _ decode: (Data) -> T?) -> (T, Int)? {
+        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let first = utf16 ? bytes.count % 2 : 0
+        for cut in stride(from: first, through: min(first + 3, bytes.count), by: utf16 ? 2 : 1) {
+            if let t = decode(bytes.prefix(bytes.count - cut)) { return (t, bytes.count - cut) }
+        }
+        return nil
+    }
+
+    /// The whole file as Follow first shows it (and shows it again after a
+    /// reset): the decoded text and the byte count it covers, which is the
+    /// offset to follow from. A character cut in half at the end is left
+    /// for the first append. Nil: the file isn't text in `encoding`.
+    public static func decodeWhole(_ data: Data, as encoding: TextEncoding) -> (DecodedText, Int)? {
+        decodePrefix(data, encoding) { TextCodec.decode($0, as: encoding) }
     }
 
     private func emit(_ e: Event) {

@@ -297,22 +297,27 @@ extension EditorWindowController {
         }
         let data: Data
         do { data = try Data(contentsOf: url) } catch { showError(error); return }
-        if let d = TextCodec.decode(data, as: doc.encoding) {
-            doc.apply(d)
-            setText(d.text)
+        // The tail's own decode: a UTF-16 character cut in half at the end
+        // (the writer still busy) is left for the first append, which
+        // starts from `used`. Not text: the tab, its edits and its stamp
+        // stay as they were and Follow doesn't start.
+        guard let (d, used) = FileTail.decodeWhole(data, as: doc.encoding) else {
+            showError(EditorDocument.LoadError.notText(url))
+            return
         }
+        doc.apply(d)
+        setText(d.text)
         doc.markSaved()
         doc.fileModified = DiskStamp.of(url)?.modified
         updateTitle()
         setEditable(false)
-        // setText already dropped cards when the buffer was replaced. If the
-        // file could not be decoded, the ones still up were proposed against
-        // an editable tab and would keep showing Apply until the next edit.
+        // setText dropped the cards proposed against the editable buffer;
+        // refresh any still up so none shows Apply on a read-only tab.
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         window?.subtitle = String(localized: "Following")
         scrollToBottom()
         let me = WeakRef(self)
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(data.count)) { e in
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { e in
             MainActor.assumeIsolated { me.value?.tailEvent(e) }
         }
         tail = t
