@@ -187,11 +187,12 @@ public enum OwlCitations {
                 if held.isEmpty {
                     if ch.isASCII, ch.isNumber, Self.mayCite(raw) { held.append(ch); continue }
                     out.append(ch)
-                    if ch == "\n" { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
+                    // "\r\n" is one Character, and "\r" alone ends a line too.
+                    if ch.isNewline { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
                     continue
                 }
                 held.append(ch)
-                if ch == "\n" || (!ch.isLetter && listEnded()) { out += release(allowed) }
+                if ch.isNewline || (!ch.isLetter && listEnded()) { out += release(allowed) }
             }
             return out
         }
@@ -219,7 +220,7 @@ public enum OwlCitations {
             // Flags go after a citation's number: what was shown stays a prefix.
             let out = checked.hasPrefix(shown) ? String(checked.dropFirst(shown.count))
                 : OwlCitations.filter(held, allowed: allowed).text
-            if held.hasSuffix("\n") {
+            if held.last?.isNewline ?? false {
                 raw = ""; shown = ""
             } else {
                 raw += held; shown += out

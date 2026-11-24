@@ -94,6 +94,26 @@ import Testing
         #expect(open.feed("Line 31 x", allowed: nil) == "Line 31 x" && open.finish(allowed: nil).isEmpty)
     }
 
+    /// "\r\n" is one Character in Swift: it still ends the line, so a
+    /// quoted "31|" after it is held and checked like any other.
+    @Test func aStreamTreatsCRLFAsALineBreak() {
+        for answer in ["Overview.\r\n31| quoted\r\nEnd.", "Overview.\r31| quoted\rEnd."] {
+            for size in [1, 3, 11, answer.count] {
+                var stream = OwlCitations.Stream()
+                var shown = ""
+                var i = answer.startIndex
+                while i < answer.endIndex {
+                    let j = answer.index(i, offsetBy: size, limitedBy: answer.endIndex) ?? answer.endIndex
+                    shown += stream.feed(String(answer[i..<j]), allowed: Self.lines1to18)
+                    i = j
+                }
+                #expect(!shown.contains("31|"), "\(size): \(shown.debugDescription)")
+                #expect(shown.contains("31\(OwlCitations.flag)|"), "\(size): \(shown.debugDescription)")
+                #expect(!(shown + stream.finish(allowed: Self.lines1to18)).contains("31|"))
+            }
+        }
+    }
+
     @Test func ordinaryProseIsNeverCutOnlyFlagged() {
         // Selection 40–60; paragraphs (not list items) about other lines keep their words.
         let allowed = IndexSet(integersIn: 40...60)
