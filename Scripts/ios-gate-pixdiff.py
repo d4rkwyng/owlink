@@ -3,11 +3,13 @@
 
 Usage: ios-gate-pixdiff.py <previous-dir> <current-dir> [threshold-percent]
 
-For every PNG in <current-dir>, compares it with the PNG of the same name in
+For every PNG in <current-dir> (and its subfolders, such as axe/), compares it with the PNG of the same name in
 <previous-dir> and prints the share of pixels that differ (any channel by
 more than a small tolerance). Images whose share is above the threshold
 (default 2.0 %), or whose size changed, are marked CHANGED; images new in
-this build or missing from it are listed too. Exit status: 0 when nothing is
+this build or missing from it are listed too (a new name has nothing to
+compare against: it is listed, not failed, and is the baseline for the next
+build). Exit status: 0 when nothing is
 above the threshold, 1 otherwise (the caller decides what that means).
 """
 import os
@@ -95,19 +97,30 @@ def diff_share(a, b):
     return 100.0 * differing / (wa * ha)
 
 
+def pngs(root):
+    """PNG paths under root, relative to it (subfolders included)."""
+    out = []
+    for folder, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".png"):
+                out.append(os.path.relpath(os.path.join(folder, f), root))
+    return out
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
     prev_dir, cur_dir = sys.argv[1], sys.argv[2]
     threshold = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
-    cur = sorted(f for f in os.listdir(cur_dir) if f.endswith(".png"))
-    prev = set(f for f in os.listdir(prev_dir) if f.endswith(".png"))
-    surprising = 0
+    cur = sorted(pngs(cur_dir))
+    prev = set(pngs(prev_dir))
+    surprising = compared = 0
     for name in cur:
         if name not in prev:
             print(f"  NEW        {name} (no image of that name in the previous build)")
             continue
+        compared += 1
         try:
             share = diff_share(read_png(os.path.join(prev_dir, name)), read_png(os.path.join(cur_dir, name)))
         except ValueError as e:
@@ -126,7 +139,8 @@ def main():
             print(f"  same       {name}: identical")
     for name in sorted(prev - set(cur)):
         print(f"  MISSING    {name} (in the previous build, not this one)")
-    print(f"  {surprising} image(s) above {threshold}% of {len(cur)} compared")
+    new = len(cur) - compared
+    print(f"  {surprising} image(s) above {threshold}% of {compared} compared ({new} new, saved as the baseline)")
     return 1 if surprising else 0
 
 
