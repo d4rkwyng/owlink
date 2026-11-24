@@ -177,6 +177,20 @@ final class EditorTextView: NSTextView {
         return NSRange(location: start, length: max(0, offset(of: vr.endLocation) - start))
     }
 
+    /// Called after a layout pass in which TextKit laid out a different
+    /// viewport (the owl rechecks the caret from the fragments just laid
+    /// out: its viewport answer can lag a scroll or a split resize).
+    var onViewportLayout: (() -> Void)?
+    private var lastLaidOutViewport: NSRange?
+
+    override func layout() {
+        super.layout()
+        let vr = viewportCharacterRange
+        guard vr != lastLaidOutViewport else { return }
+        lastLaidOutViewport = vr
+        onViewportLayout?()
+    }
+
     /// The layout fragment at the top of the visible rect (laid out if
     /// needed), else the viewport's first: TextKit's viewport can lag a
     /// scroll by a layout pass.

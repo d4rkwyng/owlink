@@ -447,6 +447,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         pane.observers.append(nc.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self, weak pane] _ in
             MainActor.assumeIsolated { if let pane { self?.scrolled(pane) } }
         })
+        // The owl's overlay sits on the primary pane: its caret check runs
+        // again once TextKit has laid out a new viewport there.
+        textView.onViewportLayout = { [weak self, weak pane] in
+            MainActor.assumeIsolated { if let pane, pane === self?.primaryPane { self?.owl?.paneLayoutChanged() } }
+        }
         scrollView.postsFrameChangedNotifications = true
         pane.observers.append(nc.addObserver(forName: NSView.frameDidChangeNotification, object: scrollView, queue: .main) { [weak self, weak pane] _ in
             MainActor.assumeIsolated {

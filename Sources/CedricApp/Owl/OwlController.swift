@@ -18,9 +18,17 @@ final class OwlOverlay: NSView {
         return v === self ? nil : v
     }
 
+    private var laidOutSize: NSSize?
+
     override func layout() {
         super.layout()
         controller?.layoutViews()
+        // A resized pane (a split opened or closed) moves the owl while
+        // the caret stays put.
+        if laidOutSize != bounds.size {
+            if laidOutSize != nil { controller?.paneLayoutChanged() }
+            laidOutSize = bounds.size
+        }
     }
 }
 
@@ -576,7 +584,26 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     /// A caret look put off until TextKit has finished an edit.
-    private var caretLookPending = false
+    private(set) var caretLookPending = false
+    /// Calls that came from inside an edit (checks).
+    private(set) var caretMovesInEdit = 0
+    /// Caret looks that got as far as placing the caret (checks).
+    private(set) var caretLooks = 0
+    /// The primary pane was resized (a split opened or closed), or TextKit
+    /// laid out a new viewport there (its viewport lags a scroll or a
+    /// resize by a layout pass). The caret is looked at again once that
+    /// pass is over, from the fragments it laid out: a caret judged out of
+    /// view from the old viewport may be in this one, and a resized pane
+    /// moves the owl while the caret stays put.
+    func paneLayoutChanged() {
+        guard !caretLookPending else { return }
+        caretLookPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.caretLookPending = false
+            self.caretMoved()
+        }
+    }
 
     /// Fades the owl (and the bubble) while the caret is close to them.
     /// `byUser`: a selection change or typing (ends the just-turned-on hold).
@@ -592,6 +619,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         // ensureLayoutForBounds walked the chunks over and over and never
         // came back (0.5.4 QA hang). Look once the edit is over.
         if tv.textLayoutManager?.textContentManager?.hasEditingTransaction == true {
+            caretMovesInEdit += 1
             guard !caretLookPending else { return }
             caretLookPending = true
             DispatchQueue.main.async { [weak self] in
@@ -609,14 +637,21 @@ final class OwlController: NSObject, NSPopoverDelegate {
         // up to it (that re-anchored the viewport there: scrolling stalled
         // near the caret), and the visible rect's fragments can mean
         // estimating across millions of characters.
+        // TextKit's viewport can lag (a scroll, a split resize):
+        // paneLayoutChanged looks again once the new one is laid out.
+        // Inside it, firstRect is answered from fragments already laid out.
+        let offscreen = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
         let caret: NSRect
         if tv.contentStorage?.chunkLimit != nil, !(tv.viewportCharacterRange.map { NSLocationInRange(caretAt, NSRange(location: $0.location, length: $0.length + 1)) } ?? false) {
-            caret = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
+            caret = offscreen
         } else {
+            // No rect: the caret is clipped out of the pane (a split just
+            // shrank it under the caret). Out of view, not "don't know":
+            // returning kept a fade that no longer fit.
             let screen = tv.firstRect(forCharacterRange: NSRange(location: caretAt, length: 0), actualRange: nil)
-            guard screen != .zero else { return }
-            caret = overlay.convert(window.convertFromScreen(screen), from: nil)
+            caret = screen == .zero ? offscreen : overlay.convert(window.convertFromScreen(screen), from: nil)
         }
+        caretLooks += 1
         let nearOwl = caret.insetBy(dx: -28, dy: -18).intersects(owl.frame)
         let nearBubble = bubble.map { caret.insetBy(dx: -12, dy: -12).intersects($0.frame) } ?? false
         if nearOwl != owlFaded {
