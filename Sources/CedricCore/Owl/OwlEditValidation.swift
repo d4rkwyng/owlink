@@ -748,3 +748,26 @@ extension OwlEditGate {
         }
     }
 }
+
+extension OwlEditProposal {
+    /// The proposal with its validation redone against the live document,
+    /// when the document changed since it was proposed (another card was
+    /// applied, the user typed): the edit applied to the live text where
+    /// its anchor is now, checked as `OwlEditValidation.validate` checks a
+    /// snapshot. Unchanged when the generation is the proposal's, the
+    /// anchor isn't text, or the text no longer applies (that is stale
+    /// anyway). The panel uses it for the card refresh and the Apply guard.
+    public func revalidated(text: NSString, generation: Int, language: String, fileName: String?,
+                            script: (any OwlScriptSyntaxChecker)?) -> OwlEditProposal {
+        guard generation != self.generation, anchor == .text else { return self }
+        let hits = Self.occurrences(of: original, in: text)
+        guard hits.count == 1, let r = hits.first else { return self }
+        let after = text.replacingCharacters(in: r, with: replacement)
+        var line = 1
+        for u in text.substring(to: r.location).utf16 where u == 10 { line += 1 }
+        var p = self
+        p.check = OwlEditValidation.validate(language: language, fileName: fileName, before: text as String, after: after,
+                                             original: original, replacement: replacement, firstLine: line, script: script)
+        return p
+    }
+}

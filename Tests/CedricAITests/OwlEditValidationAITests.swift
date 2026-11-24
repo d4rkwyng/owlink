@@ -98,6 +98,17 @@ import CedricCore
         #expect(c == .clean)
     }
 
+    @Test func aSecondCardRenamingToTheSameNameFailsThroughJSC() throws {
+        let text = "let a = 1;\nlet b = 2;\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
+        let second = try OwlEditProposal.anchored(find: "let b = 2", replace: "let c = 2", in: s).get()
+        #expect(OwlEditValidation.validate(second, in: s, script: JSCSyntaxChecker()) == .clean)
+        let live = "let c = 1;\nlet b = 2;\n" as NSString
+        let now = second.revalidated(text: live, generation: 2, language: "javascript", fileName: "a.js", script: JSCSyntaxChecker())
+        #expect(now.check.hardIssue?.check == .script)
+        #expect(!now.canApply(text: live, generation: 2))
+    }
+
     @Test func jscSourceNeverRunsScripts() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("Sources/CedricAI/JSCSyntaxChecker.swift"), encoding: .utf8)

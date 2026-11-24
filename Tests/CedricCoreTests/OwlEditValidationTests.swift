@@ -523,6 +523,44 @@ import Testing
         #expect(sw.hardIssue?.check == .brackets)
     }
 
+    /// Rejects a `let` name declared twice (as a JavaScript parser does).
+    struct DuplicateLet: OwlScriptSyntaxChecker {
+        func syntaxError(in script: String) -> OwlSyntaxError? {
+            var seen = Set<String>()
+            let re = try! NSRegularExpression(pattern: #"\blet\s+([A-Za-z_$][\w$]*)"#)
+            for m in re.matches(in: script, range: NSRange(location: 0, length: (script as NSString).length)) {
+                let name = (script as NSString).substring(with: m.range(at: 1))
+                if !seen.insert(name).inserted { return OwlSyntaxError(message: "Cannot declare a let variable twice: '\(name)'") }
+            }
+            return nil
+        }
+    }
+
+    @Test func aSecondCardIsRevalidatedAgainstTheLiveDocument() throws {
+        let text = "let a = 1;\nlet b = 2;\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
+        var first = try OwlEditProposal.anchored(find: "let a = 1", replace: "let c = 1", in: s).get()
+        var second = try OwlEditProposal.anchored(find: "let b = 2", replace: "let c = 2", in: s).get()
+        first.check = OwlEditValidation.validate(first, in: s, script: DuplicateLet())
+        second.check = OwlEditValidation.validate(second, in: s, script: DuplicateLet())
+        #expect(first.check == .clean && second.check == .clean)
+        // Unchanged document: the stored verdict stands.
+        let same = second.revalidated(text: text as NSString, generation: 1, language: "javascript", fileName: "a.js", script: DuplicateLet())
+        #expect(same == second)
+        // The first card is applied: the second's anchor is still unique, but now it declares `c` twice.
+        let live = (text as NSString).replacingOccurrences(of: "let a = 1", with: "let c = 1") as NSString
+        #expect(second.state(text: live, generation: 2) == .ready(NSRange(location: 11, length: 9)))
+        let now = second.revalidated(text: live, generation: 2, language: "javascript", fileName: "a.js", script: DuplicateLet())
+        #expect(now.check.hardIssue?.check == .script)
+        if case .failsValidation(let why) = now.state(text: live, generation: 2) {
+            #expect(why.contains("twice"))
+        } else { Issue.record("Apply should be off") }
+        #expect(!now.canApply(text: live, generation: 2))
+        // No longer applies: left as it was (stale).
+        let gone = second.revalidated(text: "x" as NSString, generation: 3, language: "javascript", fileName: "a.js", script: DuplicateLet())
+        #expect(gone == second && gone.state(text: "x", generation: 3) == .stale)
+    }
+
     // MARK: The gate
 
     @Test func gateRefusesTheFirstHardFailureOnceThenMarks() throws {
