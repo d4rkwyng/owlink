@@ -151,6 +151,63 @@ import Testing
         #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
     }
 
+    /// The same race one folder up (Codex review, 0.5.4): the file is
+    /// reached through a link to a folder. Checked through it, then the
+    /// folder link retargeted at a folder holding a read-only file of the
+    /// same name: a write by path followed the link again and its rename
+    /// replaced that file. The check and the write now share one open
+    /// folder.
+    @Test func aFolderLinkRetargetedAfterTheCheckStillWritesTheCheckedFolder() throws {
+        let anchor = try file("anchor.md", "anchor\n")
+        defer { cleanUp(anchor) }
+        let base = anchor.deletingLastPathComponent()
+        let fm = FileManager.default
+        let good = base.appendingPathComponent("good"), bad = base.appendingPathComponent("bad")
+        try fm.createDirectory(at: good, withIntermediateDirectories: false)
+        try fm.createDirectory(at: bad, withIntermediateDirectories: false)
+        defer { cleanUp(good.appendingPathComponent("doc.md")); cleanUp(bad.appendingPathComponent("doc.md")) }
+        let writable = good.appendingPathComponent("doc.md"), locked = bad.appendingPathComponent("doc.md")
+        try Data("writable\n".utf8).write(to: writable)
+        try Data("read-only\n".utf8).write(to: locked)
+        #expect(chmod(locked.path, 0o444) == 0)
+        let folderLink = base.appendingPathComponent("folder")
+        try fm.createSymbolicLink(atPath: folderLink.path, withDestinationPath: "good")
+        let url = folderLink.appendingPathComponent("doc.md")
+        #expect(FileWriteAccess.blocked(at: url) == nil)
+
+        try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {
+            // Between the check and the write: the folder link now points at the folder with the read-only file.
+            try? fm.removeItem(at: folderLink)
+            try? fm.createSymbolicLink(atPath: folderLink.path, withDestinationPath: "bad")
+        }
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n", "the read-only file is untouched")
+        #expect(mode(locked) == 0o444)
+        #expect(try String(contentsOf: writable, encoding: .utf8) == "saved\n", "the checked folder's file got the save")
+        #expect(try fm.destinationOfSymbolicLink(atPath: folderLink.path) == "bad")
+        // The plain save through the retargeted folder link is refused.
+        #expect(throws: ReadOnlyFileError.self) { try DocumentWrite.write(Data("x\n".utf8), to: url) }
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
+        // No temporary file is left in either folder.
+        #expect(try fm.contentsOfDirectory(atPath: good.path) == ["doc.md"])
+        #expect(try fm.contentsOfDirectory(atPath: bad.path) == ["doc.md"])
+    }
+
+    /// The write through the open folder keeps what an atomic save kept:
+    /// the replaced file's mode, and a new file gets the usual one.
+    @Test func aSaveKeepsTheFilesModeAndCreatesNewFiles() throws {
+        let url = try file("kept.md", "before\n")
+        defer { cleanUp(url) }
+        #expect(chmod(url.path, 0o640) == 0)
+        try DocumentWrite.write(Data("after\n".utf8), to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "after\n")
+        #expect(mode(url) == 0o640)
+        let fresh = url.deletingLastPathComponent().appendingPathComponent("new.md")
+        try DocumentWrite.write(Data("new\n".utf8), to: fresh)
+        #expect(try String(contentsOf: fresh, encoding: .utf8) == "new\n")
+        #expect(mode(fresh) & 0o600 == 0o600)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path).sorted() == ["kept.md", "new.md"])
+    }
+
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {
         let url = try file()
         defer { cleanUp(url) }
