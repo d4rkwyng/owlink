@@ -124,6 +124,28 @@ import CedricCore
         #expect(same == "- Line 40: missing signature on the download.")
     }
 
+    /// "L2" and "L3" are what a finding says, not digits to strip: "Line
+    /// 12: L3 regularization is enabled" doesn't say "Line 12: L2
+    /// regularization is enabled". 0.5.4's follow-up 4 read both as
+    /// "regularization is enabled". Neither is a line citation.
+    @Test func letterDigitTermsTellFindingsApart() {
+        #expect(OwlChunkedReview.substance("Line 12: L2 regularization is enabled.")
+                != OwlChunkedReview.substance("Line 12: L3 regularization is enabled."))
+        #expect(OwlChunkedReview.substance("Line 12: L2 regularization").contains("l2"))
+        // The citation's own number is still left out.
+        #expect(!OwlChunkedReview.substance("Line 12: L2 regularization").contains("12"))
+        #expect(OwlCitations.find("L2 regularization, an L3 cache").isEmpty)
+        let merged = OwlChunkedReview.mergeFindings(["- Line 2: setup.\n- Line 12: L3 regularization is enabled.",
+                                                     "- Line 12: L2 regularization is enabled."])
+        #expect(merged.contains("L3 regularization") && merged.contains("L2 regularization"))
+        let items = "- Line 12: L2 regularization is enabled."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        let answer = "Line 12: L3 regularization is enabled."
+        #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items)
+        let same = "Line 12 enables L2 regularization."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+    }
+
     @Test func noCapAndVerdicts() {
         let s = Self.snapshot(lines: 500)
         let plan = OwlChunkedReview.plan(s, budget: 400)

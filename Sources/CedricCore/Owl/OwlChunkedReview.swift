@@ -152,15 +152,19 @@ public enum OwlChunkedReview {
     /// filler, cut to five letters ("downloads" and "download" match;
     /// "signed" and "unsigned" don't), and every number or word with a
     /// digit in it, whole ("90 days" and "30 days" differ; "sha256" and
-    /// "sha512" too). The numbers of its citations ("line 12", "lines
-    /// 4–9", "#12", a leading "12:") are where it is, not what it says,
-    /// and are left out.
+    /// "sha512" too, and "L2" and "L3"). The numbers of its citations
+    /// ("line 12", "lines 4–9", "#12", a leading "12:") are where it is,
+    /// not what it says, and are left out.
     public static func substance(_ text: String) -> Set<String> {
         let blanked = NSMutableString(string: text)
         let all = NSRange(location: 0, length: blanked.length)
         var cites = OwlCitations.find(text).map(\.range)
         for m in findingCite.matches(in: text, range: all) {
-            cites.append(m.range(at: m.range(at: 1).location == NSNotFound ? 2 : 1))
+            let number = m.range(at: m.range(at: 1).location == NSNotFound ? 2 : 1)
+            // "L2", "L3": a term, not a line ("L2 regularization").
+            if number.location > 0, let u = UnicodeScalar(blanked.character(at: number.location - 1)),
+               CharacterSet.letters.contains(u) { continue }
+            cites.append(number)
         }
         for r in cites { blanked.replaceCharacters(in: r, with: String(repeating: " ", count: r.length)) }
         return Set((blanked as String).lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap { word -> String? in
