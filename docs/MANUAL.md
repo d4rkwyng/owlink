@@ -165,6 +165,15 @@ Latin-1, Windows-1252 and Mac Roman, and LF/CRLF/CR, detected on open
 (a file that isn't UTF-8 is read as whichever 8-bit Western encoding
 makes sense of its accented letters and quotes) and shown in the status bar,
 with menus to convert (applied on save) or reopen with another encoding.
+
+A file that isn't valid UTF-8 (and has no UTF-16 byte order mark) opens
+under a slim bar: "This file isn’t valid UTF-8, so Owlink opened it as
+Latin-1 (a guess)." The text is there and editable; the status bar says
+**Latin-1 (guessed)** (or Windows-1252, Mac Roman). **Reopen with
+Encoding…** on the bar, or **Format › Reopen with Encoding…** (⌥⇧⌘R),
+lists the encodings to read the file as again; **Keep** takes the guess
+as right. Either way the bar goes and "(guessed)" with it.
+
 Mixed line endings are shown as such and written as one kind on save.
 A file that looks binary (a NUL byte, or many control characters, in
 its first 8 KB; never UTF-16) opens with a bar, "This looks like a

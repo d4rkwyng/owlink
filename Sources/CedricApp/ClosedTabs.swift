@@ -64,7 +64,7 @@ extension AppDelegate {
         // Kept for ⇧⌘T, but the file wasn't written: say so once (ClosedNotice.swift).
         if keepText, d.fileURL != nil, d.isDirty { noteClosedUnsaved(id: d.id, name: d.displayName) }
         let sel = t.primaryTextView.selectedRange()
-        let entry = SessionTab(id: d.id, path: d.fileURL?.path, untitledName: d.fileURL == nil ? d.untitledName : nil,
+        var entry = SessionTab(id: d.id, path: d.fileURL?.path, untitledName: d.fileURL == nil ? d.untitledName : nil,
                                hasBuffer: keepText, encoding: d.encoding, lineEnding: d.lineEnding,
                                language: d.languageIsManual ? d.language : nil,
                                selectionLocation: sel.location, selectionLength: sel.length, topLine: t.primaryTopLine,
@@ -73,6 +73,7 @@ extension AppDelegate {
                                bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                indentation: d.indentation, folds: t.sessionFolds, split: t.sessionSplit,
                                writing: t.sessionWriting, wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil)
+        d.noteFormat(in: &entry)
         let r = ClosedTabs.push(entry, onto: closedTabs)
         closedTabs = r.list
         for gone in r.dropped {
@@ -108,6 +109,7 @@ extension AppDelegate {
         if url == nil, openNames.contains(name) { name = UntitledNames.next(open: openNames, base: name) }
         let doc = EditorDocument(id: st.id, fileURL: url, untitledName: name)
         doc.indentation = st.indentation
+        let fromBuffer = text != nil
         if text == nil, let url, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
             doc.apply(d)
             doc.noteDisk(mod)
@@ -117,6 +119,7 @@ extension AppDelegate {
             doc.lineEnding = st.lineEnding
             doc.noteDisk(st.diskStamp)
         }
+        doc.restoreFormat(st, fromBuffer: fromBuffer)
         guard let body = text else {
             // The file has gone and there was no unsaved text.
             NSSound.beep()

@@ -62,6 +62,9 @@ public struct SessionTab: Codable, Equatable, Sendable {
     public var certificate: OfficeTabState?
     /// A text tab whose name looks like a PDF; older sessions omit this.
     public var explicitText: Bool?
+    /// The encoding was Owlink's guess (not valid UTF-8) and the user
+    /// hadn't kept it or picked one. Only `true` is stored.
+    public var encodingGuessed: Bool?
 
     /// View › Writing Mode's switches for this tab (nil: both off, and in
     /// sessions saved before 0.4.0).

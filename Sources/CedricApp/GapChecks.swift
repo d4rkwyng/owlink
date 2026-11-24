@@ -504,6 +504,9 @@ extension DevChecks {
             sync {
                 focus(tab)
                 expect(tab.text == "café, don’t\n", "a Mac Roman file opens as such", tab.text)
+                // Not UTF-8: a guess until kept (FileNotices.swift); Keep on its bar.
+                expect(tab.statusBar.encodingButton.title == "Mac Roman (guessed)", "…marked as a guess", tab.statusBar.encodingButton.title)
+                if let b = tab.encodingBar?.button("Keep") { click(b, at: NSPoint(x: b.bounds.midX, y: b.bounds.midY)) }
                 expect(tab.doc.encoding == .macRoman && tab.statusBar.encodingButton.title == "Mac Roman",
                        "the status bar says Mac Roman", tab.statusBar.encodingButton.title)
                 choose(#selector(AppDelegate.pickEncodingMenu(_:)), TextEncoding.windows1252.rawValue)

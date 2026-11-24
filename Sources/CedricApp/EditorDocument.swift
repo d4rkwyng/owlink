@@ -17,6 +17,9 @@ final class EditorDocument {
     var encoding: TextEncoding = .utf8
     var lineEnding: LineEnding = .lf
     var mixedLineEndings = false
+    /// The encoding is Owlink's guess (not valid UTF-8: an 8-bit one),
+    /// until the user keeps it or picks one (the encoding bar).
+    var encodingGuessed = false
     /// The language and who decided it (auto-detected, picked, the file's).
     var languageChoice = LanguageChoice()
     var language: Language { languageChoice.language }
@@ -171,9 +174,21 @@ final class EditorDocument {
     }
 
     func apply(_ d: DecodedText) {
-        encoding = d.encoding
         lineEnding = d.lineEnding
         mixedLineEndings = d.mixedLineEndings
+        // Read again in the encoding it guessed (a reload): still a guess.
+        encodingGuessed = d.encodingGuessed || (encodingGuessed && d.encoding == encoding)
+        encoding = d.encoding
+    }
+
+    /// A tab restored from the session (or ⇧⌘T): still a guess if it was one.
+    func restoreFormat(_ st: SessionTab, fromBuffer: Bool) {
+        if st.encodingGuessed == true, st.encoding == encoding { encodingGuessed = true }
+    }
+
+    /// The session's record of this document's format guesses (SessionTab).
+    func noteFormat(in st: inout SessionTab) {
+        st.encodingGuessed = encodingGuessed ? true : nil
     }
 
     /// Writes `text` to `url` in this document's encoding and line ending.

@@ -851,6 +851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               folds: t.sessionFolds, split: t.sessionSplit, writing: t.sessionWriting,
                                               wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil,
                                               explicitText: d.fileURL.map { DocumentKind.hasPDFExtension($0.path) } == true ? true : nil))
+                d.noteFormat(in: &sessionTabs[sessionTabs.count - 1])
                 if t.window === NSApp.keyWindow || t.window?.tabGroup?.selectedWindow === t.window { selected = sessionTabs.count - 1 }
             }
             if !sessionTabs.isEmpty {
@@ -1004,6 +1005,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var binary = false
         if st.hasBuffer { text = store.readBuffer(st.id) }
         // The text goes into the tab's storage and is let go (shareBytes: no second copy of a big file).
+        let fromBuffer = text != nil
         if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding, shareBytes: true) {
             doc.apply(d)
             doc.noteDisk(mod)
@@ -1014,6 +1016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             doc.lineEnding = st.lineEnding
             doc.noteDisk(st.diskStamp)
         }
+        doc.restoreFormat(st, fromBuffer: fromBuffer)
         guard let body = text else { return nil } // the file is gone and there was no buffer
         if let l = st.language {
             doc.languageChoice.choose(l)
@@ -1174,6 +1177,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func pickLineEndingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let le = LineEnding(rawValue: raw) { currentTab?.convertLineEndings(to: le) }
     }
+    /// Format › Reopen with Encoding… (⌥⇧⌘R): the picker, under the status bar's encoding.
+    @objc func reopenWithEncodingMenu(_ sender: Any?) {
+        currentTab?.showReopenEncodingPicker()
+    }
+
     @objc func pickEncodingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let e = TextEncoding(rawValue: raw) { currentTab?.convertEncoding(to: e) }
     }
@@ -1248,6 +1256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(previewHomeMenu(_:)): return tab?.previewBarEnables(.home) == true
         case #selector(pickLanguageMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.language.rawValue ? .on : .off
         case #selector(pickLineEndingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.lineEnding.rawValue ? .on : .off
+        case #selector(reopenWithEncodingMenu(_:)): return tab?.doc.fileURL != nil
         case #selector(pickEncodingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.encoding.rawValue ? .on : .off
         case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty
         case #selector(toggleFloatOnTop(_:)):

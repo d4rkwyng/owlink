@@ -201,6 +201,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var readOnlyEditingAllowed = false
     /// Its bar, built when first needed.
     var readOnlyBar: NoticeBar?
+    /// "This file isn’t valid UTF-8…" (FileNotices.swift).
+    var encodingBar: NoticeBar?
+    /// Keep was chosen: the bar stays away for this tab.
+    var encodingNoticeKept = false
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// Background catch-up reads (reloadIfChangedOnDisk(inBackground:))
@@ -513,6 +517,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         gitState?.scheduleRefresh()
         // Opening or reloading is not writing: this count is the baseline.
         armDailyBaseline()
+        // Not valid UTF-8: say so (FileNotices.swift).
+        refreshFileNotices()
     }
 
     var text: String { textView.string }
@@ -850,7 +856,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             encItems += [("-", nil, false), (String(localized: "Reopen with Encoding"), nil, false)]
             encItems += TextEncoding.allCases.map { ($0.displayName, "reopen:" + $0.rawValue, false) }
         }
-        StatusBar.fill(statusBar.encodingButton, title: doc.encoding.displayName, items: encItems,
+        // Not valid UTF-8: the 8-bit encoding is a guess until kept or picked (FileNotices.swift).
+        let encTitle = doc.encodingGuessed ? String(localized: "\(doc.encoding.shortName) (guessed)") : doc.encoding.displayName
+        StatusBar.fill(statusBar.encodingButton, title: encTitle, items: encItems,
                        target: self, action: #selector(pickEncoding(_:)))
         let leTitle = doc.mixedLineEndings ? String(localized: "\(doc.lineEnding.displayName) (mixed)") : doc.lineEnding.displayName
         StatusBar.fill(statusBar.lineEndingButton, title: leTitle,
@@ -971,7 +979,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             return
         }
         doc.encoding = enc
+        doc.encodingGuessed = false
         markConverted()
+        refreshFileNotices()
     }
 
     func reopen(with enc: TextEncoding) {
@@ -988,6 +998,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             let (d, mod) = try EditorDocument.read(url, encoding: enc)
             doc.apply(d)
             doc.noteDisk(mod)
+            // Picked: no longer a guess, and the encoding bar's question is answered.
+            doc.encodingGuessed = false
             setText(d.text)
             doc.markSaved()
             updateTitle()
@@ -1258,6 +1270,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             resetPreviewTrust()
             if previewVisible { renderPreview() }
             hideDiskBar()
+            refreshFileNotices()
             updateTitle()
             updateStatus()
             onChange?(self)

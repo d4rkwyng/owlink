@@ -22,6 +22,15 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// The name without its long form ("Latin-1"), for "Latin-1 (guessed)".
+    public var shortName: String {
+        switch self {
+        case .latin1: return "Latin-1"
+        case .windows1252: return "Windows-1252"
+        default: return displayName
+        }
+    }
+
     var bom: [UInt8] {
         switch self {
         case .utf8BOM: return [0xEF, 0xBB, 0xBF]
@@ -73,6 +82,9 @@ public struct DecodedText: Sendable {
     public var mixedLineEndings: Bool
     /// The bytes look like a binary file (`TextCodec.looksBinary`).
     public var looksBinary = false
+    /// Not valid UTF-8, no BOM and not UTF-16: `encoding` is a guess at
+    /// an 8-bit one (`guessEightBit`). Never when an encoding was asked for.
+    public var encodingGuessed = false
 }
 
 public enum TextCodec {
@@ -300,13 +312,14 @@ public enum TextCodec {
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
         var enc: TextEncoding
         var scanned: UTF8Scan?
+        var guessed = false
         if let encoding {
             enc = encoding
         } else if let found = detectBOMOrUTF16(data) {
             enc = found
         } else {
             let scan = data.withUnsafeBytes { scanUTF8($0) }
-            if scan.valid { enc = .utf8; scanned = scan } else { enc = guessEightBit(data) }
+            if scan.valid { enc = .utf8; scanned = scan } else { enc = guessEightBit(data); guessed = true }
         }
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
@@ -327,7 +340,7 @@ public enum TextCodec {
         guard let raw = decoded else { return nil }
         let (ending, mixed) = detectLineEnding(raw)
         return DecodedText(text: normalizeLineEndings(raw), encoding: enc, lineEnding: ending, mixedLineEndings: mixed,
-                           looksBinary: looksBinary(data))
+                           looksBinary: looksBinary(data), encodingGuessed: guessed)
     }
 
     /// UTF-8 `body` (no BOM) as text, from one scan (`scan`, when the
