@@ -568,7 +568,7 @@ public enum OwlChatRunner {
            var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
                                          reason: "", in: req.snapshot) {
             // No tool loop to retry in: validated and marked directly.
-            p.check = OwlEditValidation.validate(p, in: req.snapshot, script: JSCSyntaxChecker())
+            p.validate(in: req.snapshot, script: JSCSyntaxChecker())
             proposals = [p]
             onEvent(.proposal(p))
         }

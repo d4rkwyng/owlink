@@ -926,6 +926,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewLanguageChanged()
         updateContextBar()
         if outlineVisible, !l.hasOutline { hideOutline() } else if outlineVisible { refreshOutline() }
+        // Cedric's cards: a verdict worked out for the old language is
+        // checked again for the new one (OwlEditProposal.revalidated).
+        if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         onChange?(self)
     }
 

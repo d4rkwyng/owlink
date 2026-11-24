@@ -561,6 +561,41 @@ import Testing
         #expect(gone == second && gone.state(text: "x", generation: 3) == .stale)
     }
 
+    /// A status-bar language change leaves the text (and its generation)
+    /// as it was. 0.5.3 kept the verdict worked out for the old language:
+    /// an edit proposed in Plain Text stayed clean after the tab became
+    /// JSON, and Apply could break valid JSON.
+    @Test func aLanguageChangeRedoesTheVerdictAtTheSameGeneration() throws {
+        let text = "{\"a\": 1, \"b\": 2}\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 4, fileName: "notes.txt", language: "plain")
+        var byText = try OwlEditProposal.anchored(find: "\"b\": 2", replace: "\"b\": 2,", in: s).get()
+        var byLines = try #require(OwlEditProposal.lines(1, 1, with: "{\"a\": 1, \"b\": 2,}", in: s))
+        byText.validate(in: s, script: nil)
+        byLines.validate(in: s, script: nil)
+        #expect(byText.check == .clean && byLines.check == .clean, "Plain Text has no parser")
+        #expect(byText.checkedAs == OwlEditValidation.Target(language: "plain", fileName: "notes.txt"))
+        let live = text as NSString
+        for p in [byText, byLines] {
+            // Same language and file type: the verdict stands.
+            #expect(p.revalidated(text: live, generation: 4, language: "plain", fileName: "notes.txt", script: nil) == p)
+            // The tab is JSON now: the edit breaks it, Apply is off.
+            let json = p.revalidated(text: live, generation: 4, language: "json", fileName: "notes.txt", script: nil)
+            #expect(json.check.hardIssue?.check == .json, "\(p.anchor)")
+            #expect(json.checkedAs == OwlEditValidation.Target(language: "json", fileName: "notes.txt"))
+            #expect(!json.canApply(text: live, generation: 4))
+            // And back: checked again, clean.
+            let back = json.revalidated(text: live, generation: 4, language: "plain", fileName: "notes.txt", script: nil)
+            #expect(back.check == .clean && back.canApply(text: live, generation: 4))
+        }
+        // The file type alone (a rename to .plist, still Plain Text) is a different target too.
+        #expect(OwlEditValidation.Target(language: "plain", fileName: "a.plist") != OwlEditValidation.Target(language: "plain", fileName: "a.txt"))
+        #expect(OwlEditValidation.Target(language: "plain", fileName: "A.TXT") == OwlEditValidation.Target(language: "plain", fileName: "b.txt"))
+        // A verdict with nothing recorded is left as it was at its own generation.
+        var bare = try OwlEditProposal.anchored(find: "\"b\": 2", replace: "\"b\": 2,", in: s).get()
+        bare.check = OwlEditValidation.validate(bare, in: s, script: nil)
+        #expect(bare.revalidated(text: live, generation: 4, language: "json", fileName: "notes.txt", script: nil) == bare)
+    }
+
     // MARK: Codex regressions (0.5.3, fourth round)
 
     @Test func aSelfInitInsideAMissedRegexIsOnlyAWarning() {
