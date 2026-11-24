@@ -134,6 +134,11 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private static var heldFinishes: [() -> Void] = []
     /// Checks only: the pages a change time is kept for.
     static var pageChangeKeysForChecks: [String] { Array(pageChangeAt.keys) }
+    /// Checks only: run once a linked document has been resolved and read,
+    /// before its page renders (a symlink retargeted in between).
+    static var afterLinkedReadForChecks: (() -> Void)?
+    /// Checks only: the page loaded now.
+    var pageKeyForChecks: String? { pageKey }
     static func releaseFinishesForChecks() {
         holdFinishForChecks = false
         let held = heldFinishes
@@ -312,8 +317,12 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             let language = LanguageDetector.language(forFileName: target.lastPathComponent) ?? .markdown
             // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
             pendingAnchor = fragment
+            if let hook = Self.afterLinkedReadForChecks { Self.afterLinkedReadForChecks = nil; hook() }
+            // The page is keyed by the file just read (`target`, already
+            // resolved), never by resolving the entry's URL again: a symlink
+            // retargeted before the page loads must not give it another key.
             show(text: text, language: language, palette: home.2, baseURL: target.deletingLastPathComponent(),
-                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL))
+                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL), pageKey: target.standardizedFileURL.path)
         }
         onNavigationChange?()
     }
@@ -342,7 +351,10 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Renders the document. `baseURL` is the file's folder, for relative
     /// images (the page may read files in that folder only).
-    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil) {
+    /// `pageKey`: a linked document's key, from the file read (nil: the
+    /// live document's `documentKey`).
+    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil,
+              pageKey: String? = nil) {
         folderFiles.folder = folder
         // The folder open in the sidebar, when the document is inside it:
         // the last place a site-root path (`/images/x.webp`) is looked for.
@@ -367,7 +379,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let key = "\(language.rawValue)|\(palette.name)|\(palette.isDark)|\(csp)|\(baseURL?.absoluteString ?? "-")|\(allowJavaScript)|\(allowNetwork)"
         guard language == .markdown else {
             shellKey = nil
-            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
+            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL, pageKey: pageKey)
             return
         }
         let ticket = latest
@@ -388,7 +400,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
                     guard gen == self.generation else { return }
                     let applyStart = DispatchTime.now()
                     self.lastRenderMs = ms
-                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
+                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL, pageKey: pageKey)
                     self.noteMainThread(applyStart)
                 }
             }
@@ -413,7 +425,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// Swaps the body into the loaded page, or loads the page.
-    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?) {
+    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, pageKey: String?) {
         if key == shellKey, !allowJavaScript {
             if loadingShell { pendingBody = body; return }
             swapBody(body)
@@ -425,7 +437,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         readFrontMatter { [weak self] open in
             guard let self, self.generation == gen else { return }
             let body = open.map { FrontMatterDisclosure.setting(open: $0, in: body) } ?? body
-            self.load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL)
+            self.load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL, pageKey: pageKey)
         }
     }
 
@@ -579,23 +591,18 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         return FrontMatterChange(key: key, open: read.open, at: at)
     }
 
-    /// The document the shown entry is: the live one, or a linked file,
-    /// by the file it really is (symlinks resolved, as `documentKey`), so
-    /// a page reached through a link and one opened on its target match.
-    private var entryKey: String? {
-        switch history[historyIndex] {
-        case .home: return documentKey
-        case .local(let url, _, _): return Self.pageKey(for: url)
-        }
-    }
-
     /// A file's page key: the file it resolves to, standardized.
     static func pageKey(for url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
 
-    private func load(_ html: String, key: String?, baseURL: URL?) {
+    /// `linkedKey`: the linked document's key, from the file displayEntry
+    /// read (nil: the live document).
+    private func load(_ html: String, key: String?, baseURL: URL?, pageKey linkedKey: String?) {
         pendingBody = nil
-        // A late close-time read's state, for this page.
-        let pageKey = entryKey
+        // The document the page shows: the live one, or the linked file
+        // read, by the file it really is (symlinks resolved, as
+        // `documentKey`), so a page reached through a link and one opened
+        // on its target match. A late close-time read's state, for it.
+        let pageKey = linkedKey ?? (isHome ? documentKey : nil)
         let html = pageKey.flatMap { adoptedFrontMatter[$0] }.flatMap { FrontMatterDisclosure.setting(open: $0.open, in: html) } ?? html
         let gen = generation
         let go = { [weak self] in

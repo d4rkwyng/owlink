@@ -82,6 +82,8 @@ extension DevChecks {
         var direct: EditorWindowController?
         var via: EditorWindowController?
         var directOpen = false
+        var swinger: EditorWindowController?
+        var barred: URL?
         run([
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
@@ -347,11 +349,42 @@ extension DevChecks {
                 untilState(d, String(!directOpen), "a late read through a symlink is set on the preview opened on the target", timeout: 5)(next)
             },
             sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 3, must-fix: a symlink retargeted after the
+            // linked file was read but before its page loads doesn't give
+            // the page the new target's key: the key is the file shown.
+            sync {
+                let b = write("barred.md", "---\ntitle: Barred owl\n---\n# Barred\n\nStripes.\n")
+                let spotted = write("spotted.md", "---\ntitle: Spotted owl\n---\n# Spotted\n\nDots.\n")
+                let swing = b.deletingLastPathComponent().appendingPathComponent("swing.md")
+                try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: b)
+                barred = b
+                PreviewController.afterLinkedReadForChecks = {
+                    try? FileManager.default.removeItem(at: swing)
+                    try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: spotted)
+                }
+                swinger = app.open(write("swinger.md", "---\ntitle: Swinger\n---\n# Swinger\n\nSee [Swing](swing.md).\n"))
+                if let s = swinger { sized(s); focus(s); if !s.previewVisible { s.togglePreview() } }
+            },
+            { next in
+                guard let s = swinger else { expect(false, "the document linking through a retargeted symlink opens"); next(); return }
+                waitForPreview(s, contains: "See Swing", "the linking document's preview (retargeted symlink)")({
+                    previewJS(s, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Swing').click(); 1") { _ in
+                        waitForPreview(s, contains: "Stripes", "the preview shows the file read before the symlink was retargeted")(next)
+                    }
+                })
+            },
+            sync {
+                PreviewController.afterLinkedReadForChecks = nil
+                let want = barred.map(PreviewController.pageKey(for:))
+                let got = swinger?.preview?.pageKeyForChecks
+                expect(want != nil && got == want, "a symlink retargeted before the page loads: the page's key is the file shown",
+                       "\(got ?? "nil") vs \(want ?? "nil")")
+            },
             // Codex b18 round 2, should-fix 3: once no preview shows a page
             // and no read of it is out, its kept change time goes.
             sync { expect(!PreviewController.pageChangeKeysForChecks.isEmpty, "pages' change times are kept while their previews are open") },
             sync {
-                for t in [tab, second, linker, direct, via].compactMap({ $0 }) where t.previewVisible { focus(t); t.togglePreview() }
+                for t in [tab, second, linker, direct, via, swinger].compactMap({ $0 }) where t.previewVisible { focus(t); t.togglePreview() }
             },
             until("the pages' change times drain once every preview has closed", timeout: 5) { PreviewController.pageChangeKeysForChecks.isEmpty },
             sync {
