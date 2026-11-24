@@ -199,8 +199,11 @@ import CedricCore
         #expect(broken.proposals.count == 1 && broken.proposals[0].check.failsValidation)
     }
 
-    /// Looks (get_lines) until the last tool round, then proposes a broken edit there.
+    /// Looks (get_lines) until the last tool round, proposes a broken edit
+    /// there, then (refused, offered only propose_edit) a fixed one or another broken one.
     struct BreaksInTheLastRound: OwlChatEngine {
+        let fix: Bool
+        let offered: TextBuffer
         var title: String { "last-round" }
         var scoreKey: String { "last-round" }
         var contextBudget: Int { 6000 }
@@ -211,26 +214,44 @@ import CedricCore
                 if results.count < OwlTools.maxRounds - 1 {
                     return .toolCalls([OwlToolCall(name: "get_lines", arguments: .object(["start": .number(1), "end": .number(2)]))])
                 }
-                return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", "[1, 2, 3,]")])
+                if results.count == OwlTools.maxRounds - 1 {
+                    return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", "[1, 2, 3,]")])
+                }
+                // The correction round: only propose_edit is offered.
+                offered.append(tools.map(\.name.rawValue).joined(separator: ",") + "\n")
+                return .toolCalls([OwlToolCall(name: "get_lines", arguments: .object(["start": .number(1), "end": .number(2)])),
+                                   OwlEditValidationAITests.edit("[1, 2, 3]", fix ? "[1, 2, 3, 4]" : "[1, 2, 3,, 4]")])
             }
-            onText("I propose adding a comma.")
-            return .answer("I propose adding a comma.")
+            onText("I propose a change.")
+            return .answer("I propose a change.")
         }
     }
 
-    @Test func aFailingEditInTheLastToolRoundIsMarkedNotRefused() async throws {
+    @Test func aFailingEditInTheLastToolRoundGetsOneCorrectionRound() async throws {
         let s = OwlDocumentSnapshot(text: Self.validJSON, generation: 1, fileName: "a.json", language: "json")
         let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: 6000)!
         let req = OwlChatRequest(question: "Change the items.", context: ctx, snapshot: s, useTools: true, prose: false)
+        // Repaired in the correction round: a clean card, Apply on.
+        let offered = TextBuffer()
         let results = TextBuffer()
-        let out = try await OwlChatRunner.run(req, engine: Recording(inner: BreaksInTheLastRound(), seen: results)) { _ in }
-        #expect(out.rounds == OwlTools.maxRounds)
-        // No "call propose_edit again" with no tool round left: the card is marked, Apply off.
-        #expect(!results.value.contains("call propose_edit again"))
-        #expect(results.value.contains("proposed, but it still fails the check"))
-        let p = try #require(out.proposals.first)
-        #expect(out.proposals.count == 1 && p.check.failsValidation)
-        #expect(!p.canApply(text: Self.validJSON as NSString, generation: 1))
+        let fixed = try await OwlChatRunner.run(req, engine: Recording(inner: BreaksInTheLastRound(fix: true, offered: offered),
+                                                                       seen: results)) { _ in }
+        #expect(fixed.rounds == OwlTools.maxRounds + 1)
+        #expect(offered.value == "propose_edit\n")
+        #expect(results.value.contains("call propose_edit again"))
+        #expect(fixed.answer.hasSuffix("I propose a change."))
+        let p = try #require(fixed.proposals.first)
+        #expect(fixed.proposals.count == 1 && p.check == .clean)
+        #expect(p.canApply(text: Self.validJSON as NSString, generation: 1))
+        // Failing again there: marked, Apply off, and no further round.
+        let again = TextBuffer()
+        let broken = try await OwlChatRunner.run(req, engine: Recording(inner: BreaksInTheLastRound(fix: false, offered: TextBuffer()),
+                                                                        seen: again)) { _ in }
+        #expect(broken.rounds == OwlTools.maxRounds + 1)
+        #expect(again.value.contains("proposed, but it still fails the check"))
+        let q = try #require(broken.proposals.first)
+        #expect(broken.proposals.count == 1 && q.check.failsValidation)
+        #expect(!q.canApply(text: Self.validJSON as NSString, generation: 1))
     }
 
     /// Two broken edits in one batch, then (told) both fixed, or both still broken.

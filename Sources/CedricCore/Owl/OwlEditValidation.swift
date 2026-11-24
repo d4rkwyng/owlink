@@ -712,7 +712,7 @@ public struct OwlEditGate: Sendable {
     /// A tool round follows this batch (the model can call propose_edit again).
     private var retryRoundLeft = true
     /// An edit in the current batch was refused for a retry.
-    private var refusedInBatch = false
+    public private(set) var refusedInBatch = false
     /// `beginBatch` was called: batches are tracked.
     private var batched = false
 
