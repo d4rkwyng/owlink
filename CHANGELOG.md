@@ -4,7 +4,7 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
+## [0.5.3] - 2026-11-24
 
 ### Added
 - **Load model at launch.** In Settings › Cedric, with the built-in engine: on, Owlink loads the model in the background when it starts, so automatic hints can use it right away. It never holds up opening a window, and the 60-second limit applies. Off by default.
@@ -308,7 +308,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
-[Unreleased]: https://github.com/d4rkwyng/owlink/compare/v0.5.2...HEAD
+[0.5.3]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.3
 [0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
 [0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
 [0.5.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.0
