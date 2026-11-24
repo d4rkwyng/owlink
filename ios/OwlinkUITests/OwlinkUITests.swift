@@ -281,6 +281,131 @@ final class OwlinkUITests: XCTestCase {
         shoot("menu-more")
     }
 
+    /// Undo, Redo and Edit / Done by touch, end to end (Codex b18 re-check
+    /// 2: the menu checks would pass with Undo and Redo always disabled).
+    /// Each command is taken from the ••• menu's folded Undo | Redo | Edit
+    /// row where the bar has folded it (an iPhone), else from the bar (an
+    /// iPad pins them there), and the test says which. Read mode on (as an
+    /// iPhone opens files) so Edit / Done is there on every device: Edit
+    /// enters editing, typed text, Undo removes it, Redo restores it, Done
+    /// leaves editing; Undo and Redo enabled only when there is something
+    /// to undo or redo (and never in read mode).
+    func testHistoryRowRoundTrip() throws {
+        let app = launch("README.md", fresh: true, extra: ["-ios.openReadOnly", "YES"])
+        let tv = editor(app)
+        let original = tv.value as? String ?? ""
+        let marker = "hoot roundtrip"
+        XCTAssertFalse(original.contains(marker))
+        let barEdit = app.navigationBars.buttons["editor.edit"]
+        XCTAssertTrue(barEdit.waitForExistence(timeout: 5), "read mode: no Edit / Done button")
+        var folded: [String: Bool] = [:]
+
+        /// Closes the open ••• menu by a tap beside it, left of the text
+        /// (the shared closeMenu taps the window's foot: the keyboard's,
+        /// while editing), and checks it closed.
+        func closeOpenMenu(line: UInt = #line) {
+            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.4)).tap()
+            sleep(1)
+            XCTAssertFalse(app.collectionViews.buttons["Settings"].firstMatch.exists, "the ••• menu didn't close", line: line)
+        }
+        /// The command: the open ••• menu's row item if the bar folded it
+        /// there (the menu is left open), else the bar's button.
+        func command(_ name: String, menu menuID: String, bar barID: String) -> XCUIElement {
+            sleep(1) // a menu or a mode change before this one settles
+            openMore(app)
+            let list = app.collectionViews.containing(.button, identifier: "Settings").firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 5), "no ••• menu list")
+            XCTAssertTrue(list.buttons["Settings"].firstMatch.waitForExistence(timeout: 5), "the ••• menu didn't open")
+            sleep(1) // the menu's appearance animation: its rows all in place
+            let inMenu = list.buttons[menuID].firstMatch
+            if inMenu.waitForExistence(timeout: 2) {
+                if folded[name] == nil { print("HISTORY-ROUNDTRIP \(name): in the ••• menu's folded row") }
+                folded[name] = true
+                return inMenu
+            }
+            closeOpenMenu()
+            if folded[name] == nil { print("HISTORY-ROUNDTRIP \(name): not folded, in the bar") }
+            folded[name] = false
+            let inBar = app.navigationBars.buttons[barID].firstMatch
+            XCTAssertTrue(inBar.exists, "\(name) neither in the ••• menu's row nor in the bar")
+            return inBar
+        }
+        func assertEnabled(_ name: String, menu: String, bar: String, _ want: Bool, _ when: String, line: UInt = #line) {
+            let c = command(name, menu: menu, bar: bar)
+            XCTAssertEqual(c.isEnabled, want, "\(name) \(want ? "disabled" : "enabled") \(when)", line: line)
+            if folded[name] == true { closeOpenMenu(line: line) }
+        }
+        func text() -> String { tv.value as? String ?? "" }
+        func waitText(_ ok: @escaping (String) -> Bool, _ what: String, line: UInt = #line) {
+            let p = NSPredicate { _, _ in ok(tv.value as? String ?? "") }
+            let r = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: p, object: nil)], timeout: 5)
+            XCTAssertEqual(r, .completed, "\(what): \(text().prefix(120))", line: line)
+        }
+        let undo = (name: "Undo", menu: "editor.menu.undo", bar: "editor.undo")
+        let redo = (name: "Redo", menu: "editor.menu.redo", bar: "editor.redo")
+
+        // Read mode: nothing to undo or redo.
+        XCTAssertEqual(barEdit.label, "Edit")
+        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "in read mode")
+        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "in read mode")
+
+        // Edit: from the row (or the bar).
+        let edit = command("Edit", menu: "editor.menu.edit", bar: "editor.edit")
+        XCTAssertEqual(edit.label, "Edit", "the Edit command isn't Edit in read mode")
+        XCTAssertTrue(edit.isEnabled, "Edit disabled")
+        edit.tap()
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Done'"), object: barEdit)], timeout: 5)
+        XCTAssertEqual(barEdit.label, "Done", "Edit didn't enter editing")
+        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "editing, nothing typed")
+        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "editing, nothing typed")
+
+        // Type.
+        tapText(tv)
+        tv.typeText(marker)
+        waitText({ $0.contains(marker) }, "the typed text isn't in the editor")
+        XCTAssertEqual(text().count, original.count + marker.count, "typing changed more than the marker")
+        let typed = text()
+
+        // Undo from the row: the typed text goes.
+        let u = command(undo.name, menu: undo.menu, bar: undo.bar)
+        XCTAssertTrue(u.isEnabled, "Undo disabled with typing to undo")
+        if folded[undo.name] == true {
+            XCTAssertFalse(app.collectionViews.buttons[redo.menu].firstMatch.isEnabled, "Redo enabled with nothing to redo")
+        } else {
+            XCTAssertFalse(app.navigationBars.buttons[redo.bar].isEnabled, "Redo enabled with nothing to redo")
+        }
+        u.tap()
+        waitText({ $0 == original }, "Undo didn't remove the typed text")
+        XCTAssertEqual(text(), original, "after Undo")
+
+        // Redo from the row: it comes back.
+        let r = command(redo.name, menu: redo.menu, bar: redo.bar)
+        XCTAssertTrue(r.isEnabled, "Redo disabled with an undo to redo")
+        r.tap()
+        waitText({ $0 == typed }, "Redo didn't restore the typed text")
+        XCTAssertEqual(text(), typed, "after Redo")
+        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "after Redo, nothing left to redo")
+        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, true, "after Redo, the typing to undo")
+
+        // Done from the row: back to read mode, Undo and Redo disabled.
+        let done = command("Edit", menu: "editor.menu.edit", bar: "editor.edit")
+        XCTAssertEqual(done.label, "Done", "the Edit command isn't Done while editing")
+        done.tap()
+        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Edit'"), object: barEdit)], timeout: 5)
+        XCTAssertEqual(barEdit.label, "Edit", "Done didn't leave editing")
+        XCTAssertEqual(text(), typed, "Done changed the text")
+        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "back in read mode")
+        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "back in read mode")
+
+        // Said, not silent: where each command was.
+        let summary = folded.keys.sorted().map { "\($0): \(folded[$0]! ? "folded row" : "bar")" }.joined(separator: ", ")
+        print("HISTORY-ROUNDTRIP \(UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone"): \(summary)")
+        XCTContext.runActivity(named: "History commands: \(summary)") { _ in }
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertEqual(folded.values.filter { $0 }.count, 0, "an iPad folded history commands into the ••• menu: \(summary)")
+        }
+    }
+
     /// Share… (Share & Export ›) brings up the share sheet with the
     /// document's copy (its caption names the document); it is dismissed
     /// without sharing, and goes. The sheet is the system's: its remote
