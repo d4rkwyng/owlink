@@ -846,4 +846,45 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists,
                        "closed, the preview hidden and shown: the front matter came back open")
     }
+
+    // MARK: The gate's screenshots (Scripts/ios-gate.sh)
+
+    private func gateShot(_ name: String) {
+        sleep(1)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "gate-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// The main screens, as attachments named gate-<screen>, which
+    /// Scripts/ios-gate.sh saves per build and device and compares with
+    /// the previous build's.
+    func testGateScreenshots() throws {
+        var app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(1)
+        gateShot("1-editor")
+        openMore(app)
+        gateShot("2-menu")
+        closeMenu(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        gateShot("3-settings")
+        closeSettings(app)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        gateShot("4-ask-cedric")
+        closeAskWithDone(app)
+        app.terminate()
+        app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        let web = showPreview(app)
+        XCTAssertTrue(web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'Front matter'")).firstMatch.waitForExistence(timeout: 10),
+                      "no front matter in the preview")
+        gateShot("5-preview-front-matter")
+    }
+
 }
