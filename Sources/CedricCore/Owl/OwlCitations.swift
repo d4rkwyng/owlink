@@ -315,7 +315,7 @@ public enum OwlCitations {
                     // "\r\n" is one Character, and "\r" alone ends a line too.
                     // A row that is only a list marker stays: the item's
                     // number may come on the next row ("-" / "31: text").
-                    if ch.isNewline, !Self.isMarker(raw) { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
+                    if ch.isNewline, !Self.markerPending(raw) { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
                     continue
                 }
                 held.append(ch)
@@ -361,7 +361,7 @@ public enum OwlCitations {
         /// as `find` reads it), so it is held until the next row shows
         /// whether one comes.
         private func itemRunsOn() -> Bool {
-            Self.isMarker(raw) && held.drop(while: { $0.isASCII && $0.isNumber }).allSatisfy(\.isWhitespace)
+            Self.markerPending(raw) && held.drop(while: { $0.isASCII && $0.isNumber }).allSatisfy(\.isWhitespace)
         }
 
         /// Held at a row's end by `itemRunsOn`, nothing but spacing since.
@@ -371,8 +371,19 @@ public enum OwlCitations {
             return after.contains(where: \.isNewline) && after.allSatisfy(\.isWhitespace)
         }
 
-        private static func isMarker(_ raw: String) -> Bool {
-            ["-", "*", "•"].contains(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        private static func isMarker(_ row: Substring) -> Bool {
+            ["-", "*", "•"].contains(row.trimmingCharacters(in: .whitespaces))
+        }
+
+        /// `raw`'s rows ("\r\n" is one Character).
+        private static func rows(_ raw: String) -> [Substring] {
+            raw.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        }
+
+        /// Whether `raw`'s last row with anything on it is only a list
+        /// marker: an item's number may still come ("-" / "31: text").
+        private static func markerPending(_ raw: String) -> Bool {
+            rows(raw).last { !$0.allSatisfy(\.isWhitespace) }.map(isMarker) ?? false
         }
 
         private mutating func release(_ allowed: IndexSet) -> String {
@@ -396,8 +407,10 @@ public enum OwlCitations {
         }
 
         static func mayCite(_ line: String) -> Bool {
-            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            return t.isEmpty || isMarker(line) || line.range(of: "line", options: .caseInsensitive) != nil
+            // The row being written: rows kept before it as context don't
+            // make its start any less a row's start.
+            let row = rows(line).last ?? ""
+            return row.allSatisfy(\.isWhitespace) || isMarker(row) || line.range(of: "line", options: .caseInsensitive) != nil
         }
     }
 

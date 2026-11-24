@@ -222,6 +222,21 @@ import Testing
                 #expect(all == f.text, "\(size): \(all.debugDescription) vs \(f.text.debugDescription)")
             }
         }
+        // A row that is only a list marker, kept as context, doesn't stop the next row's item being held.
+        for answer in ["Findings:\n-\n- 31: setup is wrong.", "*\n* 40: missing check\n", "*   \r\n* 41| quoted",
+                       "• \n\n• \n\n31: x", "-\n\n- Line 31 too."] {
+            let f = OwlCitations.filter(answer, allowed: Self.lines1to18)
+            #expect(f.changed, "\(answer.debugDescription)")
+            for size in [1, 2, 3, answer.count] {
+                let (before, all) = Self.streamed(answer, size: size, allowed: Self.lines1to18)
+                for c in OwlCitations.find(before) where !Self.lines1to18.contains(integersIn: c.lines) {
+                    #expect((before as NSString).substring(from: NSMaxRange(c.range)).hasPrefix(OwlCitations.flag),
+                            "\(size): \(before.debugDescription)")
+                }
+                #expect(OwlCitations.evidence(in: all).isSubset(of: Self.lines1to18), "\(size): \(all.debugDescription)")
+                if f.dropped.isEmpty { #expect(all == f.text, "\(size): \(all.debugDescription) vs \(f.text.debugDescription)") }
+            }
+        }
         #expect(OwlCitations.filter("- 4\n–31: setup", allowed: Self.lines1to18).text == "- 4\n–31\(OwlCitations.flag): setup")
         // A number held for a dash that doesn't come is shown as it was.
         for size in [1, 3] {
