@@ -80,4 +80,67 @@ import Testing
         #expect(LargeDocument.needsChunks(afterEditOf: first..<(first + 2), in: index))
         #expect(!LargeDocument.needsChunks(afterEditOf: 0..<1, in: index))
     }
+    /// The chunking storage's forward enumeration, from `start` to the end
+    /// of `text`: the chunk holding the offset, then on from its end.
+    /// Capped, so a walk that stops moving fails instead of hanging.
+    static func walkForward(_ text: NSString, line: NSRange, limit: Int, from start: Int, cap: Int) -> (chunks: [NSRange], stalledAt: Int?) {
+        var out: [NSRange] = [], at = start
+        while at < NSMaxRange(line) {
+            guard out.count < cap else { return (out, at) }
+            let r = LargeDocument.chunk(containing: at, line: line, in: text, limit: limit)
+            guard let next = LargeDocument.forwardStep(from: at, chunk: r) else { return (out, at) }
+            out.append(r)
+            at = next
+        }
+        return (out, nil)
+    }
+
+    /// 0.5.3 and before: a composed character (an emoji, a flag, a ZWJ
+    /// family, an accented letter) straddling a nominal chunk boundary
+    /// moved that boundary back, and `chunk(containing:)` at the moved
+    /// boundary still gave the chunk before, which ends there. TextKit's
+    /// forward enumeration then asked from the same offset forever: the
+    /// editor hung on a long Unicode line.
+    @Test func aComposedCharacterAtAChunkBoundaryDoesNotStallTheWalk() throws {
+        let limit = LargeDocument.chunkLength
+        let clusters = ["👨‍👩‍👧‍👦", "🇫🇷", "e\u{301}\u{323}", "😀", "👍🏽"]
+        var line = ""
+        for (i, c) in clusters.enumerated() {
+            // Each cluster starts one code unit before nominal boundary i+1.
+            let target = (i + 1) * limit - 1
+            line += String(repeating: "x", count: target - (line as NSString).length) + c
+        }
+        line += String(repeating: "y", count: 3_000)
+        let text = try Self.roundTrip("short first line\n" + line + "\ntail\n")
+        let start = ("short first line\n" as NSString).length
+        let r = NSRange(location: start, length: (line as NSString).length + 1)
+        let chunks = LargeDocument.chunks(of: r, in: text, limit: limit)
+        // The fixture does what it means to: every boundary 1…5 moved back.
+        for k in 1...clusters.count { #expect(chunks[k].location < start + k * limit, "boundary \(k) moved back") }
+        #expect(chunks.allSatisfy { $0.length > 0 })
+
+        // From the line start, from every moved boundary and from inside each cluster.
+        var starts = [start]
+        for k in 1...clusters.count { starts += [chunks[k].location, chunks[k].location + 1, start + k * limit] }
+        for from in starts {
+            let walk = Self.walkForward(text, line: r, limit: limit, from: from, cap: chunks.count + 1)
+            #expect(walk.stalledAt == nil, "forward walk from \(from) stalled at \(walk.stalledAt ?? -1)")
+            #expect(walk.chunks.last.map(NSMaxRange) == NSMaxRange(r))
+            #expect(walk.chunks.allSatisfy { chunks.contains($0) })
+            #expect(walk.chunks.first.map { NSLocationInRange(from, $0) } == true)
+        }
+        // Every offset of the line maps to the chunk holding it.
+        for off in r.location..<NSMaxRange(r) {
+            let c = LargeDocument.chunk(containing: off, line: r, in: text, limit: limit)
+            if !NSLocationInRange(off, c) { Issue.record("offset \(off) not in its chunk \(c)"); break }
+        }
+        // The backward walk from the line's end reaches its start, chunk by chunk.
+        var at = NSMaxRange(r) - 1, back: [NSRange] = []
+        while at >= r.location, back.count <= chunks.count {
+            let c = LargeDocument.chunk(containing: at, line: r, in: text, limit: limit)
+            guard let next = LargeDocument.backwardStep(from: at, chunk: c) else { break }
+            back.append(c); at = next
+        }
+        #expect(back == chunks.reversed())
+    }
 }
