@@ -401,9 +401,14 @@ import CedricCore
         // An uncited finding the answer left out comes back with its continuation row.
         #expect(kept.contains("- The installer never verifies a checksum.\n  It trusts any mirror."))
         // An answer that keeps every finding (in its own words) gets nothing added.
-        let full = "Line 12 downloads code that is unsigned. Line 40 writes /etc/hosts without asking. "
+        let full = "Line 12 downloads the unsigned code. Line 40 writes /etc/hosts without asking. "
             + "The installer never verifies a checksum and trusts any mirror."
         #expect(OwlChunkedReviewRunner.keepFindings(full, findings) == full)
+        // In another order it may say something else ("client trusts server"):
+        // the finding is added again, a repeat rather than a loss.
+        let reordered = "Line 12 downloads code that is unsigned. Line 40 writes /etc/hosts without asking. "
+            + "The installer never verifies a checksum and trusts any mirror."
+        #expect(OwlChunkedReviewRunner.keepFindings(reordered, findings) == reordered + "\n\n- Line 12: downloads unsigned code.")
     }
 
     @Test func aFindingWhoseMeaningTheAnswerReversesIsStillKept() {
@@ -415,8 +420,8 @@ import CedricCore
             let kept = OwlChunkedReviewRunner.keepFindings(answer, findings)
             #expect(kept.hasPrefix(answer) && kept.hasSuffix(items), "\(answer)")
         }
-        // The same claim in other words still keeps it.
-        let same = "Line 12 downloads code that is unsigned."
+        // The same claim in other words, in its order, still keeps it.
+        let same = "Line 12 downloads the unsigned code it fetched."
         #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
         // A negated finding needs the answer to say no too.
         let negated = "- Line 7: never checks the checksum."
@@ -507,8 +512,11 @@ import CedricCore
         let kept = OwlChunkedReviewRunner.keepFindings(changed, findings)
         #expect(kept.hasPrefix(changed) && kept.hasSuffix(items))
         // The same number, in other words, keeps it; the line numbers cited aren't content.
-        let same = "Lines 12–13: after 30 days the token expires."
+        let same = "Lines 12–13: the session token expires right after 30 days."
         #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+        // Reordered, it is added again: a repeat rather than a loss.
+        let reordered = "Lines 12–13: after 30 days the token expires."
+        #expect(OwlChunkedReviewRunner.keepFindings(reordered, findings) == reordered + "\n\n" + items)
         let uncited = "- Retries 3 times before giving up."
         let u = OwlChunkedReviewRunner.Findings(text: uncited, items: uncited, verdict: nil)
         #expect(OwlChunkedReviewRunner.keepFindings("It retries 5 times before giving up.", u).hasSuffix(uncited))
@@ -572,6 +580,60 @@ import CedricCore
         #expect(!result.outcome.answer.contains("hides a secret"))
         #expect(!result.outcome.answer.contains("400"))
         #expect(result.outcome.answer.contains("Line 3 was too long for this model and was not reviewed."))
+    }
+
+    /// "Line 3 was too long for this model and was not reviewed." in an
+    /// earlier answer is no evidence for line 3: a follow-up may not cite
+    /// it unflagged. 0.5.4's follow-up 5 read it as an ordinary citation.
+    @Test func aNoteAboutLinesNotReviewedVouchesForNone() async throws {
+        var lines = (1...120).map { "line \($0) " + String(repeating: "w", count: 40) }
+        lines[2] = String(repeating: "z", count: 6_000)
+        let s = OwlDocumentSnapshot(text: lines.joined(separator: "\n"), generation: 1, fileName: "t.txt", language: "plain")
+        let first = Self.request(s, action: .summarise, budget: 3_000)
+        let plan = try #require(OwlChunkedReviewRunner.plan(first, engine: Recorder(budget: 3_000)))
+        let earlier = await Self.run(first, plan, Recorder(budget: 3_000))
+        #expect(earlier.outcome.answer.hasPrefix("Line 3 was too long for this model and was not reviewed."))
+        let history = [OwlChatEntry(role: .user, text: "Summarise it."), OwlChatEntry(role: .owl, text: earlier.outcome.answer)]
+        #expect(!OwlPrompts.historyCitations(history).contains(3))
+        // The follow-up's combined answer can't cite line 3 on its strength.
+        let engine = Recorder(budget: 3_000, reduceReply: { _ in "- Line 3 hides a secret.\n- Line 1 opens it." })
+        let req = Self.request(s, action: nil, question: "Anything odd?", budget: 3_000, history: history)
+        let followUp = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, followUp, engine)
+        #expect(!result.outcome.answer.contains("hides a secret"))
+        #expect(result.outcome.answer.contains("- Line 1 opens it."))
+        // Nor do the other notes about what was not reviewed; a line cited
+        // for what it says, beside them, still counts.
+        for note in [OwlChunkedReview.tooLongNote(first: 30, last: 34),
+                     OwlChunkedReview.partialNote(first: 30, last: 34, total: 120),
+                     "Lines 30–34 were too long for this model and were not reviewed.",
+                     "Reviewed lines 30–34 of 120; the rest was not reviewed."] {
+            for text in [note, note + "\n\nLine 7 opens it.", "\r\n" + note + "\r\nLine 7 opens it."] {
+                let cited = OwlPrompts.historyCitations([OwlChatEntry(role: .user, text: "Summarise it."),
+                                                         OwlChatEntry(role: .owl, text: text)])
+                #expect(!cited.contains(integersIn: 30...34) && cited.intersection(IndexSet(integersIn: 30...34)).isEmpty,
+                        "\(text.debugDescription)")
+                #expect(cited.contains(7) == text.contains("Line 7"), "\(text.debugDescription)")
+            }
+        }
+        // A sentence that only resembles one still counts.
+        #expect(OwlPrompts.historyCitations([OwlChatEntry(role: .user, text: "Summarise it."),
+                                             OwlChatEntry(role: .owl, text: "Line 30 was reviewed and is fine.")]).contains(30))
+    }
+
+    /// A part's answer the chat runner already flagged ("Line 999 (not
+    /// among the lines read)") is filtered again by the whole-document
+    /// runner, and keeps one flag. 0.5.4's follow-up 5 added a second.
+    @Test func aPartsAnswerFlaggedByTheChatRunnerKeepsOneFlag() async throws {
+        let engine = Recorder(partReply: { _, _ in "Line 999 describes setup." })
+        let req = Self.request(Self.doc282(), action: nil, question: "What is this document about?")
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, plan, engine)
+        #expect(result.outcome.sections.count >= 2)
+        for note in result.outcome.sections {
+            #expect(note.text == "Line 999\(OwlCitations.flag) describes setup.", "\(note.text.debugDescription)")
+        }
+        #expect(!result.outcome.answer.contains(OwlCitations.flag + OwlCitations.flag))
     }
 
     @Test func theCombinedAnswerMayCiteLinesTheConversationSentWithItNamed() async throws {

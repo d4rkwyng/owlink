@@ -270,13 +270,16 @@ public enum OwlPrompts {
     /// (`OwlCitations.flag`) stays unverified, even where the history sent
     /// is cut between the citation and its flag, and even where the same
     /// line is cited again, unflagged, past the cut: each citation sent is
-    /// judged by its own flag.
+    /// judged by its own flag. A whole-document review's note about lines
+    /// it did not review ("Line 3 was too long for this model and was not
+    /// reviewed.", `OwlChunkedReview.withoutStatusNotes`) vouches for none.
     public static func historyCitations(_ history: [OwlChatEntry]) -> IndexSet {
         var s = IndexSet()
         for e in retainedHistory(history) {
             let sent = sentText(e)
             s.formUnion(e.role == .user ? OwlCitations.lines(in: sent)
-                        : OwlCitations.evidence(in: e.text, retained: (sent as NSString).length))
+                        : OwlCitations.evidence(in: OwlChunkedReview.withoutStatusNotes(e.text),
+                                                retained: (sent as NSString).length))
         }
         return s
     }

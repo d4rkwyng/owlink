@@ -68,6 +68,65 @@ public enum OwlChunkedReview {
             : String(localized: "Whole document (\(plan.totalLines) lines; \(skipped) too long to read)")
     }
 
+    /// The note put before a whole-document answer for lines too long for
+    /// the model: they were not reviewed.
+    public static func tooLongNote(first: Int, last: Int) -> String {
+        first == last
+            ? String(localized: "Line \(first) was too long for this model and was not reviewed.")
+            : String(localized: "Lines \(first)–\(last) were too long for this model and were not reviewed.")
+    }
+
+    /// The note put before a whole-document answer cut short.
+    public static func partialNote(first: Int, last: Int, total: Int) -> String {
+        String(localized: "Reviewed lines \(first)–\(last) of \(total); the rest was not reviewed.")
+    }
+
+    /// `text` with each row that is one of the notes above
+    /// (`tooLongNote`, `partialNote`) blanked out, its length kept: what
+    /// the review says about its own coverage, not about what a line
+    /// says. "Line 3 was too long for this model and was not reviewed."
+    /// is no evidence that line 3 was read, and a later answer may not
+    /// cite it on the strength of that (`OwlPrompts.historyCitations`).
+    public static func withoutStatusNotes(_ text: String) -> String {
+        let ns = text as NSString
+        let out = NSMutableString(string: text)
+        var start = 0
+        while start <= ns.length {
+            let nl = ns.range(of: "\n", range: NSRange(location: start, length: ns.length - start)).location
+            let end = nl == NSNotFound ? ns.length : nl
+            let range = NSRange(location: start, length: end - start)
+            if isStatusNote(ns.substring(with: range)) {
+                out.replaceCharacters(in: range, with: String(repeating: "_", count: range.length))
+            }
+            if nl == NSNotFound { break }
+            start = nl + 1
+        }
+        return out as String
+    }
+
+    private static let integer = try! NSRegularExpression(pattern: #"\d+"#)
+
+    static func isStatusNote(_ row: String) -> Bool {
+        let row = row.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ns = row as NSString
+        let numbers = integer.matches(in: row, range: NSRange(location: 0, length: ns.length))
+            .compactMap { Int(ns.substring(with: $0.range)) }
+        guard (1...3).contains(numbers.count) else { return false }
+        // Every order: a translation may put them differently.
+        func orders(_ a: [Int]) -> [[Int]] {
+            a.count <= 1 ? [a] : a.indices.flatMap { i in
+                orders(Array(a[..<i] + a[(i + 1)...])).map { [a[i]] + $0 }
+            }
+        }
+        return orders(numbers).contains { n in
+            switch n.count {
+            case 1: return row == tooLongNote(first: n[0], last: n[0])
+            case 2: return row == tooLongNote(first: n[0], last: n[1])
+            default: return row == partialNote(first: n[0], last: n[1], total: n[2])
+            }
+        }
+    }
+
     public static func forcedVerdict(scanHasHigh: Bool, scanTruncated: Bool, covered: IndexSet,
                                      totalLines: Int) -> ScriptVerdict.Reason? {
         ScriptVerdict.forcedReason(scanHasHigh: scanHasHigh,
@@ -80,28 +139,29 @@ public enum OwlChunkedReview {
     /// Keep each cited finding once, without manufacturing citations. A
     /// finding from a later part is left out only when every line it cites
     /// was cited by an earlier part and an earlier finding on one of those
-    /// lines already says everything it says (`substance`, numbers
-    /// included, and a "not" if it has one): "missing signature" and
-    /// "missing checksum" on line 40 are two findings, not one.
+    /// lines already says everything it says, in the same order
+    /// (`says`, numbers included, and a "not" if it has one): "missing
+    /// signature" and "missing checksum" on line 40 are two findings, not
+    /// one, and so are "client trusts server" and "server trusts client".
     public static func mergeFindings(_ answers: [String]) -> String {
         let regex = findingCite
         var seen = Set<Int>()
-        var earlier: [(lines: Set<Int>, words: Set<String>, negated: Bool)] = []
+        var earlier: [(lines: Set<Int>, words: [String], negated: Bool)] = []
         var output: [String] = []
         for answer in answers {
             var group: [String] = []
             var cited: [Int] = []
-            var thisAnswer: [(lines: Set<Int>, words: Set<String>, negated: Bool)] = []
+            var thisAnswer: [(lines: Set<Int>, words: [String], negated: Bool)] = []
             func flush() {
                 guard !group.isEmpty else { return }
                 let text = group.joined(separator: "\n")
                 let lines = Set(cited)
-                let words = substance(text)
+                let words = substanceInOrder(text)
                 let negated = negates(text)
                 // Dedupe only against earlier answers, so two distinct findings
                 // on the same line in one part are both kept.
                 let repeated = !lines.isEmpty && lines.isSubset(of: seen) && earlier.contains {
-                    !$0.lines.isDisjoint(with: lines) && words.isSubset(of: $0.words) && $0.negated == negated
+                    !$0.lines.isDisjoint(with: lines) && says(words, in: $0.words) && $0.negated == negated
                 }
                 if !repeated { output.append(text) }
                 thisAnswer.append((lines, words, negated))
@@ -152,12 +212,17 @@ public enum OwlChunkedReview {
     /// filler, cut to five letters ("downloads" and "download" match;
     /// "signed" and "unsigned" don't), and every number or word with a
     /// digit in it, whole ("90 days" and "30 days" differ; "sha256" and
-    /// "sha512" too, and "L2" and "L3"). The numbers of its citations
-    /// ("line 12", "lines 4–9", "#12", a leading "12:") are where it is,
-    /// not what it says, and are left out. "L12" is kept whole too: it may
-    /// be a term like "L2", so "- L12: x" and "- Line 12: x" are both
-    /// kept (a finding repeated is better than one dropped).
-    public static func substance(_ text: String) -> Set<String> {
+    /// "sha512" too, and "L2" and "L3"), a decimal number with its point
+    /// ("1.25" is not "25.1"). The numbers of its citations ("line 12",
+    /// "lines 4–9", "#12", a leading "12:") are where it is, not what it
+    /// says, and are left out. "L12" is kept whole too: it may be a term
+    /// like "L2", so "- L12: x" and "- Line 12: x" are both kept (a
+    /// finding repeated is better than one dropped). As a set: whether
+    /// two findings say the same thing also takes their order (`says`).
+    public static func substance(_ text: String) -> Set<String> { Set(substanceInOrder(text)) }
+
+    /// `substance`, in the order the text says it.
+    public static func substanceInOrder(_ text: String) -> [String] {
         let blanked = NSMutableString(string: text)
         let all = NSRange(location: 0, length: blanked.length)
         var cites = OwlCitations.find(text).map(\.range)
@@ -174,10 +239,36 @@ public enum OwlChunkedReview {
             cites.append(number)
         }
         for r in cites { blanked.replaceCharacters(in: r, with: String(repeating: " ", count: r.length)) }
-        return Set((blanked as String).lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap { word -> String? in
-            if word.contains(where: \.isNumber) { return String(word) }
-            guard word.count >= 4, !filler.contains(String(word)) else { return nil }
+        let lower = (blanked as String).lowercased()
+        let ns = lower as NSString
+        return token.matches(in: lower, range: NSRange(location: 0, length: ns.length)).compactMap { m -> String? in
+            let word = ns.substring(with: m.range)
+            if word.contains(where: \.isNumber) { return word }
+            guard word.count >= 4, !filler.contains(word) else { return nil }
             return String(word.prefix(5))
-        })
+        }
+    }
+
+    // A word, or a number with its decimal point or thousands comma
+    // ("1.25", "1,000", "v1.2.3"): "1.25" and "25.1" are different numbers.
+    private static let token = try! NSRegularExpression(pattern: #"[\p{L}\p{N}]*\p{N}(?:[.,]\p{N}+)+[\p{L}\p{N}]*|[\p{L}\p{N}]+"#)
+
+    /// Whether a passage whose substance (`substanceInOrder`) is `passage`
+    /// says all that `finding` says, in the same order: "server trusts
+    /// client" doesn't say "client trusts server", though its words are
+    /// the same. Words around them may differ ("downloads the unsigned
+    /// code" says "downloads unsigned code"); a reordering ("downloads
+    /// code that is unsigned") is taken as saying something else, and the
+    /// finding is kept (a finding repeated is better than one dropped).
+    /// A finding that says a word again is read from where it first says
+    /// it ("Pipes curl to sh. Pipes curl to sh." says "pipes curl").
+    public static func says(_ finding: [String], in passage: [String]) -> Bool {
+        var rest = passage[...]
+        var said = Set<String>()
+        for word in finding where said.insert(word).inserted {
+            guard let at = rest.firstIndex(of: word) else { return false }
+            rest = rest[rest.index(after: at)...]
+        }
+        return true
     }
 }

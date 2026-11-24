@@ -124,6 +124,35 @@ import CedricCore
         #expect(same == "- Line 40: missing signature on the download.")
     }
 
+    /// The same words in another order say something else: "Client
+    /// trusts server" and "Server trusts client" on one line are two
+    /// findings, and "1.25" is not "25.1". 0.5.4's follow-up 5 compared
+    /// word sets and kept only the first of each.
+    @Test func findingsWithTheSameWordsInAnotherOrderAreBothKept() {
+        let trust = OwlChunkedReview.mergeFindings(["- Line 5: Client trusts server.", "- Line 5: Server trusts client."])
+        #expect(trust == "- Line 5: Client trusts server.\n- Line 5: Server trusts client.")
+        let decimal = OwlChunkedReview.mergeFindings(["- Line 8: timeout is 1.25 seconds.", "- Line 8: timeout is 25.1 seconds."])
+        #expect(decimal == "- Line 8: timeout is 1.25 seconds.\n- Line 8: timeout is 25.1 seconds.")
+        #expect(OwlChunkedReview.substance("timeout is 1.25 seconds") != OwlChunkedReview.substance("timeout is 25.1 seconds"))
+        #expect(OwlChunkedReview.substance("timeout is 1.25 seconds").contains("1.25"))
+        // The same finding again, in the same order, is still left out.
+        #expect(OwlChunkedReview.mergeFindings(["- Line 5: Client trusts server.", "- Line 5: the client trusts the server."])
+                == "- Line 5: Client trusts server.")
+        #expect(OwlChunkedReview.mergeFindings(["- Line 8: timeout is 1.25 seconds.", "- Line 8: Timeout is 1.25 seconds."])
+                == "- Line 8: timeout is 1.25 seconds.")
+        // The combined answer keeps a finding only by saying it in its order.
+        for (items, answer) in [("- Line 5: Client trusts server.", "Line 5: Server trusts client."),
+                                ("- Line 8: timeout is 1.25 seconds.", "Line 8: timeout is 25.1 seconds."),
+                                ("- Client trusts server.", "Server trusts client.")] {
+            let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+            #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items, "\(items)")
+        }
+        let items = "- Line 5: Client trusts server."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        let same = "Line 5: the client trusts the server it connects to."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+    }
+
     /// "L2" and "L3" are what a finding says, not digits to strip: "Line
     /// 12: L3 regularization is enabled" doesn't say "Line 12: L2
     /// regularization is enabled". 0.5.4's follow-up 4 read both as
@@ -142,7 +171,7 @@ import CedricCore
         let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
         let answer = "Line 12: L3 regularization is enabled."
         #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items)
-        let same = "Line 12 enables L2 regularization."
+        let same = "Line 12 has L2 regularization enabled."
         #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
         // "line12" is still a citation, left out of what a finding says.
         #expect(OwlChunkedReview.substance("- line12: missing signature.") == OwlChunkedReview.substance("- Line 12: missing signature."))

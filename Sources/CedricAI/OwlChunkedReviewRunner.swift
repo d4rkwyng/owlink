@@ -225,17 +225,13 @@ public enum OwlChunkedReviewRunner {
         func finished(_ body: String, stopped: Bool, error: String?) -> OwlChatOutcome {
             var text = body
             if !skipped.isEmpty {
-                let lines = skipped.map {
-                    $0.first == $0.last
-                        ? String(localized: "Line \($0.first) was too long for this model and was not reviewed.")
-                        : String(localized: "Lines \($0.first)–\($0.last) were too long for this model and were not reviewed.")
-                }.joined(separator: "\n")
+                let lines = skipped.map { OwlChunkedReview.tooLongNote(first: $0.first, last: $0.last) }.joined(separator: "\n")
                 text = lines + (text.isEmpty ? "" : "\n\n" + text)
             }
             if !complete, skipped.isEmpty || stopped || error != nil {
                 let note: String
                 if let first = completed.first, let last = completed.last {
-                    note = String(localized: "Reviewed lines \(first.first)–\(last.last) of \(plan.totalLines); the rest was not reviewed.")
+                    note = OwlChunkedReview.partialNote(first: first.first, last: last.last, total: plan.totalLines)
                 } else {
                     note = String(localized: "No document lines were reviewed.")
                 }
@@ -298,7 +294,8 @@ public enum OwlChunkedReviewRunner {
     /// after it, with its continuation rows, and the verdict is the most
     /// cautious of the parts' and the answer's own. A cited finding is kept
     /// only by a passage that cites one of its lines and says everything it
-    /// says: every content word and every number ("Line 12 starts the
+    /// says, in the same order: every content word and every number
+    /// ("Client trusts server" doesn't keep "Server trusts client"; "Line 12 starts the
     /// setup" and "Line 12 downloads signed code" don't keep "Line 12:
     /// downloads unsigned code"; "expires after 90 days" doesn't keep
     /// "expires after 30 days"), a negation if it has one, and none it lacks in a sentence
@@ -316,18 +313,18 @@ public enum OwlChunkedReviewRunner {
             }
         }
         var text = rows.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let passages = findingGroups(text).map { (text: $0, lines: OwlCitations.lines(in: $0), words: substance($0)) }
-        let everything = substance(text)
+        let passages = findingGroups(text).map { (text: $0, lines: OwlCitations.lines(in: $0), words: substanceInOrder($0)) }
+        let everything = substanceInOrder(text)
         let answerNegates = negates(text)
         var missing: [String] = []
         for finding in findingGroups(findings.items) {
-            let words = substance(finding)
+            let words = substanceInOrder(finding)
             let lines = OwlCitations.lines(in: finding)
             let negated = negates(finding)
             let kept = lines.isEmpty
-                ? words.isSubset(of: everything) && (!negated || answerNegates)
+                ? says(words, in: everything) && (!negated || answerNegates)
                 : passages.contains { p in
-                    guard !p.lines.isDisjoint(with: lines), words.isSubset(of: p.words) else { return false }
+                    guard !p.lines.isDisjoint(with: lines), says(words, in: p.words) else { return false }
                     let citing = sentences(p.text).filter { !OwlCitations.lines(in: $0).isDisjoint(with: lines) }
                     return negated ? negates(p.text) : !citing.contains(where: negates)
                 }
@@ -370,6 +367,8 @@ public enum OwlChunkedReviewRunner {
 
     /// What a finding says, numbers included (`OwlChunkedReview.substance`).
     static func substance(_ text: String) -> Set<String> { OwlChunkedReview.substance(text) }
+    static func substanceInOrder(_ text: String) -> [String] { OwlChunkedReview.substanceInOrder(text) }
+    static func says(_ finding: [String], in passage: [String]) -> Bool { OwlChunkedReview.says(finding, in: passage) }
 
     /// `text` in pieces that each fit, cut at row breaks where it can (a
     /// row longer than a piece, at characters, `splitLine`), and never
