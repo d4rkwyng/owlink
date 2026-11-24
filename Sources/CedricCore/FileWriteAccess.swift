@@ -27,7 +27,13 @@ public enum FileWriteAccess {
     /// target, SafePaths.writeTarget) can't be written; nil when it can,
     /// or when it doesn't exist (a save creates it; the folder decides).
     public static func blocked(at url: URL, fileManager fm: FileManager = .default) -> Blocked? {
-        let path = SafePaths.writeTarget(for: url, fileManager: fm).path
+        blocked(target: SafePaths.writeTarget(for: url, fileManager: fm))
+    }
+
+    /// Why `target`, a path `SafePaths.writeTarget` already resolved,
+    /// can't be written; nil as for `blocked(at:)`.
+    static func blocked(target: URL) -> Blocked? {
+        let path = target.path
         var st = stat()
         guard stat(path, &st) == 0 else { return nil }
         if st.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) != 0 { return .locked }
@@ -84,10 +90,22 @@ public struct ReadOnlyFileError: LocalizedError, Equatable {
 public enum DocumentWrite {
     /// Writes `data` to the file a save through `url` replaces. Throws
     /// ReadOnlyFileError, leaving the file untouched, when it is read-only.
+    ///
+    /// The link is resolved once, and that target is both checked and
+    /// written. Resolving it again for the write (0.5.3) let a link
+    /// retargeted in between have a writable file checked and a
+    /// read-only one replaced.
     public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws {
-        if let reason = FileWriteAccess.blocked(at: url, fileManager: fm) {
+        try write(data, to: url, fileManager: fm, afterCheck: nil)
+    }
+
+    /// `afterCheck`: tests only, runs between the check and the write.
+    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?) throws {
+        let target = SafePaths.writeTarget(for: url, fileManager: fm)
+        if let reason = FileWriteAccess.blocked(target: target) {
             throw ReadOnlyFileError(url: url, reason: reason)
         }
-        try data.write(to: SafePaths.writeTarget(for: url, fileManager: fm), options: .atomic)
+        afterCheck?()
+        try data.write(to: target, options: .atomic)
     }
 }

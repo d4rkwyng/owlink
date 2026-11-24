@@ -123,6 +123,34 @@ import Testing
         #expect(try String(contentsOf: target, encoding: .utf8) == "target\n")
     }
 
+    /// The save guard and the write used to resolve the link separately:
+    /// retargeted in between, a writable file was checked and a read-only
+    /// one replaced (the atomic rename only needs the folder). Now the
+    /// target checked is the target written.
+    @Test func aLinkRetargetedAfterTheCheckStillWritesTheCheckedFile() throws {
+        let writable = try file("writable.md", "writable\n")
+        defer { cleanUp(writable) }
+        let dir = writable.deletingLastPathComponent()
+        let locked = dir.appendingPathComponent("readonly.md")
+        try Data("read-only\n".utf8).write(to: locked)
+        #expect(chmod(locked.path, 0o444) == 0)
+        let link = dir.appendingPathComponent("link.md")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "writable.md")
+        #expect(FileWriteAccess.blocked(at: link) == nil)
+
+        try DocumentWrite.write(Data("saved\n".utf8), to: link, fileManager: .default) {
+            // Between the check and the write: the link now points at the read-only file.
+            try? FileManager.default.removeItem(at: link)
+            try? FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "readonly.md")
+        }
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n", "the read-only file is untouched")
+        #expect(mode(locked) == 0o444)
+        #expect(try String(contentsOf: writable, encoding: .utf8) == "saved\n", "the checked file got the save")
+        // And the plain save through the retargeted link is refused, as before.
+        #expect(throws: ReadOnlyFileError.self) { try DocumentWrite.write(Data("x\n".utf8), to: link) }
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
+    }
+
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {
         let url = try file()
         defer { cleanUp(url) }
