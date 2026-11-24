@@ -442,8 +442,8 @@ public struct OwlChatRequest: Sendable {
             s.formUnion(OwlCitations.lines(in: digest.text))
         }
         for text in [checks, scan, question] { if let text { s.formUnion(OwlCitations.lines(in: text)) } }
-        for case .user(let t) in OwlPrompts.chatHistoryMessages(history) { s.formUnion(OwlCitations.lines(in: t)) }
-        for case .assistant(let t) in OwlPrompts.chatHistoryMessages(history) { s.formUnion(OwlCitations.lines(in: t)) }
+        // An earlier answer's citation flagged as unread stays unverified.
+        s.formUnion(OwlPrompts.historyCitations(history))
         if let scanFindings { for f in scanFindings { s.insert(f.line) } }
         return s
     }

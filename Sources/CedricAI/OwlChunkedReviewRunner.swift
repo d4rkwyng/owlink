@@ -606,10 +606,7 @@ public enum OwlChunkedReviewRunner {
         // Citable: the lines the notes sent cite, and those named in the
         // conversation sent with it (and a typed question).
         var allowed = evidence(notes)
-        for message in OwlPrompts.chatHistoryMessages(history) {
-            if case .user(let t) = message { allowed.formUnion(OwlCitations.lines(in: t)) }
-            if case .assistant(let t) = message { allowed.formUnion(OwlCitations.lines(in: t)) }
-        }
+        allowed.formUnion(OwlPrompts.historyCitations(history))
         if request.action == nil { allowed.formUnion(OwlCitations.lines(in: request.question)) }
         return OwlCitations.filter(answer, allowed: allowed).text
     }

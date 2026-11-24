@@ -667,4 +667,37 @@ import CedricCore
         #expect(outcome.answer.contains("- Line 210 repeats the walk."))
         #expect(!outcome.answer.contains("250"))
     }
+
+    /// An earlier answer's citation flagged as unread ("line 210 (not
+    /// among the lines read)") is no license to cite line 210 on the next
+    /// turn, whether the history sent is whole or cut right after the
+    /// number. 0.5.3's follow-up read it as an ordinary citation.
+    @Test func aFlaggedCitationInTheConversationStaysUnverified() async throws {
+        let s = Self.doc282()
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!
+        let said = "The note on line 150 repeats itself, and line 210\(OwlCitations.flag) does too."
+        // Cut where the history sent ends (1,200 characters): right after "210".
+        let lead = String(repeating: "x", count: 1_200 - "The note on line 210".count)
+        let cut = lead + "The note on line 210\(OwlCitations.flag) repeats."
+        for owl in [said, cut] {
+            let history = [OwlChatEntry(role: .user, text: "Anything odd?"), OwlChatEntry(role: .owl, text: owl)]
+            let req = OwlChatRequest(question: "Why is that a problem?", context: ctx, snapshot: s, history: history,
+                                     useTools: false, prose: true)
+            let allowed = try #require(req.citableLines())
+            #expect(!allowed.contains(210))
+            #expect(allowed.contains(150) == (owl == said))
+            let engine = Recorder(partReply: { _, _ in "- Line 210 repeats the walk.\n- Line 3 opens it." })
+            let outcome = try await OwlChatRunner.run(req, engine: engine) { _ in }
+            #expect(!outcome.answer.contains("210 repeats") && outcome.answer.contains("- Line 3 opens it."))
+        }
+        // The combine call is held to the same.
+        let history = [OwlChatEntry(role: .user, text: "Anything odd?"), OwlChatEntry(role: .owl, text: said)]
+        let engine = Recorder(reduceReply: { _ in "- Line 150 repeats the walk.\n- Line 210 is new.\n- Line 1 opens it." })
+        let req = Self.request(s, action: nil, question: "Why does it repeat?", history: history)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        #expect(!plan.parts.contains { $0.first == 210 || $0.last == 210 })
+        let result = await Self.run(req, plan, engine)
+        #expect(result.outcome.answer.contains("- Line 150 repeats the walk."))
+        #expect(!result.outcome.answer.contains("210 is new"))
+    }
 }
