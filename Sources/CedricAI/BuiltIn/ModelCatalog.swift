@@ -24,14 +24,20 @@ public struct BuiltInModel: Codable, Sendable, Equatable, Identifiable {
     /// Below this much physical memory the model is marked "needs more memory".
     public var minRAMGB: Int
     public var isDefault: Bool
+    /// f16 KV-cache bytes per token of context (2 × layers × KV heads ×
+    /// head size × 2), for choosing n_ctx (`contextTokens`). Optional:
+    /// without it a guess from `parametersB` is used.
+    public var kvBytesPerToken: Int64?
 
     public init(id: String, name: String, summary: String = "", family: String, parametersB: Double,
                 quantization: String, fileName: String, sizeBytes: Int64, url: URL, revision: String,
-                sha256: String, license: String, licenseURL: URL, minRAMGB: Int = 8, isDefault: Bool = false) {
+                sha256: String, license: String, licenseURL: URL, minRAMGB: Int = 8, isDefault: Bool = false,
+                kvBytesPerToken: Int64? = nil) {
         self.id = id; self.name = name; self.summary = summary; self.family = family
         self.parametersB = parametersB; self.quantization = quantization; self.fileName = fileName
         self.sizeBytes = sizeBytes; self.url = url; self.revision = revision; self.sha256 = sha256
         self.license = license; self.licenseURL = licenseURL; self.minRAMGB = minRAMGB; self.isDefault = isDefault
+        self.kvBytesPerToken = kvBytesPerToken
     }
 
     /// The id handed to the prompt builder; it contains "qwen3" for Qwen3,
@@ -142,6 +148,7 @@ public struct ModelCatalog: Codable, Sendable, Equatable {
                 throw ModelCatalogError.invalid("\(m.id): bad sha256")
             }
             guard m.sizeBytes > 0, m.parametersB > 0 else { throw ModelCatalogError.invalid("\(m.id): bad size") }
+            if let kv = m.kvBytesPerToken, kv <= 0 { throw ModelCatalogError.invalid("\(m.id): bad kvBytesPerToken") }
         }
     }
 

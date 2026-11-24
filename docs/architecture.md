@@ -617,8 +617,11 @@ first shown (no WebKit work at launch). Markdown goes through
   Cedric scrolls, so no spelling loads another document;
   everything else (redirects, meta refresh,
   script `location`, form submits, frames, new windows, any other scheme)
-  is cancelled. A navigation response that isn't `cedric-doc:` or exactly
-  `about:blank` is cancelled too, and the `WKUIDelegate` opens no windows. Images,
+  is cancelled. A navigation response is let through only in the main
+  frame and only for the exact page Cedric is loading (`expectedPageURL`,
+  set until that load finishes or fails; `PreviewNavigation.allowsResponse`):
+  another `cedric-doc:` page, or any response while no load is in
+  progress, is cancelled (fails closed). The `WKUIDelegate` opens no windows. Images,
   styles and fonts are subresources, governed by the Network setting.
 - The link prompt (`LinkPrompt`, shared with PDF tabs) shows the site on
   its own line as the opened URL spells it (punycode for a non-ASCII
@@ -1748,7 +1751,10 @@ package (2026-11-17, M4 Pro, Command Line Tools only, Swift 6.4.2):
 
 `LlamaRuntime` (`BuiltInRuntime`) loads a GGUF with every layer on Metal
 (Apple silicon) or on the CPU with one thread per physical core (Intel),
-a 4096-token context and the model's own chat template (ChatML fallback),
+a context sized to the Mac (`BuiltInModel.contextTokens()`: the largest of
+16,384, 8,192 or 4,096 tokens whose weights, f16 KV cache and 512 MiB of
+overhead fit in half of physical memory, else 4,096; Ask Cedric's budget
+follows the same n_ctx) and the model's own chat template (ChatML fallback),
 and decodes greedily. Every llama.cpp call runs on one serial queue;
 cancellation (a new edit, the scheduler's 20 s cap) is checked per token.
 Loaded models are freed from an `atexit` handler: ggml's Metal device is a

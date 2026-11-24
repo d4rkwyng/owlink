@@ -7,7 +7,10 @@ import CLlamaLoader
 /// Macs run on the CPU (ggml's Metal path on Intel GPUs is not something we
 /// test or rely on), which works but is slow.
 public struct LlamaRuntime: BuiltInRuntime {
-    public static let contextTokens: Int32 = 16384
+    /// n_ctx for a model that isn't in the catalog (live tests only):
+    /// the largest step. Catalog models use `BuiltInModel.contextTokens()`,
+    /// which `BuiltInChatEngine.contextBudget` reads too.
+    static let uncatalogedContextTokens = ContextWindow.builtInSteps[0]
     static let batchTokens: Int32 = 512
 
     public init() {}
@@ -36,7 +39,7 @@ public struct LlamaRuntime: BuiltInRuntime {
     /// that isn't in Owlink's list, such as a hybrid one for the KV-cache
     /// fallback). Never called by the app.
     static func loadForTesting(path: String) throws -> LlamaModel {
-        let model = try LlamaModel(path: path, api: api.get())
+        let model = try LlamaModel(path: path, api: api.get(), contextTokens: uncatalogedContextTokens)
         LlamaModel.registerForExit(model)
         return model
     }
@@ -56,6 +59,8 @@ public struct LlamaRuntime: BuiltInRuntime {
             throw BuiltInError.loadFailed("not a model from Owlink's list")
         }
         let store = ModelStore(directory: url.deletingLastPathComponent())
+        // Gated on this Mac's memory and the model's size (16 384, 8192 or 4096).
+        let contextTokens = model.contextTokens()
         return try await withCheckedThrowingContinuation { cont in
             LlamaModel.queue.async {
                 guard store.verifiedForLoad(model) else {
@@ -63,7 +68,7 @@ public struct LlamaRuntime: BuiltInRuntime {
                     return
                 }
                 do {
-                    let model = try LlamaModel(path: url.path, api: Self.api.get())
+                    let model = try LlamaModel(path: url.path, api: Self.api.get(), contextTokens: contextTokens)
                     LlamaModel.registerForExit(model)
                     cont.resume(returning: model)
                 } catch { cont.resume(throwing: error) }
@@ -102,9 +107,12 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
 
     /// llama.cpp's functions (CLlamaLoader).
     private let L: cedric_llama_api
+    /// The context's n_ctx: the prompt plus the answer must fit.
+    let contextTokens: Int
 
-    init(path: String, api: cedric_llama_api) throws {
+    init(path: String, api: cedric_llama_api, contextTokens: Int) throws {
         L = api
+        self.contextTokens = contextTokens
         var mp = L.llama_model_default_params!()
         #if arch(x86_64)
         mp.n_gpu_layers = 0
@@ -115,7 +123,7 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
             throw BuiltInError.loadFailed("llama.cpp could not read the model file")
         }
         var cp = L.llama_context_default_params!()
-        cp.n_ctx = UInt32(LlamaRuntime.contextTokens)
+        cp.n_ctx = UInt32(contextTokens)
         cp.n_batch = UInt32(LlamaRuntime.batchTokens)
         #if arch(x86_64)
         let threads = Int32(max(1, Self.physicalCores()))
@@ -206,7 +214,7 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         guard let context, let vocab else { throw BuiltInError.notInstalled }
         let prompt = formatChat(request.conversation)
         var tokens = tokenize(prompt)
-        let limit = Int(LlamaRuntime.contextTokens) - request.maxTokens
+        let limit = contextTokens - request.maxTokens
         guard tokens.count <= limit else { throw BuiltInError.promptTooLong(tokens: tokens.count, limit: limit) }
 
         let sampler = makeSampler(grammar: request.grammar)

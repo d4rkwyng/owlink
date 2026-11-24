@@ -21,6 +21,10 @@ enum Timing {
     /// CPU seconds this thread has run so far.
     static func threadCPU() -> Double { Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e9 }
 
+    /// Monotonic wall-clock seconds (not `Date`, which jumps when the
+    /// system clock is set), for the blow-up guards.
+    static func now() -> Double { ProcessInfo.processInfo.systemUptime }
+
     /// About 1 ms of CPU for the reference in a debug build on an M-series
     /// dev Mac: the best of 3 tries came out at 0.95–1.0 ms there.
     static let referenceNominal = 0.001
@@ -52,13 +56,13 @@ enum Timing {
         /// The best try's CPU seconds divided by the slowdown measured just
         /// before it: what to hold to the budget.
         var scaled: Double
-        /// The best try's CPU seconds and the best wall-clock seconds.
+        /// The best try's CPU seconds and wall-clock seconds (the same try).
         var cpu: Double, wall: Double
         /// The slowdown the best try was scaled by.
         var slowdown: Double
 
         var description: String {
-            String(format: "%.2f ms scaled (%.2f ms CPU, slowdown %.1f×), best wall %.2f ms", scaled * 1000, cpu * 1000, slowdown, wall * 1000)
+            String(format: "%.2f ms scaled (%.2f ms CPU, slowdown %.1f×, wall %.2f ms)", scaled * 1000, cpu * 1000, slowdown, wall * 1000)
         }
     }
 
@@ -68,11 +72,10 @@ enum Timing {
         var result = Result(scaled: .infinity, cpu: .infinity, wall: .infinity, slowdown: 1)
         for _ in 0..<tries {
             let factor = slowdown()
-            let wallStart = Date(), cpuStart = threadCPU()
+            let wallStart = now(), cpuStart = threadCPU()
             work()
-            let cpu = threadCPU() - cpuStart, wall = Date().timeIntervalSince(wallStart)
-            result.wall = min(result.wall, wall)
-            if cpu / factor < result.scaled { result.scaled = cpu / factor; result.cpu = cpu; result.slowdown = factor }
+            let cpu = threadCPU() - cpuStart, wall = now() - wallStart
+            if cpu / factor < result.scaled { result = Result(scaled: cpu / factor, cpu: cpu, wall: wall, slowdown: factor) }
         }
         return result
     }
