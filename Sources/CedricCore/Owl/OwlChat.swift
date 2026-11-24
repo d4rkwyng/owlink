@@ -1167,6 +1167,28 @@ public enum OwlTools {
 
 // MARK: - The conversation
 
+/// The notes on one part of a whole-document answer (lines `first`–`last`),
+/// shown collapsed under the one answer they were combined into.
+public struct OwlChatSection: Sendable, Equatable {
+    public var first: Int
+    public var last: Int
+    public var text: String
+
+    public init(first: Int, last: Int, text: String) {
+        self.first = first; self.last = last; self.text = text
+    }
+
+    /// "Lines 1–40".
+    public var title: String {
+        first == last ? String(localized: "Line \(first)") : String(localized: "Lines \(first)–\(last)")
+    }
+
+    /// "Section notes (6)", the collapsed disclosure's title.
+    public static func disclosureTitle(count: Int) -> String {
+        String(localized: "Section notes (\(count))")
+    }
+}
+
 /// One entry in a document's Ask Cedric history (kept in memory only).
 public struct OwlChatEntry: Sendable, Equatable {
     /// `scan`: the offline script check's findings (no AI).
@@ -1176,9 +1198,12 @@ public struct OwlChatEntry: Sendable, Equatable {
     /// The edits proposed with this answer, in the order proposed.
     public var proposals: [OwlEditProposal]
     public var proposal: OwlEditProposal? { proposals.first }
+    /// A whole-document answer's per-part notes, below the answer and
+    /// collapsed (never sent back to the model as history).
+    public var sections: [OwlChatSection]
 
-    public init(role: Role, text: String, proposals: [OwlEditProposal] = []) {
-        self.role = role; self.text = text; self.proposals = proposals
+    public init(role: Role, text: String, proposals: [OwlEditProposal] = [], sections: [OwlChatSection] = []) {
+        self.role = role; self.text = text; self.proposals = proposals; self.sections = sections
     }
 
     public init(role: Role, text: String, proposal: OwlEditProposal?) {
@@ -1196,6 +1221,11 @@ public struct OwlChatEntry: Sendable, Equatable {
                 for p in e.proposals {
                     if !p.reason.isEmpty { out += "\n_\(p.reason)_\n" }
                     out += "\n```diff\n\(p.unifiedText)\n```\n"
+                }
+                if !e.sections.isEmpty {
+                    out += "\n<details><summary>\(OwlChatSection.disclosureTitle(count: e.sections.count))</summary>\n"
+                    for sec in e.sections { out += "\n**\(sec.title):** \(sec.text)\n" }
+                    out += "\n</details>\n"
                 }
             case .tool: out += "\n> _\(e.text)_\n"
             case .note: out += "\n_\(e.text)_\n"

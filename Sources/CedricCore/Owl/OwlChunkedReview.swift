@@ -1,8 +1,11 @@
 import Foundation
 
-/// Line-aligned planning and merging for whole-document reviews.
+/// Line-aligned planning and merging for whole-document reviews. Every
+/// line of the document is planned into some part, however many parts
+/// that takes: a whole-document question is never cut short to a window
+/// of parts (0.5.2 kept 8 around the caret, so a 282-line file on Apple
+/// Intelligence's budget stopped at line 236).
 public enum OwlChunkedReview {
-    public static let maxChunks = 8
     public static let overlapLines = 2
 
     public struct Part: Sendable, Equatable {
@@ -16,7 +19,8 @@ public enum OwlChunkedReview {
     public struct Plan: Sendable {
         public let parts: [Part]
         public let totalLines: Int
-        public let uncappedCount: Int
+        /// Lines in parts that don't fit the budget (an oversize line): never reviewed.
+        public var tooLong: [Part] { parts.filter { !$0.fits } }
         public var isComplete: Bool {
             var covered = IndexSet()
             for part in parts where part.fits { covered.insert(integersIn: part.first...part.last) }
@@ -50,10 +54,18 @@ public enum OwlChunkedReview {
             }
             first = next
         }
-        let anchor = min(total, snapshot.lineNumber(at: snapshot.selection.location + snapshot.selection.length / 2))
-        let anchorIndex = all.firstIndex { $0.first <= anchor && anchor <= $0.last } ?? 0
-        let start = min(max(0, anchorIndex - maxChunks / 2), max(0, all.count - maxChunks))
-        return Plan(parts: Array(all.dropFirst(start).prefix(maxChunks)), totalLines: total, uncappedCount: all.count)
+        return Plan(parts: all, totalLines: total)
+    }
+
+    /// The scope chip for a planned whole-document question: it covers
+    /// every line, so nothing says "trimmed" or "rest not reviewed"; only
+    /// lines too long for the model are named.
+    public static func label(_ plan: Plan) -> String {
+        let skipped = plan.tooLong.reduce(0) { $0 + $1.last - $1.first + 1 }
+        if skipped == 0 { return String(localized: "Whole document (\(plan.totalLines) lines)") }
+        return skipped == 1
+            ? String(localized: "Whole document (\(plan.totalLines) lines; 1 too long to read)")
+            : String(localized: "Whole document (\(plan.totalLines) lines; \(skipped) too long to read)")
     }
 
     public static func forcedVerdict(scanHasHigh: Bool, scanTruncated: Bool, covered: IndexSet,
