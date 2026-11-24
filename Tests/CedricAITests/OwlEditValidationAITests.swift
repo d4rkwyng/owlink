@@ -171,6 +171,102 @@ import CedricCore
         #expect(broken.proposals.count == 1 && broken.proposals[0].check.failsValidation)
     }
 
+    /// Looks (get_lines) until the last tool round, then proposes a broken edit there.
+    struct BreaksInTheLastRound: OwlChatEngine {
+        var title: String { "last-round" }
+        var scoreKey: String { "last-round" }
+        var contextBudget: Int { 6000 }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            let results = messages.compactMap { m -> String? in if case .toolResult(_, _, let c) = m { return c }; return nil }
+            if !tools.isEmpty {
+                if results.count < OwlTools.maxRounds - 1 {
+                    return .toolCalls([OwlToolCall(name: "get_lines", arguments: .object(["start": .number(1), "end": .number(2)]))])
+                }
+                return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", "[1, 2, 3,]")])
+            }
+            onText("I propose adding a comma.")
+            return .answer("I propose adding a comma.")
+        }
+    }
+
+    @Test func aFailingEditInTheLastToolRoundIsMarkedNotRefused() async throws {
+        let s = OwlDocumentSnapshot(text: Self.validJSON, generation: 1, fileName: "a.json", language: "json")
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: 6000)!
+        let req = OwlChatRequest(question: "Change the items.", context: ctx, snapshot: s, useTools: true, prose: false)
+        let results = TextBuffer()
+        let out = try await OwlChatRunner.run(req, engine: Recording(inner: BreaksInTheLastRound(), seen: results)) { _ in }
+        #expect(out.rounds == OwlTools.maxRounds)
+        // No "call propose_edit again" with no tool round left: the card is marked, Apply off.
+        #expect(!results.value.contains("call propose_edit again"))
+        #expect(results.value.contains("proposed, but it still fails the check"))
+        let p = try #require(out.proposals.first)
+        #expect(out.proposals.count == 1 && p.check.failsValidation)
+        #expect(!p.canApply(text: Self.validJSON as NSString, generation: 1))
+    }
+
+    /// Two broken edits in one batch, then (told) both fixed, or both still broken.
+    struct TwoInABatch: OwlChatEngine {
+        let fix: Bool
+        var title: String { "two" }
+        var scoreKey: String { "two" }
+        var contextBudget: Int { 6000 }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            let results = messages.compactMap { m -> String? in if case .toolResult(_, _, let c) = m { return c }; return nil }
+            if !tools.isEmpty, results.count < 4 {
+                if results.isEmpty {
+                    return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", "[1, 2, 3,]"),
+                                       OwlEditValidationAITests.edit("\"ok\": true", "\"ok\": true,")])
+                }
+                // Both were refused before either became a card.
+                #expect(results.count == 2 && results.allSatisfy { $0.hasSuffix("fix it and call propose_edit again") })
+                return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", fix ? "[1, 2, 3, 4]" : "[1, 2, 3,, 4]"),
+                                   OwlEditValidationAITests.edit("\"ok\": true", fix ? "\"ok\": false" : "\"ok\": tru")])
+            }
+            onText("I propose two changes.")
+            return .answer("I propose two changes.")
+        }
+    }
+
+    @Test func everyFailingEditInTheRefusedBatchWaitsForTheRetryRound() async throws {
+        let s = OwlDocumentSnapshot(text: Self.validJSON, generation: 1, fileName: "a.json", language: "json")
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: 6000)!
+        let req = OwlChatRequest(question: "Change the items and ok.", context: ctx, snapshot: s, useTools: true, prose: false)
+        let events = EventLog()
+        let fixed = try await OwlChatRunner.run(req, engine: TwoInABatch(fix: true)) { e in events.add(e) }
+        #expect(fixed.proposals.count == 2 && fixed.proposals.allSatisfy { $0.check == .clean })
+        // No failing card was shown along the way.
+        #expect(events.proposals.allSatisfy { !$0.check.failsValidation } && events.proposals.count == 2)
+        // Still broken in the retry round: both marked, Apply off.
+        let broken = try await OwlChatRunner.run(req, engine: TwoInABatch(fix: false)) { _ in }
+        #expect(broken.proposals.count == 2 && broken.proposals.allSatisfy { $0.check.failsValidation })
+    }
+
+    /// Passes turns through, keeping every tool result the model saw.
+    struct Recording: OwlChatEngine {
+        let inner: any OwlChatEngine
+        let seen: TextBuffer
+        var title: String { inner.title }
+        var scoreKey: String { inner.scoreKey }
+        var contextBudget: Int { inner.contextBudget }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            // The answer turn (no tools) has every result in its messages.
+            if tools.isEmpty {
+                for m in messages { if case .toolResult(_, _, let c) = m { seen.append(c + "\n") } }
+            }
+            return try await inner.turn(messages, tools: tools, toolbox: toolbox, maxTokens: maxTokens, onText: onText)
+        }
+    }
+
+    final class EventLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _proposals: [OwlEditProposal] = []
+        func add(_ e: OwlChatEvent) { if case .proposal(let p) = e { lock.withLock { _proposals.append(p) } } }
+        var proposals: [OwlEditProposal] { lock.withLock { _proposals } }
+    }
+
     /// A quick action without tools: the ``` block.
     struct Block: OwlChatEngine {
         let body: String

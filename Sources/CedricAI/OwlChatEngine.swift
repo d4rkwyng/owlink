@@ -86,6 +86,9 @@ public final class OwlToolbox: @unchecked Sendable {
         self.onEvent = onEvent
     }
 
+    /// The runner starts a batch of tool calls (OwlEditGate.beginBatch).
+    public func beginBatch(retryRoundLeft: Bool) { lock.withLock { gate.beginBatch(retryRoundLeft: retryRoundLeft) } }
+
     /// The edits proposed so far, in order.
     public var proposals: [OwlEditProposal] { lock.withLock { _proposals } }
     public var proposal: OwlEditProposal? { proposals.first }
@@ -531,6 +534,7 @@ public enum OwlChatRunner {
                 var calls = Array(calls.prefix(OwlTools.maxCallsPerRound))
                 for i in calls.indices where calls[i].id.isEmpty { calls[i].id = "call_\(rounds)_\(i)" }
                 messages.append(.toolCalls(calls))
+                toolbox.beginBatch(retryRoundLeft: rounds < OwlTools.maxRounds)
                 for c in calls {
                     let r = await toolbox.perform(c)
                     messages.append(.toolResult(callID: c.id, name: c.name, content: r.text))

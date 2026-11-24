@@ -671,12 +671,31 @@ public enum OwlEditValidation {
 /// first proposal that fails a hard check is refused with the parser's
 /// message so the model can fix it; after that, a failing proposal is
 /// kept but marked (the card shows why and Apply stays off).
+///
+/// With batches (the runner's tool loop calls `beginBatch`): a refusal
+/// needs a tool round left to retry in, otherwise the proposal is marked
+/// at once; and once one edit in a batch is refused, every further
+/// hard-failing edit in that batch is refused too, so none is marked
+/// before the model has had its retry round.
 public struct OwlEditGate: Sendable {
     public let script: (any OwlScriptSyntaxChecker)?
     /// A hard failure was already sent back to the model in this Ask.
     public private(set) var retried = false
+    /// A tool round follows this batch (the model can call propose_edit again).
+    private var retryRoundLeft = true
+    /// An edit in the current batch was refused for a retry.
+    private var refusedInBatch = false
+    /// `beginBatch` was called: batches are tracked.
+    private var batched = false
 
     public init(script: (any OwlScriptSyntaxChecker)?) { self.script = script }
+
+    /// A new batch of tool calls; `retryRoundLeft`: another tool round follows it.
+    public mutating func beginBatch(retryRoundLeft: Bool) {
+        batched = true
+        self.retryRoundLeft = retryRoundLeft
+        refusedInBatch = false
+    }
 
     public enum Verdict: Sendable, Equatable {
         /// Show it (its `check` set: clean, warnings, or failing after a retry).
@@ -693,9 +712,13 @@ public struct OwlEditGate: Sendable {
     mutating func checked(_ p: OwlEditProposal, in s: OwlDocumentSnapshot) -> (verdict: Verdict, check: OwlEditCheck) {
         var p = p
         p.check = OwlEditValidation.validate(p, in: s, script: script)
-        if p.check.failsValidation, !retried, let feedback = p.check.retryFeedback {
-            retried = true
-            return (.retry(feedback), p.check)
+        if p.check.failsValidation, let feedback = p.check.retryFeedback {
+            if batched, refusedInBatch { return (.retry(feedback), p.check) }
+            if !retried, retryRoundLeft {
+                retried = true
+                if batched { refusedInBatch = true }
+                return (.retry(feedback), p.check)
+            }
         }
         return (.propose(p), p.check)
     }
