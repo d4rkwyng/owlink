@@ -155,7 +155,10 @@ public enum OwlEditValidation {
         let ns = text as NSString
         guard ns.range(of: "import").location != NSNotFound || ns.range(of: "export").location != NSNotFound else { return false }
         let code: NSString
-        if let mask = CodeMask.make(ns, language: "javascript") {
+        // Interpolations split out of their strings: a comment inside
+        // `${ … }` is a comment span of its own, not merged into the
+        // string around it, so `${/* import */ 1}` doesn't count.
+        if let mask = CodeMask.make(ns, language: "javascript", splitInterpolations: true) {
             // Blank only the comments.
             code = CodeMask(ns, spans: mask.spans.filter { $0.kind == .comment }).codeNS
         } else {

@@ -635,6 +635,14 @@ import Testing
         #expect(OwlEditValidation.mentionsImportOrExport("const m = import('x');\n"))
         // Comments don't; nor does a longer word.
         #expect(!OwlEditValidation.mentionsImportOrExport("// import x\n/* export y */\nconst important = 1;\n"))
+        // Nor a comment inside a template interpolation (PR #15 review: it
+        // was merged into the string around it, and so counted).
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `${/* import */ 1}`;\n"))
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `a ${f(1) // export\n} b`;\n"))
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `${`${/* export */ 2}`}`;\n"), "nested")
+        // The template's own text and code in the interpolation still count.
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = `${/* note */ import.meta.url}`;\n"))
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = `import ${/* x */ 1}`;\n"))
         struct RejectsUnclosed: OwlScriptSyntaxChecker {
             func syntaxError(in script: String) -> OwlSyntaxError? {
                 script.contains("f(;") || script.contains("f(1;") ? OwlSyntaxError(message: "SyntaxError", line: 1) : nil
@@ -648,6 +656,11 @@ import Testing
         let h = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "// import\nf(1);\n", after: "// import\nf(1;\n",
                                            original: "1)", replacement: "1", script: RejectsUnclosed())
         #expect(h.hardIssue?.check == .script)
+        // `import` only in a comment inside an interpolation: the rejection stays hard.
+        let t = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "const s = `${/* import */ 1}`;\nf(1);\n",
+                                           after: "const s = `${/* import */ 1}`;\nf(1;\n", original: "1)", replacement: "1",
+                                           script: RejectsUnclosed())
+        #expect(t.hardIssue?.check == .script)
     }
 
     @Test func anEscapedBracketInCSSIsOnlyAWarning() {
