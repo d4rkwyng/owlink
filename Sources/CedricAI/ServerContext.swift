@@ -71,9 +71,18 @@ public struct ServerContextReport: Sendable, Equatable {
             let parts = line.split(whereSeparator: \.isWhitespace)
             if parts.count == 2, parts[0] == "num_ctx" { configured = plausible(Int(parts[1])) }
         }
-        let info = obj["model_info"] as? [String: Any] ?? [:]
-        let maximum = info.first { $0.key.hasSuffix(".context_length") }.flatMap { plausible(int($0.value)) }
-        return (configured, maximum)
+        return (configured, modelMaximum(obj["model_info"] as? [String: Any] ?? [:]))
+    }
+
+    /// The model's own maximum from `model_info`: the key of its
+    /// `general.architecture` (`qwen3` → `qwen3.context_length`) when that
+    /// is plausible; else the smallest plausible `*.context_length` (a
+    /// dictionary's order isn't stable, and the smaller cap never
+    /// overflows the model). Implausible values are skipped, not fatal.
+    static func modelMaximum(_ info: [String: Any]) -> Int? {
+        if let arch = info["general.architecture"] as? String,
+           let n = plausible(int(info[arch + ".context_length"])) { return n }
+        return info.filter { $0.key.hasSuffix(".context_length") }.compactMap { plausible(int($0.value)) }.min()
     }
 
     /// Ollama's answer from `/api/ps` (loaded) and `/api/show`: loaded wins;
@@ -150,14 +159,18 @@ public final class ServerContextCache: @unchecked Sendable {
     private var running: [String: Task<ServerContextReport?, Never>] = [:]
     private let now: @Sendable () -> TimeInterval
     private let probe: @Sendable (LocalModelClient, String, LocalAISettings.Backend) async -> ServerContextReport?
+    /// How long `refresh` waits when not told (tests: long, so only the
+    /// probe decides).
+    private let defaultWait: TimeInterval
 
     init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+         defaultWait: TimeInterval = probeTimeout,
          probe: @escaping @Sendable (LocalModelClient, String, LocalAISettings.Backend) async -> ServerContextReport? = {
              client, model, kind in
              let quick = LocalModelClient(baseURL: client.baseURL, timeout: ServerContextCache.probeTimeout, session: client.session)
              return await quick.contextReport(model: model, kind: kind)
          }) {
-        self.now = now; self.probe = probe
+        self.now = now; self.probe = probe; self.defaultWait = defaultWait
     }
 
     static func key(_ client: LocalModelClient, _ model: String, _ kind: LocalAISettings.Backend) -> String {
@@ -178,13 +191,16 @@ public final class ServerContextCache: @unchecked Sendable {
         return entry?.report
     }
 
-    /// Waits up to `wait` seconds for a fresh report (the engine being
-    /// made, before the first question); a probe still running after
-    /// that finishes in the background.
+    /// Waits up to `wait` seconds (default `probeTimeout`) for a fresh
+    /// report (the engine being made, before the first question); a probe
+    /// still running after that finishes in the background.
     public func refresh(client: LocalModelClient, model: String, kind: LocalAISettings.Backend,
-                        wait: TimeInterval = probeTimeout) async -> ServerContextReport? {
+                        wait: TimeInterval? = nil) async -> ServerContextReport? {
         let key = Self.key(client, model, kind)
         if let e: Entry = lock.withLock({ entries[key] }), fresh(e) { return e.report }
+        // The deadline counts from this call, not from when the timer task
+        // first runs, so a busy pool can't stretch the wait.
+        let deadline = ContinuousClock.now + .seconds(max(0, wait ?? defaultWait))
         let task = start(key, client, model, kind)
         // Whichever ends first: the probe, or the wait (nil; the probe
         // goes on and stores its answer for the next read). Not a task
@@ -196,11 +212,14 @@ public final class ServerContextCache: @unchecked Sendable {
         return await withCheckedContinuation { (c: CheckedContinuation<ServerContextReport?, Never>) in
             pending.mutate { $0 = c }
             let timer = Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, wait) * 1_000_000_000))
+                try? await Task.sleep(until: deadline, clock: .continuous)
                 if !Task.isCancelled { finish(nil) }
             }
             Task {
-                finish(await task.value)
+                let report = await task.value
+                // An answer after the deadline is late even when the timer
+                // hasn't run yet: nil, as the wait promised (it is stored).
+                finish(ContinuousClock.now < deadline ? report : nil)
                 timer.cancel()
             }
         }

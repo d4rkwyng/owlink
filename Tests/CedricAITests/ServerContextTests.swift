@@ -72,6 +72,27 @@ import Testing
         #expect(ServerContextReport.ollamaShow(data(["error": "model not found"])) == nil)
         #expect(ServerContextReport.ollama(loaded: nil, show: nil) == nil)
     }
+
+    @Test func modelMaximumPrefersTheArchitectureKeyElseTheSmallestPlausible() {
+        let info: [String: Any] = ["general.architecture": "qwen3", "clip.context_length": 2_048,
+                                   "qwen3.context_length": 40_960, "zeta.context_length": 8_192]
+        #expect(ServerContextReport.modelMaximum(info) == 40_960, "the architecture's own key, whatever the order")
+        #expect(ServerContextReport.modelMaximum(["b.context_length": 32_768, "a.context_length": 8_192]) == 8_192,
+                "no architecture: the smallest")
+        #expect(ServerContextReport.modelMaximum(["general.architecture": "llama", "llama.context_length": 0,
+                                                  "x.context_length": 16_384, "y.context_length": 1]) == 16_384,
+                "an implausible key is skipped, not fatal")
+        #expect(ServerContextReport.modelMaximum(["general.architecture": "llama", "llama.block_count": 32]) == nil)
+        // Every order of the same keys gives the same answer.
+        let keys = ["a.context_length", "b.context_length", "c.context_length"]
+        let values = [65_536, 4_096, 131_072]
+        for _ in 0..<20 {
+            let shuffled = Dictionary(uniqueKeysWithValues: zip(keys.shuffled(), values.shuffled()))
+            #expect(ServerContextReport.modelMaximum(shuffled) == 4_096)
+        }
+        let show = data(["model_info": info, "parameters": "num_ctx 65536"])
+        #expect(ServerContextReport.ollamaShow(show)?.maximum == 40_960)
+    }
 }
 
 @Suite(.timely) struct ServerContextProbeTests {
@@ -108,7 +129,7 @@ import Testing
         #expect(await client.contextReport(model: "m", kind: .custom) == nil)
         #expect(await client.contextReport(model: "m", kind: .lmStudio) == nil)
         let slow = StubServer()
-        slow.json("/api/v0/models", ["data": [["id": "m", "state": "loaded", "loaded_context_length": 8_192]]], delay: 5)
+        slow.json("/api/v0/models", ["data": [["id": "m", "state": "loaded", "loaded_context_length": 8_192]]], delay: 3_600)
         let quick = LocalModelClient(baseURL: slow.baseURL, timeout: 0.2, session: slow.session)
         #expect(await quick.contextReport(model: "m", kind: .lmStudio) == nil, "past the deadline")
         let public_ = LocalModelClient(baseURL: URL(string: "http://example.com/v1")!, timeout: 1, session: server.session)
@@ -116,14 +137,15 @@ import Testing
     }
 }
 
-@Suite struct ServerContextCacheTests {
+@Suite(.timeLimit(.minutes(1))) struct ServerContextCacheTests {
     final class Fake: @unchecked Sendable {
         let lock = NSLock()
         var time: TimeInterval = 1_000
         var calls = 0
         var answer: ServerContextReport? = ServerContextReport(tokens: 4_096, source: .loaded)
         var now: TimeInterval { lock.withLock { time } }
-        func probe() -> ServerContextReport? { lock.withLock { calls += 1; return answer } }
+        func probe() -> ServerContextReport? { lock.withLock { answer } }
+        func called() { lock.withLock { calls += 1 } }
         func advance(_ s: TimeInterval) { lock.withLock { time += s } }
         var count: Int { lock.withLock { calls } }
         func set(_ r: ServerContextReport?) { lock.withLock { answer = r } }
@@ -131,9 +153,30 @@ import Testing
 
     let client = LocalModelClient(baseURL: URL(string: "http://localhost:1234/v1")!)
 
-    func cache(_ fake: Fake, delay: TimeInterval = 0) -> ServerContextCache {
-        ServerContextCache(now: { fake.now }, probe: { _, _, _ in
-            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1e9)) }
+    /// A probe that answers only once opened: no real time decides who
+    /// ends first.
+    final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var open = false
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+        func wait() async {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                let now: Bool = lock.withLock { if open { return true }; waiting.append(c); return false }
+                if now { c.resume() }
+            }
+        }
+        func release() {
+            let all: [CheckedContinuation<Void, Never>] = lock.withLock { open = true; defer { waiting = [] }; return waiting }
+            all.forEach { $0.resume() }
+        }
+    }
+
+    /// `refresh` waits an hour unless told otherwise, so only the probe
+    /// (instant, or held by `gate`) decides what it returns.
+    func cache(_ fake: Fake, gate: Gate? = nil) -> ServerContextCache {
+        ServerContextCache(now: { fake.now }, defaultWait: 3_600, probe: { _, _, _ in
+            fake.called()
+            await gate?.wait()
             return fake.probe()
         })
     }
@@ -176,11 +219,27 @@ import Testing
 
     @Test func aSlowProbeDoesNotHoldTheEngineAndIsAskedOnce() async {
         let fake = Fake()
-        let contexts = cache(fake, delay: 0.5)
+        let gate = Gate()
+        let contexts = cache(fake, gate: gate)
+        // The probe can't answer until the gate opens: the short wait ends first.
         #expect(await contexts.refresh(client: client, model: "m", kind: .ollama, wait: 0.01) == nil, "the wait ends first")
         #expect(contexts.current(client: client, model: "m", kind: .ollama) == nil)
-        #expect(await contexts.refresh(client: client, model: "m", kind: .ollama, wait: 10)?.tokens == 4_096)
+        // A second wait joins the same probe (still held), then the probe answers.
+        let second = Task { await contexts.refresh(client: client, model: "m", kind: .ollama, wait: 3_600) }
+        gate.release()
+        #expect(await second.value?.tokens == 4_096)
         #expect(fake.count == 1, "one probe in flight, shared")
         #expect(contexts.current(client: client, model: "m", kind: .ollama)?.tokens == 4_096)
+    }
+
+    @Test func anAnswerAfterTheDeadlineIsLateEvenWhenItArrivesFirst() async {
+        let fake = Fake()
+        let contexts = cache(fake)
+        // wait 0: the deadline has passed before the probe can answer, so
+        // the instant answer is late, whichever task the pool runs first.
+        #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio, wait: 0) == nil)
+        // It is still stored: the next read has it, without a second probe.
+        #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio)?.tokens == 4_096)
+        #expect(fake.count == 1)
     }
 }
