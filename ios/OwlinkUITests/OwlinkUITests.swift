@@ -803,4 +803,47 @@ final class OwlinkUITests: XCTestCase {
         scan("format bar")
         XCTAssertTrue(found.isEmpty, "British spellings on screen: \(found)")
     }
+
+    // MARK: Front matter remembered (0.5.2 (16) findings)
+
+    private func hidePreview(_ app: XCUIApplication) {
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let toggle = app.buttons["editor.menu.preview"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview toggle in the Preview submenu")
+        toggle.tap()
+        let gone = NSPredicate { _, _ in !app.webViews["editor.previewWeb"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// The front matter stays as it was left, open or closed, when the
+    /// preview is hidden and shown again.
+    func testFrontMatterStateKeptAcrossPreviewHideShow() throws {
+        let app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        func summary(_ web: XCUIElement) -> XCUIElement {
+            web.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS 'Front matter' AND label CONTAINS 'Owls of the World'")).firstMatch
+        }
+        var web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter · title summary")
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists, "the values show while collapsed")
+        summary(web).tap()
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
+        hidePreview(app)
+        web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter summary after showing the preview again")
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5),
+                      "opened, the preview hidden and shown: the front matter came back closed")
+        shoot("front-matter-kept-open")
+        summary(web).tap()
+        let closed = NSPredicate { _, _ in !web.staticTexts["A barn owl at dusk"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: closed, object: nil)], timeout: 5)
+        hidePreview(app)
+        web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter summary after showing the preview again")
+        sleep(1)
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists,
+                       "closed, the preview hidden and shown: the front matter came back open")
+    }
 }
