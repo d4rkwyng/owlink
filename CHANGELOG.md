@@ -4,6 +4,16 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- **Cedric's proposed edits are checked before you can apply them.** The change is tried on a copy of the document first. If it breaks JSON, a property list, XML or JavaScript, leaves brackets unbalanced, or declares a JavaScript `const`/`let` from itself, Cedric is told once and asked to fix it; if it still fails, the card says “Doesn’t parse” (or “Won’t run”) with the reason and Apply stays off. Problems the document already had don't count against the edit.
+- **Warnings on proposed edits.** A card notes when a change assigns a variable to itself, changes a Swift `let` it can't change in place, or adds or drops a negation in prose (“May change the meaning: adds ‘not’”). Apply stays on.
+
+### Changed
+- **Asking Cedric to fix spelling opens Fix Typos.** “Fix the spelling mistakes”, “check spelling” and similar requests step through the system spell checker's suggestions on this Mac instead of asking the AI model to rewrite the text. Nothing is sent anywhere.
+- **Cedric says what he proposes.** After proposing an edit, Cedric is told nothing is applied until you press Apply, so his answers describe the proposal instead of claiming the change was made.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security
