@@ -297,18 +297,25 @@ final class OwlinkUITests: XCTestCase {
         let done = app.buttons["ask.done"].firstMatch
         XCTAssertTrue(done.waitForExistence(timeout: 10), "Ask Cedric didn't open")
         if sheet {
-            // iPad at regular width docks Ask Cedric; Pop Out turns it into
-            // the sheet. ask.done exists in both presentations, so a missing
-            // or ineffective Pop Out must not let a "sheet" test pass against
-            // the docked panel. ask.popOut is only on the docked panel; it
-            // must be gone afterwards (on iPhone, Ask is already a sheet).
-            let popOut = app.buttons["ask.popOut"].firstMatch
-            if device == "ipad", popOut.waitForExistence(timeout: 2) {
+            // iPad at regular width docks Ask Cedric (ask.panel) and offers
+            // Pop Out (ask.popOut). ask.done exists in both presentations, so
+            // a missing identifier must not let a "sheet" test pass against
+            // the docked panel: both must be present, Pop Out is tapped, and
+            // both must then be gone. On iPhone, Ask is already a sheet (no
+            // panel). The sheet is independently the absence of ask.panel.
+            let panel = app.descendants(matching: .any)["ask.panel"].firstMatch
+            if device == "ipad" {
+                XCTAssertTrue(panel.waitForExistence(timeout: 5),
+                              "Ask Cedric didn't dock (no ask.panel); can't open the sheet")
+                let popOut = app.buttons["ask.popOut"].firstMatch
+                XCTAssertTrue(popOut.waitForExistence(timeout: 5),
+                              "Ask Cedric's docked panel has no Pop Out")
                 popOut.tap()
                 sleep(1)
+                XCTAssertFalse(app.buttons["ask.popOut"].firstMatch.exists,
+                               "Pop Out is still on screen; the sheet didn't open")
             }
-            XCTAssertFalse(app.buttons["ask.popOut"].firstMatch.exists,
-                           "Ask Cedric is still docked; the sheet didn't open")
+            XCTAssertFalse(panel.exists, "Ask Cedric is still the docked panel; the sheet didn't open")
         }
         XCTAssertTrue(done.waitForExistence(timeout: 5), "Ask Cedric didn't stay open")
     }

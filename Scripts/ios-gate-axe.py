@@ -61,9 +61,26 @@ class Driver:
             data = json.loads(r.stdout)
         except ValueError:
             return None
-        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        if not self.tree_is_valid(data):
             return None
         return data
+
+    @staticmethod
+    def tree_is_valid(data):
+        """A real capture: an Application root with a frame and children.
+        `[{}]` or an Owlink root with no frame or children is not evidence
+        that something disappeared."""
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            return False
+        root = data[0]
+        if root.get("type") != "Application":
+            return False
+        frame = root.get("frame") or {}
+        if not frame.get("width") or not frame.get("height"):
+            return False
+        if not root.get("children"):
+            return False
+        return True
 
     def save(self, name):
         """describe-ui JSON and a screenshot for this step; returns the tree."""
@@ -174,6 +191,26 @@ class Driver:
         return [(e, v) for e, v, path in self.walk(tree)
                 if e.get("type") == "Button" and e.get("AXLabel") and any(p is menu for p in path)]
 
+    def preview_submenu_rows(self, tree):
+        """Buttons that share the Preview toggle row's x and width (the
+        open Preview submenu). Empty if that row isn't visible."""
+        if not tree:
+            return []
+        toggle = [h for h in self.find(tree, ident="editor.menu.preview", kind="Button")
+                  if self.visible(h[1], 2)]
+        if not toggle:
+            return []
+        frame = toggle[0][0].get("frame") or {}
+        key = (round(frame.get("x", 0)), round(frame.get("width", 0)))
+        rows = []
+        for e, vis, _ in self.walk(tree):
+            if e.get("type") != "Button" or not e.get("AXLabel") or not self.visible(vis, 2):
+                continue
+            f = e.get("frame") or {}
+            if (round(f.get("x", 0)), round(f.get("width", 0))) == key:
+                rows.append((e, vis))
+        return rows
+
     def open_menu(self):
         end = time.time() + 8
         more = []
@@ -280,6 +317,9 @@ class Driver:
             self.fail("the ••• menu opened but describe-ui returned no tree")
             return
         labels = [e["AXLabel"] for e, _ in self.menu_buttons(tree)]
+        if not labels:
+            self.fail("the ••• menu opened but listed no rows")
+            return
         dupes = sorted({l for l in labels if labels.count(l) > 1})
         focus = labels.count("Focus Preview")
         if dupes:
@@ -290,18 +330,24 @@ class Driver:
             self.ok(f"••• menu: {len(labels)} items, none twice, Focus Preview 0x in the main list")
 
         # 3. Its Preview submenu: opened, Focus Preview exactly once.
+        # The submenu has only two or three rows, too few for menu_container
+        # (which needs four). Identify it by the Preview toggle row
+        # (editor.menu.preview) and count Focus Preview among buttons that
+        # share that row's x and width — not the bar's editor.focusPreview.
         if self.tap_menu_item("Preview"):
             time.sleep(1.5)
             tree = self.save("menu-preview")
-            if tree is None or self.menu_open(tree) is not True:
+            rows = self.preview_submenu_rows(tree) if tree is not None else []
+            ids = [e.get("AXUniqueId") for e, _ in rows]
+            n_menu = sum(1 for e, _ in rows
+                         if e.get("AXUniqueId") == "editor.menu.focusPreview"
+                         or e.get("AXLabel") == "Focus Preview")
+            if "editor.menu.preview" not in ids or len(rows) < 2:
                 self.fail("the Preview submenu didn't open")
+            elif n_menu != 1:
+                self.fail(f"the Preview submenu lists Focus Preview {n_menu} times, not exactly once")
             else:
-                # Menu rows only (not the bar's editor.focusPreview button).
-                n_menu = sum(1 for e, _ in self.menu_buttons(tree) if e.get("AXLabel") == "Focus Preview")
-                if n_menu != 1:
-                    self.fail(f"the Preview submenu lists Focus Preview {n_menu} times, not exactly once")
-                else:
-                    self.ok("Preview submenu: Focus Preview 1x")
+                self.ok(f"Preview submenu: {len(rows)} rows, Focus Preview 1x")
         else:
             self.fail("no Preview item in the ••• menu")
         if not self.close_menu():
