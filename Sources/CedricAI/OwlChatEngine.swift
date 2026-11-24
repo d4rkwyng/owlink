@@ -841,8 +841,10 @@ public struct BuiltInChatEngine: OwlChatEngine {
 
     public var title: String { "Built-in · \(model.name)" }
     public var scoreKey: String { "builtIn:\(model.id)" }
-    /// n_ctx 16384 tokens: a memory-conscious cap that fits typical whole files.
-    public var contextBudget: Int { 24_000 }
+    /// From the n_ctx `LlamaRuntime` loads this model with on this Mac
+    /// (16 384, 8192 or 4096 tokens by memory and model size), less the
+    /// reply reserve: 23 040, 10 752 or 4608 units.
+    public var contextBudget: Int { ContextWindow.budgetUnits(contextTokens: model.contextTokens()) }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
                      onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
