@@ -89,6 +89,18 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
     }
 }
 
+/// Every suite with a test that fires the load watchdog. Each firing
+/// posts `.cedricBuiltInModelUnhealthy` (no sender, `seconds` 60) to the
+/// process-wide center, so a test counting that notice must not overlap
+/// another suite's watchdog test: run in parallel, `BuiltInLoadGateTests`
+/// and `BuiltInLoadSerialTests` added their notices to
+/// `aHungLoadMarksTheEngineUnhealthyAndAutomaticPathsStopLoading`'s count.
+/// `.serialized` here runs the nested suites one at a time. (The suites
+/// below keep their top-level indentation.)
+@Suite(.serialized) enum BuiltInWatchdogFiringTests {}
+
+extension BuiltInWatchdogFiringTests {
+
 @MainActor
 @Suite(.serialized) struct BuiltInLoadGateTests {
     /// Derek's settings: built-in, automatic checks on (Apple silicon's
@@ -308,6 +320,10 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         let rt = HangingRuntime(), clock = FakeClock()
         let host = BuiltInModelHost(runtime: rt, clock: clock)
         let notices = Box(0)
+        // A notice an earlier watchdog test queued on main (the post is a
+        // `DispatchQueue.main.async`) is delivered before the observer is
+        // added: a main-actor hop runs after everything already queued there.
+        await MainActor.run {}
         let token = NotificationCenter.default.addObserver(forName: .cedricBuiltInModelUnhealthy, object: nil, queue: nil) { n in
             if n.userInfo?["seconds"] as? Int == Int(BuiltInWatchdog.seconds) { notices.mutate { $0 += 1 } }
         }
@@ -322,6 +338,11 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         #expect(host.session.unhealthy == BuiltInSession.Unhealthy(seconds: Int(BuiltInWatchdog.seconds)))
         #expect(!host.session.allowsAutomatic)
         #expect(await eventually { notices.value == 1 })
+        // `gaveUp` queued the post on main before the error was thrown, so
+        // after a main-actor hop every notice it caused has been delivered:
+        // still exactly one.
+        await MainActor.run {}
+        #expect(notices.value == 1)
         #expect(await eventually { rt.cancelRequests.value == 1 }, "the stuck load was asked to stop")
         #expect(await host.hasStuckLoad)
         // Automatic: refused, no load.
@@ -550,6 +571,7 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         #expect(rt.count("gen-freed serial-a.gguf") == 0)
     }
 }
+}  // extension BuiltInWatchdogFiringTests
 
 /// A gate a fake waits at until it is open.
 final class TestGate: @unchecked Sendable {
