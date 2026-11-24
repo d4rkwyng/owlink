@@ -41,7 +41,10 @@
 # Not covered: a failure after the N-second window, and resources the app
 # only reads on user action (owl art when the owl first shows, licences at
 # download time). Step 1 checks those files are where the app looks, and
-# step 2 makes sure nothing else could answer for them.
+# step 2 makes sure nothing else could answer for them. Opening a big
+# file isn't covered either (a release build has no switch to open one
+# with): Scripts/bigfile-check.sh opens a generated 55 MiB log in a check
+# build and fails on a crash report (0.5.2's macOS 26 crash).
 set -euo pipefail
 
 SECONDS_UP=10
@@ -51,7 +54,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --seconds) SECONDS_UP=$2; shift ;;
         --allow-check-build) ALLOW_CHECK=1 ;;
-        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
         -*) echo "smoke-launch.sh: unknown option $1" >&2; exit 2 ;;
         *) ZIP=$1 ;;
     esac
