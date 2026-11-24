@@ -134,17 +134,17 @@ cp Scripts/cedric "$APP/Contents/Resources/cedric"
 chmod +x "$APP/Contents/Resources/cedric"
 
 # The text file types (Resources/document-types.txt, which explains the
-# ranks): one document type each with its icon, LSHandlerRank None (they
-# never make Owlink a default; Settings › Default editor for… or Get Info
-# does, when the user asks), the catch-all "Text" type at Alternate as in
-# 0.2.x, and an imported declaration for the few types macOS lacks.
+# ranks): one document type each with its icon and the row's LSHandlerRank
+# (Alternate only for 0.2.x's exact claims, each in the row whose icon
+# Finder should show; None otherwise, so Settings › Default editor for… or
+# Get Info makes Owlink a default only when the user asks), and an imported
+# declaration for the few types macOS lacks.
 TEXT_TYPES=""
 IMPORTED_TYPES=""
-while IFS='|' read -r label icon name utis decl; do
+while IFS='|' read -r label icon name utis decl rank; do
     case "$label" in ''|'#'*) continue ;; esac
     [ -f "Resources/DocIcons/$icon.icns" ] || { echo "bundle-app.sh: missing Resources/DocIcons/$icon.icns" >&2; exit 1; }
-    rank=None
-    [ "$label" = "*" ] && rank=Alternate
+    case "$rank" in None|Alternate) ;; *) echo "bundle-app.sh: document-types.txt row $label: rank must be None or Alternate, not '$rank'" >&2; exit 1 ;; esac
     items=""
     IFS=',' read -ra U <<<"$utis"
     for u in "${U[@]}"; do items+="                <string>$u</string>

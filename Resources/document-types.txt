@@ -1,44 +1,57 @@
 # Owlink's text file types: one CFBundleDocumentTypes entry each, with its own
 # document icon (Resources/DocIcons/<icon>.icns, made by tools/icon/doc_icons.py).
 #
-# Ranks: the labelled rows are LSHandlerRank None. They carry the icons and
-# never make Owlink the default on their own: Launch Services binds a type
-# to the app with the most specific claim before it looks at rank, so an
-# exact "public.css" claim even at Alternate beat Safari's and VS Code's on a
-# test Mac, and on a clean macOS 26 took md, json, swift, py, sh, csv and
-# toml from TextEdit. Once the user picks Owlink for a type (Settings or
-# Get Info › Change All), Finder takes the icon from that type's row.
-# The "*" row is Alternate and lists exactly what 0.2.x's one Text entry
-# listed, so which app opens what without a choice is the same as in 0.2.x
-# (checked on a clean macOS 26 and with a VS Code-like app installed).
+# Ranks (the last column, the entry's LSHandlerRank: "None" or "Alternate"):
+# which app opens what without a choice must stay what 0.2.x set up. 0.2.x
+# had one Text entry at Alternate claiming exactly public.text,
+# public.plain-text, public.source-code, public.script, public.json,
+# public.yaml, public.html, public.xml, public.css,
+# net.daringfireball.markdown, public.log and public.data; every other claim
+# here is None. Launch Services binds a type to the app with the most
+# specific claim before it looks at rank, so an exact claim even at
+# Alternate wins: "public.css" at Alternate beat Safari's and VS Code's on a
+# test Mac, and on a clean macOS 26 an exact Alternate claim took md, json
+# and yaml from TextEdit. Finder then draws the icon of the entry whose
+# claim won, so each of those exact Alternate claims sits in its labelled
+# row (TXT, MD, JSON, YAML, XML, HTML, CSS at Alternate), not in the "*"
+# row, or Finder shows the unlabelled icon for a file Owlink opens by
+# itself. Every content type keeps 0.2.x's rank and is claimed by one row
+# only (DocumentTypesTests checks both).
+# LOG stays None: its row also claims com.apple.log, and Alternate there
+# would be a new claim that could take .log files from Console. So
+# public.log stays in "*", and a .log file Owlink opens without a choice
+# shows the unlabelled icon until the user picks Owlink for Log File
+# (Settings sets com.apple.log). The other labelled rows are None and never
+# make Owlink the default on their own; once the user picks Owlink for one
+# (Settings or Get Info › Change All), Finder takes the icon from its row.
 # Scripts/bundle-app.sh builds Info.plist from this file; DocumentTypes.swift
 # (Settings › Default editor for…) has the same list, and a unit test keeps
-# the two in step.
+# the two in step. Scripts/doctypes-check.sh checks a built app against it.
 #
-# label | icon | name | content types (first = the one Settings sets) | imported declaration
-# The last column is "-" for a type the system declares, else
+# label | icon | name | content types (first = the one Settings sets) | imported declaration | rank
+# The fifth column is "-" for a type the system declares, else
 # "<conforms to, comma-separated>;<extensions, comma-separated>": declared
 # only for types macOS's CoreTypes lacks, with the identifiers Apple's Xcode
 # already uses for them, so the declarations agree. Markdown is in CoreTypes
 # from macOS 26 but not in 15 (a .md file there is a dyn.… type nothing
 # opens); where the system declares it, Owlink's import is inactive.
 # The "*" row is the catch-all for any other text, with the unlabelled icon.
-TXT|doc-txt|Plain Text|public.plain-text|-
-MD|doc-md|Markdown|net.daringfireball.markdown|public.plain-text;md,markdown
-JSON|doc-json|JSON|public.json|-
-YAML|doc-yaml|YAML|public.yaml|-
-SWIFT|doc-swift|Swift Source|public.swift-source|-
-PY|doc-py|Python Script|public.python-script|-
-JS|doc-js|JavaScript|com.netscape.javascript-source|-
-TS|doc-ts|TypeScript|com.microsoft.typescript|public.script,public.source-code;tsx,ts
-SH|doc-sh|Shell Script|public.shell-script,public.zsh-script,public.bash-script|-
-LOG|doc-log|Log File|com.apple.log,public.log|-
-CSV|doc-csv|CSV|public.comma-separated-values-text|-
-XML|doc-xml|XML|public.xml|-
-HTML|doc-html|HTML|public.html|-
-CSS|doc-css|CSS|public.css|-
-TOML|doc-toml|TOML|public.toml|public.text;toml
-INI|doc-ini|INI Settings|com.microsoft.ini|public.text;ini
-SQL|doc-sql|SQL|org.iso.sql|public.source-code;sql
-PS1|doc-ps1|PowerShell Script|com.microsoft.powershell-script|public.script;ps1,psm1,psd1
-*|doc-text|Text|public.text,public.plain-text,public.source-code,public.script,public.json,public.yaml,public.html,public.xml,public.css,net.daringfireball.markdown,public.log,public.data|-
+TXT|doc-txt|Plain Text|public.plain-text|-|Alternate
+MD|doc-md|Markdown|net.daringfireball.markdown|public.plain-text;md,markdown|Alternate
+JSON|doc-json|JSON|public.json|-|Alternate
+YAML|doc-yaml|YAML|public.yaml|-|Alternate
+SWIFT|doc-swift|Swift Source|public.swift-source|-|None
+PY|doc-py|Python Script|public.python-script|-|None
+JS|doc-js|JavaScript|com.netscape.javascript-source|-|None
+TS|doc-ts|TypeScript|com.microsoft.typescript|public.script,public.source-code;tsx,ts|None
+SH|doc-sh|Shell Script|public.shell-script,public.zsh-script,public.bash-script|-|None
+LOG|doc-log|Log File|com.apple.log,public.log|-|None
+CSV|doc-csv|CSV|public.comma-separated-values-text|-|None
+XML|doc-xml|XML|public.xml|-|Alternate
+HTML|doc-html|HTML|public.html|-|Alternate
+CSS|doc-css|CSS|public.css|-|Alternate
+TOML|doc-toml|TOML|public.toml|public.text;toml|None
+INI|doc-ini|INI Settings|com.microsoft.ini|public.text;ini|None
+SQL|doc-sql|SQL|org.iso.sql|public.source-code;sql|None
+PS1|doc-ps1|PowerShell Script|com.microsoft.powershell-script|public.script;ps1,psm1,psd1|None
+*|doc-text|Text|public.text,public.source-code,public.script,public.log,public.data|-|Alternate

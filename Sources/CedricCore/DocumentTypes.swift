@@ -18,6 +18,14 @@ public struct DocumentFileType: Sendable, Hashable, Identifiable {
     /// For the types macOS doesn't declare: what Owlink's imported
     /// declaration says.
     public let imported: Imported?
+    /// The entry's LSHandlerRank. Alternate only for 0.2.x's exact claims
+    /// (see Resources/document-types.txt).
+    public let rank: Rank
+
+    public enum Rank: String, Sendable, Hashable {
+        case none = "None"
+        case alternate = "Alternate"
+    }
 
     public struct Imported: Sendable, Hashable {
         public let conformsTo: [String]
@@ -43,12 +51,14 @@ public struct DocumentFileType: Sendable, Hashable, Identifiable {
         imported?.extensions.first ?? UTType(primaryType)?.preferredFilenameExtension ?? label.lowercased()
     }
 
-    public init(label: String, icon: String, name: String, contentTypes: [String], imported: Imported? = nil) {
+    public init(label: String, icon: String, name: String, contentTypes: [String], imported: Imported? = nil,
+                rank: Rank = .none) {
         self.label = label
         self.icon = icon
         self.name = name
         self.contentTypes = contentTypes
         self.imported = imported
+        self.rank = rank
     }
 }
 
@@ -57,14 +67,16 @@ public enum DocumentTypes {
         .init(conformsTo: conforms, extensions: exts)
     }
 
-    /// The labelled types, in the Settings list's order.
+    /// The labelled types, in the Settings list's order. The Alternate ones
+    /// hold 0.2.x's exact claims, so a type Owlink opens by itself shows
+    /// its own icon (Finder draws the icon of the claim that won).
     public static let all: [DocumentFileType] = [
-        .init(label: "TXT", icon: "doc-txt", name: "Plain Text", contentTypes: ["public.plain-text"]),
+        .init(label: "TXT", icon: "doc-txt", name: "Plain Text", contentTypes: ["public.plain-text"], rank: .alternate),
         // Imported: macOS 15 and earlier have no Markdown type (26 does; then this is inactive).
         .init(label: "MD", icon: "doc-md", name: "Markdown", contentTypes: ["net.daringfireball.markdown"],
-              imported: imp(["public.plain-text"], ["md", "markdown"])),
-        .init(label: "JSON", icon: "doc-json", name: "JSON", contentTypes: ["public.json"]),
-        .init(label: "YAML", icon: "doc-yaml", name: "YAML", contentTypes: ["public.yaml"]),
+              imported: imp(["public.plain-text"], ["md", "markdown"]), rank: .alternate),
+        .init(label: "JSON", icon: "doc-json", name: "JSON", contentTypes: ["public.json"], rank: .alternate),
+        .init(label: "YAML", icon: "doc-yaml", name: "YAML", contentTypes: ["public.yaml"], rank: .alternate),
         .init(label: "SWIFT", icon: "doc-swift", name: "Swift Source", contentTypes: ["public.swift-source"]),
         .init(label: "PY", icon: "doc-py", name: "Python Script", contentTypes: ["public.python-script"]),
         .init(label: "JS", icon: "doc-js", name: "JavaScript", contentTypes: ["com.netscape.javascript-source"]),
@@ -74,9 +86,9 @@ public enum DocumentTypes {
               contentTypes: ["public.shell-script", "public.zsh-script", "public.bash-script"]),
         .init(label: "LOG", icon: "doc-log", name: "Log File", contentTypes: ["com.apple.log", "public.log"]),
         .init(label: "CSV", icon: "doc-csv", name: "CSV", contentTypes: ["public.comma-separated-values-text"]),
-        .init(label: "XML", icon: "doc-xml", name: "XML", contentTypes: ["public.xml"]),
-        .init(label: "HTML", icon: "doc-html", name: "HTML", contentTypes: ["public.html"]),
-        .init(label: "CSS", icon: "doc-css", name: "CSS", contentTypes: ["public.css"]),
+        .init(label: "XML", icon: "doc-xml", name: "XML", contentTypes: ["public.xml"], rank: .alternate),
+        .init(label: "HTML", icon: "doc-html", name: "HTML", contentTypes: ["public.html"], rank: .alternate),
+        .init(label: "CSS", icon: "doc-css", name: "CSS", contentTypes: ["public.css"], rank: .alternate),
         .init(label: "TOML", icon: "doc-toml", name: "TOML", contentTypes: ["public.toml"], imported: imp(["public.text"], ["toml"])),
         .init(label: "INI", icon: "doc-ini", name: "INI Settings", contentTypes: ["com.microsoft.ini"], imported: imp(["public.text"], ["ini"])),
         .init(label: "SQL", icon: "doc-sql", name: "SQL", contentTypes: ["org.iso.sql"], imported: imp(["public.source-code"], ["sql"])),
@@ -87,13 +99,13 @@ public enum DocumentTypes {
     /// The rows of Settings › Default editor for….
     public static var settingsTypes: [DocumentFileType] { all.filter(\.inSettings) }
 
-    /// Any other text: the unlabelled icon. The only Alternate-rank text
-    /// claim (the labelled ones are None; see Resources/document-types.txt),
-    /// listing exactly 0.2.x's types so no default changes on update.
+    /// Any other text: the unlabelled icon. At Alternate with the rest of
+    /// 0.2.x's claims that no labelled Alternate row holds (public.log too:
+    /// LOG is None, see Resources/document-types.txt), so together with
+    /// those rows no default changes on update.
     public static let catchAll = DocumentFileType(label: "*", icon: "doc-text", name: "Text", contentTypes: [
-        "public.text", "public.plain-text", "public.source-code", "public.script", "public.json", "public.yaml", "public.html",
-        "public.xml", "public.css", "net.daringfireball.markdown", "public.log", "public.data",
-    ])
+        "public.text", "public.source-code", "public.script", "public.log", "public.data",
+    ], rank: .alternate)
 
     /// Every row of Resources/document-types.txt, in order.
     public static var declared: [DocumentFileType] { all + [catchAll] }
@@ -104,7 +116,7 @@ public enum DocumentTypes {
             let l = line.trimmingCharacters(in: .whitespaces)
             guard !l.isEmpty, !l.hasPrefix("#") else { return nil }
             let f = l.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            guard f.count == 5 else { return nil }
+            guard f.count == 6, let rank = DocumentFileType.Rank(rawValue: f[5]) else { return nil }
             var imported: DocumentFileType.Imported?
             if f[4] != "-" {
                 let parts = f[4].split(separator: ";", omittingEmptySubsequences: false).map(String.init)
@@ -113,7 +125,7 @@ public enum DocumentTypes {
                                  extensions: parts[1].split(separator: ",").map(String.init))
             }
             return DocumentFileType(label: f[0], icon: f[1], name: f[2], contentTypes: f[3].split(separator: ",").map(String.init),
-                                    imported: imported)
+                                    imported: imported, rank: rank)
         }
     }
 }

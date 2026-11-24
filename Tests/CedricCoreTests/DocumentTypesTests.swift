@@ -14,10 +14,38 @@ import UniformTypeIdentifiers
         #expect(Set(all.map(\.icon)).count == all.count)
         let claims = DocumentTypes.all.flatMap(\.contentTypes)
         #expect(Set(claims).count == claims.count, "no content type is in two labelled rows")
-        // The catch-all keeps 0.2.x's list exactly (same defaults after the update).
-        #expect(DocumentTypes.catchAll.contentTypes == ["public.text", "public.plain-text", "public.source-code", "public.script",
-                                                        "public.json", "public.yaml", "public.html", "public.xml", "public.css",
-                                                        "net.daringfireball.markdown", "public.log", "public.data"])
+    }
+
+    /// Every content type keeps the rank it had in 0.2.x's Info.plist plus
+    /// 0.5.3's labelled rows (same defaults after the update), and each is
+    /// claimed once, so Finder draws the icon of the row that holds it.
+    @Test func ranksKeep0_2ClaimsOnceEach() {
+        func claims(_ rank: DocumentFileType.Rank) -> [String] {
+            DocumentTypes.declared.filter { $0.rank == rank }.flatMap(\.contentTypes)
+        }
+        // 0.2.x's one Text entry, exactly.
+        let alternate = ["public.text", "public.plain-text", "public.source-code", "public.script", "public.json", "public.yaml",
+                         "public.html", "public.xml", "public.css", "net.daringfireball.markdown", "public.log", "public.data"]
+        // 0.5.3's labelled rows, which were all None.
+        let none = ["public.plain-text", "net.daringfireball.markdown", "public.json", "public.yaml", "public.swift-source",
+                    "public.python-script", "com.netscape.javascript-source", "com.microsoft.typescript",
+                    "public.shell-script", "public.zsh-script", "public.bash-script", "com.apple.log", "public.log",
+                    "public.comma-separated-values-text", "public.xml", "public.html", "public.css", "public.toml",
+                    "com.microsoft.ini", "org.iso.sql", "com.microsoft.powershell-script"]
+        #expect(claims(.alternate).sorted() == alternate.sorted(), "Alternate claims are 0.2.x's, each once")
+        // A type at Alternate anywhere binds as Alternate; None is what remains.
+        #expect(Set(claims(.none)) == Set(none).subtracting(alternate).union(["public.log"]))
+        let every = DocumentTypes.declared.flatMap(\.contentTypes)
+        #expect(Set(every) == Set(alternate + none), "no content type added or dropped")
+        // LOG stays None (com.apple.log at Alternate would be a new claim on
+        // Console's files), so public.log stays in the catch-all too.
+        #expect(Set(every.filter { c in every.filter { $0 == c }.count > 1 }) == ["public.log"])
+        // The labelled rows with one of 0.2.x's exact claims hold it themselves.
+        for t in DocumentTypes.all where t.contentTypes.count == 1 && alternate.contains(t.primaryType) {
+            #expect(t.rank == .alternate && !DocumentTypes.catchAll.contentTypes.contains(t.primaryType), "\(t.label)")
+        }
+        #expect(DocumentTypes.catchAll.rank == .alternate)
+        #expect(DocumentTypes.all.first { $0.label == "LOG" }!.rank == .none)
     }
 
     @Test func infoPlistSourceMatchesTheModel() throws {

@@ -759,11 +759,12 @@ Finder as type-coloured pages with white symbols and, in larger views, short
 type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
 HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
-- only for types you chose Owlink for, in Settings or with Get Info ›
-  Change All. A type that opens in Owlink without your choice (Markdown,
-  JSON, YAML on a Mac with no other editor) shows the generic page with a
-  white line and no label until you choose it; **Use Owlink for All Text Files**
-  does that for every type;
+- for types you chose Owlink for, in Settings or with Get Info ›
+  Change All, and for the types that open in Owlink without your choice
+  (Markdown, JSON, YAML on a Mac with no other editor). Logs are the
+  exception: a .log file that opens in Owlink without your choice shows
+  the generic page with a white line and no label until you choose Owlink
+  for logs; **Use Owlink for All Text Files** does that for every type;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the
   text itself for many text files. Untick it to see the type icons;

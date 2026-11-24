@@ -2,8 +2,9 @@
 # Checks a built Owlink.app's Info.plist against Resources/document-types.txt:
 # one CFBundleDocumentTypes entry per row with its content types, its icon
 # (CFBundleTypeIconFile, and the .icns in Contents/Resources), role Editor,
-# LSHandlerRank None for the labelled types and Alternate for the catch-all
-# (see the header of Resources/document-types.txt), and an
+# the row's LSHandlerRank, Alternate claims that are exactly 0.2.x's, no
+# claim in two rows but public.log (see the header of
+# Resources/document-types.txt), and an
 # imported type declaration exactly for the rows that have one. Also that
 # nothing asks macOS to compose icons instead (no
 # CFBundleTypeIconSystemGenerated, no UTTypeIcons) and that every
@@ -33,11 +34,11 @@ for line in open(src):
     line = line.strip()
     if not line or line.startswith('#'):
         continue
-    label, icon, name, utis, decl = line.split('|')
-    rows.append((label, icon, name, utis.split(','), decl))
+    label, icon, name, utis, decl, rank = line.split('|')
+    rows.append((label, icon, name, utis.split(','), decl, rank))
 docs = pl.get('CFBundleDocumentTypes', [])
 by_name = {d.get('CFBundleTypeName'): d for d in docs}
-for label, icon, name, utis, decl in rows:
+for label, icon, name, utis, decl, rank in rows:
     d = by_name.get(name)
     check(d is not None, f"{label}: a document type named {name!r}")
     if d is None:
@@ -46,17 +47,26 @@ for label, icon, name, utis, decl in rows:
     check(d.get('CFBundleTypeIconFile') == icon + '.icns', f"{label}: icon {icon}.icns")
     check(os.path.isfile(os.path.join(res, icon + '.icns')), f"{label}: {icon}.icns is in the bundle")
     check(d.get('CFBundleTypeRole') == 'Editor', f"{label}: role Editor")
-    want_rank = 'Alternate' if label == '*' else 'None'
-    check(d.get('LSHandlerRank') == want_rank, f"{label}: LSHandlerRank {want_rank}")
+    check(rank in ('None', 'Alternate') and d.get('LSHandlerRank') == rank, f"{label}: LSHandlerRank {rank}")
 text_names = {r[2] for r in rows}
 others = [d for d in docs if d.get('CFBundleTypeName') not in text_names]
 check(len(others) == 3 and all(d.get('LSHandlerRank') == 'Alternate' for d in others), "PDF, Image and Office types are Alternate")
 check(not any(d.get('LSHandlerRank') in ('Owner', 'Default') or 'LSHandlerRank' not in d for d in docs), "no Owner/Default rank anywhere")
 check(not any('CFBundleTypeIconSystemGenerated' in d for d in docs), "no CFBundleTypeIconSystemGenerated")
-claims = [u for label, icon, name, utis, decl in rows if label != '*' for u in utis]
+claims = [u for label, icon, name, utis, decl, rank in rows if label != '*' for u in utis]
 check(len(claims) == len(set(claims)), "no content type is in two labelled types")
+# Alternate claims are exactly 0.2.x's Text entry's, so no default changes;
+# each is in one row, so Finder shows that row's icon. public.log is also
+# in LOG at None (as in 0.2.x's Info.plist + LOG row): the only double claim.
+alt = [u for d in docs if d.get('CFBundleTypeName') in text_names and d.get('LSHandlerRank') == 'Alternate'
+       for u in d.get('LSItemContentTypes', [])]
+check(sorted(alt) == sorted(['public.text', 'public.plain-text', 'public.source-code', 'public.script', 'public.json',
+                             'public.yaml', 'public.html', 'public.xml', 'public.css', 'net.daringfireball.markdown',
+                             'public.log', 'public.data']), f"Alternate text claims are 0.2.x's, once each: {alt}")
+every = [u for d in docs if d.get('CFBundleTypeName') in text_names for u in d.get('LSItemContentTypes', [])]
+check(sorted({u for u in every if every.count(u) > 1}) == ['public.log'], "public.log is the only content type in two rows")
 imp = {t['UTTypeIdentifier']: t for t in pl.get('UTImportedTypeDeclarations', [])}
-want = {utis[0]: (name, decl) for label, icon, name, utis, decl in rows if decl != '-'}
+want = {utis[0]: (name, decl) for label, icon, name, utis, decl, rank in rows if decl != '-'}
 check(set(imp) == set(want), f"imported declarations are exactly {sorted(want)}")
 for uti, (name, decl) in want.items():
     t = imp.get(uti, {})
