@@ -274,6 +274,33 @@ import Testing
         #expect(broken.check.failureText?.hasPrefix("Doesn’t parse: ") == true)
     }
 
+    @Test func aNewErrorInAnAlreadyBrokenDocumentStillCounts() {
+        // Removing the trailing comma and the "]": a different complaint, so it counts.
+        let before = "{ \"items\": [1, 2,] }"
+        let after = "{ \"items\": [1, 2 }"
+        let c = OwlEditValidation.validate(language: "json", fileName: "a.json", before: before, after: after,
+                                           original: "[1, 2,]", replacement: "[1, 2", script: nil)
+        #expect(c.hardIssue?.check == .json)
+        // The same complaint as before: still not the edit's.
+        let same = OwlEditValidation.validate(language: "json", fileName: "a.json",
+                                               before: "{\"a\": 1, \"b\": [1,]}\n", after: "{\"a\": 1, \"b\": [1,]}\n",
+                                               original: "", replacement: "", script: nil)
+        #expect(same == .clean)
+        // The same complaint, but now in the replacement while the old one wasn't in the replaced text: counts.
+        let script = FakeLineScript()
+        let inEdit = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "x(\nok\nok\n", after: "x(\nok\nbad\n",
+                                                original: "ok", replacement: "bad", firstLine: 3, script: script)
+        #expect(inEdit.hardIssue?.check == .script && inEdit.hardIssue?.line == 3)
+    }
+
+    /// Always "Unexpected token": on the line of the first "bad", else line 1.
+    struct FakeLineScript: OwlScriptSyntaxChecker {
+        func syntaxError(in script: String) -> OwlSyntaxError? {
+            let lines = script.components(separatedBy: "\n")
+            return OwlSyntaxError(message: "Unexpected token", line: (lines.firstIndex(of: "bad") ?? 0) + 1)
+        }
+    }
+
     // MARK: Property lists and XML
 
     static let plist = """

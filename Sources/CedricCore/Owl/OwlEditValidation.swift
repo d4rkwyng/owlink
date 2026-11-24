@@ -140,12 +140,27 @@ public enum OwlEditValidation {
         var issues: [OwlEditIssue] = []
         let ext = ((fileName ?? "") as NSString).pathExtension.lowercased()
 
-        // Single-verdict parsers: skipped when the document already failed before.
+        // The lines the edit covers, before (`original`) and after (`replacement`).
+        func lines(_ fragment: String) -> ClosedRange<Int> {
+            firstLine...(firstLine + fragment.utf16.reduce(0) { $0 + ($1 == 10 ? 1 : 0) })
+        }
+        // Single-verdict parsers. When the document already failed before,
+        // the after error still counts if it is a different complaint
+        // (line numbers aside), or if it is in the replacement and the
+        // before error wasn't in the text the edit replaced.
         func parser(_ check: OwlEditIssue.Check, _ run: (String) -> OwlSyntaxError?) -> OwlSyntaxError? {
             guard !after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let e = run(after) else { return nil }
-            if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || run(before) == nil {
-                issues.append(OwlEditIssue(check: check, severity: .hard, message: e.message, line: e.line))
+            let counts: Bool
+            if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                counts = true
+            } else if let b = run(before) {
+                let inEdit = e.line.map { lines(replacement).contains($0) } ?? false
+                let beforeInEdit = b.line.map { lines(original).contains($0) } ?? false
+                counts = comparable(e.message) != comparable(b.message) || (inEdit && !beforeInEdit)
+            } else {
+                counts = true
             }
+            if counts { issues.append(OwlEditIssue(check: check, severity: .hard, message: e.message, line: e.line)) }
             return e
         }
         if language == "json" {
@@ -273,6 +288,12 @@ public enum OwlEditValidation {
         }
         while t.hasSuffix(".") { t.removeLast() }
         return String(t.prefix(160))
+    }
+
+    /// A parser message without its numbers (lines, columns, offsets), to
+    /// tell a different complaint from the same one moved by the edit.
+    static func comparable(_ message: String) -> String {
+        cleanMessage(message).replacingOccurrences(of: #"\d+"#, with: "#", options: .regularExpression)
     }
 
     static func lineNumber(in s: String) -> Int? {
