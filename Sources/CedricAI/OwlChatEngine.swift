@@ -2,7 +2,8 @@ import Foundation
 import CedricCore
 
 // Ask Cedric: one conversation turn per engine, and the runner that loops
-// over tool calls (at most `OwlTools.maxRounds`) until the model answers.
+// over tool calls (at most `OwlTools.maxRounds`, plus one propose_edit-only
+// correction round after a refused last-round edit) until the model answers.
 // Every engine streams its answer. Tools are adapted three ways: OpenAI
 // `tools` for LM Studio / Ollama, a GBNF-constrained JSON envelope for the
 // built-in llama.cpp engine, and FoundationModels' `Tool` protocol for
@@ -70,18 +71,29 @@ public final class OwlToolbox: @unchecked Sendable {
     private var calls = 0
     private var _proposals: [OwlEditProposal] = []
     private var _picture: Task<OwlRenderedImage, Error>?
+    /// propose_edit's validation for this Ask (one retry; OwlEditGate).
+    private var gate: OwlEditGate
     private let onEvent: @Sendable (OwlChatEvent) -> Void
     public static let maxCalls = OwlTools.maxRounds * OwlTools.maxCallsPerRound
 
     public init(snapshot: OwlDocumentSnapshot, allowed: Set<OwlToolName>, imageSource: (any OwlImageSource)? = nil,
-                inlineSelection: String? = nil,
+                inlineSelection: String? = nil, script: (any OwlScriptSyntaxChecker)? = JSCSyntaxChecker(),
                 onEvent: @escaping @Sendable (OwlChatEvent) -> Void = { _ in }) {
+        self.gate = OwlEditGate(script: script)
         self.snapshot = snapshot
         self.allowed = allowed
         self.imageSource = imageSource
         self.inlineSelection = inlineSelection
         self.onEvent = onEvent
     }
+
+    /// The runner starts a batch of tool calls (OwlEditGate.beginBatch).
+    public func beginBatch(retryRoundLeft: Bool) { lock.withLock { gate.beginBatch(retryRoundLeft: retryRoundLeft) } }
+    /// An edit in the batch just run was refused for a retry.
+    public var refusedInBatch: Bool { lock.withLock { gate.refusedInBatch } }
+    /// The runner's one correction round: its calls on top of `maxCalls`.
+    public func allowCorrectionRound() { lock.withLock { extraCalls = OwlTools.maxCallsPerRound } }
+    private var extraCalls = 0
 
     /// The edits proposed so far, in order.
     public var proposals: [OwlEditProposal] { lock.withLock { _proposals } }
@@ -101,7 +113,7 @@ public final class OwlToolbox: @unchecked Sendable {
     /// Counts and logs a call; the refusal when over the budget.
     private func admit(_ call: OwlToolCall) -> OwlToolResult? {
         let n: Int = lock.withLock { calls += 1; _log.append(call); return calls }
-        guard n <= Self.maxCalls else {
+        guard n <= Self.maxCalls + lock.withLock({ extraCalls }) else {
             return OwlToolResult(text: "error: tool limit reached; answer now with what you have", proposal: nil,
                                  summary: "tool limit reached", ok: false)
         }
@@ -134,6 +146,7 @@ public final class OwlToolbox: @unchecked Sendable {
             r = OwlToolResult(text: same ? "error: this edit is already proposed" : "error: this overlaps an edit you already proposed (lines \(other.firstLine)-\(other.lastLine)); put both changes in one edit",
                               proposal: nil, summary: String(localized: "overlapping edit refused"), ok: false)
         }
+        if r.proposal != nil { r = lock.withLock { gate.screen(r, in: snapshot) } }
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
@@ -469,7 +482,9 @@ public struct OwlChatOutcome: Sendable, Equatable {
 
 public enum OwlChatRunner {
     /// Asks `engine`, running tools until it answers (≤ `OwlTools.maxRounds`
-    /// rounds; then it must answer without tools). A quick action that
+    /// rounds; then it must answer without tools). When an edit in the last
+    /// round is refused for its one retry, one more round offers only
+    /// propose_edit; a still-failing edit there is a card with Apply off. A quick action that
     /// edits and got no `propose_edit` (no tools, or the model pasted the
     /// text instead) gets its proposal from the answer's ``` block.
     public static func run(_ req: OwlChatRequest, engine: any OwlChatEngine, model: String = "",
@@ -512,9 +527,11 @@ public enum OwlChatRunner {
         }
         var rounds = 0
         var answer = ""
+        // The one propose_edit-only round after a refusal in the last round.
+        var correcting = false
         while true {
             try Task.checkCancellation()
-            let offer = rounds < OwlTools.maxRounds ? specs : []
+            let offer = correcting ? specs.filter { $0.name == .proposeEdit } : rounds < OwlTools.maxRounds ? specs : []
             if offer.isEmpty, rounds > 0 { messages.append(.user("Answer now, without tools.")) }
             let turn = try await engine.turn(messages, tools: offer, toolbox: offer.isEmpty ? nil : toolbox,
                                              maxTokens: req.maxTokens, onText: onText)
@@ -525,11 +542,22 @@ public enum OwlChatRunner {
                 guard !offer.isEmpty, !calls.isEmpty else { answer = ""; break }
                 rounds += 1
                 var calls = Array(calls.prefix(OwlTools.maxCallsPerRound))
+                let correction = correcting
+                correcting = false
+                if correction { calls = calls.filter { OwlToolName(rawValue: $0.name) == .proposeEdit } }
+                if calls.isEmpty { continue }
                 for i in calls.indices where calls[i].id.isEmpty { calls[i].id = "call_\(rounds)_\(i)" }
                 messages.append(.toolCalls(calls))
+                // A refusal always has a round to answer it in: the next one,
+                // or after the last, the correction round.
+                toolbox.beginBatch(retryRoundLeft: !correction)
                 for c in calls {
                     let r = await toolbox.perform(c)
                     messages.append(.toolResult(callID: c.id, name: c.name, content: r.text))
+                }
+                if !correction, rounds >= OwlTools.maxRounds, toolbox.refusedInBatch {
+                    correcting = true
+                    toolbox.allowCorrectionRound()
                 }
                 continue
             }
@@ -537,8 +565,10 @@ public enum OwlChatRunner {
         }
         var proposals = toolbox.proposals
         if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
-           let p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
+           var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
                                          reason: "", in: req.snapshot) {
+            // No tool loop to retry in: validated and marked directly.
+            p.check = OwlEditValidation.validate(p, in: req.snapshot, script: JSCSyntaxChecker())
             proposals = [p]
             onEvent(.proposal(p))
         }

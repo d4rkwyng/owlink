@@ -724,6 +724,12 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let q = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty else { return }
         input.stringValue = ""
+        // A spelling request goes to the offline Fix Typos (OwlSpellingRoute.swift).
+        if OwlSpellingIntent.isSpellingRequest(q), let tab, let id = docID {
+            routeToFixTypos(q, tab: tab, id: id)
+            render()
+            return
+        }
         ask(question: q, action: nil)
     }
 
@@ -1188,14 +1194,23 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     func state(of p: OwlEditProposal) -> OwlEditProposal.ApplyState {
         guard let tab else { return .stale }
-        return p.state(text: tab.textView.string as NSString, generation: tab.doc.changeCount, readOnly: documentIsReadOnly)
+        return live(p).state(text: tab.textView.string as NSString, generation: tab.doc.changeCount, readOnly: documentIsReadOnly)
+    }
+
+    /// `p` validated against the live document when it changed since the
+    /// proposal (OwlEditProposal.revalidated): the card refresh and Apply use it.
+    private func live(_ p: OwlEditProposal) -> OwlEditProposal {
+        guard let tab else { return p }
+        return p.revalidated(text: tab.textView.string as NSString, generation: tab.doc.changeCount,
+                             language: tab.doc.language.rawValue, fileName: tab.doc.fileURL?.lastPathComponent,
+                             script: JSCSyntaxChecker())
     }
 
     /// Every card's Apply, against the document as it is now. One search
     /// per distinct find, and none at all when Apply is already refused.
     func refreshCards() {
         guard !cards.isEmpty, let tab else { layoutCards(); return }
-        let result = OwlEditProposal.refresh(cards.map(\.proposal), text: tab.textView.string as NSString,
+        let result = OwlEditProposal.refresh(cards.map { live($0.proposal) }, text: tab.textView.string as NSString,
                                              generation: tab.doc.changeCount, readOnly: documentIsReadOnly)
         for (c, s) in zip(cards, result.states) {
             // The title names where the unique match is now, not where it was proposed.

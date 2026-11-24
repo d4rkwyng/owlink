@@ -155,8 +155,8 @@ public enum OwlPrompts {
         let what = prose ? "text" : "code"
         let edit = toolsOn
             ? "For each change call propose_edit with find (the exact text from \(lines), copied without the line numbers) and replace (the new text), "
-                + "at most \(OwlTools.maxProposals) calls, then say in one sentence what you changed."
-            : "Reply with only the new text for \(lines) in one ``` block, without line numbers, then one sentence on what you changed."
+                + "at most \(OwlTools.maxProposals) calls, then say in one sentence what you propose; nothing is applied until the user presses Apply."
+            : "Reply with only the new text for \(lines) in one ``` block, without line numbers, then one sentence on what you propose; nothing is applied until the user presses Apply."
         switch action {
         case .explain:
             return "Explain what this \(what) (\(lines)) does or says, in plain words, in at most 5 sentences."

@@ -76,7 +76,7 @@ extension OwlEditProposal {
                     cache[p.original] = hits
                     searches += 1
                 }
-                states.append(hits.count == 1 ? .ready(hits[0]) : .stale)
+                states.append(hits.count == 1 ? p.validated(.ready(hits[0])) : .stale)
             }
         }
         return OwlEditRefresh(states: states, searches: searches)
