@@ -85,17 +85,12 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         get { UserDefaults.standard.bool(forKey: FrontMatterDisclosure.preferenceKey) }
         set { UserDefaults.standard.set(newValue, forKey: FrontMatterDisclosure.preferenceKey) }
     }
-    /// Close-time front matter reads still out (keepFrontMatterState), and
-    /// the renders waiting for them: a preview reopened at once takes the
-    /// state the closed one was left in, not the preference from before
-    /// its read came back (Codex review round 2 of the 0.5.2 (17) fixes).
-    private static var closingReads = 0
-    private static var afterClosingReads: [() -> Void] = []
-    private static func whenClosingReadsDone(_ run: @escaping () -> Void) {
-        if closingReads == 0 { run() } else { afterClosingReads.append(run) }
-    }
-    /// Every preview alive (weakly): a close-time read that comes back
-    /// late sets the block on the live previews of its document.
+    /// Every preview alive (weakly): a close-time read (keepFrontMatterState)
+    /// sets the block on the live previews of its document when it comes
+    /// back. Nothing waits for it: a preview reopened at once renders with
+    /// the preference it has, and the read corrects it (Codex review rounds
+    /// 2 and 3 of the 0.5.2 (17) fixes; a wait for every tab's reads held up
+    /// renders in all tabs).
     private static let alive = NSHashTable<PreviewController>.weakObjects()
     /// The document shown (set by its tab on each render): close-time
     /// reads are matched to live previews by it.
@@ -341,25 +336,23 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let ticket = latest
         // An immutable copy, whatever `text` is backed by (the storage keeps changing).
         let text = (text as NSString).copy() as! NSString as String
-        // The preference once any close-time read has come back.
-        Self.whenClosingReadsDone { [self] in
-            guard gen == generation else { return }
-            let frontMatterExpanded = Self.frontMatterExpanded
-            Self.queue.async {
-                // Skip a render a newer one has already replaced.
-                guard ticket.value == gen else { return }
-                let t0 = DispatchTime.now()
-                let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
-                                                                      : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard gen == self.generation else { return }
-                        let applyStart = DispatchTime.now()
-                        self.lastRenderMs = ms
-                        self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
-                        self.noteMainThread(applyStart)
-                    }
+        // The preference as it is now: a close-time read still out
+        // corrects the page when it comes back (adoptFrontMatter).
+        let frontMatterExpanded = Self.frontMatterExpanded
+        Self.queue.async {
+            // Skip a render a newer one has already replaced.
+            guard ticket.value == gen else { return }
+            let t0 = DispatchTime.now()
+            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
+                                                                  : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard gen == self.generation else { return }
+                    let applyStart = DispatchTime.now()
+                    self.lastRenderMs = ms
+                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
+                    self.noteMainThread(applyStart)
                 }
             }
         }
@@ -440,24 +433,12 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// it is kept (Codex review of the 0.5.2 (17) fixes: opened, then
     /// closed with no edit or refresh between, the change was lost). The
     /// same read in the app's own world; the read holds this controller
-    /// (and its web view) until it comes back. Renders wait for it (a
-    /// preview reopened at once), for a second at most. A read that comes
-    /// back after that sets the block on the document's live previews
-    /// (Codex round 3: the reopened one kept the old state).
+    /// (and its web view) until it comes back, then sets the block on the
+    /// document's live previews (a preview reopened at once rendered with
+    /// the preference from before; Codex rounds 2 and 3). Nothing waits.
     func keepFrontMatterState() {
         closed = true
         guard pageFrontMatterOpen != nil, !loadingShell else { return }
-        Self.closingReads += 1
-        var done = false
-        let finish = {
-            guard !done else { return }
-            done = true
-            Self.closingReads -= 1
-            guard Self.closingReads == 0 else { return }
-            let waiting = Self.afterClosingReads
-            Self.afterClosingReads = []
-            waiting.forEach { $0() }
-        }
         Self.closeReadsStarted += 1
         let number = Self.closeReadsStarted
         let writes = Self.preferenceWrites
@@ -467,7 +448,6 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let delay = Self.closeReadDelayForChecks
         webView.callAsyncJavaScript(Self.readScript, arguments: [:], in: nil, in: .defaultClient) { [self] result in
             let land = { [self] in
-                defer { finish() }
                 if let key, Self.newestCloseRead[key] == number { Self.newestCloseRead[key] = nil }
                 else if key != nil { return } // a newer close of this document read it since
                 // The reader changed it in another preview since: theirs stands.
@@ -484,7 +464,6 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
                 land()
             }
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
     }
 
     static let readScript = "const d = document.querySelector('details.frontmatter'); return d ? d.open : null;"

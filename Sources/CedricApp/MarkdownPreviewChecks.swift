@@ -148,6 +148,33 @@ extension DevChecks {
             untilState(tab, "true", "a close-time read that comes back late sets the reopened block open", timeout: 5),
             sync { expect(PreviewController.frontMatterExpanded, "the late read's opening is kept as the preference") },
             sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex review round 3, should-fix 2: a slow close-time read in
+            // this tab doesn't hold up a render in another tab (renders
+            // used to wait for every close-time read, up to a second).
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview() },
+            { next in
+                guard let second else { expect(false, "the second document is open"); next(); return }
+                let start = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                let t0 = Date()
+                second.renderPreview()
+                @MainActor func poll() {
+                    let n = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    if n > start {
+                        expect(ms < 500, "another tab's render isn't held up by a slow close-time read", "\(ms) ms")
+                        next()
+                    } else if ms > 3000 {
+                        expect(false, "another tab's render isn't held up by a slow close-time read", "no render")
+                        next()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
+                    }
+                }
+                poll()
+            },
+            until("the slow close-time read still keeps the closed block", timeout: 4) { !PreviewController.frontMatterExpanded },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
