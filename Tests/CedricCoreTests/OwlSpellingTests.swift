@@ -16,7 +16,8 @@ import Testing
     @Test func spellingRequestsAreDetected() {
         for q in ["Fix the spelling mistakes.", "fix typos", "check spelling", "any misspellings?", "Spellcheck this",
                   "Are there any typos?", "Please correct the spelling", "Can you fix the typos in this?", "spelling",
-                  "Find spelling errors", "Proofread the spelling"] {
+                  "Find spelling errors", "Proofread the spelling",
+                  "Fix a typo", "Fix a spelling mistake", "Is there a typo?", "Fix the typo"] {
             #expect(OwlSpellingIntent.isSpellingRequest(q), "\(q)")
         }
     }
@@ -27,7 +28,8 @@ import Testing
                   "Write a spell checker", "What does `spelling` hold?", "Fix the bug in the typo detector", "Summarise this",
                   "Rewrite this paragraph and fix typos", "Why is spelling important in reports?", "Fix the typo in the test",
                   "the spelling variable is unused", "Rewrite line 3",
-                  "Check the spelling bee results", "List the spelling rules"] {
+                  "Check the spelling bee results", "List the spelling rules", "Check a spelling bee result",
+                  "Fix a typo in the test"] {
             #expect(!OwlSpellingIntent.isSpellingRequest(q), "\(q)")
         }
         // The typos corpus' own text isn't a request either.
