@@ -110,8 +110,13 @@ import Testing
             let target = (i + 1) * limit - 1
             line += String(repeating: "x", count: target - (line as NSString).length) + c
         }
-        line += String(repeating: "y", count: 3_000)
+        // Past the threshold, so the line is one the editor really chunks.
+        line += String(repeating: "y", count: LargeDocument.lineThreshold)
         let text = try Self.roundTrip("short first line\n" + line + "\ntail\n")
+        let index = LineIndex(text)
+        #expect((line as NSString).length > LargeDocument.lineThreshold)
+        #expect(LargeDocument.needsChunks(index), "TextKit sees this line in chunks (ChunkedContentStorage)")
+        #expect(LargeDocument.reason(for: index) == .longLine)
         let start = ("short first line\n" as NSString).length
         let r = NSRange(location: start, length: (line as NSString).length + 1)
         let chunks = LargeDocument.chunks(of: r, in: text, limit: limit)
