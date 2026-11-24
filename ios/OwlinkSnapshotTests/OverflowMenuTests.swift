@@ -16,6 +16,7 @@ final class OverflowMenuTests: XCTestCase {
     private var windows: [UIWindow] = []
 
     override func tearDown() async throws {
+        WindowSupport.overrideForTests = nil
         for window in windows { window.isHidden = true; window.rootViewController = nil }
         windows = []
     }
@@ -113,36 +114,149 @@ final class OverflowMenuTests: XCTestCase {
         }
     }
 
-    /// The groups (0.5.2 (18), six rows: the menu was too long): Find ›,
-    /// Preview ›, Ask Cedric | Save, More › | Settings. Same intent as
-    /// before the trim: the preview modes first in their submenu, the view
-    /// toggles together, Save beside Print and the exports (now in More ›
-    /// Export & Print), find, marks and navigation together, and nothing
-    /// dropped.
+    /// The groups (0.5.2 (18), seven rows, file actions first as in
+    /// document apps): Save, Share & Export › | Find ›, Preview ›, Ask
+    /// Cedric | More ›, Settings. The preview modes first in their
+    /// submenu, the view toggles together, Save beside Share…, Print and the
+    /// exports (Share & Export ›), find, marks and navigation together, and
+    /// nothing dropped.
     func testMenuIsGroupedInline() throws {
         let editor = markdownEditor(width: .compact)
         let groups = editor.moreMenuItems().compactMap { $0 as? UIMenu }
-        XCTAssertGreaterThanOrEqual(groups.count, 3)
-        XCTAssertEqual(groups.prefix(3).map { $0.options.contains(.displayInline) }, [true, true, true])
+        XCTAssertEqual(groups.count, 3)
+        XCTAssertEqual(groups.map { $0.options.contains(.displayInline) }, [true, true, true])
         let tops = groups.map { $0.children.map { e in (e as? UIMenu).map { $0.title + " ›" } ?? (e as? UIAction)?.title ?? "?" } }
-        XCTAssertEqual(tops, [["Find ›", "Preview ›", "Ask Cedric"], ["Save", "More ›"], ["Settings"]])
+        XCTAssertEqual(tops, [["Save", "Share & Export ›"], ["Find ›", "Preview ›", "Ask Cedric"], ["More ›", "Settings"]])
         let all = flatten(UIMenu(children: editor.moreMenuItems()))
         func titles(under path: [String]) -> [String] { all.filter { $0.path == path }.map(\.title) }
         XCTAssertEqual(Array(titles(under: ["Preview"]).prefix(2)), ["Preview", "Focus Preview"])
         let view = titles(under: ["More", "View"])
         XCTAssertTrue(view.contains("Wrap Lines") && view.contains("Readable Width") && view.contains("Show Invisibles"), "\(view)")
-        XCTAssertEqual(titles(under: ["More", "Export & Print"]), ["Print…", "Export as HTML…", "Export as PDF…"])
+        XCTAssertEqual(titles(under: ["Share & Export"]), ["Share…", "Print…", "Export as HTML…", "Export as PDF…"])
+        XCTAssertFalse(allSubmenus(editor.moreMenuItems()).contains { $0.title == "Export & Print" }, "Export & Print › is gone from More ›")
         XCTAssertEqual(titles(under: ["Find"]), ["Find", "Find and Replace", "Find TODOs", "Mark All", "Clear Marks"])
         XCTAssertEqual(Array(titles(under: ["More"]).prefix(3)), ["Go to Line…", "Open Quickly…", "Statistics…"])
         // Nothing dropped: the identifiers the UI tests use are all there.
         let ids = Set(actions(editor.moreMenuItems()).compactMap(\.accessibilityIdentifier))
         for id in ["editor.menu.focusPreview", "editor.menu.print", "editor.menu.exportHTML", "editor.menu.exportPDF",
                    "editor.menu.quickOpen", "tools.menu.todos", "stats.menu", "editor.menu.wrapLines",
-                   "editor.menu.showInvisibles", "editor.menu.readableWidth", "editor.menu.fixTypos"] {
+                   "editor.menu.showInvisibles", "editor.menu.readableWidth", "editor.menu.fixTypos", "editor.menu.share"] {
             XCTAssertTrue(ids.contains(id), "\(id) missing")
         }
-        for title in ["Ask Cedric", "Check with Cedric", "Settings", "Statistics…", "Find TODOs"] {
+        for title in ["Ask Cedric", "Check with Cedric", "Settings", "Statistics…", "Find TODOs", "Share…"] {
             XCTAssertTrue(flatten(UIMenu(children: editor.moreMenuItems())).contains { $0.title == title }, "\(title) missing")
+        }
+    }
+
+    // MARK: Top-level order, per layout
+
+    private struct Layout {
+        let name: String
+        let width: UIUserInterfaceSizeClass
+        let size: CGSize
+        let readMode: Bool
+        let iPad: Bool
+    }
+
+    private static let layouts = [
+        Layout(name: "iPhone compact", width: .compact, size: CGSize(width: 390, height: 844), readMode: true, iPad: false),
+        Layout(name: "iPad regular", width: .regular, size: CGSize(width: 1024, height: 768), readMode: false, iPad: true),
+        Layout(name: "iPad compact", width: .compact, size: CGSize(width: 507, height: 1024), readMode: false, iPad: true),
+    ]
+
+    private func editor(_ layout: Layout, _ ext: String) -> EditorViewController {
+        WindowSupport.overrideForTests = (multipleScenes: layout.iPad, isPhone: !layout.iPad)
+        let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext))
+        doc.language.choose(ext == "md" ? .markdown : .plain)
+        doc.text = ext == "md" ? "# Owls\n\nHoot.\n" : "Owls\n"
+        let editor = EditorViewController(document: doc, readModeOnOpen: layout.readMode)
+        let nav = UINavigationController(rootViewController: editor)
+        nav.traitOverrides.horizontalSizeClass = layout.width
+        nav.traitOverrides.userInterfaceIdiom = layout.iPad ? .pad : .phone
+        let window = UIWindow(frame: CGRect(origin: .zero, size: layout.size))
+        window.rootViewController = nav
+        window.makeKeyAndVisible()
+        window.layoutIfNeeded()
+        windows.append(window)
+        return editor
+    }
+
+    /// The top level as groups of rows: an inline group's rows, a submenu
+    /// as "Title ›".
+    private func topGroups(_ elements: [UIMenuElement]) -> [[String]] {
+        elements.map { e -> [String] in
+            guard let group = e as? UIMenu, group.options.contains(.displayInline) || group.title.isEmpty else {
+                return [(e as? UIMenu).map { $0.title + " ›" } ?? (e as? UIAction)?.title ?? "?"]
+            }
+            return group.children.compactMap { c -> String? in
+                if let m = c as? UIMenu { return m.options.contains(.displayInline) && m.children.isEmpty ? nil : m.title + " ›" }
+                if let a = c as? UIAction { return a.attributes.contains(.hidden) ? nil : a.title }
+                return "?"
+            }
+        }.filter { !$0.isEmpty }
+    }
+
+    /// The ••• menu with the bar buttons a narrow bar collapses: all but
+    /// Undo and Redo (an iPhone keeps those two in the bar).
+    private func narrowMenu(_ editor: EditorViewController) -> UIMenu {
+        let bar = (editor.navigationItem.rightBarButtonItems ?? []).reversed()
+            .filter { !["editor.undo", "editor.redo"].contains($0.accessibilityIdentifier ?? "") }
+        return UIMenu(children: bar.map(overflowRepresentation) + editor.moreMenuItems())
+    }
+
+    /// The exact top level of the ••• menu, groups and order, for each
+    /// layout and document: with no bar button collapsed into it, and with
+    /// the ones a narrow bar collapses (an iPhone in read mode adds Edit,
+    /// first).
+    func testTopLevelOrderPerLayout() {
+        defer { WindowSupport.overrideForTests = nil }
+        for layout in Self.layouts {
+            for ext in ["md", "txt"] {
+                let name = "\(layout.name) \(ext)"
+                let editor = editor(layout, ext)
+                let preview = ext == "md" ? "Preview ›" : "View ›"
+                let want = [["Save", "Share & Export ›"], ["Find ›", preview, "Ask Cedric"], ["More ›", "Settings"]]
+                XCTAssertEqual(topGroups(editor.moreMenuItems()), want, "\(name), none collapsed")
+                XCTAssertEqual(topGroups(editor.moreMenuItems()).flatMap { $0 }.first, "Save", "\(name): Save first")
+                let collapsed = narrowMenu(editor).children
+                let edit = layout.readMode && !layout.iPad
+                XCTAssertEqual(topGroups(collapsed), (edit ? [["Edit"]] : []) + want, "\(name), bar collapsed")
+                let rows = topGroups(collapsed).flatMap { $0 }
+                XCTAssertEqual(Array(rows.prefix(edit ? 2 : 1)), edit ? ["Edit", "Save"] : ["Save"], "\(name), bar collapsed: Save first (after Edit)")
+                assertNoDuplicates(narrowMenu(editor), "\(name), bar collapsed")
+                assertNoDuplicates(overflowMenu(editor, collapsed: true), "\(name), every button collapsed")
+                assertNoDuplicates(overflowMenu(editor, collapsed: false), "\(name), none collapsed")
+            }
+        }
+    }
+
+    // MARK: Share…
+
+    /// Share… shows the share sheet with one item: a copy of the document
+    /// as it is now, as a file named like the document; the copy goes when
+    /// the sheet is done.
+    func testShareSharesACopyNamedForTheDocument() throws {
+        for ext in ["md", "txt"] {
+            let editor = editor(Self.layouts[0], ext)
+            defer { WindowSupport.overrideForTests = nil }
+            editor.textView.text += "Unsaved line.\n"
+            let share = try XCTUnwrap(actions(editor.moreMenuItems()).first { $0.accessibilityIdentifier == "editor.menu.share" })
+            XCTAssertEqual(share.title, "Share…")
+            XCTAssertTrue(flatten(UIMenu(children: editor.moreMenuItems())).contains { $0.title == "Share…" && $0.path == ["Share & Export"] })
+            editor.shareDocumentCopy()
+            // The share sheet presents once its activities are loaded.
+            for _ in 0..<50 where editor.presentedViewController == nil {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+            let activity = try XCTUnwrap(editor.presentedViewController as? UIActivityViewController, "\(ext): no share sheet")
+            XCTAssertEqual(editor.sharedCopyItems.count, 1)
+            let file = try XCTUnwrap(editor.sharedCopyItems.first)
+            XCTAssertTrue(file.isFileURL)
+            XCTAssertEqual(file.lastPathComponent, editor.document.displayName)
+            XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), editor.textView.text)
+            activity.completionWithItemsHandler?(nil, false, nil, nil)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "the copy stays after the sheet")
+            editor.dismiss(animated: false)
         }
     }
 

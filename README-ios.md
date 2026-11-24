@@ -56,11 +56,14 @@ Reopen Closed Tab).
 
 Build 18 (from a device check of build 17):
 
-- **A shorter ••• menu.** Six rows: Find › (Find, Find and Replace,
-  Find TODOs, Mark All, Clear Marks), Preview › (View › for a document
-  without a preview: Wrap Lines, Show Invisibles, Readable Width), Ask
-  Cedric, Save, More › and Settings; an iPhone adds Edit / Done when its
-  button doesn't fit the bar. More › has Export & Print ›, View ›, Go to
+- **A shorter ••• menu, file actions first.** Seven rows in three groups,
+  the way document apps lead (Pages, Notes, Runestone): Save and Share &
+  Export › (Share…, a copy of the document for another app or person,
+  Print…, Export as HTML…, Export as PDF…); Find › (Find, Find and
+  Replace, Find TODOs, Mark All, Clear Marks), Preview › (View › for a
+  document without a preview: Wrap Lines, Show Invisibles, Readable
+  Width) and Ask Cedric; More › and Settings. An iPhone adds Edit / Done
+  first when its button doesn't fit the bar. More › has View ›, Go to
   Line…, Open Quickly…, Statistics…, Cedric's checks, Writing Mode,
   Language, Indentation, Bookmarks, Folding, Encoding and Line Endings,
   Revert and Restore Previous Version. Nothing that was reachable is gone,

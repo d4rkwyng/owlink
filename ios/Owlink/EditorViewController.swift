@@ -804,10 +804,16 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        // Six rows (0.5.2 (18): the menu was too long): Find ›, Preview ›
-        // (View › without a preview), Ask Cedric, Save, More ›, Settings.
-        // The bar's buttons that collapse into the menu add nothing to it
-        // but Edit / Done (read mode, on an iPhone): seven rows at most.
+        // Seven rows, in three groups, the way document apps lead (Pages,
+        // Notes, Runestone: file actions first, Settings last): Save, Share
+        // & Export › | Find ›, Preview › (View › without a preview), Ask
+        // Cedric | More ›, Settings. The bar's buttons that collapse into
+        // the menu add nothing to it but Edit / Done (read mode, on an
+        // iPhone), before Save: eight rows at most.
+        let share = UIAction(title: String(localized: "Share…"), image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+            self?.shareDocumentCopy()
+        }
+        share.accessibilityIdentifier = "editor.menu.share"
         let findNow = UIAction(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
             self?.textView.findInteraction?.presentFindNavigator(showingReplace: false)
         }
@@ -817,23 +823,25 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             UIMenu(options: .displayInline, children: markActions()),
         ])
         let viewMenu = UIMenu(title: String(localized: "View"), image: UIImage(systemName: "eyeglasses"), children: [wrap, invisibles, readable])
-        let exportMenu = UIMenu(title: String(localized: "Export & Print"), image: UIImage(systemName: "square.and.arrow.up"),
-                                children: [print, exportHTML, exportPDF])
+        let shareMenu = UIMenu(title: String(localized: "Share & Export"), image: UIImage(systemName: "square.and.arrow.up"), children: [
+            UIMenu(options: .displayInline, children: [share, print]),
+            UIMenu(options: .displayInline, children: [exportHTML, exportPDF]),
+        ])
         let preview = previewSubmenu()
         var tools: [UIMenuElement] = [fixTyposAction(), check]
         if let checkScript = checkScriptAction() { tools.append(checkScript) }
         var fileGroup: [UIMenuElement] = [revert, previousVersionsMenu()]
         if WindowSupport.multipleScenes { fileGroup.append(Self.newWindowAction()) }
         let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
-            UIMenu(options: .displayInline, children: [exportMenu] + (preview == nil ? [] : [viewMenu])),
+            UIMenu(options: .displayInline, children: preview == nil ? [] : [viewMenu]),
             UIMenu(options: .displayInline, children: [goTo, quickly, statistics]),
             UIMenu(options: .displayInline, children: tools),
             UIMenu(options: .displayInline, children: [writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu()]),
             UIMenu(options: .displayInline, children: fileGroup),
-        ])
-        return [UIMenu(options: .displayInline, children: [findMenu, preview ?? viewMenu, ask]),
-                UIMenu(options: .displayInline, children: [save, more]),
-                UIMenu(options: .displayInline, children: [settings])]
+        ].filter { !$0.children.isEmpty })
+        return [UIMenu(options: .displayInline, children: [save, shareMenu]),
+                UIMenu(options: .displayInline, children: [findMenu, preview ?? viewMenu, ask]),
+                UIMenu(options: .displayInline, children: [more, settings])]
     }
 
     /// What a bar button shows when the bar runs out of room and it
@@ -3601,6 +3609,67 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             try? manager.removeItem(at: directory)
             showExportError(error)
         }
+    }
+
+    /// What the last Share… handed the share sheet (a copy of the
+    /// document's file); the snapshot tests read it.
+    private(set) var sharedCopyItems: [URL] = []
+
+    /// Share…: a copy of the document as it is now (unsaved edits too), as
+    /// a file named like the document, in the share sheet (as Notes' Send a
+    /// Copy). In the document's encoding and line endings; the copy is
+    /// removed when the sheet is done.
+    @objc func shareDocumentCopy() {
+        let manager = FileManager.default
+        guard let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            showExportError(CocoaError(.fileNoSuchFile))
+            return
+        }
+        let directory = caches.appendingPathComponent("ShareCopy-\(UUID().uuidString)", isDirectory: true)
+        do {
+            let text = textView.text ?? ""
+            guard let data = TextCodec.encode(text, encoding: document.encoding, lineEnding: document.lineEnding,
+                                              includeBOM: document.currentState.hasBOM) else {
+                throw TextDocument.OpenError.unencodable(document.encoding)
+            }
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let url = directory.appendingPathComponent(document.displayName)
+            try data.write(to: url, options: .atomic)
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            activity.completionWithItemsHandler = { _, _, _, _ in try? manager.removeItem(at: directory) }
+            activity.view.accessibilityIdentifier = "editor.shareSheet"
+            if let popover = activity.popoverPresentationController {
+                if let button = overflowButton() {
+                    popover.sourceView = button
+                    popover.sourceRect = button.bounds
+                } else {
+                    popover.sourceView = view
+                    popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+                    popover.permittedArrowDirections = []
+                }
+            }
+            sharedCopyItems = [url]
+            present(activity, animated: true)
+        } catch {
+            try? manager.removeItem(at: directory)
+            showExportError(error)
+        }
+    }
+
+    /// The system's ••• button in the navigation bar, if it is there to
+    /// anchor a popover to (UIKit doesn't hand it out: found by its label).
+    private func overflowButton() -> UIView? {
+        guard let bar = navigationController?.navigationBar, bar.window != nil else { return nil }
+        let labels: Set<String> = ["More", String(localized: "More")]
+        func find(_ v: UIView) -> UIView? {
+            if v is UIControl || v.isAccessibilityElement, let label = v.accessibilityLabel, labels.contains(label),
+               !v.isHidden, v.alpha > 0, !v.bounds.isEmpty {
+                return v
+            }
+            for s in v.subviews { if let found = find(s) { return found } }
+            return nil
+        }
+        return find(bar)
     }
 
     private func showExportError(_ error: Error) {

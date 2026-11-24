@@ -213,18 +213,39 @@ final class MenuReachabilityTests: XCTestCase {
         }
     }
 
-    /// Six or seven rows at the top of the ••• menu, for each size class
+    /// Share… (new in 0.5.2 (18), a copy of the document in the share
+    /// sheet) is reachable by touch in every layout, bar wide and collapsed,
+    /// in Share & Export › beside Print… and the exports.
+    func testShareReachableByTouch() {
+        for sc in Self.sizeClasses {
+            for ext in Self.documents {
+                let now = reach(sc, ext)
+                for title in ["Share…", "Print…", "Export as HTML…", "Export as PDF…"] {
+                    XCTAssertTrue(now.expanded.contains(title), "\(key(sc, ext)): \(title) by touch (bar not collapsed)")
+                    XCTAssertTrue(now.collapsed.contains(title), "\(key(sc, ext)): \(title) by touch (bar collapsed)")
+                }
+                let editor = editor(sc, ext)
+                let share = allSubmenus(editor.moreMenuItems()).first { $0.title == "Share & Export" }
+                XCTAssertEqual(share.map(titles), ["Share…", "Print…", "Export as HTML…", "Export as PDF…"], key(sc, ext))
+            }
+        }
+    }
+
+    /// At most seven rows at the top of the ••• menu, for each size class
     /// and document: with no bar button collapsed into it, and with the
-    /// ones a narrow bar collapses (all but Undo and Redo).
-    func testTopLevelHasSixOrSevenRows() {
+    /// ones a narrow bar collapses (all but Undo and Redo). Eight only on
+    /// an iPhone in read mode with the bar collapsed, where the eighth is
+    /// Edit.
+    func testTopLevelHasAtMostSevenRows() {
         for sc in Self.sizeClasses {
             for ext in Self.documents {
                 let editor = editor(sc, ext)
                 let none = topLevelRows(editor.moreMenuItems())
                 let narrow = topLevelRows(narrowCollapse(editor).map(overflowRepresentation) + editor.moreMenuItems())
-                for (what, rows) in [("none collapsed", none), ("narrow bar", narrow)] {
-                    XCTAssertTrue((6...7).contains(rows.count), "\(key(sc, ext)), \(what): \(rows.count) rows: \(rows)")
-                }
+                XCTAssertLessThanOrEqual(none.count, 7, "\(key(sc, ext)), none collapsed: \(none.count) rows: \(none)")
+                let withEdit = sc.readMode && !sc.iPad
+                XCTAssertLessThanOrEqual(narrow.count, withEdit ? 8 : 7, "\(key(sc, ext)), narrow bar: \(narrow.count) rows: \(narrow)")
+                if narrow.count == 8 { XCTAssertEqual(narrow.first, "Edit", "\(key(sc, ext)): the eighth row is Edit") }
             }
         }
     }

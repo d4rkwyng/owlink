@@ -169,26 +169,61 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(preview.waitForExistence(timeout: 5), "no Preview submenu in the ••• menu")
         let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
-        // Six or seven rows (0.5.2 (18)): Find ›, Preview ›, Ask Cedric,
-        // Save, More ›, Settings, and Edit on an iPhone (read mode).
-        // (The menu's cells don't expose their titles to XCUITest: counted only.)
+        // Seven rows (0.5.2 (18)): Save, Share & Export › | Find ›,
+        // Preview ›, Ask Cedric | More ›, Settings; eight with Edit first
+        // on an iPhone in read mode (its bar button collapsed).
+        // (The menu's cells don't expose their titles to XCUITest: counted,
+        // and the order checked by where the rows' buttons are.)
         let rows = app.collectionViews.firstMatch.cells.count
         print("MENU-TOP-ROWS \(device): \(rows)")
-        XCTAssertTrue((6...7).contains(rows), "\(rows) rows at the top of the ••• menu")
+        let edit = app.collectionViews.buttons["Edit"].firstMatch
+        let editInMenu = edit.exists
+        XCTAssertEqual(rows, editInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Edit in it: \(editInMenu))")
+        var order = ["Save", "Share & Export", "Find", "Preview", "Ask Cedric", "More", "Settings"]
+        if editInMenu { order.insert("Edit", at: 0) }
+        let ys = order.map { app.collectionViews.buttons[$0].firstMatch.frame.minY }
+        XCTAssertEqual(ys, ys.sorted(), "the ••• menu's rows not in the order \(order): \(ys)")
+        XCTAssertEqual(Set(ys).count, ys.count, "two rows at the same place: \(ys)")
+        if editInMenu { shoot("menu-readmode") }
         preview.tap()
         let focus = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
         XCTAssertEqual(focus.count, 1, "Focus Preview more than once in the Preview submenu")
         shoot("menu-preview-submenu")
-        // More › and its Export & Print › (0.5.2 (18)).
+        // Share & Export › (0.5.2 (18)): Share…, Print… and the exports.
+        closeMenu(app)
+        more.tap()
+        openSubmenu(app, "Share & Export")
+        for item in ["editor.menu.share", "editor.menu.print", "editor.menu.exportHTML", "editor.menu.exportPDF"] {
+            XCTAssertTrue(app.collectionViews.buttons[item].firstMatch.waitForExistence(timeout: 5), "no \(item) in Share & Export ›")
+        }
+        XCTAssertTrue(app.collectionViews.buttons["Share…"].firstMatch.exists, "no Share… in Share & Export ›")
+        shoot("menu-share-export")
+        // More ›, without Export & Print › now.
         closeMenu(app)
         more.tap()
         openSubmenu(app, "More")
         XCTAssertTrue(app.collectionViews.buttons["Go to Line…"].firstMatch.waitForExistence(timeout: 5), "no Go to Line… in More ›")
+        XCTAssertFalse(app.collectionViews.buttons["Export & Print"].firstMatch.exists, "Export & Print › still in More ›")
         shoot("menu-more")
-        openSubmenu(app, "Export & Print")
-        XCTAssertTrue(app.collectionViews.buttons["Export as PDF…"].firstMatch.waitForExistence(timeout: 5), "no Export as PDF… in Export & Print ›")
-        shoot("menu-export")
+    }
+
+    /// Share… (Share & Export ›) brings up the share sheet with the
+    /// document's copy; it is dismissed without sharing.
+    func testShareOpensTheShareSheet() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        openSubmenu(app, "Share & Export")
+        let share = app.collectionViews.buttons["editor.menu.share"].firstMatch
+        XCTAssertTrue(share.waitForExistence(timeout: 5), "no Share… in Share & Export ›")
+        share.tap()
+        let sheet = app.descendants(matching: .any)["editor.shareSheet"].firstMatch
+        let named = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "README")).firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 10) || named.waitForExistence(timeout: 5), "no share sheet")
+        shoot("share-sheet")
+        let close = app.buttons["Close"].firstMatch
+        if close.exists { close.tap() } else { closeMenu(app) }
     }
 
     // MARK: Settings and the back chevron (0.5.2 (17))
@@ -223,7 +258,7 @@ final class OwlinkUITests: XCTestCase {
         return item
     }
 
-    /// Opens a submenu of the open ••• menu (More ›, Export & Print ›, …).
+    /// Opens a submenu of the open ••• menu (More ›, Share & Export ›, …).
     private func openSubmenu(_ app: XCUIApplication, _ label: String) {
         menuItem(app, label).tap()
         sleep(1) // the submenu's animation
