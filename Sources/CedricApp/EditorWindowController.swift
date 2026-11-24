@@ -1676,6 +1676,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewWindow = nil
         previewPane = nil
         previewTimer?.invalidate()
+        // The editor may not become key again: the bar's eye turns off here.
+        contextBar?.refreshStates()
         onChange?(self)
     }
 

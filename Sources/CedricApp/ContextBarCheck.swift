@@ -347,6 +347,8 @@ extension DevChecks {
                 key("p", [.command, .option, .shift])
                 expect(tsvTab.previewDetached && eye.state == .on, "TSV: ⇧⌥⌘P opens it detached, the toggle shows on")
                 tsvTab.previewWindow?.window?.performClose(nil)
+                expect(!tsvTab.previewVisible && eye.state == .off && eye.accessibilityValue() as? String == "off",
+                       "TSV: closing the detached window turns the toggle off")
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "dark", theme: .dark, system: nil))
                 // Closed again: the Markdown steps below run as before.
                 for t in app.tabs where ["bar.csv", "bar.tsv"].contains(t.doc.fileURL?.lastPathComponent ?? "") {
