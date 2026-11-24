@@ -192,13 +192,25 @@ public final class WikiVault: @unchecked Sendable {
             let parts = path.split(separator: "/")
             if path.isEmpty || path == "current" {
                 attachmentFolder = documentFolder
-            } else if path == "/" {
-                attachmentFolder = root
-            } else if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\"),
-                      !path.contains("\0"), !path.contains(":") {
-                let base = path.hasPrefix("./") ? documentFolder : root
-                let folder = base.appendingPathComponent(path).standardizedFileURL
-                if Self.contains(folder, in: root) { attachmentFolder = folder }
+            } else {
+                #if os(iOS)
+                // iOS also takes Obsidian's "/" (the vault root) and "./sub"
+                // (under the note's folder), and refuses ':' and NUL. The Mac
+                // keeps 0.5.2's rule (2c8664a): a relative path under the root.
+                if path == "/" {
+                    attachmentFolder = root
+                } else if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\"),
+                          !path.contains("\0"), !path.contains(":") {
+                    let base = path.hasPrefix("./") ? documentFolder : root
+                    let folder = base.appendingPathComponent(path).standardizedFileURL
+                    if Self.contains(folder, in: root) { attachmentFolder = folder }
+                }
+                #else
+                if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\") {
+                    let folder = root.appendingPathComponent(path).standardizedFileURL
+                    if Self.contains(folder, in: root) { attachmentFolder = folder }
+                }
+                #endif
             }
         }
         built = Date()
