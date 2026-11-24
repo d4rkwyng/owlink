@@ -632,11 +632,14 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// A navigation response the policy above let through must still be
-    /// the preview's own page: never a web page (a redirect is a new
+    /// the page being loaded (`expectedPageURL`, set until it finishes or
+    /// fails): never a web page or another document (a redirect is a new
     /// navigation action, so this is a second line, failing closed).
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame) ? .allow : .cancel)
+        let ours = PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame,
+                                                    expectedPage: expectedPageURL)
+        decisionHandler(ours ? .allow : .cancel)
     }
 
     /// No new windows: `target=_blank` and `window.open` clicks come through

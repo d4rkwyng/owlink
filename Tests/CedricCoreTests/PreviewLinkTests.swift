@@ -160,20 +160,51 @@ import Testing
         for s in ["about:blankevil", "about:blank-x", "about:blanks#x", "about:blankevil%23x", "about:blank?x", "about:blank/x", "about:srcdoc", "about:"] {
             guard let u = URL(string: s) else { continue }
             #expect(!PreviewNavigation.isPageScheme(u), "\(s)")
-            #expect(!PreviewNavigation.allowsResponse(url: u, mainFrame: true), "\(s)")
+            #expect(!PreviewNavigation.allowsResponse(url: u, mainFrame: true, expectedPage: u), "\(s)")
             #expect(decide(url: u, page: u, expected: u, loading: true) == .cancel, "\(s)")
             #expect(decide(url: u, click: true, page: URL(string: "about:blank")) == .route, "\(s)")
         }
     }
 
     @Test func onlyThePagesOwnResponseIsShown() {
-        #expect(PreviewNavigation.allowsResponse(url: page, mainFrame: true))
-        #expect(PreviewNavigation.allowsResponse(url: URL(string: "about:blank"), mainFrame: true))
+        let blank = URL(string: "about:blank")!
+        #expect(PreviewNavigation.allowsResponse(url: page, mainFrame: true, expectedPage: page))
+        #expect(PreviewNavigation.allowsResponse(url: blank, mainFrame: true, expectedPage: blank))
+        // The same URL from WebKit's bytes (what the delegate gets) matches too.
+        #expect(PreviewNavigation.allowsResponse(url: Self.webKitURL(page.absoluteString), mainFrame: true, expectedPage: page))
+        #expect(PreviewNavigation.allowsResponse(url: Self.webKitURL("about:blank"), mainFrame: true, expectedPage: blank))
         for s in ["https://example.com/", "http://example.com/", "about:srcdoc", "about:foo", "file:///etc/hosts", "data:text/html,x", "x-unknown:y"] {
-            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true), "\(s)")
+            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true, expectedPage: page), "\(s)")
+            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true, expectedPage: URL(string: s)), "\(s), even if expected")
         }
-        #expect(!PreviewNavigation.allowsResponse(url: page, mainFrame: false), "no frame")
-        #expect(!PreviewNavigation.allowsResponse(url: nil, mainFrame: true))
+        #expect(!PreviewNavigation.allowsResponse(url: page, mainFrame: false, expectedPage: page), "no frame")
+        #expect(!PreviewNavigation.allowsResponse(url: nil, mainFrame: true, expectedPage: page))
+    }
+
+    // Fable 5.2 should-fix: a page-scheme response is not enough; it must be
+    // the very page Cedric is loading.
+    @Test func aResponseMustBeTheExpectedPageExactly() {
+        let blank = URL(string: "about:blank")!
+        // Not loading (expectedPage nil): nothing, not even the page itself.
+        #expect(!PreviewNavigation.allowsResponse(url: page, mainFrame: true, expectedPage: nil))
+        #expect(!PreviewNavigation.allowsResponse(url: blank, mainFrame: true, expectedPage: nil))
+        // Another cedric-doc page, a sibling or a parent folder.
+        for s in ["cedric-doc://doc/tmp/other/", "cedric-doc://doc/tmp/", "cedric-doc://doc/tmp/vault/sub/", "cedric-doc://other/tmp/vault/"] {
+            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true, expectedPage: page), "\(s)")
+        }
+        // The page with a fragment or a query is not the page loaded.
+        #expect(!PreviewNavigation.allowsResponse(url: URL(string: page.absoluteString + "#x"), mainFrame: true, expectedPage: page))
+        #expect(!PreviewNavigation.allowsResponse(url: URL(string: page.absoluteString + "?x"), mainFrame: true, expectedPage: page))
+        // The blank page while a cedric-doc page loads, and the other way round.
+        #expect(!PreviewNavigation.allowsResponse(url: blank, mainFrame: true, expectedPage: page))
+        #expect(!PreviewNavigation.allowsResponse(url: page, mainFrame: true, expectedPage: blank))
+        // Look-alikes and anchor spellings of the blank page.
+        for s in ["about:blankevil", "about:blank#x", "about:blank%23x", "about:blank?x"] {
+            #expect(!PreviewNavigation.allowsResponse(url: URL(string: s), mainFrame: true, expectedPage: blank), "\(s)")
+            #expect(!PreviewNavigation.allowsResponse(url: Self.webKitURL(s), mainFrame: true, expectedPage: blank), "\(s) from WebKit")
+        }
+        // The expected page in a subframe.
+        #expect(!PreviewNavigation.allowsResponse(url: blank, mainFrame: false, expectedPage: blank))
     }
 
     @Test func noWebPageLoadsWithoutAClick() {
