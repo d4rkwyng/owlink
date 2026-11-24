@@ -167,15 +167,19 @@ final class OwlinkUITests: XCTestCase {
     }
 
     /// Find: the magnifying glass in the bar, or on a narrow iPhone bar
-    /// (where Edit takes the room) its item in the ••• menu.
+    /// (where Edit takes the room) Find in the ••• menu's Find › submenu
+    /// (0.5.2 (18): the top-level row opens the submenu, not the navigator).
     func testFindNavigatorOpens() throws {
         let app = launch("sample.swift", fresh: true)
         _ = editor(app)
         let find = app.navigationBars.buttons["editor.find"]
         if find.waitForExistence(timeout: 2) { find.tap() } else {
             app.navigationBars.buttons["More"].firstMatch.tap()
-            let item = app.collectionViews.buttons["Find"].firstMatch
-            XCTAssertTrue(item.waitForExistence(timeout: 5), "no Find in the bar or the ••• menu")
+            let submenu = app.collectionViews.buttons["Find"].firstMatch
+            XCTAssertTrue(submenu.waitForExistence(timeout: 5), "no Find in the bar or the ••• menu")
+            submenu.tap()
+            let item = app.collectionViews.buttons["editor.menu.find"].firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "no Find in the ••• menu's Find › submenu")
             item.tap()
         }
         // The system find navigator's field (a search field, not a text field).
@@ -284,18 +288,58 @@ final class OwlinkUITests: XCTestCase {
         more.tap()
     }
 
-    /// An item of the open ••• menu, scrolled to (the menu is long).
+    /// An item of the open ••• menu (or of an open submenu). The ••• menu's
+    /// top level is short (0.5.2 (18): seven or eight rows) and a swipe on a
+    /// list that fits closes the menu, so the list is scrolled only if it
+    /// runs past its frame (More › and Language › can, on an iPhone).
     private func menuItem(_ app: XCUIApplication, _ label: String) -> XCUIElement {
         let item = app.collectionViews.buttons[label].firstMatch
-        // Down the menu, then back up if a swipe went past it.
+        // Down the list, then back up if a swipe went past it.
         for i in 0..<14 {
             if item.waitForExistence(timeout: 1), item.isHittable { return item }
-            let list = app.collectionViews.firstMatch
-            guard list.exists else { break }
+            guard let list = scrollingMenuList(app) else { break }
             if i < 7 { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
         }
         XCTAssertTrue(item.exists && item.isHittable, "no \(label) in the ••• menu")
         return item
+    }
+
+    /// The open menu's topmost list (a submenu is shown over its parent),
+    /// if it is open and its rows run past the part of it on screen; nil if
+    /// it fits.
+    private func scrollingMenuList(_ app: XCUIApplication) -> XCUIElement? {
+        let lists = app.collectionViews.allElementsBoundByIndex
+        guard let list = lists.last, list.exists, let shot = try? list.snapshot() else { return nil }
+        var rows: [CGRect] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if e.elementType == .cell { rows.append(e.frame) }
+            e.children.forEach(walk)
+        }
+        walk(shot)
+        guard let top = rows.map(\.minY).min(), let bottom = rows.map(\.maxY).max() else { return nil }
+        // The list's own frame runs past the screen (an iPhone's ••• menu:
+        // y 62 to 936 on an 874-point screen), so the rows are measured
+        // against the part of it in the window.
+        let window = app.windows.firstMatch.frame
+        let shown = window.isEmpty ? shot.frame : shot.frame.intersection(window)
+        return top < shown.minY - 1 || bottom > shown.maxY + 1 ? list : nil
+    }
+
+    /// Looks at every row of the open menu: once if it fits, else at each
+    /// step of a scroll through it, and back to the top. Only a list that
+    /// scrolls is swiped, and only while it is still open.
+    private func readOpenMenu(_ app: XCUIApplication, _ what: String, _ look: () -> Void) {
+        look()
+        guard let list = scrollingMenuList(app) else { return }
+        var swipes = 0
+        while swipes < 7, list.exists {
+            list.swipeUp(velocity: .slow)
+            swipes += 1
+            XCTAssertTrue(list.exists, "\(what) closed on a swipe through it")
+            guard list.exists else { return }
+            look()
+        }
+        for _ in 0..<swipes where list.exists { list.swipeDown(velocity: .slow) }
     }
 
     /// Opens a submenu of the open ••• menu (More ›, Share & Export ›, …).
@@ -856,8 +900,9 @@ final class OwlinkUITests: XCTestCase {
     // MARK: Focus Preview listed once (0.5.2 (16) findings)
 
     /// Focus Preview is listed once: never in the ••• menu's main list (not
-    /// as a collapsed bar button either, with the preview off or on), once
-    /// in its Preview submenu, at most once in the bar. On every device
+    /// as a collapsed bar button either, with the preview off or on) nor in
+    /// More › or its submenus, once in its Preview submenu, at most once in
+    /// the bar. On every device
     /// the gate runs (iPhone, iPad mini, iPad Pro 13).
     func testFocusPreviewListedOnce() throws {
         let app = launch("README.md", fresh: true)
@@ -870,16 +915,33 @@ final class OwlinkUITests: XCTestCase {
             openMore(app)
             let preview = app.collectionViews.buttons["Preview"].firstMatch
             XCTAssertTrue(preview.waitForExistence(timeout: 5), "\(state): no Preview submenu in the ••• menu")
-            // The whole main list, scrolled through (it is long).
+            // The whole main list (seven or eight rows since 0.5.2 (18):
+            // scrolled through only if it doesn't fit).
             var seen = 0
-            let list = app.collectionViews.firstMatch
-            for _ in 0..<6 {
+            readOpenMenu(app, "\(state): the ••• menu") {
                 seen = max(seen, app.collectionViews.descendants(matching: .any).matching(named).count)
-                list.swipeUp(velocity: .slow)
             }
-            seen = max(seen, app.collectionViews.descendants(matching: .any).matching(named).count)
             XCTAssertEqual(seen, 0, "\(state): Focus Preview in the ••• menu's main list")
-            for _ in 0..<6 { list.swipeDown(velocity: .slow) }
+            // More › and each submenu in it: no Focus Preview either.
+            for nested in [nil, "View", "Writing Mode", "Language", "Encoding and Line Endings",
+                           "Indentation", "Bookmarks", "Folding"] as [String?] {
+                if nested != nil {
+                    closeMenu(app)
+                    openMore(app)
+                }
+                openSubmenu(app, "More")
+                XCTAssertTrue(app.collectionViews.buttons["Go to Line…"].firstMatch.waitForExistence(timeout: 5),
+                              "\(state): More › didn't open")
+                if let nested { openSubmenu(app, nested) }
+                let place = nested.map { "More › \($0) ›" } ?? "More ›"
+                var seenHere = 0
+                readOpenMenu(app, "\(state): \(place)") {
+                    seenHere = max(seenHere, app.collectionViews.descendants(matching: .any).matching(named).count)
+                }
+                XCTAssertEqual(seenHere, 0, "\(state): Focus Preview in \(place)")
+            }
+            closeMenu(app)
+            openMore(app)
             menuItem(app, "Preview").tap()
             let focus = app.collectionViews.buttons.matching(named)
             XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "\(state): no Focus Preview in the Preview submenu")
@@ -941,12 +1003,11 @@ final class OwlinkUITests: XCTestCase {
             if !bad.isEmpty { found[screen, default: []] += bad }
         }
         scan("editor")
-        // The ••• menu, scrolled through, and its Preview submenu.
+        // The ••• menu (scrolled through only if it doesn't fit), and its
+        // Preview submenu.
         openMore(app)
-        let list = app.collectionViews.firstMatch
-        for _ in 0..<7 { scan("••• menu"); list.swipeUp(velocity: .slow) }
-        scan("••• menu")
-        for _ in 0..<7 { list.swipeDown(velocity: .slow) }
+        XCTAssertTrue(app.collectionViews.buttons["Preview"].firstMatch.waitForExistence(timeout: 5), "no ••• menu")
+        readOpenMenu(app, "the ••• menu") { scan("••• menu") }
         menuItem(app, "Preview").tap()
         sleep(1)
         scan("••• › Preview")
