@@ -11,6 +11,9 @@ import CedricCore
 final class OwlEditCard: NSStackView {
     let proposal: OwlEditProposal
     let titleLabel = NSTextField(labelWithString: "")
+    /// "Proposed, not applied": the app says so, whatever the model wrote.
+    /// The card goes on Apply, and the transcript says "Applied."
+    let badgeLabel = NSTextField(labelWithString: OwlProposalWording.badge)
     let reasonLabel = NSTextField(wrappingLabelWithString: "")
     let warningLabel = NSTextField(labelWithString: "")
     let diffView = NSTextView()
@@ -67,6 +70,8 @@ final class OwlEditCard: NSStackView {
 
         titleLabel.stringValue = title(first: p.firstLine, last: p.lastLine)
         titleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        badgeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        badgeLabel.textColor = .systemOrange
         reasonLabel.stringValue = p.reason
         reasonLabel.font = .systemFont(ofSize: 11)
         reasonLabel.textColor = .secondaryLabelColor
@@ -129,7 +134,10 @@ final class OwlEditCard: NSStackView {
         let buttons = NSStackView(views: [applyButton, skipButton, askAgainButton])
         buttons.spacing = 6
 
-        for v in [titleLabel, reasonLabel, warningLabel, scroll, showAllButton, staleLabel, buttons] as [NSView] {
+        let header = NSStackView(views: [titleLabel, badgeLabel])
+        header.spacing = 6
+        header.alignment = .firstBaseline
+        for v in [header, reasonLabel, warningLabel, scroll, showAllButton, staleLabel, buttons] as [NSView] {
             addArrangedSubview(v)
         }
         scroll.widthAnchor.constraint(equalTo: widthAnchor, constant: -12).isActive = true
@@ -260,7 +268,7 @@ final class OwlEditCard: NSStackView {
     }
 
     private func updateAccessLabel() {
-        var label = titleLabel.stringValue
+        var label = titleLabel.stringValue + ". " + badgeLabel.stringValue
         if !proposal.reason.isEmpty { label += ": " + proposal.reason }
         if warnsInvisible { label += ". " + OwlEditInvisibles.warning }
         setAccessibilityLabel(label)

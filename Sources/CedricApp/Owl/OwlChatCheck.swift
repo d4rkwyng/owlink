@@ -373,6 +373,12 @@ enum OwlChatCheck {
             check(chat.transcriptText.contains("Looked at lines"), "the transcript shows what Cedric looked at")
             check(o?.proposal?.anchor == .text && chat.cards.count == 1 && !chat.cardsScroll.isHidden, "propose_edit (find/replace) became a diff card")
             check(chat.isProposalCurrent && chat.cards.first?.applyButton.isEnabled == true, "Apply is enabled while the text is unchanged")
+            // The app, not the model, says it isn't done yet.
+            check(chat.cards.first?.badgeLabel.stringValue == OwlProposalWording.badge
+                  && chat.cards.first?.badgeLabel.isHidden == false, "the card says Proposed, not applied")
+            check(chat.transcriptText.contains(OwlProposalWording.header(count: 1)), "the transcript says Proposed 1 change, not applied")
+            check(!chat.transcriptText.contains("I added") && chat.transcriptText.contains("I propose adding"),
+                  "the model's “I added…” reads as a proposal before Apply")
             check(chat.cards.first?.accessibilityLabel()?.isEmpty == false && chat.cards.first?.diffView.accessibilityValue() as? String != nil,
                   "the card has VoiceOver labels")
             OwlCheck.snapshot(chat.panel, "\(out)/chat-2-diff.png") {
@@ -381,6 +387,7 @@ enum OwlChatCheck {
                 let applied = tab.text
                 check(applied.contains("// \(FakeChatEngine.commentText)\n"), "Apply inserted the comment")
                 check(chat.cards.isEmpty && chat.cardsScroll.isHidden, "the card closes after Apply")
+                check(chat.transcriptText.contains(String(localized: "Applied. ⌘Z undoes it.")), "and the transcript says Applied")
                 check(tab.owl?.chatMood == .flap && tab.owl?.owl.isPlaying == true,
                       "the editor's owl flaps on Apply (\(tab.owl.map { "\($0.chatMood)" } ?? "no owl"))")
                 guard let w = tab.window else { several(tab, chat, out: out); return }
@@ -496,6 +503,40 @@ enum OwlChatCheck {
     static func cancel(_ tab: EditorWindowController, _ chat: OwlChatPanel, out: String) {
         tab.textView.setSelectedRange(NSRange(location: 0, length: 0))
         chat.refresh()
+        OwlCheck.click(chat.actionButtons[.explain]!)
+        check(chat.transcriptText.contains("Processing prompt…") && chat.transcriptText.contains(" s"),
+              "before the first word: “Processing prompt…” with the time, not a bare …")
+        check(chat.actionButtons[.explain]?.isEnabled == true && chat.input.isEnabled && !chat.sendButton.isHidden,
+              "while it runs, a new question can still be asked")
+        after(0.15) {
+            newAskCancels(tab, chat, out: out)
+        }
+    }
+
+    /// A second question while the first runs: the first is cancelled
+    /// (no Stop needed) and nothing of it reaches the second's thread.
+    static func newAskCancels(_ tab: EditorWindowController, _ chat: OwlChatPanel, out: String) {
+        check(chat.running, "the first answer is running")
+        let cancelled = chat.lifecycle.cancelledCount
+        let asks = chat.asks
+        chat.input.stringValue = "Which rows look wrong or suspicious?"
+        chat.send(nil)
+        check(chat.lifecycle.cancelledCount == cancelled + 1, "asking again cancelled the running answer")
+        check(chat.asks == asks + 1 && chat.running, "and the new question started at once")
+        check(chat.transcriptText.contains("Stopped."), "the first answer says it stopped")
+        OwlCheck.snapshot(chat.panel, "\(out)/chat-6-new-ask-cancels.png") {
+            waitDone(chat) { _ in
+                let t = chat.transcriptText
+                let tail = t.components(separatedBy: "Which rows look wrong or suspicious?").last ?? ""
+                check(chat.lastOutcome != nil && !tail.contains("Stopped.") && !tail.contains("Processing prompt"),
+                      "the second question got its own answer, with nothing from the first")
+                check(chat.stopButton.isHidden, "Stop hides once it is answered")
+                stopCheck(tab, chat, out: out)
+            }
+        }
+    }
+
+    static func stopCheck(_ tab: EditorWindowController, _ chat: OwlChatPanel, out: String) {
         OwlCheck.click(chat.actionButtons[.explain]!)
         after(0.15) {
             check(chat.running, "a request is running")

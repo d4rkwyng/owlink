@@ -174,8 +174,11 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var cardsHeight: NSLayoutConstraint!
     private(set) var cards: [OwlEditCard] = []
 
-    private var task: Task<Void, Never>?
+    /// The request in flight: a new one cancels it (`OwlAskLifecycle`).
+    let lifecycle = OwlAskLifecycle()
     private(set) var running = false
+    /// The tool phase (searching) while nothing has been written yet.
+    private var waitingSearching = false
     private var chunkedReviewRunning = false
     private var footerBeforeReview: String?
     private var reviewProgress: String?
@@ -455,7 +458,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     func close() {
         stopTypingIndicator(renderAfter: false)
-        stop(nil)
+        abandon()
         hiddenWithTab = false
         unfollow()
         panel.parent?.removeChildWindow(panel)
@@ -465,7 +468,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     func windowWillClose(_ notification: Notification) {
         stopTypingIndicator(renderAfter: false)
-        stop(nil)
+        abandon()
         hiddenWithTab = false
         // Closed by its own close button or Escape (not `close()`): stop
         // watching the tab's window too.
@@ -551,10 +554,13 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func updateButtons() {
-        sendButton.isHidden = running
+        // Asking again while an answer runs cancels it (`ask`): Ask, the
+        // field and the actions stay on; Stop shows beside them.
+        sendButton.isHidden = false
         stopButton.isHidden = !running
-        for b in actionButtons.values { b.isEnabled = !running }
-        input.isEnabled = !running
+        if !running { stopButton.title = String(localized: "Stop") }
+        for b in actionButtons.values { b.isEnabled = true }
+        input.isEnabled = true
     }
 
     var selectedScope: OwlChatScope {
@@ -605,7 +611,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
         for (index, entry) in h.enumerated() {
             if index == h.count - 1, entry.role == .owl, entry.text.isEmpty, running, typingIndicatorActive {
-                all.append(attributed(OwlChatEntry(role: .owl, text: typingDots)))
+                all.append(attributed(OwlChatEntry(role: .owl, text: waitingLabel)))
             } else {
                 all.append(attributed(entry))
             }
@@ -670,13 +676,15 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run
     /// it" after a high finding or a partial review.
     func checkScriptSafety() {
-        guard !running, let tab, docID != nil else { return }
+        guard let tab, docID != nil else { return }
         // Over the auto-review cap: only once the user confirmed.
         guard !tab.autoReviewCapped || tab.autoReviewAskConfirmed else {
             tab.confirmAskingCedric(over: panel) { [weak self] in self?.checkScriptSafety() }
             return
         }
         guard let id = docID else { return }
+        // A new question cancels the one running.
+        if running { abandon() }
         let text = tab.textView.string
         let language = tab.doc.language
         discardProposal(nil)
@@ -685,9 +693,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         render()
         running = true
         updateButtons()
-        Task { @MainActor [weak self] in
+        lifecycle.start { [weak self] ticket in
             let report = await Task.detached(priority: .userInitiated) { ScriptSafety.check(text, language: language) }.value
-            guard let self, let id = self.docID else { return }
+            guard let self, self.lifecycle.isCurrent(ticket), let id = self.docID else { return }
+            self.lifecycle.finished(ticket)
             self.running = false
             self.lastScan = report.findings
             self.lastScanTruncated = report.truncated
@@ -713,7 +722,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     @objc func send(_ sender: Any?) {
         let q = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty, !running else { return }
+        guard !q.isEmpty else { return }
         input.stringValue = ""
         ask(question: q, action: nil)
     }
@@ -733,7 +742,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     func ask(question: String, action: OwlQuickAction?, selection: NSRange? = nil, scope forced: OwlChatScope? = nil,
              scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true,
              inline: Bool = false) {
-        guard !running, let tab, let id = docID else { return }
+        guard let tab, docID != nil else { return }
         // Over the auto-review cap: asked for, so it may run, once the
         // user has confirmed (the size, and that auto-review is off). The
         // whole-file chunked review starts only from here.
@@ -744,6 +753,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             }
             return
         }
+        // A new question cancels the one running (and its engine
+        // request) before it starts; the user needn't press Stop first.
+        if running { abandon() }
+        guard let id = docID else { return }
         discardProposal(nil)
         forcedVerdict = nil
         verdictStream = nil
@@ -781,16 +794,18 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         tab.owl?.chatCue(.asked)
         // The user asked: this request may load the built-in model
         // (BuiltInLoadIntent). Everything it starts inherits that.
-        task = BuiltInLoad.$intent.withValue(.userAsked) { Task { @MainActor [weak self] in
-            guard let self else { return }
+        BuiltInLoad.$intent.withValue(.userAsked) { lifecycle.start { @MainActor [weak self, snap, history] ticket in
+            guard let self, self.lifecycle.isCurrent(ticket) else { return }
             guard let engine = await OwlChatStore.shared.engine() else {
-                self.finish(nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
+                self.finish(ticket, nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
                 return
             }
+            // Abandoned (a newer question, Stop, closed) while the engine was made.
+            guard self.lifecycle.isCurrent(ticket) else { return }
             self.showEngineTitle(engine)
             let tools = OwlChatStore.shared.useTools(engine)
             if inline, action == .rewrite, (!tools || !OwlChatStore.shared.gate.allowsTools(engine.scoreKey)) {
-                self.finish(nil, error: String(localized: "This model is not enabled for proposed edits."))
+                self.finish(ticket, nil, error: String(localized: "This model is not enabled for proposed edits."))
                 return
             }
             var requestSnapshot = snap
@@ -813,7 +828,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 ctx = context(for: usedScope)
             }
             guard let ctx else {
-                self.finish(nil, error: String(localized: "The selected text is no longer available."))
+                self.finish(ticket, nil, error: String(localized: "The selected text is no longer available."))
                 return
             }
             if let index = self.scopes.firstIndex(of: usedScope) {
@@ -845,7 +860,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                                                       visible: snap.visible, fileName: snap.fileName, language: snap.language,
                                                       facts: snap.facts, grammar: snap.grammar)
                 if clip.text.isEmpty {
-                    self.finish(nil, error: String(localized: "There isn’t enough room in this model’s context for the selected text."))
+                    self.finish(ticket, nil, error: String(localized: "There isn’t enough room in this model’s context for the selected text."))
                     return
                 }
             }
@@ -857,7 +872,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                                      inlineSelectionNote: inlineClip?.note)
             if action == .scriptSafety { req.scanFindings = self.lastScan }
             if let plan = OwlChunkedReviewRunner.plan(req, engine: engine) {
-                guard self.running, !Task.isCancelled else { return }
+                guard self.lifecycle.isCurrent(ticket), !Task.isCancelled else { return }
                 self.chunkedReviewRunning = true
                 self.footerBeforeReview = self.footer.stringValue
                 if let index = self.scopes.firstIndex(of: usedScope), let first = plan.parts.first, let last = plan.parts.last {
@@ -870,13 +885,13 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, model: engine.scoreKey,
                                                               describeError: Self.describe) { [weak self] _, _ in
                     DispatchQueue.main.async { MainActor.assumeIsolated {
-                        guard let self, self.running, self.chunkedReviewRunning else { return }
+                        guard let self, self.lifecycle.isCurrent(ticket), self.chunkedReviewRunning else { return }
                         let progress = String(localized: "Reviewing…")
                         self.reviewProgress = progress
                         self.footer.stringValue = progress
                     } }
                 }
-                self.finish(result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
+                self.finish(ticket, result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
                 return
             }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
@@ -886,18 +901,18 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             if let mode = req.safeClaimGuard { self.verdictStream = ScriptVerdictStream(forced: req.forcedVerdict, guard: mode) }
             do {
                 let outcome = try await OwlChatRunner.run(req, engine: engine, model: engine.scoreKey) { [weak self] ev in
-                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.handle(ev) } }
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.handle(ev, ticket) } }
                 }
                 // Events queued before this point are delivered first.
-                DispatchQueue.main.async { MainActor.assumeIsolated { self.finish(outcome, error: nil) } }
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.finish(ticket, outcome, error: nil) } }
             } catch is CancellationError {
-                self.finish(nil, error: String(localized: "Stopped."))
+                self.finish(ticket, nil, error: String(localized: "Stopped."))
             } catch LocalAIError.cancelled {
-                self.finish(nil, error: String(localized: "Stopped."))
+                self.finish(ticket, nil, error: String(localized: "Stopped."))
             } catch BuiltInError.cancelled {
-                self.finish(nil, error: String(localized: "Stopped."))
+                self.finish(ticket, nil, error: String(localized: "Stopped."))
             } catch {
-                self.finish(nil, error: Self.describe(error))
+                self.finish(ticket, nil, error: Self.describe(error))
             }
         } }
     }
@@ -916,8 +931,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    private func handle(_ ev: OwlChatEvent) {
-        guard running, let id = docID else { return }
+    /// An event from request `ticket`: dropped once that request was
+    /// cancelled or replaced (nothing of it reaches the next question).
+    private func handle(_ ev: OwlChatEvent, _ ticket: OwlAskLifecycle.Ticket) {
+        guard running, lifecycle.isCurrent(ticket), let id = docID else { return }
         switch ev {
         case .text(let t):
             tab?.owl?.chatCue(.streaming)
@@ -937,6 +954,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             }
         case .tool(let name, let summary):
             flush()
+            if name == .searchDocument || name == .getLines || name == .getOutline { waitingSearching = true }
             // Above the answer being written.
             OwlChatStore.shared.insertBeforeLast(OwlChatEntry(role: .tool, text: "· " + summary), in: id)
             render()
@@ -981,15 +999,37 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
+    /// What shows in place of the answer until its first word: "Processing
+    /// prompt… 12 s", never a bare "…" (a whole file's prefill on the
+    /// built-in engine can take minutes).
+    var waitingLabel: String {
+        OwlAskWaiting.label(elapsed: lifecycle.elapsed(), searching: waitingSearching)
+    }
+
     private func startTypingIndicator() {
         stopTypingIndicator(renderAfter: false)
         typingIndicatorActive = true
-        typingDots = "."
-        let timer = Timer(timeInterval: 0.4, repeats: true) { [weak self] _ in
+        waitingSearching = false
+        typingDots = waitingLabel
+        startElapsedTimer()
+    }
+
+    /// Once a second while a request runs: the waiting label's time, then
+    /// (once text streams) Stop's.
+    private func startElapsedTimer() {
+        typingTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.typingIndicatorActive else { return }
-                self.typingDots = self.typingDots.count == 3 ? "." : self.typingDots + "."
-                self.render()
+                guard let self, self.running else { return }
+                if self.typingIndicatorActive {
+                    let label = self.waitingLabel
+                    guard label != self.typingDots else { return }
+                    self.typingDots = label
+                    self.render()
+                } else {
+                    let title = OwlAskWaiting.stopTitle(elapsed: self.lifecycle.elapsed())
+                    if self.stopButton.title != title { self.stopButton.title = title }
+                }
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -997,25 +1037,37 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func stopTypingIndicator(renderAfter: Bool = true) {
-        typingTimer?.invalidate()
-        typingTimer = nil
-        guard typingIndicatorActive else { return }
+        guard typingIndicatorActive else {
+            if !running { typingTimer?.invalidate(); typingTimer = nil }
+            return
+        }
         typingIndicatorActive = false
         transcript.setAccessibilityLabel(String(localized: "Conversation"))
         if renderAfter { render() }
     }
 
     /// A flush timer or a request is pending (checks: none once closed).
-    var hasTimers: Bool { flushTimer != nil || typingTimer != nil || task != nil }
+    var hasTimers: Bool { flushTimer != nil || typingTimer != nil || lifecycle.isRunning }
 
     /// Times streamed text reached the transcript during this answer (checks).
     private(set) var flushes = 0
     /// Characters of answer shown so far (checks: streaming arrives in steps).
     var streamedCount: Int { streamed.count }
 
+    /// Request `ticket` ended: only if it is still the panel's request.
+    private func finish(_ ticket: OwlAskLifecycle.Ticket, _ outcome: OwlChatOutcome?, error: String?,
+                        stopped: Bool = false, failed: Bool = false) {
+        guard lifecycle.isCurrent(ticket) else { return }
+        let cancelled = Task.isCancelled
+        lifecycle.finished(ticket)
+        finish(outcome, error: error, stopped: stopped || cancelled, failed: failed)
+    }
+
     private func finish(_ outcome: OwlChatOutcome?, error: String?, stopped: Bool = false, failed: Bool = false) {
         guard running else { return }
         stopTypingIndicator(renderAfter: false)
+        typingTimer?.invalidate()
+        typingTimer = nil
         flush()
         running = false
         chunkedReviewRunning = false
@@ -1023,20 +1075,31 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         reviewScopeLabel = nil
         if let footerBeforeReview { footer.stringValue = footerBeforeReview; self.footerBeforeReview = nil }
         tab?.contextBar?.refreshStates()
-        tab?.owl?.chatCue(stopped || task?.isCancelled == true ? .stopped : failed || outcome == nil ? .failed : .answered)
-        task = nil
+        tab?.owl?.chatCue(stopped ? .stopped : failed || outcome == nil ? .failed : .answered)
         lastOutcome = outcome
         if let id = docID {
             if let outcome {
                 // An empty answer falls back to what streamed, guarded the same way.
-                let text = OwlChatRunner.storedText(answer: outcome.answer, streamed: streamed, guard: safeClaimGuard, forced: forcedVerdict)
+                var text = OwlChatRunner.storedText(answer: outcome.answer, streamed: streamed, guard: safeClaimGuard, forced: forcedVerdict)
+                // Not applied until Apply: the app says so, not the model.
+                text = OwlProposalWording.guardClaims(text, proposals: outcome.proposals.count)
                 OwlChatStore.shared.replaceLast(OwlChatEntry(role: .owl, text: text, proposals: outcome.proposals), in: id)
+                if !outcome.proposals.isEmpty {
+                    let shown = min(outcome.proposals.count, OwlTools.maxProposals)
+                    OwlChatStore.shared.append(OwlChatEntry(role: .note, text: OwlProposalWording.header(count: shown)), to: id)
+                }
             } else if let error {
                 // A script check cut short still never reads as "safe".
                 let partial = !streamed.isEmpty
                     ? OwlChatRunner.storedText(answer: "", streamed: streamed, guard: safeClaimGuard, forced: forcedVerdict) : streamed
                 let text = partial.isEmpty ? error : partial + " (" + error + ")"
-                OwlChatStore.shared.replaceLast(OwlChatEntry(role: .note, text: text), in: id)
+                // Over the answer being written; a script check stopped
+                // during its offline scan has none yet.
+                if OwlChatStore.shared.history(id).last?.role == .owl {
+                    OwlChatStore.shared.replaceLast(OwlChatEntry(role: .note, text: text), in: id)
+                } else {
+                    OwlChatStore.shared.append(OwlChatEntry(role: .note, text: text), to: id)
+                }
             }
             if let note = pendingInlineNote {
                 OwlChatStore.shared.append(OwlChatEntry(role: .note, text: note), to: id)
@@ -1050,14 +1113,25 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         onFinish?(outcome)
     }
 
+    /// Stop: the request is cancelled (the built-in engine aborts its
+    /// prefill or decode). A whole-file review keeps the parts it
+    /// finished, so it ends when the runner returns; anything else ends now.
     @objc func stop(_ sender: Any?) {
         guard running else { return }
-        task?.cancel()
-        if chunkedReviewRunning {
+        if chunkedReviewRunning, lifecycle.isRunning {
+            lifecycle.stopWaiting()
             stopTypingIndicator()
             return
         }
-        finish(nil, error: String(localized: "Stopped."))
+        abandon()
+    }
+
+    /// Cancels the running request and ends it now ("Stopped."): a new
+    /// question, the panel closing, Stop. Nothing it still sends arrives.
+    func abandon() {
+        guard running else { lifecycle.cancel(); return }
+        lifecycle.cancel()
+        finish(nil, error: String(localized: "Stopped."), stopped: true)
     }
 
     // MARK: The proposed edits
