@@ -944,7 +944,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTex
                         self.footer.stringValue = progress
                     } }
                 }) { _, _ in }
-                self.finish(ticket, result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
+                // Stop after the run returned but before this resumed: the
+                // combined answer is not published as finished; the notes stay.
+                let shown = result.published(cancelled: Task.isCancelled)
+                self.finish(ticket, shown.outcome, error: nil, stopped: shown.stopped, failed: shown.error != nil)
                 return
             }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }

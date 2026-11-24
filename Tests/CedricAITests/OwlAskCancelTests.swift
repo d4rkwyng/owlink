@@ -257,6 +257,47 @@ import CedricCore
         #expect(!result.outcome.answer.contains("PARTIAL SUMMARY"))
     }
 
+    /// Stop after the runner returned its combined answer but before the
+    /// panel resumed to publish it (OwlChatPanel.ask: `published(cancelled:
+    /// Task.isCancelled)` then `finish`): the answer is not shown as
+    /// finished; the section notes are kept.
+    @Test(arguments: [OwlQuickAction?.none, .findProblems])
+    func stopAfterTheCombinedAnswerReturnedKeepsTheNotesNotTheAnswer(action: OwlQuickAction?) async throws {
+        let engine = OwlWholeDocSynthesisTests.Recorder(partReply: { a, _ in "- Line \(a): a finding." },
+                                                        reduceReply: { _ in "FINISHED SUMMARY of the whole document." })
+        var req = Self.doc()
+        req.action = action
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let returned = Box(false)
+        let unpublished = Box<OwlChunkedReviewRunner.Result?>(nil)
+        let task = Task { () -> OwlChunkedReviewRunner.Result in
+            let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, describeError: { "\($0)" }) { _, _ in }
+            unpublished.mutate { $0 = result }
+            returned.mutate { $0 = true }
+            // The panel resumes on the main actor after this; Stop can come first.
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 1_000_000) }
+            return result.published(cancelled: Task.isCancelled)
+        }
+        #expect(await eventually { returned.value })
+        task.cancel()
+        let shown = await task.value
+        // The run itself finished: its answer was the combined one.
+        let finished = try #require(unpublished.value)
+        #expect(!finished.stopped && finished.outcome.answer.hasPrefix("FINISHED SUMMARY"))
+        #expect(finished.published(cancelled: false).outcome == finished.outcome)
+        // Published after Stop: stopped, no combined answer, the notes kept.
+        #expect(shown.stopped)
+        #expect(!shown.outcome.answer.contains("FINISHED SUMMARY"))
+        #expect(shown.outcome.answer.hasSuffix("Stopped."))
+        #expect(shown.outcome.sections.count == plan.parts.count)
+        if action == .findProblems {
+            // The merged findings stand in for the answer, each once.
+            for part in plan.parts { #expect(shown.outcome.answer.contains("- Line \(part.first): a finding.")) }
+        } else {
+            #expect(shown.outcome.answer.contains("not combined"))
+        }
+    }
+
     /// The panel's chunked path in miniature (OwlChatPanel.ask): a new
     /// question cancels the combine call in flight, and the abandoned
     /// run's result never reaches the transcript.
