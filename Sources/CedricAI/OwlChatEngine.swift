@@ -70,12 +70,15 @@ public final class OwlToolbox: @unchecked Sendable {
     private var calls = 0
     private var _proposals: [OwlEditProposal] = []
     private var _picture: Task<OwlRenderedImage, Error>?
+    /// propose_edit's validation for this Ask (one retry; OwlEditGate).
+    private var gate: OwlEditGate
     private let onEvent: @Sendable (OwlChatEvent) -> Void
     public static let maxCalls = OwlTools.maxRounds * OwlTools.maxCallsPerRound
 
     public init(snapshot: OwlDocumentSnapshot, allowed: Set<OwlToolName>, imageSource: (any OwlImageSource)? = nil,
-                inlineSelection: String? = nil,
+                inlineSelection: String? = nil, script: (any OwlScriptSyntaxChecker)? = JSCSyntaxChecker(),
                 onEvent: @escaping @Sendable (OwlChatEvent) -> Void = { _ in }) {
+        self.gate = OwlEditGate(script: script)
         self.snapshot = snapshot
         self.allowed = allowed
         self.imageSource = imageSource
@@ -134,6 +137,7 @@ public final class OwlToolbox: @unchecked Sendable {
             r = OwlToolResult(text: same ? "error: this edit is already proposed" : "error: this overlaps an edit you already proposed (lines \(other.firstLine)-\(other.lastLine)); put both changes in one edit",
                               proposal: nil, summary: String(localized: "overlapping edit refused"), ok: false)
         }
+        if r.proposal != nil { r = lock.withLock { gate.screen(r, in: snapshot) } }
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
@@ -537,8 +541,10 @@ public enum OwlChatRunner {
         }
         var proposals = toolbox.proposals
         if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
-           let p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
+           var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
                                          reason: "", in: req.snapshot) {
+            // No tool loop to retry in: validated and marked directly.
+            p.check = OwlEditValidation.validate(p, in: req.snapshot, script: JSCSyntaxChecker())
             proposals = [p]
             onEvent(.proposal(p))
         }
