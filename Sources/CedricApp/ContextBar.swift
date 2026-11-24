@@ -107,17 +107,24 @@ final class ContextBarView: NSView {
 
     private func button(_ item: ContextBarItem) -> NSButton {
         let menu = item.command.flatMap(Self.menuItem)
-        // A toggle is named for what it shows ("Preview"), its on/off is the value:
-        // the menu item's Show/Hide title changes with the state.
-        let label = item.toggle ? Self.toggleName(menu?.title ?? item.id) : menu?.title ?? item.id
+        let (label, tip) = item.toggle ? Self.toggleLabel(menu, fallback: item.id) : (menu?.title ?? item.id, Self.tooltip(menu))
         let b = NSButton(title: "", target: self, action: #selector(pressed(_:)))
         style(b)
         if item.toggle { b.setButtonType(.pushOnPushOff) }
         b.image = Self.symbol(item.symbol, label)
         if b.image == nil { b.title = label; b.imagePosition = .noImage }
-        b.toolTip = item.toggle ? Self.tooltip(menu).replacingOccurrences(of: menu?.title ?? "", with: label) : Self.tooltip(menu)
+        b.toolTip = tip
         b.setAccessibilityLabel(label)
         return b
+    }
+
+    /// A toggle is named for what it shows ("Preview"), its on/off is the
+    /// value: the menu item's Show/Hide title changes with the state. The
+    /// tooltip carries the menu's shortcut: "Preview (⌥⌘P)". Also the
+    /// status bar's CSV / TSV Preview eye (Bars.swift).
+    static func toggleLabel(_ menu: NSMenuItem?, fallback: String) -> (label: String, tooltip: String) {
+        let label = toggleName(menu?.title ?? fallback)
+        return (label, tooltip(menu).replacingOccurrences(of: menu?.title ?? "", with: label))
     }
 
     /// "Show Preview" / "Hide Preview" → "Preview".

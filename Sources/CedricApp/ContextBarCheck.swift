@@ -263,6 +263,11 @@ extension DevChecks {
                 expect(code.contextBar != nil, "a tab switched to Markdown gets the bar")
                 code.setLanguage(.swift)
                 expect(code.contextBar == nil, "and loses it back in Swift")
+                // CSV / TSV: no Context Bar (its Preview eye is on the status bar: statuszoom).
+                code.setLanguage(.csv)
+                expect(code.contextBar == nil && !code.stack.arrangedSubviews.contains { $0 is ContextBarView },
+                       "a tab switched to CSV / TSV gets no Context Bar")
+                code.setLanguage(.swift)
             },
             sync { typingRounds(tab, toggle: toggleBar) },
             sync {

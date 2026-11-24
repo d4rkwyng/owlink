@@ -807,6 +807,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         statusBar.gitButton.action = #selector(showGitMenu(_:))
         statusBar.languageButton.target = self
         statusBar.encodingButton.target = self
+        statusBar.previewButton.target = self
+        statusBar.previewButton.action = #selector(previewStatusItemPressed(_:))
         statusBar.counts.onClick = { [weak self] in self?.toggleStatsPopover() }
         statusBar.counts.toolTip = String(localized: "Words, reading time, a word goal and a daily target")
     }
@@ -820,6 +822,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         scheduleCounts()
         editing.statsPopover?.scheduleRefresh()
         statusBar.position.stringValue = pos
+        updatePreviewStatusItem()
         StatusBar.fill(statusBar.languageButton, title: doc.languageChoice.displayTitle,
                        items: Language.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.language) },
                        target: self, action: #selector(pickLanguage(_:)))
@@ -836,6 +839,36 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
                        items: [(String(localized: "Convert Line Endings To"), nil, false)]
                         + LineEnding.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.lineEnding) },
                        target: self, action: #selector(pickLineEnding(_:)))
+    }
+
+    /// The status bar's Preview eye (CSV / TSV only): shown for this
+    /// language, on while the preview is docked or detached. Run by
+    /// `updateStatus()` and wherever the preview opens, closes, detaches
+    /// or attaches (`refreshPreviewToggles()`).
+    func updatePreviewStatusItem() {
+        let eye = statusBar.previewButton
+        let shown = doc.language == .csv
+        if eye.isHidden == shown { eye.isHidden = !shown }
+        guard shown else { return }
+        if eye.toolTip == nil || eye.toolTip?.isEmpty == true {
+            let tip = ContextBarView.toggleLabel(ContextBarView.menuItem("togglePreview:"), fallback: String(localized: "Preview")).tooltip
+            if !tip.isEmpty { eye.toolTip = tip }
+        }
+        statusBar.setPreviewState(previewVisible)
+    }
+
+    /// The eye's click (and VoiceOver's press): View › Show Preview, the
+    /// same command as the menu and ⌥⌘P.
+    @objc func previewStatusItemPressed(_ sender: NSButton) {
+        togglePreview()
+        refreshPreviewToggles()
+    }
+
+    /// The preview's on/off changed: the Context Bar's eye (Markdown) and
+    /// the status bar's (CSV / TSV) follow.
+    func refreshPreviewToggles() {
+        contextBar?.refreshStates()
+        updatePreviewStatusItem()
     }
 
     @objc func pickLanguage(_ sender: NSMenuItem) {
@@ -1379,6 +1412,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if sel.length > 0, sel.length < 200 {
             findBar.findField.stringValue = (textView.string as NSString).substring(with: sel)
         }
+        // ⌘F with the detached preview key: the editor takes the keyboard first.
+        if window?.isKeyWindow == false { window?.makeKeyAndOrderFront(nil) }
         window?.makeFirstResponder(findBar.findField)
         findBar.findField.selectText(nil)
         findChanged()
@@ -1489,7 +1524,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if showsCertificatePanel { CertificatePanel.closedByUser = false }
         dock(makePreviewPane())
         renderPreview()
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1644,7 +1679,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         dock(makePreviewPane(), width: width)
         renderPreview()
         updatePreviewBar()
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
         guard let width, width.isFinite, width > 0 else { return }
         // The split can still be 0 wide on this turn (the window's frame
@@ -1662,13 +1697,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewPane?.removeFromSuperview()
         previewPane = nil
         if docked { FolderSidebar.keepWidth(in: split) }
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
     /// View › Detach Preview (⇧⌥⌘P), or the header's Detach: the preview
     /// in its own window, bound to this tab's document. `frame`: where it
     /// was (session restore); `activate` false leaves the focus alone.
+    /// Activated, the new window comes to the front and takes the focus
+    /// (any preview: Markdown, CSV, HTML, the certificate panel).
     func detachPreview(frame: String? = nil, activate: Bool = true) {
         guard !previewDetached else { return }
         guard previewApplies else { NSSound.beep(); return }
@@ -1678,10 +1715,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if docked { FolderSidebar.keepWidth(in: split) }
         let pw = PreviewWindowController(tab: self, pane: pane, frame: frame)
         previewWindow = pw
-        pw.window?.orderFront(nil)
-        if activate { window?.makeKeyAndOrderFront(nil) }
+        if activate { pw.window?.makeKeyAndOrderFront(nil) } else { pw.window?.orderFront(nil) }
         renderPreview()
         updatePreviewBar()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1694,6 +1731,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         window?.makeKeyAndOrderFront(nil)
         renderPreview()
         updatePreviewBar()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1706,6 +1744,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewWindow = nil
         previewPane = nil
         previewTimer?.invalidate()
+        // The editor may not become key again: the eyes turn off here.
+        refreshPreviewToggles()
         onChange?(self)
     }
 

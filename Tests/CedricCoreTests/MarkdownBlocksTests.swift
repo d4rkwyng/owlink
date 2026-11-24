@@ -198,11 +198,29 @@ import Testing
         #expect(Set(md.map(\.symbol)).count == md.count, "every item has its own symbol")
         // No bar for code or plain text.
         for l in [Language.plain, .swift, .python, .json, .html, .csv] { #expect(ContextBarSet.items(for: l).isEmpty) }
+        // Only Markdown has a set (CSV / TSV's Preview eye is on the status bar).
+        #expect(Language.allCases.filter(ContextBarSet.hasBar) == [.markdown])
         #expect(ContextBarSet.hasBar(.markdown) && !ContextBarSet.hasBar(.swift))
         #expect(all.suffix(2).map(\.id) == ["explain", "rewrite"])
         #expect(all.suffix(2).map(\.command) == ["explainSelectionMenu:", "rewriteSelectionMenu:"])
         #expect(all.suffix(2).allSatisfy { $0.trailing && !$0.toggle })
         #expect(Set(all.map(\.symbol)).count == all.count)
+    }
+
+    /// CSV / TSV: no Context Bar (its Preview eye is on the status bar,
+    /// beside the format picker, Bars.swift); Markdown's bar keeps its
+    /// eye. .tsv, .tab and .psv are CSV / TSV too, with a preview.
+    @Test func contextBarCSVPreviewToggle() {
+        #expect(ContextBarSet.items(for: .csv).isEmpty)
+        #expect(!ContextBarSet.hasBar(.csv))
+        let mdPreview = ContextBarSet.items(for: .markdown).first { $0.id == "preview" }
+        #expect(mdPreview?.command == "togglePreview:" && mdPreview?.symbol == "eye" && mdPreview?.toggle == true && mdPreview?.trailing == true)
+        #expect(Language.csv.hasPreview)
+        for name in ["people.csv", "cols.tsv", "data.tab", "pipes.psv"] {
+            let l = LanguageDetector.detect(fileName: name, content: "a,b\n1,2\n")
+            #expect(l == .csv, "\(name)")
+            #expect(l.hasPreview && !ContextBarSet.hasBar(l), "\(name)")
+        }
     }
 
     /// UX review #21: Strikethrough on the bar (Format › Markdown's ⇧⌘X
