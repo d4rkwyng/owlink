@@ -4,6 +4,15 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Changed
+- **The built-in engine's context fits your Mac's memory.** Each model gets a 16,384-token context when its weights and that context fit in half of your Mac's memory, else 8,192, and at least 4,096. On an 8 GB Mac that is 8,192 for the Qwen3 4B models and 4,096 for Qwen2.5 Coder 7B; 16 GB and up keep 16,384. How much of a file Ask Cedric sends is worked out from the same number.
+
+### Fixed
+- **Long questions to LM Studio and Ollama are no longer cut off silently.** Ask Cedric reads the context the server runs the model with (LM Studio's loaded context, Ollama's loaded context or `num_ctx`, else their 4,096-token default) and sends no more than fits, splitting a whole-file review into parts when needed. A server that doesn't say keeps the previous limit.
+- **The preview accepts only the page it is loading.** A response for any other page in the preview, such as another document's or a blank page, is refused, also between loads.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security
@@ -284,6 +293,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[Unreleased]: https://github.com/d4rkwyng/owlink/compare/v0.5.2...HEAD
 [0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
 [0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
 [0.5.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.0
