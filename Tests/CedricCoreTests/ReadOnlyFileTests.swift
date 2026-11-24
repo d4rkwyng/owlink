@@ -330,8 +330,10 @@ import Testing
 
     /// The in-place save (folder refusing new files) is bound to the
     /// checked file: swapped between the check and the write for another
-    /// writable file, a link to one, or a read-only file, the save fails
-    /// with an error and neither file changes.
+    /// writable file, a link, or a read-only file, the save fails with an
+    /// error and neither file changes. The link points at the checked file
+    /// itself (renamed to moved.md), so its target passes the device and
+    /// inode match and only `O_NOFOLLOW` refuses it.
     @Test func theInPlaceSaveCantBeRedirectedToAnotherFile() throws {
         enum Swap: CaseIterable { case otherFile, link, readOnly }
         for swap in Swap.allCases {
@@ -352,7 +354,7 @@ import Testing
                     case .otherFile:
                         #expect(rename(other.path, url.path) == 0)
                     case .link:
-                        #expect(symlink("other.md", url.path) == 0)
+                        #expect(symlink("moved.md", url.path) == 0)
                     case .readOnly:
                         #expect((try? Data("read-only\n".utf8).write(to: url)) != nil)
                         #expect(chmod(url.path, 0o444) == 0)
@@ -366,8 +368,8 @@ import Testing
             case .otherFile:
                 #expect(try String(contentsOf: url, encoding: .utf8) == "other\n", "the other writable file is untouched")
             case .link:
-                #expect(try fm.destinationOfSymbolicLink(atPath: url.path) == "other.md", "the link stays a link")
-                #expect(try String(contentsOf: other, encoding: .utf8) == "other\n", "the link's target is untouched")
+                #expect(try fm.destinationOfSymbolicLink(atPath: url.path) == "moved.md", "the link stays a link")
+                #expect(try String(contentsOf: other, encoding: .utf8) == "other\n", "the other file is untouched")
             case .readOnly:
                 #expect(try String(contentsOf: url, encoding: .utf8) == "read-only\n", "the read-only file is untouched")
                 #expect(mode(url) == 0o444)
