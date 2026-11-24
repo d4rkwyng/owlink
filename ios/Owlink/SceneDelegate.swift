@@ -376,4 +376,59 @@ final class EditorNavigationController: UINavigationController {
         return nav.viewControllers.first as? EditorViewController
     }
 
+    /// What the editor's navigation controller shows over the editor: the
+    /// topmost presented controller that is on screen and not on its way
+    /// out.
+    enum Modal: Equatable {
+        case none
+        /// The Ask Cedric sheet: at half height it leaves the editor in
+        /// view, undimmed and in use (the text can keep the keyboard).
+        case askCedric
+        /// Settings, Open Quickly, Statistics, the share sheet…
+        case sheet
+        /// An alert (Go to Line, Save / Don't Save…): it takes the keys.
+        case alert
+    }
+
+    static func modal(over base: UIViewController) -> Modal {
+        var top: UIViewController?
+        var next = base.presentedViewController
+        while let shown = next, !shown.isBeingDismissed, shown.viewIfLoaded?.window != nil {
+            top = shown
+            next = shown.presentedViewController
+        }
+        switch top {
+        case nil: return .none
+        case is UIAlertController: return .alert
+        case is AskSheetHost: return .askCedric
+        default: return .sheet
+        }
+    }
+
+    /// Commands that stay available over a sheet other than Ask Cedric:
+    /// Settings (it goes on top, or does nothing when it is the sheet), and
+    /// Close and Save (Close takes the sheet with the editor; their alerts
+    /// go on top of the sheet).
+    static let availableOverASheet: Set<Selector> = [
+        #selector(EditorViewController.showSettings),
+        #selector(EditorViewController.closeDocument),
+        #selector(EditorViewController.saveDocument),
+    ]
+
+    /// The policy, for the editor's own chain and for the navigation
+    /// controller, browser and scene that hand commands to it:
+    /// - nothing up: every command;
+    /// - Ask Cedric's sheet: every command. The editor is in view and in
+    ///   use; what presents goes on top of Ask Cedric (the editor's
+    ///   `present`), and Ask Cedric… does nothing (already open);
+    /// - another sheet: only `availableOverASheet`;
+    /// - an alert: none.
+    static func allows(_ action: Selector, over modal: Modal) -> Bool {
+        switch modal {
+        case .none, .askCedric: return true
+        case .sheet: return availableOverASheet.contains(action)
+        case .alert: return false
+        }
+    }
+
 }

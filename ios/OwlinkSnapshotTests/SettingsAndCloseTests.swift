@@ -18,6 +18,10 @@ final class SettingsAndCloseTests: XCTestCase {
         var dismissing = false
         var forwardTo: UIResponder?
         var dismissCalls = 0
+        var presentCalls: [UIViewController] = []
+        override func present(_ controller: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+            presentCalls.append(controller)
+        }
         override var presentedViewController: UIViewController? { presented }
         override var presentingViewController: UIViewController? { presenting }
         override var isBeingDismissed: Bool { dismissing }
@@ -159,6 +163,102 @@ final class SettingsAndCloseTests: XCTestCase {
             if let m = e as? UIMenu { return commands(m) }
             return (e as? UIKeyCommand).map { [$0] } ?? []
         }
+    }
+
+    // MARK: Commands over a modal (Codex review of 0.5.2 (17), must-fix 1)
+
+    typealias Routing = EditorCommandRouting
+
+    /// The policy: everything with nothing up or over Ask Cedric; over
+    /// another sheet only Settings, Close and Save; over an alert nothing.
+    func testWhatAModalLeavesAvailable() {
+        let goToLine = #selector(EditorViewController.goToLine)
+        let settings = #selector(EditorViewController.showSettings)
+        let close = #selector(EditorViewController.closeDocument)
+        let save = #selector(EditorViewController.saveDocument)
+        let ask = #selector(EditorViewController.askCedric)
+        for action in [goToLine, settings, close, save, ask] {
+            XCTAssertTrue(Routing.allows(action, over: .none), "\(action)")
+            XCTAssertTrue(Routing.allows(action, over: .askCedric), "\(action)")
+            XCTAssertFalse(Routing.allows(action, over: .alert), "\(action)")
+        }
+        XCTAssertFalse(Routing.allows(goToLine, over: .sheet))
+        XCTAssertFalse(Routing.allows(ask, over: .sheet))
+        for action in [settings, close, save] { XCTAssertTrue(Routing.allows(action, over: .sheet), "\(action)") }
+    }
+
+    /// What is over the editor: the topmost live controller decides.
+    func testTheModalOverTheEditor() {
+        let (nav, _) = editor()
+        XCTAssertEqual(Routing.modal(over: nav), .none)
+        let settings = shownSheet()
+        nav.presented = settings
+        XCTAssertEqual(Routing.modal(over: nav), .sheet)
+        let alert = UIAlertController(title: "Go to Line", message: nil, preferredStyle: .alert)
+        let w = UIWindow(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        w.addSubview(alert.view)
+        w.isHidden = false
+        windows.append(w)
+        settings.presented = alert
+        XCTAssertEqual(Routing.modal(over: nav), .alert)
+        settings.presented = nil
+        nav.presented = askSheet()
+        XCTAssertEqual(Routing.modal(over: nav), .askCedric)
+        // On its way out: not over the editor any more.
+        let going = shownSheet()
+        going.dismissing = true
+        nav.presented = going
+        XCTAssertEqual(Routing.modal(over: nav), .none)
+    }
+
+    private func askSheet() -> AskSheetHost {
+        let host = AskSheetHost(rootView: AskCedricView(model: AskCedricModel(fileName: "README.md", language: .markdown)))
+        let w = UIWindow(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        w.addSubview(host.view)
+        w.isHidden = false
+        windows.append(w)
+        return host
+    }
+
+    /// The editor applies the policy itself, so the navigation controller,
+    /// browser and scene (which ask it) apply it too: ⌘L is off over
+    /// Settings and an alert, on over Ask Cedric; ⌘, and ⌘W stay on over a
+    /// sheet.
+    func testTheEditorAppliesThePolicy() {
+        let (nav, editor) = editor()
+        let goToLine = #selector(EditorViewController.goToLine)
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.showStatistics), withSender: nil))
+        nav.presented = askSheet()
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.showStatistics), withSender: nil))
+        nav.presented = shownSheet()
+        XCTAssertFalse(editor.canPerformAction(#selector(EditorViewController.showStatistics), withSender: nil))
+        XCTAssertFalse(editor.canPerformAction(goToLine, withSender: nil))
+        XCTAssertFalse(editor.canPerformAction(#selector(EditorViewController.askCedric), withSender: nil))
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.showSettings), withSender: nil))
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.closeDocument), withSender: nil))
+    }
+
+    /// What the editor presents goes on top of the sheet it shows (Go to
+    /// Line over Ask Cedric was refused: the navigation controller was
+    /// already presenting).
+    func testTheEditorPresentsOnTopOfASheet() {
+        let (nav, editor) = editor()
+        let sheet = shownSheet()
+        nav.presented = sheet
+        editor.goToLine()
+        XCTAssertEqual(sheet.presentCalls.count, 1)
+        XCTAssertTrue(sheet.presentCalls.first is UIAlertController)
+    }
+
+    /// Opening Ask Cedric again keeps the open conversation.
+    func testAskCedricOpensOnce() {
+        let (_, editor) = editor()
+        editor.askCedric()
+        let first = editor.askModel
+        XCTAssertNotNil(first)
+        XCTAssertTrue(editor.askIsOpen)
+        editor.askCedric()
+        XCTAssertTrue(editor.askModel === first, "a second Ask Cedric replaced the open conversation")
     }
 
     // MARK: Close

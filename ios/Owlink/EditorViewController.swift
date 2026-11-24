@@ -191,7 +191,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Ask Cedric as a sheet (compact width).
     private weak var askSheet: UIViewController?
     private var askPanelWidth: NSLayoutConstraint?
-    private var askModel: AskCedricModel?
+    private(set) var askModel: AskCedricModel?
     private var splitTrailing: NSLayoutConstraint!
     /// The split's bottom: on the status line, or (Focus Preview, the status
     /// line hidden) on the safe area's bottom.
@@ -2825,9 +2825,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         askModel?.ask(title, action: action, inlineSelection: selection)
     }
 
+    /// Opens Ask Cedric, or does nothing when it is already open (panel,
+    /// or a sheet not on its way out): a second ⇧⌘A, ••• › Ask Cedric or
+    /// owl tap kept nothing of the first. It replaced `askModel` and
+    /// `askSheet` (on iPhone the new sheet was then refused, leaving the
+    /// shown sheet's conversation unreachable from the editor).
     @objc func askCedric() {
         // Ask is about the text: Focus Preview ends.
         if focusOn { exitFocusPreview() }
+        if askIsOpen { return }
         let model = AskCedricModel(fileName: document.displayName, language: document.language.language)
         model.apply = { [weak self] proposal in self?.apply(proposal) ?? .refused }
         model.documentNow = { [weak self] in self?.currentDocument() ?? AskCedricModel.DocumentNow(text: "", generation: 0, readOnly: true, large: false, lines: LineIndex()) }
@@ -2847,6 +2853,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         presentAskSheet(model)
+    }
+
+    /// Ask Cedric is up: the panel, or a sheet not on its way out.
+    var askIsOpen: Bool {
+        askPanel != nil || (askSheet.map { !$0.isBeingDismissed } ?? false)
     }
 
     /// Side panel only on an iPad that has room. A phone, and an iPad in a
@@ -3700,6 +3711,22 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         presenter.present(host, animated: true)
     }
 
+    /// Everything the editor presents (Go to Line, alerts, Statistics, the
+    /// share sheet…) goes on the topmost controller it shows (see
+    /// `sheetPresenter`): with Ask Cedric's sheet up, on top of it. The
+    /// editor's own `present` went to its navigation controller, which
+    /// was already presenting Ask Cedric, so UIKit refused it: ⌘L over Ask
+    /// Cedric showed nothing. What may present while another modal is up
+    /// is `EditorCommandRouting.allows`.
+    override func present(_ controller: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+        let top = sheetPresenter()
+        if top === (navigationController ?? self) {
+            super.present(controller, animated: flag, completion: completion)
+        } else {
+            top.present(controller, animated: flag, completion: completion)
+        }
+    }
+
     /// Where a sheet the editor opens goes: on the topmost controller this
     /// editor's window presents that isn't on its way out (the editor's
     /// navigation controller when nothing is up). Never a controller that
@@ -3959,6 +3986,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        // What a modal over the editor leaves available (one policy for the
+        // text's own chain and for the navigation controller, browser and
+        // scene, which route here).
+        guard EditorCommandRouting.allows(action, over: EditorCommandRouting.modal(over: navigationController ?? self)) else {
+            return false
+        }
         if action == #selector(printDocument) { return true }
         if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) {
             return document.language.language == .markdown
