@@ -11,12 +11,14 @@ events from AXe:
 
 After each step it saves `axe describe-ui` JSON and an `axe screenshot`
 under <out>/<device>-<n>-<step>.{json,png} and checks, from the JSON:
-  - the open ••• menu's main list has no label twice, and Focus Preview at
-    most once; its Preview submenu has Focus Preview at most once;
+  - the open ••• menu's main list has no label twice and no Focus Preview;
+    its Preview submenu opened and lists Focus Preview exactly once;
   - Ask Cedric opens (its Done) and goes with Done;
   - ⌘, shows Owlink's Settings (settings.font), with Owlink still in front;
-  - the back chevron closes the document (the file list's browser.settings,
-    no editor.text).
+    ⌘, is the first hardware-key event of the launch (the menu is dismissed
+    with a tap, not Escape);
+  - the back chevron closes the document: a valid Owlink tree, no editor
+    chrome, and browser.settings when AXe can see the system file list.
 
 Usage: ios-gate-axe.py <udid> <device-name> <app-path> <out-dir>
 Prints one "AXE <device> PASS|FAIL ..." line last; exit 0 on PASS, 1 on FAIL.
@@ -49,11 +51,19 @@ class Driver:
         return r
 
     def tree(self):
+        """The accessibility tree, or None if describe-ui failed or the
+        output is empty/malformed. Callers must not treat None as an
+        empty screen (that would satisfy gone=True waits)."""
         r = self.axe("describe-ui", "--minimal-keys", check=False)
+        if r.returncode != 0:
+            return None
         try:
-            return json.loads(r.stdout)
+            data = json.loads(r.stdout)
         except ValueError:
-            return []
+            return None
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            return None
+        return data
 
     def save(self, name):
         """describe-ui JSON and a screenshot for this step; returns the tree."""
@@ -91,6 +101,8 @@ class Driver:
             yield from Driver.walk(c, child_clip, path + (node,))
 
     def find(self, tree, ident=None, label=None, kind=None):
+        if not tree:
+            return []
         out = []
         for e, vis, path in self.walk(tree):
             if ident is not None and e.get("AXUniqueId") != ident:
@@ -107,9 +119,17 @@ class Driver:
         return vis[2] - vis[0] > 4 and vis[3] - vis[1] > min_h
 
     def wait_for(self, ident=None, label=None, gone=False, timeout=12):
+        """Wait until the element is visible, or (gone=True) until a
+        *valid* tree does not contain it. A failed describe-ui does not
+        count as disappearance."""
         end = time.time() + timeout
         while True:
             tree = self.tree()
+            if tree is None:
+                if time.time() > end:
+                    return False
+                time.sleep(0.5)
+                continue
             hits = [h for h in self.find(tree, ident, label) if self.visible(h[1], 2)]
             if bool(hits) != gone:
                 return True
@@ -127,6 +147,8 @@ class Driver:
         (4 or more) of labelled buttons sharing one x and width, which bar
         buttons don't. (Rows scrolled far out of view drop out of the tree,
         so no single row is a reliable anchor.)"""
+        if not tree:
+            return None, None
         groups = {}
         for e, vis, path in self.walk(tree):
             if e.get("type") == "Button" and e.get("AXLabel"):
@@ -153,39 +175,56 @@ class Driver:
                 if e.get("type") == "Button" and e.get("AXLabel") and any(p is menu for p in path)]
 
     def open_menu(self):
-        more = self.find(self.tree(), ident="TopOverflowBarButtonItem") or self.find(self.tree(), label="More", kind="Button")
+        end = time.time() + 8
+        more = []
+        while time.time() < end and not more:
+            tree = self.tree()
+            if tree is None:
+                time.sleep(0.4)
+                continue
+            more = (self.find(tree, ident="TopOverflowBarButtonItem")
+                    or self.find(tree, label="More", kind="Button"))
+            if not more:
+                time.sleep(0.4)
         if not more:
             raise RuntimeError("no ••• (More) button")
         self.tap_vis(more[0][1])
         end = time.time() + 6
         while time.time() < end:
-            if self.menu_buttons(self.tree()):
+            tree = self.tree()
+            if tree is not None and self.menu_buttons(tree):
                 return True
             time.sleep(0.4)
         return False
 
     def menu_open(self, tree):
-        """Any menu row on screen (a submenu has too few rows for
-        menu_container), or the ••• button gone behind the menu."""
+        """True if a menu row is on screen (a submenu has too few rows for
+        menu_container) or the ••• button is gone behind the menu.
+        False if the menu is definitely closed. None if the tree is
+        invalid (a missing ••• must not count as "open")."""
+        if tree is None:
+            return None
         rows = [h for h in self.find(tree, kind="Button")
                 if str(h[0].get("AXUniqueId") or "").startswith("editor.menu.") and self.visible(h[1], 2)]
         more = [h for h in self.find(tree, ident="TopOverflowBarButtonItem") if self.visible(h[1], 2)]
         return bool(rows) or bool(self.menu_buttons(tree)) or not more
 
     def close_menu(self):
-        """Escape, then a tap outside the menu (on the status line), until
-        the menu is gone and the ••• button is back."""
-        for attempt in range(4):
+        """Tap outside the menu (on the status line) until the menu is
+        gone and the ••• button is back. No key events: ⌘, later in the
+        run must be the launch's first hardware-key event."""
+        for attempt in range(6):
             tree = self.tree()
-            if not self.menu_open(tree):
+            state = self.menu_open(tree)
+            if state is False:
                 return True
-            if attempt % 2 == 0:
-                self.axe("key", "41", check=False)  # Escape
+            if tree:
+                app = tree[0].get("frame") or {"width": 400, "height": 800}
             else:
-                app = tree[0]["frame"] if tree else {"width": 400, "height": 800}
-                self.axe("tap", "-x", f"{app['width'] / 2:.0f}", "-y", f"{app['height'] * 0.98:.0f}", check=False)
+                app = {"width": 400, "height": 800}
+            self.axe("tap", "-x", f"{app['width'] / 2:.0f}", "-y", f"{app['height'] * 0.98:.0f}", check=False)
             time.sleep(1.2)
-        return not self.menu_open(self.tree())
+        return self.menu_open(self.tree()) is False
 
     def tap_menu_item(self, label):
         """Scrolls the open menu until the item is inside the menu's visible
@@ -230,40 +269,44 @@ class Driver:
         self.save("editor")
         self.ok("document open")
 
-        # 2. The ••• menu: no label twice, Focus Preview at most once.
+        # 2. The ••• menu: no label twice, no Focus Preview in the main list.
         if not self.open_menu():
             self.save("menu")
             self.fail("the ••• menu didn't open")
             return
         time.sleep(1)
         tree = self.save("menu")
+        if tree is None:
+            self.fail("the ••• menu opened but describe-ui returned no tree")
+            return
         labels = [e["AXLabel"] for e, _ in self.menu_buttons(tree)]
         dupes = sorted({l for l in labels if labels.count(l) > 1})
         focus = labels.count("Focus Preview")
         if dupes:
             self.fail(f"••• menu lists twice: {dupes}")
-        if focus > 1:
-            self.fail(f"••• menu lists Focus Preview {focus} times")
-        if not dupes and focus <= 1:
-            self.ok(f"••• menu: {len(labels)} items, none twice, Focus Preview {focus}x in the main list")
+        if focus != 0:
+            self.fail(f"••• menu lists Focus Preview in the main list ({focus}x)")
+        if not dupes and focus == 0:
+            self.ok(f"••• menu: {len(labels)} items, none twice, Focus Preview 0x in the main list")
 
-        # 3. Its Preview submenu: Focus Preview at most once.
+        # 3. Its Preview submenu: opened, Focus Preview exactly once.
         if self.tap_menu_item("Preview"):
             time.sleep(1.5)
             tree = self.save("menu-preview")
-            # Every Focus Preview on screen but the bar's own ↖↘ button
-            # (editor.focusPreview), which isn't a menu item.
-            n_menu = sum(1 for e, vis, _ in self.find(tree, label="Focus Preview", kind="Button")
-                         if e.get("AXUniqueId") != "editor.focusPreview" and self.visible(vis, 2))
-            if n_menu > 1:
-                self.fail(f"the Preview submenu lists Focus Preview {n_menu} times")
+            if tree is None or self.menu_open(tree) is not True:
+                self.fail("the Preview submenu didn't open")
             else:
-                self.ok(f"Preview submenu: Focus Preview {n_menu}x")
+                # Menu rows only (not the bar's editor.focusPreview button).
+                n_menu = sum(1 for e, _ in self.menu_buttons(tree) if e.get("AXLabel") == "Focus Preview")
+                if n_menu != 1:
+                    self.fail(f"the Preview submenu lists Focus Preview {n_menu} times, not exactly once")
+                else:
+                    self.ok("Preview submenu: Focus Preview 1x")
         else:
             self.fail("no Preview item in the ••• menu")
         if not self.close_menu():
             self.save("menu-close")
-            self.fail("the ••• menu didn't close (Escape, then a tap outside)")
+            self.fail("the ••• menu didn't close (tap outside)")
             return
 
         # 4. Ask Cedric, then Done.
@@ -310,27 +353,40 @@ class Driver:
         time.sleep(1)
 
         # 6. The back chevron closes the document.
-        back = [h for h in self.find(self.tree(), ident="BackButton") if self.visible(h[1], 2)]
-        if not back:
+        tree = self.tree()
+        back = [h for h in self.find(tree, ident="BackButton") if self.visible(h[1], 2)]
+        if tree is None or not back:
             self.save("back")
             self.fail("no back chevron")
             return
         self.tap_vis(back[0][1])
         closed = self.wait_for(ident="editor.text", gone=True, timeout=12)
-        # The file list is the system document browser: its own tree
-        # usually doesn't reach AXe (only the Application node does), so
-        # "closed" is: no editor text, no back chevron, no README.md title.
+        # browser.settings is the strongest confirmation, but the system
+        # document browser's controls often don't reach AXe. Positive
+        # evidence then is a valid Owlink application tree with no editor
+        # chrome (editor.text, the back chevron, the README.md title, the
+        # overflow button). A failed describe-ui is not evidence of that.
         listed = self.wait_for(ident="browser.settings", timeout=4)
         time.sleep(1)
         tree = self.save("back-file-list")
-        left = [what for what, hits in (("editor.text", self.find(tree, ident="editor.text")),
-                                        ("BackButton", self.find(tree, ident="BackButton")),
-                                        ("README.md", self.find(tree, ident="README.md")))
-                if any(self.visible(h[1], 2) for h in hits)]
+        if tree is None:
+            self.fail("the back chevron was tapped but describe-ui returned no tree")
+            return
+        root = tree[0] if tree else {}
+        if root.get("type") != "Application" or root.get("AXLabel") != "Owlink":
+            self.fail(f"the back chevron didn't return to Owlink's file list (front: {root.get('AXLabel')!r})")
+            return
+        chrome = (("editor.text", "editor.text"),
+                  ("BackButton", "BackButton"),
+                  ("README.md", "README.md"),
+                  ("TopOverflowBarButtonItem", "TopOverflowBarButtonItem"),
+                  ("editor.edit", "editor.edit"))
+        left = [label for ident, label in chrome
+                if any(self.visible(h[1], 2) for h in self.find(tree, ident=ident))]
         if not closed or left:
             self.fail(f"the back chevron didn't close the document (still on screen: {left or ['editor.text']})")
             return
-        self.notes.append("file list " + ("seen (browser.settings)" if listed else "not in AXe's tree (system browser)"))
+        self.notes.append("file list " + ("seen (browser.settings)" if listed else "Owlink application, editor chrome gone (system browser not in AXe's tree)"))
         self.ok("back chevron closed the document")
 
 

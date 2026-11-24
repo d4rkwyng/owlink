@@ -266,7 +266,12 @@ final class OwlinkUITests: XCTestCase {
     /// typing in an earlier launch didn't help; after one Shift press ⌘,
     /// opened Settings with no sheet, after Ask Cedric's sheet closed and
     /// over the sheet (same app build; gate-ipad-mini and gate-ipad-pro-13,
-    /// 2026-11-24). A real keyboard sends ⌘'s own key-down first.
+    /// 2026-11-24). This is an XCUITest-only artefact, so the prime is kept.
+    /// AXe v2.1.1's real HID `key-combo --modifiers 227 --key 54` (no prime)
+    /// opened Owlink's Settings on a fresh launch: twice on gate-ipad-pro-11,
+    /// and on all four gate devices in the 3b9e5a9 gate run after the •••
+    /// menu closed and after Ask Cedric closed (/tmp/ios-gate-run-20261124-065834).
+    /// A real keyboard sends ⌘'s own key-down first, as AXe does.
     private func primeHardwareKeyboard(_ app: XCUIApplication) {
         app.typeKey(XCUIKeyboardKey.shift.rawValue, modifierFlags: [])
         sleep(1)
@@ -291,12 +296,21 @@ final class OwlinkUITests: XCTestCase {
         menuItem(app, "Ask Cedric").tap()
         let done = app.buttons["ask.done"].firstMatch
         XCTAssertTrue(done.waitForExistence(timeout: 10), "Ask Cedric didn't open")
-        let popOut = app.buttons["ask.popOut"].firstMatch
-        if sheet, popOut.exists {
-            popOut.tap()
-            sleep(1)
+        if sheet {
+            // iPad at regular width docks Ask Cedric; Pop Out turns it into
+            // the sheet. ask.done exists in both presentations, so a missing
+            // or ineffective Pop Out must not let a "sheet" test pass against
+            // the docked panel. ask.popOut is only on the docked panel; it
+            // must be gone afterwards (on iPhone, Ask is already a sheet).
+            let popOut = app.buttons["ask.popOut"].firstMatch
+            if device == "ipad", popOut.waitForExistence(timeout: 2) {
+                popOut.tap()
+                sleep(1)
+            }
+            XCTAssertFalse(app.buttons["ask.popOut"].firstMatch.exists,
+                           "Ask Cedric is still docked; the sheet didn't open")
         }
-        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "Ask Cedric didn't stay open")
     }
 
     private func closeAskWithDone(_ app: XCUIApplication) {
