@@ -158,7 +158,7 @@ enum AskCedricEngine {
 }
 
 @MainActor
-final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTextViewDelegate {
     private weak var tab: EditorWindowController?
     let panel: NSPanel
     let scopePopup = NSPopUpButton()
@@ -183,6 +183,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var footerBeforeReview: String?
     private var reviewProgress: String?
     private var reviewScopeLabel: String?
+    /// History entries whose section notes are open (collapsed by default).
+    private(set) var expandedSections: Set<Int> = []
+    static let sectionsLinkScheme = "cedric-sections"
     /// The first card's proposal (checks).
     var pending: OwlEditProposal? { cards.first?.proposal }
     var hasProposals: Bool { !cards.isEmpty }
@@ -271,6 +274,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         transcript.autoresizingMask = [.width]
         transcript.textContainer?.widthTracksTextView = true
         transcript.setAccessibilityLabel(String(localized: "Conversation"))
+        // "Section notes" under a whole-document answer opens and closes.
+        transcript.delegate = self
+        transcript.linkTextAttributes = [.foregroundColor: NSColor.secondaryLabelColor, .cursor: NSCursor.pointingHand]
         let tScroll = NSScrollView()
         tScroll.documentView = transcript
         tScroll.hasVerticalScroller = true
@@ -495,11 +501,13 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let current = pickedScope.flatMap { scopes.contains($0) ? $0 : nil }
         scopePopup.removeAllItems()
         for sc in scopes {
+            // A typed question about the whole document is read in parts
+            // when it doesn't fit: the chip never says "trimmed to fit" for it.
             let label = (chunkedReviewRunning && sc == .wholeDocument ? reviewScopeLabel : nil)
                 ?? OwlChatRequest.documentContext(s, scope: sc, engineBudget: OwlChatStore.shared.contextBudget,
                                                        history: history, question: "", action: nil, tools: tools,
                                                        server: server, prose: isProse, imageSource: picture,
-                                                       preview: true)?.label ?? sc.title
+                                                       preview: true).map(OwlChunkedReviewRunner.previewLabel) ?? sc.title
             scopePopup.addItem(withTitle: label)
             scopePopup.lastItem?.representedObject = sc.rawValue
         }
@@ -578,7 +586,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     // MARK: Transcript
 
-    private func attributed(_ e: OwlChatEntry) -> NSAttributedString {
+    private func attributed(_ e: OwlChatEntry, index: Int? = nil) -> NSAttributedString {
         let out = NSMutableAttributedString()
         let body: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]
         let label: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor]
@@ -590,6 +598,22 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         case .owl:
             out.append(NSAttributedString(string: String(localized: "Cedric") + "\n", attributes: label))
             out.append(NSAttributedString(string: e.text, attributes: body))
+            if !e.sections.isEmpty, let index {
+                // The combined answer first; the parts' notes below, collapsed.
+                let open = expandedSections.contains(index)
+                let title = (open ? "▾ " : "▸ ") + OwlChatSection.disclosureTitle(count: e.sections.count)
+                var link = label
+                link[.link] = URL(string: "\(Self.sectionsLinkScheme)://\(index)")
+                out.append(NSAttributedString(string: "\n\n", attributes: body))
+                out.append(NSAttributedString(string: title, attributes: link))
+                if open {
+                    let note: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]
+                    for sec in e.sections {
+                        out.append(NSAttributedString(string: "\n\n" + sec.title + "\n", attributes: label))
+                        out.append(NSAttributedString(string: sec.text, attributes: note))
+                    }
+                }
+            }
             out.append(NSAttributedString(string: "\n\n", attributes: body))
         case .tool, .note:
             out.append(NSAttributedString(string: e.text + "\n", attributes: quiet))
@@ -613,7 +637,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             if index == h.count - 1, entry.role == .owl, entry.text.isEmpty, running, typingIndicatorActive {
                 all.append(attributed(OwlChatEntry(role: .owl, text: waitingLabel)))
             } else {
-                all.append(attributed(entry))
+                all.append(attributed(entry, index: index))
             }
         }
         transcript.setAccessibilityLabel(typingIndicatorActive
@@ -625,6 +649,19 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     /// The transcript's text (checks).
     var transcriptText: String { transcript.string }
+
+    /// Opens or closes the section notes under history entry `index`.
+    func toggleSectionNotes(_ index: Int) {
+        if expandedSections.contains(index) { expandedSections.remove(index) } else { expandedSections.insert(index) }
+        render()
+    }
+
+    func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
+        let url = (link as? URL) ?? (link as? String).flatMap(URL.init(string:))
+        guard let url, url.scheme == Self.sectionsLinkScheme, let index = url.host.flatMap(Int.init) else { return false }
+        toggleSectionNotes(index)
+        return true
+    }
 
     // MARK: Asking
 
@@ -841,7 +878,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 return
             }
             if let index = self.scopes.firstIndex(of: usedScope) {
-                self.scopePopup.item(at: index)?.title = ctx.label
+                // Labelled below, once it is known whether it is read in parts
+                // (never "trimmed to fit" for a whole-document review).
                 self.scopePopup.selectItem(at: index)
             }
             if inline, let action {
@@ -884,26 +922,33 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 guard self.lifecycle.isCurrent(ticket), !Task.isCancelled else { return }
                 self.chunkedReviewRunning = true
                 self.footerBeforeReview = self.footer.stringValue
-                if let index = self.scopes.firstIndex(of: usedScope), let first = plan.parts.first, let last = plan.parts.last {
-                    let label = plan.isComplete
-                        ? String(localized: "Whole document (\(plan.totalLines) lines)")
-                        : String(localized: "Lines \(first.first)–\(last.last) of \(plan.totalLines) (rest not reviewed)")
+                if let index = self.scopes.firstIndex(of: usedScope) {
+                    // Every line is in some part: "Whole document (282 lines)".
+                    let label = OwlChunkedReview.label(plan)
                     self.reviewScopeLabel = label
                     self.scopePopup.item(at: index)?.title = label
                 }
+                let total = plan.totalLines
                 let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, model: engine.scoreKey,
-                                                              describeError: Self.describe) { [weak self] _, _ in
+                                                              describeError: Self.describe, stage: { [weak self] stage in
+                    let progress: String
+                    switch stage {
+                    case .reviewing(_, _, let first, let last):
+                        progress = String(localized: "Reading lines \(first)–\(last) of \(total)…")
+                    case .combining:
+                        progress = String(localized: "Writing one answer from the notes…")
+                    }
                     DispatchQueue.main.async { MainActor.assumeIsolated {
                         guard let self, self.lifecycle.isCurrent(ticket), self.chunkedReviewRunning else { return }
-                        let progress = String(localized: "Reviewing…")
                         self.reviewProgress = progress
                         self.footer.stringValue = progress
                     } }
-                }
+                }) { _, _ in }
                 self.finish(ticket, result.outcome, error: nil, stopped: result.stopped, failed: result.error != nil)
                 return
             }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
+            if let index = self.scopes.firstIndex(of: usedScope) { self.scopePopup.item(at: index)?.title = req.context.label }
             self.forcedVerdict = req.forcedVerdict
             // Any answer about a script: clamped before it shows (ScriptVerdictStream).
             self.safeClaimGuard = req.safeClaimGuard
@@ -1093,7 +1138,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 var text = OwlChatRunner.storedText(answer: outcome.answer, streamed: streamed, guard: safeClaimGuard, forced: forcedVerdict)
                 // Not applied until Apply: the app says so, not the model.
                 text = OwlProposalWording.guardClaims(text, proposals: outcome.proposals.count)
-                OwlChatStore.shared.replaceLast(OwlChatEntry(role: .owl, text: text, proposals: outcome.proposals), in: id)
+                OwlChatStore.shared.replaceLast(OwlChatEntry(role: .owl, text: text, proposals: outcome.proposals,
+                                                             sections: outcome.sections), in: id)
                 if !outcome.proposals.isEmpty {
                     let shown = min(outcome.proposals.count, OwlTools.maxProposals)
                     OwlChatStore.shared.append(OwlChatEntry(role: .note, text: OwlProposalWording.header(count: shown)), to: id)
