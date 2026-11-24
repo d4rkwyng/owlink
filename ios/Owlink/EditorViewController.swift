@@ -823,7 +823,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         var tools: [UIMenuElement] = [fixTyposAction(), check]
         if let checkScript = checkScriptAction() { tools.append(checkScript) }
         var fileGroup: [UIMenuElement] = [revert, previousVersionsMenu()]
-        if UIApplication.shared.supportsMultipleScenes { fileGroup.append(Self.newWindowAction()) }
+        if WindowSupport.multipleScenes { fileGroup.append(Self.newWindowAction()) }
         let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
             UIMenu(options: .displayInline, children: [exportMenu] + (preview == nil ? [] : [viewMenu])),
             UIMenu(options: .displayInline, children: [goTo, quickly, statistics]),

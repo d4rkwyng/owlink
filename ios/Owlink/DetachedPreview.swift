@@ -28,8 +28,8 @@ import CedricCore
 
     /// Offered here (iPad), hidden on an iPhone.
     static var available: Bool {
-        PreviewWindows.detachAvailable(supportsMultipleScenes: UIApplication.shared.supportsMultipleScenes,
-                                       isPhone: UIDevice.current.userInterfaceIdiom == .phone)
+        PreviewWindows.detachAvailable(supportsMultipleScenes: WindowSupport.multipleScenes,
+                                       isPhone: WindowSupport.isPhone)
     }
 
     static func hasPreviews(forPath path: String) -> Bool { registry.hasPreviews(forPath: path) }
@@ -295,4 +295,13 @@ final class DetachedPreviewViewController: UIViewController {
     @objc func smallerFont() { preview.smaller() }
     @objc func actualSizeFont() { preview.actualSize() }
     @objc func closeDocument() { closeWindow() }
+}
+
+/// What the device offers for windows: more than one (an iPad), and
+/// whether it is an iPhone. The snapshot tests set `overrideForTests` to
+/// build an iPad's menus in an iPhone simulator (MenuReachabilityTests).
+enum WindowSupport {
+    static var overrideForTests: (multipleScenes: Bool, isPhone: Bool)?
+    static var multipleScenes: Bool { overrideForTests?.multipleScenes ?? UIApplication.shared.supportsMultipleScenes }
+    static var isPhone: Bool { overrideForTests?.isPhone ?? (UIDevice.current.userInterfaceIdiom == .phone) }
 }
