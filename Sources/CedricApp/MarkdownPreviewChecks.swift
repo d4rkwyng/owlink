@@ -133,12 +133,44 @@ extension DevChecks {
             waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again"),
             expectState("true", "reopened at once, the opened block is still open"),
             sync { expect(PreviewController.frontMatterExpanded, "opening it at once is kept as the preference") },
+            // Codex review round 3, should-fix: the close-time read comes
+            // back after its one-second timeout (held back 1.5 s), when
+            // the reopened preview has already rendered with the old
+            // preference: the late read still sets the block there.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (a slow close-time read)"),
+            untilState(tab, "false", "a close-time read that comes back late sets the reopened block closed", timeout: 5),
+            sync { expect(!PreviewController.frontMatterExpanded, "the late read's closing is kept as the preference") },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again (a slow close-time read)"),
+            untilState(tab, "true", "a close-time read that comes back late sets the reopened block open", timeout: 5),
+            sync { expect(PreviewController.frontMatterExpanded, "the late read's opening is kept as the preference") },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
                 finish()
             },
         ])
+    }
+
+    /// Waits (up to `timeout`) for the preview's front matter block to be
+    /// `want` ("true", "false" or "none").
+    static func untilState(_ tab: EditorWindowController, _ want: String, _ name: String, timeout: Double) -> (@escaping () -> Void) -> Void {
+        { next in
+            let deadline = Date().addingTimeInterval(timeout)
+            let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
+            @MainActor func poll() {
+                previewJS(tab, state) { v in
+                    if v as? String == want { expect(true, name); next() }
+                    else if Date() > deadline { expect(false, name, "\(v ?? "nil")"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+            }
+            poll()
+        }
     }
 
     /// Runs `code` in the preview, in Cedric's own content world (where
