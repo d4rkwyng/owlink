@@ -153,6 +153,28 @@ import CedricCore
         #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
     }
 
+    /// A word said again is part of what a finding says: "Client trusts
+    /// server and server trusts client" says more than "Client trusts
+    /// server", so neither merging nor the combined answer loses it.
+    /// 0.5.4's follow-up 6 read each word only from its first use.
+    @Test func aFindingThatSaysAWordAgainIsReadWhole() {
+        let both = "- Line 5: Client trusts server and server trusts client."
+        let one = "- Line 5: Client trusts server."
+        #expect(OwlChunkedReview.mergeFindings([one, both]) == one + "\n" + both)
+        #expect(OwlChunkedReview.mergeFindings([both, one]) == both)
+        let findings = OwlChunkedReviewRunner.Findings(text: both, items: both, verdict: nil)
+        for answer in ["Line 5: Client trusts server.", "Line 5: the client trusts the server it connects to."] {
+            #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + both, "\(answer)")
+        }
+        let restated = "Line 5: the client trusts the server, and the server trusts the client."
+        #expect(OwlChunkedReviewRunner.keepFindings(restated, findings) == restated)
+        // A finding that is one claim said over is still that claim once.
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.", "- Line 12: Pipes curl to sh. Pipes curl to sh."])
+                == "- Line 12: pipes curl to sh.")
+        #expect(OwlChunkedReview.says(["pipes", "curl", "pipes", "curl"], in: ["pipes", "curl"]))
+        #expect(!OwlChunkedReview.says(["clien", "trust", "serve", "serve", "trust", "clien"], in: ["clien", "trust", "serve"]))
+    }
+
     /// "L2" and "L3" are what a finding says, not digits to strip: "Line
     /// 12: L3 regularization is enabled" doesn't say "Line 12: L2
     /// regularization is enabled". 0.5.4's follow-up 4 read both as

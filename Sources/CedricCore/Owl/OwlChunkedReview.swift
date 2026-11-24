@@ -260,15 +260,30 @@ public enum OwlChunkedReview {
     /// code" says "downloads unsigned code"); a reordering ("downloads
     /// code that is unsigned") is taken as saying something else, and the
     /// finding is kept (a finding repeated is better than one dropped).
-    /// A finding that says a word again is read from where it first says
-    /// it ("Pipes curl to sh. Pipes curl to sh." says "pipes curl").
+    /// Every word counts, a word said again included: "client trusts
+    /// server and server trusts client" says more than "client trusts
+    /// server". Only a finding that is one claim said over, whole ("Pipes
+    /// curl to sh. Pipes curl to sh."), is read as that claim once.
     public static func says(_ finding: [String], in passage: [String]) -> Bool {
         var rest = passage[...]
-        var said = Set<String>()
-        for word in finding where said.insert(word).inserted {
+        for word in once(finding) {
             guard let at = rest.firstIndex(of: word) else { return false }
             rest = rest[rest.index(after: at)...]
         }
         return true
+    }
+
+    /// `words` as the shortest run it is a whole repeat of ("pipes curl
+    /// pipes curl" is "pipes curl" twice); otherwise `words` itself.
+    static func once(_ words: [String]) -> [String] {
+        let n = words.count
+        guard n > 1 else { return words }
+        for length in 1...(n / 2) where n % length == 0 {
+            let unit = words[0..<length]
+            if stride(from: length, to: n, by: length).allSatisfy({ words[$0..<($0 + length)] == unit }) {
+                return Array(unit)
+            }
+        }
+        return words
     }
 }
