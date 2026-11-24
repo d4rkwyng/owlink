@@ -726,6 +726,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         input.stringValue = ""
         // A spelling request goes to the offline Fix Typos (OwlSpellingRoute.swift).
         if OwlSpellingIntent.isSpellingRequest(q), let tab, let id = docID {
+            // Like ask(): a new request stops the running one first, or its
+            // finish() would replace this Fix Typos note and show its cards.
+            if running { abandon() }
             routeToFixTypos(q, tab: tab, id: id)
             render()
             return
@@ -1194,7 +1197,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     func state(of p: OwlEditProposal) -> OwlEditProposal.ApplyState {
         guard let tab else { return .stale }
-        return live(p).state(text: tab.textView.string as NSString, generation: tab.doc.changeCount, readOnly: documentIsReadOnly)
+        // Read-only refuses Apply whatever the proposal: no revalidation.
+        let readOnly = documentIsReadOnly
+        return (readOnly ? p : live(p)).state(text: tab.textView.string as NSString, generation: tab.doc.changeCount,
+                                              readOnly: readOnly)
     }
 
     /// `p` validated against the live document when it changed since the
@@ -1210,8 +1216,10 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// per distinct find, and none at all when Apply is already refused.
     func refreshCards() {
         guard !cards.isEmpty, let tab else { layoutCards(); return }
-        let result = OwlEditProposal.refresh(cards.map { live($0.proposal) }, text: tab.textView.string as NSString,
-                                             generation: tab.doc.changeCount, readOnly: documentIsReadOnly)
+        let readOnly = documentIsReadOnly
+        let result = OwlEditProposal.refresh(cards.map { readOnly ? $0.proposal : live($0.proposal) },
+                                             text: tab.textView.string as NSString,
+                                             generation: tab.doc.changeCount, readOnly: readOnly)
         for (c, s) in zip(cards, result.states) {
             // The title names where the unique match is now, not where it was proposed.
             if case .ready(let range) = s {
