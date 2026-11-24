@@ -179,6 +179,58 @@ import Testing
         #expect(OwlCitations.find("Several lines\n31 rows").isEmpty)
     }
 
+    /// A list item taken out must not leave the rows around it reading as
+    /// a citation the answer never made: "Line 4 through" / "9999
+    /// describes" once the line-99 item between them is gone is lines
+    /// 4–9999. 0.5.4's follow-up 4 joined them and so vouched for 4–9999.
+    @Test func droppingAnItemNeverJoinsTheRowsAroundItIntoACitation() {
+        for brk in ["\n", "\r\n"] {
+            for (lead, tail) in [("Line 4 through", "9999 describes the setup."), ("See lines 3 and", "31 describe it."),
+                                 ("- 4", "–31: setup"), ("Line 4 -", "9999 describes the setup.")] {
+                let answer = "\(lead)\(brk)- Line 99: unrelated.\(brk)\(tail)"
+                let f = OwlCitations.filter(answer, allowed: Self.lines1to18)
+                // Nothing vouched for beyond the lines given, and nothing cited that the answer didn't cite.
+                #expect(OwlCitations.evidence(in: f.text).isSubset(of: Self.lines1to18), "\(answer.debugDescription) → \(f.text.debugDescription)")
+                let before = Set(OwlCitations.find(answer).map(\.lines))
+                for c in OwlCitations.find(f.text) {
+                    #expect(before.contains(c.lines), "\(answer.debugDescription) → \(f.text.debugDescription)")
+                }
+                // The item stays, flagged, rather than join them.
+                #expect(f.text.contains("Line 99\(OwlCitations.flag): unrelated.") && f.dropped.isEmpty, "\(f.text.debugDescription)")
+            }
+        }
+        // Where the rows around it join into nothing, the item still goes.
+        let plain = OwlCitations.filter("Overview.\n- Line 99: unrelated.\nLine 4 describes the setup.", allowed: Self.lines1to18)
+        #expect(plain.text == "Overview.\nLine 4 describes the setup." && plain.dropped == [99...99])
+    }
+
+    /// "- 4" / "–31: setup" is item 4–31 to `find`, so the stream holds
+    /// the "4" at its row's end until the next row shows whether a dash
+    /// comes. 0.5.4's follow-up 4 showed "31: setup" unflagged.
+    @Test func aStreamHoldsAListItemsNumberForADashOnTheNextRow() {
+        for answer in ["- 4\n–31: setup", "- 4\r\n–31: setup", "* 4\n\n— 31: setup", "Overview.\n- 4\n-31: setup\nThe end.",
+                       "-\n4\n–31: setup", "- 4\n- Line 99: x, line 2\nLine 2 ok"] {
+            let f = OwlCitations.filter(answer, allowed: Self.lines1to18)
+            for size in [1, 2, 3, 5, answer.count] {
+                let (before, all) = Self.streamed(answer, size: size, allowed: Self.lines1to18)
+                for c in OwlCitations.find(before) where !Self.lines1to18.contains(integersIn: c.lines) {
+                    #expect((before as NSString).substring(from: NSMaxRange(c.range)).hasPrefix(OwlCitations.flag),
+                            "\(size): \(before.debugDescription)")
+                }
+                #expect(!before.contains("31: setup"), "\(size): \(before.debugDescription)")
+                // The stream flags what the finished answer flags (it drops nothing: none of these is dropped).
+                #expect(all == f.text, "\(size): \(all.debugDescription) vs \(f.text.debugDescription)")
+            }
+        }
+        #expect(OwlCitations.filter("- 4\n–31: setup", allowed: Self.lines1to18).text == "- 4\n–31\(OwlCitations.flag): setup")
+        // A number held for a dash that doesn't come is shown as it was.
+        for size in [1, 3] {
+            #expect(Self.streamed("- 4\nThe end.", size: size, allowed: Self.lines1to18).all == "- 4\nThe end.")
+            #expect(Self.streamed("- 4\nLine 31 too.", size: size, allowed: Self.lines1to18).all
+                    == "- 4\nLine 31\(OwlCitations.flag) too.")
+        }
+    }
+
     /// "line 5, 2026" is line 5 and a year, at the end of the text too.
     @Test func aBareCommaAfterSingularLineListsNothing() {
         for text in ["On line 5, 2026", "On line 5, 2026\n", "On line 5, 2026.", "Line 3, 100"] {

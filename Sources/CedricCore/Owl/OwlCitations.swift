@@ -38,7 +38,9 @@ public enum OwlCitations {
     // "line 3, 100 items" cite only 5 and 3). A citation may run onto the next row only after a word or
     // mark that joins it ("Line 4 through" / "9999"): never at "line" itself
     // or before "and", "to" or a dash, so a stream can tell at a row's end
-    // whether the citation goes on (`Stream`).
+    // whether the citation goes on (`Stream`). The one exception is a
+    // listed finding's number ("- 4" / "–31: setup", `item`), which the
+    // stream holds until the next row shows whether a dash comes.
     private static let span = #"(?:(?:[^\S\r\n]*[-–—]|[^\S\r\n]*(?:to|through))\s*\d+)?"#
     private static let joined = #"(?:[^\S\r\n]*(?:,[^\S\r\n]*and|and|&)\s*\d+"# + span + #"\b)"#
     private static let comma = #"(?:[^\S\r\n]*,\s*\d+"# + span + #"(?=[^\S\r\n]*(?:[,.;:)]|and\b|&|$)))"#
@@ -169,42 +171,69 @@ public enum OwlCitations {
             if nl == NSNotFound { break }
             start = nl + 1
         }
-        var kept: [String] = []
-        var dropping = false
-        var dropped = false
-        for unit in units {
-            let row = ns.substring(with: unit)
-            let cites = all.filter { NSLocationInRange($0.range.location, unit) }
-                .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
-            let trimmed = row.trimmingCharacters(in: .whitespaces)
-            if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
-            // No doubled blank line where an item was taken out.
-            if dropped, trimmed.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true { continue }
-            dropping = false
-            dropped = false
-            let bad = cites.filter(outside)
-            if bad.isEmpty { kept.append(row); continue }
-            let item = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ")
-                || trimmed.range(of: #"^\d+[.)]\s"#, options: .regularExpression) != nil
-            if cites.allSatisfy(untouched), item {
-                result.dropped.append(contentsOf: bad.map(\.lines))
-                dropping = true
-                dropped = true
-                continue
+        // Units whose items are flagged rather than dropped: taking them
+        // out would join the rows around them into a citation the text
+        // never made ("Line 4 through" / "9999 describes" once the item
+        // between them is gone).
+        var keep = Set<Int>()
+        while true {
+            var kept: [String] = []
+            // Where an item was taken out: the index in `kept` of the row
+            // after it, and the unit that was dropped.
+            var gaps: [(at: Int, unit: Int)] = []
+            var dropping = false
+            var dropped = false
+            var dropStart = 0
+            result = Filtered(text: text, dropped: [], flagged: [])
+            for (index, unit) in units.enumerated() {
+                let row = ns.substring(with: unit)
+                let cites = all.filter { NSLocationInRange($0.range.location, unit) }
+                    .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
+                let trimmed = row.trimmingCharacters(in: .whitespaces)
+                if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
+                // No doubled blank line where an item was taken out.
+                if dropped, trimmed.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true { continue }
+                if dropped { gaps.append((kept.count, dropStart)) }
+                dropping = false
+                dropped = false
+                let bad = cites.filter(outside)
+                if bad.isEmpty { kept.append(row); continue }
+                let item = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ")
+                    || trimmed.range(of: #"^\d+[.)]\s"#, options: .regularExpression) != nil
+                if cites.allSatisfy(untouched), item, !keep.contains(index) {
+                    result.dropped.append(contentsOf: bad.map(\.lines))
+                    dropping = true
+                    dropped = true
+                    dropStart = index
+                    continue
+                }
+                let marked = NSMutableString(string: row)
+                for c in bad.reversed() { marked.insert(flag, at: NSMaxRange(c.range)) }
+                result.flagged.append(contentsOf: bad.map(\.lines))
+                kept.append(marked as String)
             }
-            let marked = NSMutableString(string: row)
-            for c in bad.reversed() { marked.insert(flag, at: NSMaxRange(c.range)) }
-            result.flagged.append(contentsOf: bad.map(\.lines))
-            kept.append(marked as String)
+            guard result.changed else { return result }
+            let joined = kept.joined(separator: "\n")
+            if joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Everything was about unseen lines: say so, rather than nothing.
+                return flagOnly(text, allowed: allowed)
+            }
+            // A row break where an item was taken out must not fall inside
+            // a citation (`uncuttable`): if it does, that item stays, flagged.
+            let noCut = uncuttable(in: joined)
+            var offset = 0
+            var offsets: [Int] = []
+            for row in kept { offsets.append(offset); offset += (row as NSString).length + 1 }
+            let joins = gaps.filter { $0.at > 0 && $0.at < kept.count }.filter {
+                let newline = offsets[$0.at] - 1
+                return noCut.contains(newline) || noCut.contains(newline + 1)
+            }
+            if joins.isEmpty {
+                result.text = joined
+                return result
+            }
+            keep.formUnion(joins.map(\.unit))
         }
-        guard result.changed else { return result }
-        let joined = kept.joined(separator: "\n")
-        if joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Everything was about unseen lines: say so, rather than nothing.
-            return flagOnly(text, allowed: allowed)
-        }
-        result.text = joined
-        return result
     }
 
     /// Streamed text with a possible citation held from its first number
@@ -213,8 +242,10 @@ public enum OwlCitations {
     /// ends on a word or mark that joins the next number), then checked
     /// (`filter`): a citation of a line the model wasn't given is shown
     /// flagged, never as written, even while the answer is still being
-    /// written or after Stop. Text before a number, and numbers not after
-    /// "line" or at a line's start or list marker, pass at once.
+    /// written or after Stop. A list item's number alone on its row
+    /// ("- 4") is held until the next row shows whether a dash makes it a
+    /// range. Text before a number, and numbers not after "line" or at a
+    /// line's start or list marker, pass at once.
     public struct Stream: Sendable {
         /// The current line as the model wrote it, up to `held`.
         private var raw = ""
@@ -237,15 +268,22 @@ public enum OwlCitations {
             }
             var out = ""
             for ch in text {
+                // A list item's number held past its row ("- 4" / "–31:
+                // setup") goes on only with a dash: anything else ends it.
+                if !held.isEmpty, awaitingDash(), !ch.isWhitespace, !Self.dashes.contains(ch) { out += release(allowed) }
                 if held.isEmpty {
                     if ch.isASCII, ch.isNumber, Self.mayCite(raw) { held.append(ch); continue }
                     out.append(ch)
                     // "\r\n" is one Character, and "\r" alone ends a line too.
-                    if ch.isNewline { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
+                    // A row that is only a list marker stays: the item's
+                    // number may come on the next row ("-" / "31: text").
+                    if ch.isNewline, !Self.isMarker(raw) { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
                     continue
                 }
                 held.append(ch)
-                if ch.isNewline ? !continuesOnNextRow() : (!ch.isLetter && listEnded()) { out += release(allowed) }
+                if ch.isNewline ? !(continuesOnNextRow() || itemRunsOn()) : (!ch.isLetter && listEnded()) {
+                    out += release(allowed)
+                }
             }
             return out
         }
@@ -278,6 +316,27 @@ public enum OwlCitations {
             return ["and", "to", "through", ",", ",and", "&", "-", "–", "—"].contains(tail)
         }
 
+        private static let dashes: Set<Character> = ["-", "–", "—"]
+
+        /// Whether a list item's number is held at its row's end ("- 4"):
+        /// a dash on the next row makes it a range ("- 4" / "–31: setup",
+        /// as `find` reads it), so it is held until the next row shows
+        /// whether one comes.
+        private func itemRunsOn() -> Bool {
+            Self.isMarker(raw) && held.drop(while: { $0.isASCII && $0.isNumber }).allSatisfy(\.isWhitespace)
+        }
+
+        /// Held at a row's end by `itemRunsOn`, nothing but spacing since.
+        private func awaitingDash() -> Bool {
+            guard let lastDigit = held.lastIndex(where: { $0.isASCII && $0.isNumber }) else { return false }
+            let after = held[held.index(after: lastDigit)...]
+            return after.contains(where: \.isNewline) && after.allSatisfy(\.isWhitespace)
+        }
+
+        private static func isMarker(_ raw: String) -> Bool {
+            ["-", "*", "•"].contains(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
         private mutating func release(_ allowed: IndexSet) -> String {
             // Flagged, never cut: a list item about unread lines is dropped
             // from the finished answer (`filter`), but what was shown of it
@@ -299,8 +358,8 @@ public enum OwlCitations {
         }
 
         static func mayCite(_ line: String) -> Bool {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            return t.isEmpty || t == "-" || t == "*" || t == "•" || line.range(of: "line", options: .caseInsensitive) != nil
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty || isMarker(line) || line.range(of: "line", options: .caseInsensitive) != nil
         }
     }
 
