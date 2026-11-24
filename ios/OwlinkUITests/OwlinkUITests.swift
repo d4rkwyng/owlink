@@ -9,9 +9,9 @@ final class OwlinkUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launch(_ name: String, fresh: Bool) -> XCUIApplication {
+    private func launch(_ name: String, fresh: Bool, extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-OwlinkOpen", name, "-OwlinkResetSettings"] + (fresh ? ["-OwlinkFreshSample"] : [])
+        app.launchArguments = ["-OwlinkOpen", name, "-OwlinkResetSettings"] + (fresh ? ["-OwlinkFreshSample"] : []) + extra
         app.launch()
         return app
     }
@@ -326,23 +326,89 @@ final class OwlinkUITests: XCTestCase {
         assertBackReturnsToFiles(app, "after Settings over Ask Cedric")
     }
 
+    /// Waits until Owlink is in front and Ask Cedric's sheet has stopped
+    /// moving (Done hittable, its frame the same on two reads), so a tap
+    /// that follows is the one being tested, not one that activates the
+    /// window or lands mid-animation.
+    private func waitForAskSheetToSettle(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5), "Owlink isn't in front", file: file, line: line)
+        let done = app.buttons["ask.done"].firstMatch
+        var last = CGRect.null
+        for _ in 0..<40 {
+            let frame = done.frame
+            if done.exists, done.isHittable, frame == last { return }
+            last = frame
+            usleep(250_000)
+        }
+        XCTFail("Ask Cedric's sheet didn't settle", file: file, line: line)
+    }
+
+    /// One tap where the back chevron is (XCUITest may count the undimmed
+    /// sheet's container as covering it; a finger isn't stopped by it).
+    private func tapBackOnce(_ app: XCUIApplication) {
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "no back chevron")
+        back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
     /// The sheet stops at half height, undimmed: the back chevron stays
-    /// tappable over it. It closes the document (sheet and all), and is
-    /// never left dead.
+    /// tappable over it. One tap, once the sheet has settled, closes the
+    /// document (sheet and all). (Codex review of 0.5.2 (17), should-fix
+    /// 3: a second tap is no longer accepted.)
     func testBackChevronWithAskCedricOpen() throws {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         openAsk(app, sheet: true)
-        let back = app.navigationBars.buttons["BackButton"].firstMatch
-        XCTAssertTrue(back.waitForExistence(timeout: 5))
-        // A tap where the chevron is (XCUITest may count the undimmed
-        // sheet's container as covering it; a finger isn't stopped by it).
-        back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
-        if !app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 6), back.exists {
-            back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() // the second tap a person would try
-        }
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
         XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
-                      "Ask Cedric open: the back chevron didn't return to the file list")
+                      "Ask Cedric open: one tap on the back chevron didn't return to the file list")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
+    }
+
+    /// Unsaved changes ("Save automatically" off) with Ask Cedric open:
+    /// one tap asks Save / Don't Save over the sheet; Cancel keeps the
+    /// document and Ask Cedric, and the chevron still works; Don't Save
+    /// returns to the file list.
+    func testBackChevronWithAskCedricOpenAndUnsavedChanges() throws {
+        let app = launch("README.md", fresh: true, extra: ["-ios.saveAutomatically", "<false/>"])
+        _ = editor(app)
+        // Opened read-only on iPhone: Edit (in the bar, or collapsed into
+        // the ••• menu on a narrow bar).
+        let edit = app.buttons["editor.edit"]
+        if edit.exists {
+            if edit.label == "Edit" { edit.tap() }
+        } else {
+            openMore(app)
+            let item = app.collectionViews.buttons["Edit"].firstMatch
+            if item.waitForExistence(timeout: 3) { item.tap() } else { closeMenu(app) }
+        }
+        // An unsaved change without the keyboard (typing doesn't reach the
+        // text view in this simulator: see testHideKeyboardButton): CRLF
+        // line endings, an undoable change written on Save.
+        openMore(app)
+        menuItem(app, "Encoding and Line Endings").tap()
+        let crlf = app.buttons["CRLF"].firstMatch
+        XCTAssertTrue(crlf.waitForExistence(timeout: 5), "no CRLF item")
+        crlf.tap()
+        let change = app.alerts.buttons["Change"].firstMatch
+        XCTAssertTrue(change.waitForExistence(timeout: 5), "no line-ending confirmation")
+        change.tap()
+        XCTAssertTrue(app.alerts.count == 0 || !change.exists)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
+        let dontSave = app.buttons["Don’t Save"].firstMatch
+        XCTAssertTrue(dontSave.waitForExistence(timeout: 5), "one tap didn't ask about the unsaved changes")
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "Cancel took Ask Cedric away")
+        XCTAssertTrue(app.textViews["editor.text"].exists, "Cancel closed the document")
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
+        XCTAssertTrue(dontSave.waitForExistence(timeout: 5), "after Cancel the back chevron did nothing")
+        dontSave.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "Don't Save didn't return to the file list")
         XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
     }
 
