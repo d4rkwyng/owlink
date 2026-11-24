@@ -58,6 +58,38 @@ func makeTree(_ files: [String]) throws -> URL {
         #expect(PreviewRoot.searchFolders(from: doc, openedRoot: vault).map(\.lastPathComponent) == ["notes", "vault"])
     }
 
+    /// The walk up has the vault walk's bounds (`WikiVault.mayBeVaultRoot`).
+    /// Before 0.5.4 it stopped only at the home folder itself and top-level
+    /// folders: a document on a disk searched `/Volumes/<disk>` for
+    /// `/images/…`, and one beside the home folder searched the folder
+    /// holding it.
+    @Test func theWalkStopsAtAVolumeAndAtFoldersHoldingHome() throws {
+        // A disk: its root is never searched (pure paths; nothing is read there).
+        let onDisk = URL(fileURLWithPath: "/Volumes/Backup/site/content")
+        #expect(PreviewRoot.searchFolders(from: onDisk, openedRoot: nil).map(\.path) == ["/Volumes/Backup/site/content", "/Volumes/Backup/site"])
+        // Opened on purpose, the disk is still tried.
+        let disk = URL(fileURLWithPath: "/Volumes/Backup")
+        #expect(PreviewRoot.searchFolders(from: onDisk, openedRoot: disk).map(\.path).last == "/Volumes/Backup")
+
+        // A home folder deep in a temp tree: t/home/user.
+        let t = try makeTree(["home/images/above.png", "home/user/images/home.png", "home/user/notes/site/n.md",
+                              "home/other/site/n.md", "home/user/notes/images/notes.png"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let home = t.appendingPathComponent("home/user")
+        // Beside the home folder: the folder holding home (t/home) and above are not searched.
+        let beside = t.appendingPathComponent("home/other/site")
+        #expect(PreviewRoot.searchFolders(from: beside, openedRoot: nil, home: home).map(\.lastPathComponent) == ["site", "other"])
+        #expect(PreviewRoot.resolve("/images/above.png", from: beside, openedRoot: nil, home: home) == nil)
+        // Inside it: up to, not including, the home folder.
+        let inside = t.appendingPathComponent("home/user/notes/site")
+        #expect(PreviewRoot.searchFolders(from: inside, openedRoot: nil, home: home).map(\.lastPathComponent) == ["site", "notes"])
+        #expect(PreviewRoot.resolve("/images/notes.png", from: inside, openedRoot: nil, home: home) != nil)
+        #expect(PreviewRoot.resolve("/images/home.png", from: inside, openedRoot: nil, home: home) == nil)
+        #expect(PreviewRoot.resolve("/images/above.png", from: inside, openedRoot: nil, home: home) == nil)
+        // The home folder opened in the sidebar: searched, as before.
+        #expect(PreviewRoot.resolve("/images/home.png", from: inside, openedRoot: home, home: home)?.file.lastPathComponent == "home.png")
+    }
+
     @Test func onlyRootAbsolutePathsAndNoClimbing() throws {
         let t = try makeTree(["site/images/x.png", "secret.png"])
         defer { try? FileManager.default.removeItem(at: t) }
