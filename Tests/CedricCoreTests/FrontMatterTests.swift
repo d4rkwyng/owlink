@@ -90,3 +90,33 @@ import Testing
         #expect(html.contains("<td>&amp;amp; &lt;svg/onload=1&gt;</td>"))
     }
 }
+
+/// The block as the reader leaves it (Codex review of 0.5.2 (17), must-fix
+/// 2 on iOS and 3 on the Mac).
+@Suite struct FrontMatterDisclosureTests {
+    let doc = "---\ntitle: Owls\n---\n# Owls\n"
+
+    @Test func readsAndSetsTheBlocksState() {
+        let closed = Markdown.render(doc, options: .preview(vault: nil))
+        let open = Markdown.render(doc, options: .preview(vault: nil, frontMatterExpanded: true))
+        #expect(FrontMatterDisclosure.isOpen(in: closed) == false)
+        #expect(FrontMatterDisclosure.isOpen(in: open) == true)
+        #expect(FrontMatterDisclosure.isOpen(in: "<h1>Owls</h1>") == nil)
+        #expect(FrontMatterDisclosure.setting(open: true, in: closed) == open)
+        #expect(FrontMatterDisclosure.setting(open: false, in: open) == closed)
+        #expect(FrontMatterDisclosure.setting(open: true, in: open) == open)
+        #expect(FrontMatterDisclosure.setting(open: true, in: "<p>x</p>") == "<p>x</p>")
+    }
+
+    /// Only a change from what the page last had, on the page still shown.
+    @Test func keepsOnlyTheReadersChange() {
+        #expect(FrontMatterDisclosure.change(read: true, applied: false, readFor: 3, shown: 3) == true)
+        #expect(FrontMatterDisclosure.change(read: false, applied: true, readFor: 3, shown: 3) == false)
+        #expect(FrontMatterDisclosure.change(read: false, applied: false, readFor: 3, shown: 3) == nil)
+        #expect(FrontMatterDisclosure.change(read: true, applied: true, readFor: 3, shown: 3) == nil)
+        #expect(FrontMatterDisclosure.change(read: true, applied: false, readFor: 3, shown: 4) == nil)
+        #expect(FrontMatterDisclosure.change(read: true, applied: false, readFor: 3, shown: nil) == nil)
+        #expect(FrontMatterDisclosure.change(read: nil, applied: false, readFor: 3, shown: 3) == nil)
+        #expect(FrontMatterDisclosure.change(read: true, applied: nil, readFor: 3, shown: 3) == nil)
+    }
+}

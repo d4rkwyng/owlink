@@ -71,6 +71,20 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var lastAnchor: (fragment: String, found: Bool)?
     /// Bumped by each render; a result for an older one is dropped.
     private var generation = 0
+    /// The page loaded now (counted per load) and its front matter block's
+    /// state as the app last left it (nil: no block). A state read from the
+    /// page counts only for that page, and only a change from this one is
+    /// the reader's (FrontMatterDisclosure.change).
+    private var pageCount = 0
+    private var pageFrontMatterOpen: Bool?
+
+    /// Whether the preview opens the front matter block, as the reader
+    /// last left it (a click on its summary), across documents and
+    /// launches. Off: one collapsed line.
+    static var frontMatterExpanded: Bool {
+        get { UserDefaults.standard.bool(forKey: FrontMatterDisclosure.preferenceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: FrontMatterDisclosure.preferenceKey) }
+    }
     private let latest = RenderTicket()
     /// Called after a whole page load (the tab scrolls it in step).
     var onLoaded: (() -> Void)?
@@ -298,11 +312,13 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let ticket = latest
         // An immutable copy, whatever `text` is backed by (the storage keeps changing).
         let text = (text as NSString).copy() as! NSString as String
+        let frontMatterExpanded = Self.frontMatterExpanded
         Self.queue.async {
             // Skip a render a newer one has already replaced.
             guard ticket.value == gen else { return }
             let t0 = DispatchTime.now()
-            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault) : .preview(vault: vault))
+            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
+                                                                  : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
             let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -337,12 +353,64 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?) {
         if key == shellKey, !allowJavaScript {
             if loadingShell { pendingBody = body; return }
-            bodySwaps += 1
-            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
-                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
+            swapBody(body)
             return
         }
-        load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL)
+        // A whole new page (Refresh, a theme change…): the front matter
+        // block as the reader has it on the page now goes into the new one.
+        let gen = generation
+        readFrontMatter { [weak self] open in
+            guard let self, self.generation == gen else { return }
+            let body = open.map { FrontMatterDisclosure.setting(open: $0, in: body) } ?? body
+            self.load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL)
+        }
+    }
+
+    /// The patch in the app's content world, keeping the front matter
+    /// block as the reader has it: `__cedricPatch` compares whole blocks,
+    /// `open` included, so a block the reader had opened was replaced by
+    /// the render's collapsed one on the next keystroke. Returns [the state
+    /// before, the state after] (null: no block).
+    static let swapScript = """
+    const d = document.querySelector('details.frontmatter');
+    const was = d ? d.open : null;
+    if (was !== null) html = html.replace(/<details class="frontmatter"([^>]*?)( open)?>/, (m, a) => '<details class="frontmatter"' + a + (was ? ' open' : '') + '>');
+    window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html);
+    const n = document.querySelector('details.frontmatter');
+    return [was, n ? n.open : null];
+    """
+
+    private func swapBody(_ body: String) {
+        bodySwaps += 1
+        let page = pageCount
+        webView.callAsyncJavaScript(Self.swapScript, arguments: ["html": body], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, case .success(let value) = result, let states = value as? [Any], states.count == 2 else { return }
+            self.recordFrontMatter(read: states[0] as? Bool, page: page)
+            if page == self.pageCount { self.pageFrontMatterOpen = states[1] as? Bool }
+        }
+    }
+
+    /// The page's front matter block state now (nil: no block, or no
+    /// page), kept as the preference when the reader changed it.
+    private func readFrontMatter(_ then: @escaping (Bool?) -> Void) {
+        guard pageFrontMatterOpen != nil, !loadingShell else { then(nil); return }
+        let page = pageCount
+        webView.callAsyncJavaScript("const d = document.querySelector('details.frontmatter'); return d ? d.open : null;",
+                                    arguments: [:], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, page == self.pageCount, case .success(let value) = result, let open = value as? Bool else { then(nil); return }
+            self.recordFrontMatter(read: open, page: page)
+            then(open)
+        }
+    }
+
+    /// Keeps `read` as the preference when it is the reader's change on
+    /// the page still shown (with page JavaScript off: with it on, the
+    /// page's own script could have changed it).
+    private func recordFrontMatter(read: Bool?, page: Int) {
+        guard !allowJavaScript,
+              let open = FrontMatterDisclosure.change(read: read, applied: pageFrontMatterOpen, readFor: page, shown: pageCount) else { return }
+        Self.frontMatterExpanded = open
+        pageFrontMatterOpen = open
     }
 
     private func load(_ html: String, key: String?, baseURL: URL?) {
@@ -359,6 +427,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             self.loadingShell = true
             self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
+            self.pageCount += 1
+            self.pageFrontMatterOpen = FrontMatterDisclosure.isOpen(in: html)
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }
@@ -515,9 +585,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         pendingAnchor = nil
         if let body = pendingBody {
             pendingBody = nil
-            bodySwaps += 1
-            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
-                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
+            swapBody(body)
         }
         // (Evaluated after the patch above: one content world, in order.)
         if let anchor { scroll(toAnchor: anchor, follow: false) }

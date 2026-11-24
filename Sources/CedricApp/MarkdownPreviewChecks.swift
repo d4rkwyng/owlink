@@ -18,6 +18,7 @@ extension DevChecks {
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
         case "previewnav": previewNavigationDemo(app)
+        case "mdfrontmatter": frontMatterCheck(app)
         default: return false
         }
         return true
@@ -48,6 +49,74 @@ extension DevChecks {
             waitForPreview(tab, contains: "A place for field notes", "demo Home returns to the editor document"),
             snapshot("returned-home.png", window: tab.window),
             sync { finish() },
+        ])
+    }
+
+    /// The front matter block as the reader leaves it (Codex review of
+    /// 0.5.2 (17), must-fix 3): opened, it stays open through edits (body
+    /// swaps) and a whole-page reload, and the next document opens it from
+    /// the preference; closed, the same. The preference is put back after.
+    static func frontMatterCheck(_ app: AppDelegate) {
+        let saved = UserDefaults.standard.object(forKey: FrontMatterDisclosure.preferenceKey)
+        PreviewController.frontMatterExpanded = false
+        let text = "---\ntitle: Owls of the World\nhero:\n  icon: owl.png\n---\n# Owls\n\nThey hunt at night.\n"
+        let tab = app.open(write("owls.md", text))!
+        sized(tab)
+        let p = { tab.preview }
+        var before = 0
+        let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
+        func expectState(_ want: String, _ name: String, in t: EditorWindowController? = nil) -> (@escaping () -> Void) -> Void {
+            { next in previewJS(t ?? tab, state) { v in expect(v as? String == want, name, "\(v ?? "nil")"); next() } }
+        }
+        func edit(_ s: String) -> (@escaping () -> Void) -> Void {
+            sync {
+                before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0)
+                focus(tab)
+                tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+                type(s)
+            }
+        }
+        var second: EditorWindowController?
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
+            expectState("false", "front matter collapsed by default"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            edit("a"),
+            waitForSwap(tab, "an edit renders", since: { before }),
+            expectState("true", "an opened block stays open through an edit (body swap)"),
+            sync { expect(PreviewController.frontMatterExpanded, "opening it is kept as the preference") },
+            sync { p()?.forceReload(); before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0) },
+            edit("b"),
+            waitForSwap(tab, "a reload renders", since: { before }),
+            waitForPreview(tab, contains: "night. ab", "the reloaded page shows the edits"),
+            expectState("true", "an opened block stays open through a whole-page reload"),
+            sync { second = app.open(write("barn.md", "---\ntitle: Barn owl\n---\n# Barn\n\nPale.\n")) },
+            { next in
+                guard let second else { expect(false, "second document opens"); next(); return }
+                sized(second); focus(second)
+                if !second.previewVisible { second.togglePreview() }
+                next()
+            },
+            { next in
+                guard let second else { next(); return }
+                waitForPreview(second, contains: "Pale", "the second document's preview")(next)
+            },
+            { next in
+                guard let second else { next(); return }
+                expectState("true", "the next document opens the block from the preference", in: second)(next)
+            },
+            sync { focus(tab) },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            edit("c"),
+            waitForSwap(tab, "an edit renders", since: { before }),
+            expectState("false", "a closed block stays closed through an edit"),
+            sync { expect(!PreviewController.frontMatterExpanded, "closing it is kept as the preference") },
+            sync {
+                if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
+                else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
+                finish()
+            },
         ])
     }
 

@@ -242,8 +242,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// when it differs from the state its page was rendered with and that
     /// page (`readFor`) is still the one shown.
     nonisolated static func frontMatterChange(read: Bool?, renderedOpen: Bool, readFor: Int, shown: Int?) -> Bool? {
-        guard let read, readFor == shown, read != renderedOpen else { return nil }
-        return read
+        FrontMatterDisclosure.change(read: read, applied: renderedOpen, readFor: readFor, shown: shown)
     }
 
     static let frontMatterStateScript = """
