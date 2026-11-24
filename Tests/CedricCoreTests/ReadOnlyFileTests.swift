@@ -418,8 +418,10 @@ import Testing
             if !finished {
                 // Stuck opening the FIFO: give it the other end so the save returns.
                 let release = open(url.path, O_RDWR | O_NONBLOCK)
-                _ = done.wait(timeout: .now() + 20)
+                let released = done.wait(timeout: .now() + 20) == .success
                 if release >= 0 { close(release) }
+                // Still running: its outcome and the folder aren't safe to read.
+                try #require(released, "the \(String(folderMode, radix: 8)) folder's save returns once the FIFO has a reader")
             }
             let label = String(folderMode, radix: 8)
             #expect(finished, "the \(label) folder's save doesn't block on the FIFO")
@@ -428,13 +430,16 @@ import Testing
             #expect(try String(contentsOf: moved, encoding: .utf8) == "checked\n", "\(label): the checked file is untouched")
             #expect(try String(contentsOf: other, encoding: .utf8) == "other\n", "\(label): the other file is untouched")
             var st = stat()
-            #expect(lstat(url.path, &st) == 0)
+            let statted = lstat(url.path, &st) == 0
+            #expect(statted)
             if folderMode == 0o555 {
                 #expect(outcome.error is CocoaError, "in place: the save fails with an error")
                 #expect(st.st_mode & S_IFMT == S_IFIFO, "the FIFO is left as it was")
             } else {
                 #expect(outcome.error == nil, "a writable folder still saves with the usual replace")
-                #expect(st.st_mode & S_IFMT == S_IFREG)
+                // Reading a FIFO left in place would block the test itself.
+                try #require(statted)
+                try #require(st.st_mode & S_IFMT == S_IFREG)
                 #expect(try String(contentsOf: url, encoding: .utf8) == "saved\n")
             }
             #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["doc.md", "moved.md", "other.md"],
