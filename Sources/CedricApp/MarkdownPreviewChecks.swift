@@ -79,6 +79,9 @@ extension DevChecks {
         var second: EditorWindowController?
         var linker: EditorWindowController?
         var secondOpen = false
+        var direct: EditorWindowController?
+        var via: EditorWindowController?
+        var directOpen = false
         run([
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
@@ -306,6 +309,44 @@ extension DevChecks {
                 guard let second else { next(); return }
                 waitForPreview(second, contains: "Pale", "the second document's preview opens again")(next)
             },
+            // Codex b18 round 2, must-fix 3: a page is keyed by the file it
+            // shows. A late read from a preview that followed a link
+            // through a symlink is set on a preview opened on the target.
+            sync {
+                let real = write("tawny.md", "---\ntitle: Tawny owl\n---\n# Tawny\n\nBrown.\n")
+                try? FileManager.default.createSymbolicLink(at: real.deletingLastPathComponent().appendingPathComponent("alias.md"),
+                                                            withDestinationURL: real)
+                direct = app.open(real)
+                if let d = direct { sized(d); focus(d); if !d.previewVisible { d.togglePreview() } }
+                via = app.open(write("via.md", "---\ntitle: Via\n---\n# Via\n\nSee [Alias](alias.md).\n"))
+                if let v = via { sized(v); focus(v); if !v.previewVisible { v.togglePreview() } }
+            },
+            { next in
+                guard let d = direct else { expect(false, "the target document opens"); next(); return }
+                waitForPreview(d, contains: "Brown", "the target's preview")(next)
+            },
+            { next in
+                guard let v = via else { expect(false, "the document linking through a symlink opens"); next(); return }
+                waitForPreview(v, contains: "See Alias", "the linking document's preview (symlink)")({
+                    previewJS(v, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Alias').click(); 1") { _ in
+                        waitForPreview(v, contains: "Brown", "the preview follows the link through the symlink")(next)
+                    }
+                })
+            },
+            { next in
+                guard let d = direct else { next(); return }
+                previewJS(d, "String(document.querySelector('details.frontmatter').open)") { v in
+                    directOpen = v as? String == "true"
+                    next()
+                }
+            },
+            { next in guard let v = via else { next(); return }; previewJS(v, "document.querySelector('details.frontmatter').open = \(!directOpen); 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.0; if let v = via { focus(v); v.togglePreview() } },
+            { next in
+                guard let d = direct else { next(); return }
+                untilState(d, String(!directOpen), "a late read through a symlink is set on the preview opened on the target", timeout: 5)(next)
+            },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }

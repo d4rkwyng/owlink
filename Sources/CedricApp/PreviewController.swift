@@ -558,13 +558,18 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         return FrontMatterChange(key: key, open: read.open, at: at)
     }
 
-    /// The document the shown entry is: the live one, or a linked file.
+    /// The document the shown entry is: the live one, or a linked file,
+    /// by the file it really is (symlinks resolved, as `documentKey`), so
+    /// a page reached through a link and one opened on its target match.
     private var entryKey: String? {
         switch history[historyIndex] {
         case .home: return documentKey
-        case .local(let url, _, _): return url.standardizedFileURL.path
+        case .local(let url, _, _): return Self.pageKey(for: url)
         }
     }
+
+    /// A file's page key: the file it resolves to, standardized.
+    static func pageKey(for url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
 
     private func load(_ html: String, key: String?, baseURL: URL?) {
         pendingBody = nil

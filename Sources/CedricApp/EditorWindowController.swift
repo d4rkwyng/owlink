@@ -1730,8 +1730,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         pane.applyPalette(palette)
         previewWindow?.updateTitle()
         // The key of the live document's page (a linked page shown in the
-        // preview has its own: its path); front matter reads are kept per page.
-        (pane.renderer as? PreviewController)?.documentKey = doc.fileURL?.standardizedFileURL.path ?? "untitled-\(ObjectIdentifier(self).hashValue)"
+        // preview has its own: its path), the file it resolves to; front
+        // matter reads are kept per page.
+        (pane.renderer as? PreviewController)?.documentKey = doc.fileURL.map(PreviewController.pageKey(for:)) ?? "untitled-\(ObjectIdentifier(self).hashValue)"
         // `string` is a copy (the renderers work on it off the main thread).
         pane.renderer.render(text: textView.string, language: doc.language, palette: palette,
                              baseURL: doc.fileURL?.deletingLastPathComponent(), fileName: doc.fileURL?.lastPathComponent)
