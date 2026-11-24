@@ -1014,7 +1014,7 @@ public enum OwlTools {
                 let at = p.firstLine == p.lastLine ? "line \(p.firstLine)" : "lines \(p.firstLine)-\(p.lastLine)"
                 let summary = p.firstLine == p.lastLine ? String(localized: "Proposed a change to line \(p.firstLine)")
                     : String(localized: "Proposed a change to lines \(p.firstLine)–\(p.lastLine)")
-                return OwlToolResult(text: "proposed: the user will review the change to \(at) and apply it or not. For another separate change call propose_edit again (at most \(maxProposals) in all); otherwise briefly say what you changed.",
+                return OwlToolResult(text: "proposed: the user will review the change to \(at) and apply it or not. For another separate change call propose_edit again (at most \(maxProposals) in all); otherwise briefly say what you propose. Nothing is applied until the user presses Apply.",
                                      proposal: p, summary: summary, ok: true)
             }
         case .checkDocument:
