@@ -561,6 +561,44 @@ import Testing
         #expect(gone == second && gone.state(text: "x", generation: 3) == .stale)
     }
 
+    // MARK: Codex regressions (0.5.3, fourth round)
+
+    @Test func aSelfInitInsideAMissedRegexIsOnlyAWarning() {
+        // The lexer reads `/TODO/` after `)` as a division: the "declaration" may be regex text.
+        let before = "if (ok) /TODO/.test(s);\n"
+        let after = "if (ok) /const x = x;/.test(s);\n"
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: before, after: after,
+                                           original: "TODO", replacement: "const x = x;", firstLine: 1, script: FakeScript(accepts: true))
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.selfInitialization])
+        // A line whose only slashes are comment syntax stays hard.
+        let commented = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "const x = 1; // one\n",
+                                                   after: "const x = x; // one\n", original: "1", replacement: "x", script: nil)
+        #expect(commented.hardIssue?.check == .selfInitialization)
+    }
+
+    @Test func importMetaIsModuleSyntax() {
+        struct RejectsImportMeta: OwlScriptSyntaxChecker {
+            func syntaxError(in script: String) -> OwlSyntaxError? {
+                script.contains("import.meta") ? OwlSyntaxError(message: "import.meta is only valid inside modules.", line: 1) : nil
+            }
+        }
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "const url = \"\";\n",
+                                           after: "const url = import.meta.url;\n", original: "\"\"", replacement: "import.meta.url",
+                                           script: RejectsImportMeta())
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.script])
+        #expect(OwlEditValidation.usesModuleSyntax("f(import.meta.url);\n"))
+        #expect(!OwlEditValidation.usesModuleSyntax("const s = 'import.meta';\nx.import.meta = 1;\n"))
+    }
+
+    @Test func anEscapedBracketInCSSIsOnlyAWarning() {
+        let c = OwlEditValidation.validate(language: "css", fileName: "a.css", before: ".example { color: red; }\n",
+                                           after: ".\\( { color: red; }\n", original: ".example", replacement: ".\\(", script: nil)
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.brackets])
+    }
+
     // MARK: The gate
 
     @Test func gateRefusesTheFirstHardFailureOnceThenMarks() throws {

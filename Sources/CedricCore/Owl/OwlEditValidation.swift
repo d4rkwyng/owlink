@@ -108,7 +108,9 @@ public enum OwlEditValidation {
     /// `#/…/#`) are blanked over the whole text by the owl's lexer
     /// (`CodeMask`, from `RulesHintProvider.scanCode`) before counting.
     ///
-    /// - Swift, C, CSS, Python: HARD.
+    /// - Swift, C, Python: HARD.
+    /// - CSS: WARNING. An escape makes a bracket part of a name
+    ///   (`.\(` is a class called `(`), and the lexer doesn't read escapes.
     /// - JavaScript: HARD only when the syntax checker also rejects the
     ///   edited text as a classic script. Accepted: the parser wins and
     ///   the brackets aren't reported. Module syntax (the checker can't
@@ -121,15 +123,17 @@ public enum OwlEditValidation {
     ///   anything past the highlighter's per-line limit, so a count there
     ///   is a hint, not a verdict.
     static let bracketLanguages: [String: OwlEditIssue.Severity] = [
-        "swift": .hard, "javascript": .hard, "c": .hard, "css": .hard, "python": .hard,
+        "swift": .hard, "javascript": .hard, "c": .hard, "css": .warning, "python": .hard,
         "typescript": .warning, "ruby": .warning,
     ]
 
     /// A statement-start `import` (not a dynamic `import(…)`) or `export`,
-    /// outside strings and comments: module syntax, which JavaScriptCore's
-    /// classic-script check rejects even when it is valid.
+    /// or `import.meta` anywhere, outside strings and comments: module
+    /// syntax, which JavaScriptCore's classic-script check rejects even
+    /// when it is valid.
     static let moduleSyntax = try! NSRegularExpression(
-        pattern: #"(?:^|[;{}])[ \t]*(?:import\b(?!\s*\()|export\b)"#, options: [.anchorsMatchLines])
+        pattern: #"(?:^|[;{}])[ \t]*(?:import\b(?!\s*\()|export\b)|(?<![\w$.])import\s*\.\s*meta\b"#,
+        options: [.anchorsMatchLines])
 
     static func usesModuleSyntax(_ text: String) -> Bool {
         let code = code(text, language: "javascript")
@@ -535,7 +539,9 @@ public enum OwlEditValidation {
     /// Rule a. JS/TS: a variable declared from itself.
     /// - `const x = x` / `let x = x`: HARD, Apply off (and one retry for
     ///   the model), because it always throws a ReferenceError (temporal
-    ///   dead zone) when it runs: it never works.
+    ///   dead zone) when it runs: it never works. A WARNING instead when
+    ///   its line has a `/` that isn't `//`, `/*` or `*/`: the lexer may
+    ///   have missed a regex (`if (ok) /const x = x;/.test(s);`).
     /// - `var x = x`: WARNING, Apply on: it runs (x is just undefined or
     ///   unchanged), so it is a probable mistake, not a broken program.
     static func selfInitializations(_ s: String, language: String) -> [RuleHit] {
@@ -543,14 +549,36 @@ public enum OwlEditValidation {
         return selfInit.matches(in: ns as String, range: NSRange(location: 0, length: ns.length)).compactMap { m in
             let kw = ns.substring(with: m.range(at: 1)), name = ns.substring(with: m.range(at: 2))
             guard name == ns.substring(with: m.range(at: 3)) else { return nil }
-            let hard = kw != "var"
-            let message = hard
-                ? String(localized: "`\(kw) \(name) = \(name)` reads `\(name)` before it is set, which always throws a ReferenceError")
-                : String(localized: "`var \(name) = \(name)` sets `\(name)` to itself, which does nothing")
-            return RuleHit(check: .selfInitialization, severity: hard ? .hard : .warning, key: "init:\(kw):\(name)",
+            let tdz = kw != "var"
+            let ambiguous = tdz && hasStraySlash(ns, lineOf: m.range.location)
+            let message = !tdz
+                ? String(localized: "`var \(name) = \(name)` sets `\(name)` to itself, which does nothing")
+                : ambiguous
+                ? String(localized: "`\(kw) \(name) = \(name)` reads `\(name)` before it is set, which throws a ReferenceError (unless it is inside a regular expression)")
+                : String(localized: "`\(kw) \(name) = \(name)` reads `\(name)` before it is set, which always throws a ReferenceError")
+            return RuleHit(check: .selfInitialization, severity: tdz && !ambiguous ? .hard : .warning, key: "init:\(kw):\(name)",
                            message: message, lineOffset: lineOffset(ns, m.range.location),
                            location: m.range.location, length: m.range.length)
         }
+    }
+
+    /// The line of `at` (in blanked code) has a `/` that isn't part of
+    /// `//`, `/*` or `*/`: a division, or a regex the lexer missed.
+    static func hasStraySlash(_ ns: NSString, lineOf at: Int) -> Bool {
+        let line = ns.lineRange(for: NSRange(location: at, length: 0))
+        var i = line.location
+        let end = NSMaxRange(line)
+        while i < end {
+            let u = ns.character(at: i)
+            if u == 47 {   // /
+                let next: unichar = i + 1 < end ? ns.character(at: i + 1) : 0
+                let prev: unichar = i > line.location ? ns.character(at: i - 1) : 0
+                if next == 47 || next == 42 { i += 2; continue }   // // or /*
+                if prev != 42 { return true }                      // not */
+            }
+            i += 1
+        }
+        return false
     }
 
     static let selfAssign = try! NSRegularExpression(

@@ -98,6 +98,23 @@ import CedricCore
         #expect(c == .clean)
     }
 
+    @Test func aSelfInitInsideARegexKeepsApplyOnThroughJSC() {
+        let after = "if (ok) /const x = x;/.test(s);\n"
+        #expect(JSCSyntaxChecker().syntaxError(in: after) == nil)
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "if (ok) /TODO/.test(s);\n",
+                                           after: after, original: "TODO", replacement: "const x = x;", script: JSCSyntaxChecker())
+        #expect(!c.failsValidation)
+    }
+
+    @Test func importMetaIsAWarningThroughJSC() throws {
+        let s = OwlDocumentSnapshot(text: "const url = \"\";\n", generation: 1, fileName: "a.js", language: "javascript")
+        let p = try OwlEditProposal.anchored(find: "\"\"", replace: "import.meta.url", in: s).get()
+        #expect(JSCSyntaxChecker().syntaxError(in: "const url = import.meta.url;\n") != nil)
+        let c = OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker())
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.script])
+    }
+
     @Test func aSecondCardRenamingToTheSameNameFailsThroughJSC() throws {
         let text = "let a = 1;\nlet b = 2;\n"
         let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
