@@ -713,6 +713,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             done.accessibilityHint = String(localized: "Leaves Focus Preview and shows the text.")
             done.accessibilityIdentifier = "editor.focusDone"
             if #available(iOS 27.0, *) { done.visibilityPriority = .high }
+            navigationItem.pinnedTrailingGroup = nil
             navigationItem.rightBarButtonItems = [done]
             updateEdited()
             navigationItem.additionalOverflowItems = UIDeferredMenuElement.uncached { [weak self] done in
@@ -740,8 +741,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         // Undo and Redo first (leading), then Save, Find, Preview, and
         // Edit / Done at the trailing end.
-        items.insert(contentsOf: [undoItem, redoItem], at: 0)
-        if let edit = configuredEditItem() { items.append(edit) }
+        let edit = configuredEditItem()
+        if Self.pinsHistory {
+            // An iPad: Undo, Redo and Edit / Done pinned at the trailing
+            // edge, never collapsed into the ••• menu, which stays seven
+            // rows (no history row there, Codex b18 re-check 2).
+            navigationItem.pinnedTrailingGroup = historyGroup(edit)
+        } else {
+            navigationItem.pinnedTrailingGroup = nil
+            items.insert(contentsOf: [undoItem, redoItem], at: 0)
+            if let edit { items.append(edit) }
+        }
         navigationItem.rightBarButtonItems = items.reversed()
         updateEdited()
         // The rest in the system's own overflow menu (the ellipsis is
@@ -876,6 +886,27 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
     /// Tests only: nil follows the runtime (barPrioritiesInForce).
     static var barPrioritiesOverrideForTests: Bool?
+
+    /// An iPad's bar pins Undo, Redo and Edit / Done (pinnedTrailingGroup:
+    /// UIKit never moves it to the ••• menu), so the menu has no history
+    /// row there; an iPhone's bar is too narrow to pin three buttons.
+    static var pinsHistory: Bool {
+        #if targetEnvironment(macCatalyst)
+        return false
+        #else
+        return !WindowSupport.isPhone
+        #endif
+    }
+
+    /// Undo, Redo and Edit / Done as the iPad's pinned group; if even that
+    /// doesn't fit (a narrow slide-over), one button with the three in its
+    /// menu, enabled as the buttons are.
+    private func historyGroup(_ edit: UIBarButtonItem?) -> UIBarButtonItemGroup {
+        let representative = UIBarButtonItem(title: String(localized: "Undo"), image: UIImage(systemName: "arrow.uturn.backward"),
+                                             menu: UIMenu(children: [historyMenuRow()]))
+        representative.accessibilityIdentifier = "editor.history"
+        return UIBarButtonItemGroup(barButtonItems: [undoItem, redoItem] + (edit.map { [$0] } ?? []), representativeItem: representative)
+    }
 
     /// The ••• menu's Preview submenu: the preview modes side by side, on
     /// every width (the bar's eye and Focus Preview buttons may or may not
@@ -4206,9 +4237,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// they collapse only after Undo's, so the row is there when they go.
     /// Without the priorities (before iOS 27: barPrioritiesInForce) any of
     /// the three may go alone, first: each is then its own entry, so none
-    /// is ever collapsed out of reach.
+    /// is ever collapsed out of reach. Pinned (an iPad) they never
+    /// collapse; their own entries all the same.
     private func updateHistoryMenuRow() {
-        if Self.barPrioritiesInForce {
+        if Self.barPrioritiesInForce && !Self.pinsHistory {
             undoItem.menuRepresentation = historyMenuRow()
             redoItem.menuRepresentation = Self.notInOverflowMenu
             editItem.menuRepresentation = Self.notInOverflowMenu
@@ -4218,6 +4250,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             redoItem.menuRepresentation = h.redo
             editItem.menuRepresentation = h.edit ?? Self.notInOverflowMenu
         }
+        // The pinned group's one button (a narrow iPad bar), as they are now.
+        navigationItem.pinnedTrailingGroup?.representativeItem?.menu = UIMenu(children: [historyMenuRow()])
     }
 
     /// Undo, Redo (and Edit / Done, in read mode's use) as one row of small

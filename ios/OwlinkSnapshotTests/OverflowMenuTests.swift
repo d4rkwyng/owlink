@@ -229,9 +229,11 @@ final class OverflowMenuTests: XCTestCase {
                     let editTitle = bar.first { $0.accessibilityIdentifier == "editor.edit" }?.title
                     let historyRow = (["Undo", "Redo"] + [editTitle].compactMap { $0 }).joined(separator: " | ")
                     let sets = BarCollapse.collapseSets(bar)
-                    if priorities {
+                    if priorities && bar.count >= 2 {
                         XCTAssertGreaterThan(sets.count, 2, "\(name): the bar's priorities give no order to collapse in")
                     } else {
+                        // Without priorities, or one button (an iPad's txt
+                        // bar: Find; the rest pinned): any set may collapse.
                         XCTAssertEqual(sets.count, 1 << bar.count, "\(name): without priorities any set may collapse")
                     }
                     for set in sets {

@@ -214,7 +214,7 @@ final class OwlinkUITests: XCTestCase {
         let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
         // Seven rows (0.5.2 (18)): Save, Share & Export › | Find ›,
-        // Preview ›, Ask Cedric | More ›, Settings; eight when the bar's
+        // Preview ›, Ask Cedric | More ›, Settings; on an iPhone eight when the bar's
         // Undo and Redo collapse into it: one row first, side by side, with
         // Edit / Done (read mode, an iPhone) if that collapsed too. Never
         // more than eight (b18 gate: nine, Undo and Redo a row each).
@@ -229,8 +229,15 @@ final class OwlinkUITests: XCTestCase {
         let undo = menuList.buttons["editor.menu.undo"].firstMatch
         let redo = menuList.buttons["editor.menu.redo"].firstMatch
         let historyInMenu = undo.exists || redo.exists
-        XCTAssertEqual(rows, historyInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Undo and Redo in it: \(historyInMenu))")
-        XCTAssertLessThanOrEqual(rows, 8, "\(rows) rows at the top of the ••• menu")
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // An iPad pins Undo, Redo and Edit / Done in the bar: seven
+            // rows, no history row (Codex b18 re-check 2).
+            XCTAssertFalse(historyInMenu, "a history row in an iPad's ••• menu")
+            XCTAssertEqual(rows, 7, "\(rows) rows at the top of an iPad's ••• menu")
+        } else {
+            XCTAssertEqual(rows, historyInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Undo and Redo in it: \(historyInMenu))")
+            XCTAssertLessThanOrEqual(rows, 8, "\(rows) rows at the top of the ••• menu")
+        }
         // Undo and Redo by touch: in the bar, or both side by side in one row.
         if historyInMenu {
             XCTAssertTrue(undo.exists && redo.exists, "Undo and Redo not both in the ••• menu")

@@ -155,6 +155,15 @@ final class MenuReachabilityTests: XCTestCase {
         }
         r.expanded.formUnion(editor.moreMenuItems().flatMap(titles))
         r.collapsed = Set(titles(overflowMenu(editor, collapsing: barItems(editor))))
+        // The pinned group (an iPad's Undo, Redo, Edit / Done) stays in the
+        // bar however narrow (UIKit never collapses it), as its buttons or
+        // their representative's menu.
+        if let pinned = editor.navigationItem.pinnedTrailingGroup {
+            var inBar = Set(pinned.barButtonItems.compactMap { $0.title ?? $0.accessibilityLabel }.filter { !$0.isEmpty })
+            r.expanded.formUnion(inBar)
+            if let menu = pinned.representativeItem?.menu { inBar = Set(titles(menu)) }
+            r.collapsed.formUnion(inBar)
+        }
         r.keys = Set((editor.keyCommands ?? []).compactMap { $0.title.isEmpty ? nil : $0.title })
         for i in MenuBar.insertions(hasFind: true, hasSpelling: true, hasAppSettings: true) { r.keys.formUnion(titles(i.menu)) }
         return r
@@ -237,6 +246,40 @@ final class MenuReachabilityTests: XCTestCase {
         }
     }
 
+    /// On an iPad, Undo, Redo and (read mode) Edit / Done are the bar's
+    /// pinned group, which UIKit never collapses into the ••• menu, and
+    /// not among the buttons that can collapse; its representative (a
+    /// narrow slide-over) has the three, by touch. On an iPhone they are
+    /// among the bar's buttons (and not pinned).
+    func testHistoryPinnedOnIPadOnly() {
+        defer { EditorViewController.barPrioritiesOverrideForTests = nil }
+        for priorities in BarCollapse.priorityPaths {
+            EditorViewController.barPrioritiesOverrideForTests = priorities
+            for sc in Self.sizeClasses {
+                for readMode in [false, true] {
+                    let name = "\(sc.name), read mode \(readMode), priorities \(priorities)"
+                    let editor = editor(SizeClass(name: sc.name, width: sc.width, size: sc.size, readMode: readMode, iPad: sc.iPad), "md")
+                    let want = ["editor.undo", "editor.redo"] + (readMode ? ["editor.edit"] : [])
+                    let bar = barItems(editor).compactMap(\.accessibilityIdentifier)
+                    let pinned = editor.navigationItem.pinnedTrailingGroup
+                    if sc.iPad {
+                        XCTAssertEqual(pinned?.barButtonItems.compactMap(\.accessibilityIdentifier), want, "\(name): not pinned")
+                        XCTAssertEqual(bar.filter(want.contains), [], "\(name): among the buttons that collapse")
+                        let rep = pinned?.representativeItem?.menu.map { UIMenu(children: [$0]) }
+                        XCTAssertNotNil(rep, "\(name): no representative for a narrow bar")
+                        let repTitles = rep.map(titles) ?? []
+                        for t in ["Undo", "Redo"] + (readMode ? ["Edit"] : []) {
+                            XCTAssertTrue(repTitles.contains(t), "\(name): \(t) not in the representative's menu")
+                        }
+                    } else {
+                        XCTAssertNil(pinned, "\(name): pinned on an iPhone")
+                        XCTAssertEqual(bar.filter(want.contains), want, "\(name): not in the bar")
+                    }
+                }
+            }
+        }
+    }
+
     /// At most seven rows at the top of the ••• menu, for each size class
     /// and document: with no bar button collapsed into it, and with every
     /// set of buttons a narrow bar may collapse (Undo and Redo too, by
@@ -257,13 +300,16 @@ final class MenuReachabilityTests: XCTestCase {
                     let none = topLevelRows(editor.moreMenuItems())
                     XCTAssertLessThanOrEqual(none.count, 7, "\(name), none collapsed: \(none.count) rows: \(none)")
                     let sets = collapseSets(editor)
-                    if priorities {
+                    let n = barItems(editor).count
+                    if priorities && n >= 2 {
                         XCTAssertGreaterThan(sets.count, 2, "\(name): the bar's priorities give no order to collapse in")
                     } else {
-                        XCTAssertEqual(sets.count, 1 << barItems(editor).count, "\(name): without priorities any set may collapse")
+                        // Without priorities, or one button (an iPad's txt
+                        // bar: Find; the rest pinned): any set may collapse.
+                        XCTAssertEqual(sets.count, 1 << n, "\(name): without priorities any set may collapse")
                     }
                     for set in sets {
-                        assertRowBudget(editor, collapsed: set, priorities: priorities, "\(name), collapsed \(set.compactMap(\.accessibilityIdentifier))")
+                        assertRowBudget(editor, collapsed: set, priorities: priorities, iPad: sc.iPad, "\(name), collapsed \(set.compactMap(\.accessibilityIdentifier))")
                     }
                 }
             }
@@ -276,11 +322,16 @@ final class MenuReachabilityTests: XCTestCase {
     /// for each of Undo, Redo and Edit collapsed, each a row of its own,
     /// first. Either way every collapsed button's command still in the
     /// menu, by touch, enabled as the button is.
-    private func assertRowBudget(_ editor: EditorViewController, collapsed: [UIBarButtonItem], priorities: Bool, _ name: String, file: StaticString = #filePath, line: UInt = #line) {
+    private func assertRowBudget(_ editor: EditorViewController, collapsed: [UIBarButtonItem], priorities: Bool, iPad: Bool, _ name: String, file: StaticString = #filePath, line: UInt = #line) {
         let rows = topLevelRows(collapsed.map(overflowRepresentation) + editor.moreMenuItems())
         let history = rows.filter { $0.contains("Undo") || $0.contains("Redo") || ["Edit", "Done", "Read Only"].contains($0) }
         let gone = collapsed.filter { ["editor.undo", "editor.redo", "editor.edit"].contains($0.accessibilityIdentifier ?? "") }
-        if priorities {
+        if iPad {
+            // An iPad: seven rows, never a history row (Undo, Redo and
+            // Edit / Done pinned in the bar).
+            XCTAssertEqual(history, [], "\(name): a history row on an iPad: \(rows)", file: file, line: line)
+            XCTAssertLessThanOrEqual(rows.count, 7, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
+        } else if priorities {
             XCTAssertLessThanOrEqual(history.count, 1, "\(name): Undo, Redo and Edit take \(history.count) rows: \(rows)", file: file, line: line)
             XCTAssertLessThanOrEqual(rows.count, history.isEmpty ? 7 : 8, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
         } else {
