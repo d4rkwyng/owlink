@@ -2,8 +2,9 @@
 # Checks a built Owlink.app's Info.plist against Resources/document-types.txt:
 # one CFBundleDocumentTypes entry per row with its content types, its icon
 # (CFBundleTypeIconFile, and the .icns in Contents/Resources), role Editor,
-# the row's LSHandlerRank, Alternate claims that are exactly 0.2.x's, no
-# claim in two rows but public.log (see the header of
+# the row's LSHandlerRank, Alternate labelled rows exactly MD, JSON and
+# YAML, Alternate claims that are exactly 0.2.x's (once each), no claim in
+# two rows but the five 0.5.3 also had there (see the header of
 # Resources/document-types.txt), and an
 # imported type declaration exactly for the rows that have one. Also that
 # nothing asks macOS to compose icons instead (no
@@ -34,7 +35,11 @@ for line in open(src):
     line = line.strip()
     if not line or line.startswith('#'):
         continue
-    label, icon, name, utis, decl, rank = line.split('|')
+    f = line.split('|')
+    if len(f) != 6:
+        check(False, f"row has 6 fields: {line!r}")
+        continue
+    label, icon, name, utis, decl, rank = f
     rows.append((label, icon, name, utis.split(','), decl, rank))
 docs = pl.get('CFBundleDocumentTypes', [])
 by_name = {d.get('CFBundleTypeName'): d for d in docs}
@@ -55,16 +60,22 @@ check(not any(d.get('LSHandlerRank') in ('Owner', 'Default') or 'LSHandlerRank' 
 check(not any('CFBundleTypeIconSystemGenerated' in d for d in docs), "no CFBundleTypeIconSystemGenerated")
 claims = [u for label, icon, name, utis, decl, rank in rows if label != '*' for u in utis]
 check(len(claims) == len(set(claims)), "no content type is in two labelled types")
-# Alternate claims are exactly 0.2.x's Text entry's, so no default changes;
-# each is in one row, so Finder shows that row's icon. public.log is also
-# in LOG at None (as in 0.2.x's Info.plist + LOG row): the only double claim.
+# Alternate claims are exactly 0.2.x's Text entry's, each once, so no
+# default changes. Only MD, JSON and YAML hold theirs in their labelled
+# row (Finder shows that row's icon); a labelled row at Alternate for
+# public.xml or public.css took them from Safari on a clean macOS 26 VM.
+labelled_alt = sorted(name for label, icon, name, utis, decl, rank in rows if label != '*' and rank == 'Alternate')
+check(labelled_alt == ['JSON', 'Markdown', 'YAML'], f"Alternate labelled rows are exactly MD, JSON, YAML: {labelled_alt}")
 alt = [u for d in docs if d.get('CFBundleTypeName') in text_names and d.get('LSHandlerRank') == 'Alternate'
        for u in d.get('LSItemContentTypes', [])]
 check(sorted(alt) == sorted(['public.text', 'public.plain-text', 'public.source-code', 'public.script', 'public.json',
                              'public.yaml', 'public.html', 'public.xml', 'public.css', 'net.daringfireball.markdown',
                              'public.log', 'public.data']), f"Alternate text claims are 0.2.x's, once each: {alt}")
 every = [u for d in docs if d.get('CFBundleTypeName') in text_names for u in d.get('LSItemContentTypes', [])]
-check(sorted({u for u in every if every.count(u) > 1}) == ['public.log'], "public.log is the only content type in two rows")
+# As in 0.5.3: these are in a labelled row at None and in "*" at Alternate.
+dup = sorted({u for u in every if every.count(u) > 1})
+check(dup == ['public.css', 'public.html', 'public.log', 'public.plain-text', 'public.xml'],
+      f"only plain-text, xml, html, css and log are in two rows (labelled None + \"*\"): {dup}")
 imp = {t['UTTypeIdentifier']: t for t in pl.get('UTImportedTypeDeclarations', [])}
 want = {utis[0]: (name, decl) for label, icon, name, utis, decl, rank in rows if decl != '-'}
 check(set(imp) == set(want), f"imported declarations are exactly {sorted(want)}")

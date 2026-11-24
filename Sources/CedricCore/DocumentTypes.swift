@@ -18,8 +18,9 @@ public struct DocumentFileType: Sendable, Hashable, Identifiable {
     /// For the types macOS doesn't declare: what Owlink's imported
     /// declaration says.
     public let imported: Imported?
-    /// The entry's LSHandlerRank. Alternate only for 0.2.x's exact claims
-    /// (see Resources/document-types.txt).
+    /// The entry's LSHandlerRank. Alternate only for MD, JSON, YAML and the
+    /// catch-all, which together hold 0.2.x's claims (see
+    /// Resources/document-types.txt).
     public let rank: Rank
 
     public enum Rank: String, Sendable, Hashable {
@@ -67,11 +68,13 @@ public enum DocumentTypes {
         .init(conformsTo: conforms, extensions: exts)
     }
 
-    /// The labelled types, in the Settings list's order. The Alternate ones
-    /// hold 0.2.x's exact claims, so a type Owlink opens by itself shows
-    /// its own icon (Finder draws the icon of the claim that won).
+    /// The labelled types, in the Settings list's order. MD, JSON and YAML
+    /// hold their 0.2.x claim at Alternate themselves: Owlink opens those
+    /// types by itself on a clean Mac, and Finder draws the icon of the
+    /// entry whose claim won. The rest are None (an exact Alternate claim
+    /// in a row of its own took xml and css from Safari).
     public static let all: [DocumentFileType] = [
-        .init(label: "TXT", icon: "doc-txt", name: "Plain Text", contentTypes: ["public.plain-text"], rank: .alternate),
+        .init(label: "TXT", icon: "doc-txt", name: "Plain Text", contentTypes: ["public.plain-text"]),
         // Imported: macOS 15 and earlier have no Markdown type (26 does; then this is inactive).
         .init(label: "MD", icon: "doc-md", name: "Markdown", contentTypes: ["net.daringfireball.markdown"],
               imported: imp(["public.plain-text"], ["md", "markdown"]), rank: .alternate),
@@ -86,9 +89,9 @@ public enum DocumentTypes {
               contentTypes: ["public.shell-script", "public.zsh-script", "public.bash-script"]),
         .init(label: "LOG", icon: "doc-log", name: "Log File", contentTypes: ["com.apple.log", "public.log"]),
         .init(label: "CSV", icon: "doc-csv", name: "CSV", contentTypes: ["public.comma-separated-values-text"]),
-        .init(label: "XML", icon: "doc-xml", name: "XML", contentTypes: ["public.xml"], rank: .alternate),
-        .init(label: "HTML", icon: "doc-html", name: "HTML", contentTypes: ["public.html"], rank: .alternate),
-        .init(label: "CSS", icon: "doc-css", name: "CSS", contentTypes: ["public.css"], rank: .alternate),
+        .init(label: "XML", icon: "doc-xml", name: "XML", contentTypes: ["public.xml"]),
+        .init(label: "HTML", icon: "doc-html", name: "HTML", contentTypes: ["public.html"]),
+        .init(label: "CSS", icon: "doc-css", name: "CSS", contentTypes: ["public.css"]),
         .init(label: "TOML", icon: "doc-toml", name: "TOML", contentTypes: ["public.toml"], imported: imp(["public.text"], ["toml"])),
         .init(label: "INI", icon: "doc-ini", name: "INI Settings", contentTypes: ["com.microsoft.ini"], imported: imp(["public.text"], ["ini"])),
         .init(label: "SQL", icon: "doc-sql", name: "SQL", contentTypes: ["org.iso.sql"], imported: imp(["public.source-code"], ["sql"])),
@@ -99,12 +102,12 @@ public enum DocumentTypes {
     /// The rows of Settings › Default editor for….
     public static var settingsTypes: [DocumentFileType] { all.filter(\.inSettings) }
 
-    /// Any other text: the unlabelled icon. At Alternate with the rest of
-    /// 0.2.x's claims that no labelled Alternate row holds (public.log too:
-    /// LOG is None, see Resources/document-types.txt), so together with
-    /// those rows no default changes on update.
+    /// Any other text: the unlabelled icon. At Alternate with 0.2.x's
+    /// claims but the three MD, JSON and YAML hold, so together with those
+    /// rows no default changes on update (see Resources/document-types.txt).
     public static let catchAll = DocumentFileType(label: "*", icon: "doc-text", name: "Text", contentTypes: [
-        "public.text", "public.source-code", "public.script", "public.log", "public.data",
+        "public.text", "public.plain-text", "public.source-code", "public.script", "public.html", "public.xml", "public.css",
+        "public.log", "public.data",
     ], rank: .alternate)
 
     /// Every row of Resources/document-types.txt, in order.

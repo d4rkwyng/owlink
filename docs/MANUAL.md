@@ -750,7 +750,9 @@ predates 0.3.0 and is unchanged: on a Mac where nothing but TextEdit
 opens text, Markdown, JSON and YAML files open in Owlink once it's
 installed, because Owlink names those types and TextEdit only claims
 "text". (On macOS 15, where .md files opened in nothing before, they now
-open in Owlink for the same reason.) The labelled types never open in Owlink unless you choose it.
+open in Owlink for the same reason.) The other types in the list keep the
+app macOS gives them (TextEdit, Safari, Console, …) until you choose
+Owlink.
 Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
@@ -760,11 +762,12 @@ type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
 HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
 - for types you chose Owlink for, in Settings or with Get Info ›
-  Change All, and for the types that open in Owlink without your choice
-  (Markdown, JSON, YAML on a Mac with no other editor). Logs are the
-  exception: a .log file that opens in Owlink without your choice shows
-  the generic page with a white line and no label until you choose Owlink
-  for logs; **Use Owlink for All Text Files** does that for every type;
+  Change All (**Use Owlink for All Text Files** does that for every type),
+  and for Markdown, JSON and YAML when they open in Owlink without your
+  choice (a Mac with no other editor for them). A plain-text, XML, HTML,
+  CSS or log file that opens in Owlink without your choice (only where
+  TextEdit, Safari or Console doesn't take it) shows the generic page
+  with a white line and no label;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the
   text itself for many text files. Untick it to see the type icons;

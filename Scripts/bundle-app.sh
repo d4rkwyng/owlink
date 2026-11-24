@@ -135,14 +135,18 @@ chmod +x "$APP/Contents/Resources/cedric"
 
 # The text file types (Resources/document-types.txt, which explains the
 # ranks): one document type each with its icon and the row's LSHandlerRank
-# (Alternate only for 0.2.x's exact claims, each in the row whose icon
-# Finder should show; None otherwise, so Settings › Default editor for… or
-# Get Info makes Owlink a default only when the user asks), and an imported
-# declaration for the few types macOS lacks.
+# (Alternate for MD, JSON, YAML and the catch-all, which hold 0.2.x's
+# claims; None otherwise, so Settings › Default editor for… or Get Info
+# makes Owlink a default for those only when the user asks), and an
+# imported declaration for the few types macOS lacks. A row must have
+# exactly six fields, as DocumentTypes.swift and doctypes-check.sh require.
 TEXT_TYPES=""
 IMPORTED_TYPES=""
-while IFS='|' read -r label icon name utis decl rank; do
-    case "$label" in ''|'#'*) continue ;; esac
+while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    pipes="${line//[^|]/}"
+    [ "${#pipes}" -eq 5 ] || { echo "bundle-app.sh: document-types.txt row '$line': needs exactly 6 fields, has $(( ${#pipes} + 1 ))" >&2; exit 1; }
+    IFS='|' read -r label icon name utis decl rank <<<"$line"
     [ -f "Resources/DocIcons/$icon.icns" ] || { echo "bundle-app.sh: missing Resources/DocIcons/$icon.icns" >&2; exit 1; }
     case "$rank" in None|Alternate) ;; *) echo "bundle-app.sh: document-types.txt row $label: rank must be None or Alternate, not '$rank'" >&2; exit 1 ;; esac
     items=""
