@@ -109,16 +109,54 @@ public enum OwlCitations {
         return s
     }
 
+    /// The lines the start of `text` (its first `retained` UTF-16 units,
+    /// as sent on in a conversation's history) vouches for, each citation
+    /// judged by its own `flag` in the whole of `text`: one cut off right
+    /// after its number is still unread if the whole says so, and a line
+    /// cited again, unflagged, past the cut vouches for nothing the start
+    /// flagged. A citation only the cut makes ("lines 5, 20" from "lines
+    /// 5, 2026 changed") vouches for nothing.
+    public static func evidence(in text: String, retained: Int) -> IndexSet {
+        let ns = text as NSString
+        let prefix = ns.substring(to: min(max(retained, 0), ns.length))
+        let flagLength = (flag as NSString).length
+        let whole = find(text)
+        func flagged(_ c: Cite) -> Bool {
+            let end = NSMaxRange(c.range)
+            return end + flagLength <= ns.length && ns.substring(with: NSRange(location: end, length: flagLength)) == flag
+        }
+        var s = IndexSet()
+        for p in find(prefix) where p.lines.lowerBound >= 1 {
+            let same = whole.filter { $0.range.location == p.range.location }
+            guard !same.isEmpty, !same.contains(where: flagged) else { continue }
+            for f in same where f.lines.overlaps(p.lines) {
+                let r = f.lines.clamped(to: p.lines)
+                s.insert(integersIn: r.lowerBound...r.upperBound)
+            }
+        }
+        return s
+    }
+
     /// Where `text` must not be cut (UTF-16 offsets: a cut at `p` falls
     /// between `p - 1` and `p`): inside a citation, from its "line" or
-    /// "lines" to its last number, and between a number and the `flag`
-    /// after it. A piece holding "Line 4 through" is evidence for line 4
-    /// that the whole citation, read together, may not be.
+    /// "lines" to its last number, from a quoted line's or listed
+    /// finding's marker to its "|" or ":", and between a number and the
+    /// `flag` after it. A piece holding "Line 4 through" is evidence for
+    /// line 4 that the whole citation, read together, may not be.
     public static func uncuttable(in text: String) -> IndexSet {
         let ns = text as NSString
         let all = NSRange(location: 0, length: ns.length)
         let flagLength = (flag as NSString).length
         var spans = listed.matches(in: text, range: all).map(\.range)
+        // A quoted "31| text" or a listed "- 31: text" is a citation only
+        // with its marker and its "|" or ":": cut between them, neither
+        // piece cites the line. Kept whole from the marker (or number) on.
+        for m in quoted.matches(in: text, range: all) + item.matches(in: text, range: all) {
+            var start = m.range.location
+            while start < NSMaxRange(m.range), let u = UnicodeScalar(ns.character(at: start)),
+                  CharacterSet.whitespacesAndNewlines.contains(u) { start += 1 }
+            spans.append(NSRange(location: start, length: NSMaxRange(m.range) - start))
+        }
         for c in find(text) {
             let end = NSMaxRange(c.range)
             let flagged = end + flagLength <= ns.length

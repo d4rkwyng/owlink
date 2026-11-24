@@ -448,6 +448,25 @@ import CedricCore
         #expect(got == ["Overview of the part.", "Line 4 through\n9999\(OwlCitations.flag)| quoted text.\nThe end."])
     }
 
+    /// "31| text" and "- 31: text" cite line 31 only with their marks: a
+    /// cut between "31" and "| text" left a piece "31" that cites nothing
+    /// and the citation gone (0.5.4's follow-up 4, at two characters).
+    @Test func aNumberedRowIsNeverCutFromItsMark() {
+        for text in ["31| text", "Overview.\n31| quoted text\n- 40: a finding\nThe end.", "- 12-14: eval of input"] {
+            let whole = OwlCitations.find(text).map(\.lines)
+            for limit in 1...(text as NSString).length {
+                guard let pieces = OwlChunkedReviewRunner.splitNote(text, fits: { ($0 as NSString).length <= limit }) else {
+                    continue
+                }
+                // Every citation the note makes is still made, whole, by one piece.
+                #expect(pieces.flatMap { OwlCitations.find($0).map(\.lines) } == whole, "limit \(limit): \(pieces)")
+            }
+        }
+        // Too short to hold "31|": no split, rather than one that loses the citation.
+        #expect(OwlChunkedReviewRunner.splitLine("31| text", fits: { ($0 as NSString).length <= 2 }) == nil)
+        #expect(OwlChunkedReviewRunner.splitLine("31| text", fits: { ($0 as NSString).length <= 3 })?.first == "31|")
+    }
+
     /// "Line 4 through" / "18 describes the setup": cut there, the first
     /// piece cites line 4 alone, a citation the whole note never made (its
     /// evidence, {4}, is inside 4–18, so 0.5.3's follow-up allowed the cut).
@@ -690,6 +709,15 @@ import CedricCore
             let outcome = try await OwlChatRunner.run(req, engine: engine) { _ in }
             #expect(!outcome.answer.contains("210 repeats") && outcome.answer.contains("- Line 3 opens it."))
         }
+        // Each citation sent is judged by its own flag: line 210 cited again,
+        // unflagged, past the cut doesn't vouch for the flagged one sent.
+        let past = cut + " Line 210 is fine after all."
+        #expect(!OwlPrompts.historyCitations([OwlChatEntry(role: .user, text: "Anything odd?"),
+                                              OwlChatEntry(role: .owl, text: past)]).contains(210))
+        #expect(OwlCitations.evidence(in: past, retained: 1_200).isEmpty)
+        // One sent unflagged still counts, and one cited only past the cut doesn't.
+        let sent = lead + "The note on line 211 repeats. Line 212 too."
+        #expect(OwlCitations.evidence(in: sent, retained: 1_200 + " repeats.".count) == IndexSet(integer: 211))
         // The combine call is held to the same.
         let history = [OwlChatEntry(role: .user, text: "Anything odd?"), OwlChatEntry(role: .owl, text: said)]
         let engine = Recorder(reduceReply: { _ in "- Line 150 repeats the walk.\n- Line 210 is new.\n- Line 1 opens it." })

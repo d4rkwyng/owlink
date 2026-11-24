@@ -268,12 +268,15 @@ public enum OwlPrompts {
     /// answer may cite too: any a question names, and any an earlier answer
     /// cites as read. A citation that answer flagged as unread
     /// (`OwlCitations.flag`) stays unverified, even where the history sent
-    /// is cut between the citation and its flag.
+    /// is cut between the citation and its flag, and even where the same
+    /// line is cited again, unflagged, past the cut: each citation sent is
+    /// judged by its own flag.
     public static func historyCitations(_ history: [OwlChatEntry]) -> IndexSet {
         var s = IndexSet()
         for e in retainedHistory(history) {
-            let sent = OwlCitations.lines(in: sentText(e))
-            s.formUnion(e.role == .user ? sent : sent.intersection(OwlCitations.evidence(in: e.text)))
+            let sent = sentText(e)
+            s.formUnion(e.role == .user ? OwlCitations.lines(in: sent)
+                        : OwlCitations.evidence(in: e.text, retained: (sent as NSString).length))
         }
         return s
     }
