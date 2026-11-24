@@ -42,12 +42,66 @@ extension DevChecks {
         }
         guard let tab = app.open(write("server.log", log)) else { expect(false, "open"); finish(); return }
         sized(tab)
-        var timings: [String: Double] = [:]
+        final class Timings: @unchecked Sendable { var ms: [String: Double] = [:] }
+        let timings = Timings()
         func timed(_ name: String, _ f: () -> Void) {
             mark(name)
             let t0 = DevHooks.now()
             f()
-            timings[name] = (DevHooks.now() - t0) * 1000
+            timings.ms[name] = (DevHooks.now() - t0) * 1000
+        }
+        /// Typing after the unsplit, timed through the owl's put-off caret
+        /// look (it runs on a later main-queue turn): the keys must reach the
+        /// owl from inside the edit, and the look must have finished.
+        func typedToOwl(_ name: String, _ f: @escaping () -> Void) -> (@escaping () -> Void) -> Void {
+            { next0 in
+                nonisolated(unsafe) let next = next0
+                guard let owl = tab.owl else { expect(false, "the owl is on"); next(); return }
+                mark(name)
+                let inEdit = owl.caretMovesInEdit, looks = owl.caretLooks
+                let t0 = DevHooks.now()
+                f()
+                func settle(_ turns: Int) {
+                    DispatchQueue.main.async {
+                        guard owl.caretLookPending, turns < 50 else {
+                            timings.ms[name] = (DevHooks.now() - t0) * 1000
+                            expect(owl.caretMovesInEdit > inEdit, "\(name): the caret move reached the owl from inside the edit",
+                                   "\(owl.caretMovesInEdit - inEdit) calls in an edit")
+                            expect(!owl.caretLookPending && owl.caretLooks > looks, "\(name): the owl's caret look ran after the edit",
+                                   "pending \(owl.caretLookPending), looks \(owl.caretLooks - looks)")
+                            next()
+                            return
+                        }
+                        settle(turns + 1)
+                    }
+                }
+                settle(0)
+            }
+        }
+        /// The owl's fade against the caret's place, from laid-out geometry.
+        func caretNearOwl() -> Bool? {
+            guard let owl = tab.owl, let window = tab.window else { return nil }
+            let tv = tab.primaryTextView
+            let screen = tv.firstRect(forCharacterRange: NSRange(location: NSMaxRange(tv.selectedRange()), length: 0), actualRange: nil)
+            guard screen != .zero else { return false }
+            let caret = owl.overlay.convert(window.convertFromScreen(screen), from: nil)
+            return caret.insetBy(dx: -28, dy: -18).intersects(owl.owl.frame)
+        }
+        /// Puts the caret on a laid-out place in the viewport whose rect
+        /// touches the owl (from the end of the viewport back).
+        func caretByOwl() -> Bool {
+            guard let owl = tab.owl, let window = tab.window, let vr = tab.primaryTextView.viewportCharacterRange else { return false }
+            let tv = tab.primaryTextView
+            var loc = NSMaxRange(vr)
+            while loc >= vr.location {
+                let screen = tv.firstRect(forCharacterRange: NSRange(location: loc, length: 0), actualRange: nil)
+                if screen != .zero, owl.overlay.convert(window.convertFromScreen(screen), from: nil).insetBy(dx: -28, dy: -18).intersects(owl.owl.frame) {
+                    tv.setSelectedRange(NSRange(location: loc, length: 0))
+                    return true
+                }
+                loc -= 8
+            }
+            return false
         }
         run([
             sync {
@@ -64,38 +118,88 @@ extension DevChecks {
                 timed("type") { type("qexcarzrpya") }
             },
             sync { timed("Add Next Occurrence") { tab.textView.addNextOccurrence() } },
-            sync { timed("split") { tab.toggleSplit() } },
+            sync {
+                timed("split") { tab.toggleSplit() }
+                expect(tab.isSplit, "split: the split is open")
+                expect(tab.window?.firstResponder is EditorTextView && tab.window?.firstResponder !== tab.primaryTextView,
+                       "split: the new pane has the focus")
+            },
             sync {
                 timed("unsplit") { tab.toggleSplit() }
                 expect(!tab.isSplit && tab.window?.firstResponder === tab.primaryTextView, "unsplit: the primary pane has the focus")
+                expect(tab.primaryTextView.contentStorage?.chunkLimit != nil, "unsplit: still in chunks")
             },
-            sync { timed("type after unsplit") { type("etydolljwp") } },
-            sync { timed("one more key") { key("k") } },
-            { next in
-                // The owl's caret check, put off until the edit is over, has run.
-                DispatchQueue.main.async { next() }
+            typedToOwl("type after unsplit") { type("etydolljwp") },
+            typedToOwl("one more key") { key("k") },
+            sync {
+                mark("checks")
+                expect(tab.text.hasSuffix("etydolljwpk"), "the typed text is there", String(tab.text.suffix(16)))
+                for name in ["type after unsplit", "one more key"] {
+                    let ms = timings.ms[name] ?? .infinity
+                    expect(ms < 250, "\(name) takes under 250 ms, the owl's caret look included", String(format: "%.0f ms", ms))
+                }
+            },
+            // The owl keeps out of the caret's way in the chunked line. The
+            // caret by the owl (a place in the laid-out viewport whose rect
+            // touches it): it fades.
+            sync {
+                mark("caret by the owl")
+                expect(caretByOwl(), "a laid-out place by the owl", String(describing: tab.primaryTextView.viewportCharacterRange))
+            },
+            sync {
+                expect(caretNearOwl() == true && tab.owl?.owlFaded == true, "caret by the owl: it fades",
+                       "near \(String(describing: caretNearOwl())), faded \(String(describing: tab.owl?.owlFaded))")
+                // A split shrinks the pane away from under the still caret
+                // (TextKit may lay out no new viewport for it).
+                mark("split resize")
+                tab.toggleSplit()
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                let near = caretNearOwl()
+                expect(tab.isSplit && near == false, "split resize: the pane shrank away from under the caret", "near \(String(describing: near))")
+                expect(tab.owl?.owlFaded == near, "after a split resize the owl's fade follows the caret",
+                       "faded \(String(describing: tab.owl?.owlFaded)), caret near \(String(describing: near))")
+                mark("unsplit")
+                tab.toggleSplit()
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                let near = caretNearOwl()
+                expect(tab.owl?.owlFaded == near, "after the unsplit the owl's fade follows the caret",
+                       "faded \(String(describing: tab.owl?.owlFaded)), caret near \(String(describing: near))")
+                mark("caret by the owl again")
+                expect(caretByOwl(), "a laid-out place by the owl, again", String(describing: tab.primaryTextView.viewportCharacterRange))
+            },
+            sync {
+                expect(tab.owl?.owlFaded == true, "caret by the owl again: it fades", "faded \(String(describing: tab.owl?.owlFaded))")
+                // Scrolled away from the caret: the owl is back.
+                mark("scroll away")
+                let clip = tab.primaryPane.scrollView.contentView
+                clip.scroll(to: .zero)
+                tab.primaryPane.scrollView.reflectScrolledClipView(clip)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                expect(tab.owl?.owlFaded == false, "scrolled away from the caret: the owl is back", "faded \(String(describing: tab.owl?.owlFaded))")
+                // Scrolled back: the scroll is heard before TextKit has laid
+                // out the new viewport (the old one, at the top, hasn't the
+                // caret). Once it has, the owl fades again.
+                mark("scroll back")
+                tab.primaryTextView.scrollRangeToVisible(tab.primaryTextView.selectedRange())
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                let near = caretNearOwl()
+                expect(near == true && tab.owl?.owlFaded == true, "scrolled back to the caret by the owl: it fades once the viewport is laid out",
+                       "near \(String(describing: near)), faded \(String(describing: tab.owl?.owlFaded))")
+                mark("caret far away")
+                tab.primaryTextView.setSelectedRange(NSRange(location: 0, length: 0))
             },
             sync {
                 mark("checks")
-                expect(true, "typing after the unsplit came back (no hang)")
-                expect(tab.text.hasSuffix("etydolljwpk"), "the typed text is there", String(tab.text.suffix(16)))
-                for name in ["type after unsplit", "one more key"] {
-                    let ms = timings[name] ?? .infinity
-                    expect(ms < 250, "\(name) takes under 250 ms", String(format: "%.0f ms", ms))
-                }
-                // The owl still keeps out of the caret's way: its faded state
-                // matches where the caret is now (asked outside any edit).
-                if let owl = tab.owl, let window = tab.window {
-                    let tv = tab.primaryTextView
-                    let sel = tv.selectedRange()
-                    let screen = tv.firstRect(forCharacterRange: NSRange(location: NSMaxRange(sel), length: 0), actualRange: nil)
-                    let caret = owl.overlay.convert(window.convertFromScreen(screen), from: nil)
-                    let near = screen != .zero && caret.insetBy(dx: -28, dy: -18).intersects(owl.owl.frame)
-                    expect(owl.owlFaded == near, "the owl's fade follows the caret", "faded \(owl.owlFaded), caret near \(near)")
-                } else {
-                    expect(false, "the owl is on")
-                }
-                for (k, v) in timings.sorted(by: { $0.key < $1.key }) { print(String(format: "check: note: %@ %.0f ms", k, v)) }
+                expect(tab.owl?.owlFaded == false, "caret out of view: the owl is back", "faded \(String(describing: tab.owl?.owlFaded))")
+                for (k, v) in timings.ms.sorted(by: { $0.key < $1.key }) { print(String(format: "check: note: %@ %.0f ms", k, v)) }
                 tab.doc.markSaved()
             },
         ], gap: 0.1)
