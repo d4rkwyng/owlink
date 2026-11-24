@@ -210,6 +210,11 @@ final class StatusBar: NSView {
     /// The git branch (or short SHA) with a dot for uncommitted changes;
     /// a click shows a small menu (GitIntegration.swift). Hidden outside git.
     let gitButton = NSButton(title: "", target: nil, action: nil)
+    /// CSV / TSV only: View › Show Preview (⌥⌘P) as an on/off eye, just
+    /// before the language pull-down ("CSV / TSV"). Hidden for every other
+    /// language (Markdown has its Context Bar's eye). The tab sets its
+    /// target, tooltip and state (`updatePreviewStatusItem`).
+    let previewButton = NSButton(title: "", target: nil, action: nil)
     var background: NSColor = .windowBackgroundColor { didSet { needsDisplay = true } }
     private let stack = NSStackView()
 
@@ -246,9 +251,22 @@ final class StatusBar: NSView {
         gitButton.imagePosition = .imageLeading
         gitButton.contentTintColor = .secondaryLabelColor
         gitButton.isHidden = true
+        previewButton.setButtonType(.pushOnPushOff)
+        previewButton.isBordered = false
+        previewButton.controlSize = .small
+        previewButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        previewButton.image = NSImage(systemSymbolName: "eye", accessibilityDescription: String(localized: "Preview"))?
+            .withSymbolConfiguration(.init(pointSize: NSFont.smallSystemFontSize, weight: .regular))
+        previewButton.imagePosition = .imageOnly
+        previewButton.setAccessibilityLabel(String(localized: "Preview"))
+        previewButton.identifier = NSUserInterfaceItemIdentifier("statusbar.preview")
+        previewButton.isHidden = true
+        setPreviewState(false)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
-        stack.setViews([position, counts, spacer, gitButton, zoom, languageButton, encodingButton, lineEndingButton], in: .leading)
+        stack.setViews([position, counts, spacer, gitButton, zoom, previewButton, languageButton, encodingButton, lineEndingButton], in: .leading)
+        // The eye belongs to the format it previews: closer to "CSV / TSV" than the other items.
+        stack.setCustomSpacing(6, after: previewButton)
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 0, left: 10, bottom: 0, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -278,6 +296,20 @@ final class StatusBar: NSView {
         leadingInset.constant = left
         trailingInset.constant = -right
         needsDisplay = true
+    }
+
+    private var previewOn: Bool?
+
+    /// The Preview eye's on/off: its state, VoiceOver's value, and a
+    /// stronger tint when on (still a status-bar control).
+    func setPreviewState(_ on: Bool) {
+        // Run on every updateStatus (each keystroke): a no-op unless it changed.
+        // A click flips the button's state itself before the tab acts.
+        guard on != previewOn || (previewButton.state == .on) != on else { return }
+        previewOn = on
+        previewButton.state = on ? .on : .off
+        previewButton.setAccessibilityValue(on ? String(localized: "on") : String(localized: "off"))
+        previewButton.contentTintColor = on ? .labelColor : .secondaryLabelColor
     }
 
     /// The items' frame in the bar (the checks).

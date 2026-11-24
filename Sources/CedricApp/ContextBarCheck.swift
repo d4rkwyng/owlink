@@ -8,9 +8,7 @@ import CedricCore
 /// line; Checkbox over three lines; every other button once (one undo
 /// step each); the heading pull-down; the preview toggle's state; labels
 /// for VoiceOver, keyboard focus, both themes, right-to-left; the bar's
-/// commands in the palette; a CSV and a TSV tab get one compact Preview
-/// toggle (click, VoiceOver press, ⌥⌘P, both themes); off again drops
-/// the view. Then keystroke
+/// commands in the palette; off again drops the view. Then keystroke
 /// timing in the same Markdown tab with the bar hidden and shown, rounds
 /// alternating.
 @MainActor
@@ -259,115 +257,17 @@ extension DevChecks {
                 let px2 = button("preview").map { $0.convert($0.bounds, to: bar).midX } ?? 0
                 expect(bx2 < px2, "left-to-right: formatting on the left")
             },
-            // CSV / TSV: one compact Preview toggle (the Markdown bar's own
-            // item), at the leading edge with no divider, off at first.
-            sync {
-                let csvTab = app.open(write("bar.csv", "name,city\nAnn,Oslo\nBo,Rome\n"))!
-                sized(csvTab)
-                focus(csvTab)
-                csvTab.window?.layoutIfNeeded()
-                expect(csvTab.doc.language == .csv, "a .csv file is CSV / TSV", csvTab.doc.language.rawValue)
-                guard let cbar = csvTab.contextBar, let eye = cbar.buttons["preview"] else { expect(false, "a CSV tab shows the bar with a Preview toggle"); return }
-                expect(cbar.buttons.keys.sorted() == ["preview"], "CSV: only the Preview toggle (no formatting, no Explain / Rewrite)",
-                       "\(cbar.buttons.keys.sorted())")
-                expect(abs(cbar.frame.height - ContextBarView.height) < 0.5, "CSV: the same thin row", "\(cbar.frame.height)")
-                let stack = csvTab.stack.arrangedSubviews
-                let bi = stack.firstIndex(of: cbar) ?? -1, si = stack.firstIndex(of: csvTab.split) ?? -1
-                expect(bi >= 0 && bi == si - 1, "CSV: the bar sits just above the text", "bar \(bi), split \(si)")
-                let x = eye.convert(eye.bounds, to: cbar).minX
-                expect(eye.frame.width > 0 && x < 20, "CSV: the toggle sits at the leading edge, compact", "x \(x), width \(eye.frame.width)")
-                expect(cbar.frame.minX == 0 && abs(cbar.frame.width - csvTab.stack.frame.width) < 0.5,
-                       "CSV: the bar spans the window, like Markdown's", "bar \(cbar.frame), window \(csvTab.stack.frame)")
-                let mdSeparators = tab.contextBar.map { separators(in: $0) } ?? []
-                let separatorsHere = separators(in: cbar)
-                expect(mdSeparators.count == 2 && separatorsHere.count == 1, "CSV: no divider with nothing to divide (only the bottom rule)",
-                       "Markdown \(mdSeparators.count), CSV \(separatorsHere.count)")
-                expect(eye.isEnabled && eye.state == .off && !csvTab.previewVisible, "CSV: the Preview toggle starts off")
-                expect(eye.accessibilityLabel() == "Preview" && eye.accessibilityValue() as? String == "off",
-                       "CSV: VoiceOver hears Preview, off", "\(eye.accessibilityLabel() ?? "-") \(String(describing: eye.accessibilityValue()))")
-                expect(eye.toolTip == "Preview (⌥⌘P)", "CSV: tooltip with the menu's shortcut", eye.toolTip ?? "-")
-                expect(eye.contentTintColor == NSColor(hex: csvTab.palette.contextBarIcon), "CSV: the icon takes the theme's icon colour")
-                expect(cbar.layer?.backgroundColor == NSColor(hex: csvTab.palette.statusBar).cgColor && cbar.appearance?.name == .darkAqua,
-                       "CSV: the bar takes the dark theme")
-            },
-            snapshot("contextbar-csv-dark-off.png"),
-            sync {
-                guard let csvTab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "bar.csv" }),
-                      let eye = csvTab.contextBar?.buttons["preview"] else { expect(false, "the CSV tab"); return }
-                csvTab.window?.layoutIfNeeded()
-                click(eye, at: NSPoint(x: eye.bounds.midX, y: eye.bounds.midY))
-            },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
-            sync {
-                guard let csvTab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "bar.csv" }),
-                      let eye = csvTab.contextBar?.buttons["preview"] else { expect(false, "the CSV tab"); return }
-                expect(csvTab.previewVisible && csvTab.previewPane?.renderer is CSVPreview, "CSV: a click on the toggle shows the grid")
-                expect(eye.state == .on && eye.accessibilityValue() as? String == "on", "CSV: the toggle shows as on, VoiceOver hears on")
-                expect(eye.accessibilityLabel() == "Preview", "CSV: still labelled Preview", eye.accessibilityLabel() ?? "-")
-                expect(eye.contentTintColor == NSColor(hex: csvTab.palette.contextBarIconOn), "CSV: on, the icon takes the theme's on colour")
-                expect(csvTab.previewPane?.bar.state.items.contains(.detach) == true, "CSV: the grid's own bar is untouched (Detach still there)")
-            },
-            snapshot("contextbar-csv-dark-on.png"),
-            sync {
-                TypingCheck.apply(TypingCheck.ThemeCase(name: "light", theme: .light, system: nil))
-                guard let csvTab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "bar.csv" }), let cbar = csvTab.contextBar else { return }
-                expect(cbar.layer?.backgroundColor == NSColor(hex: csvTab.palette.statusBar).cgColor && cbar.appearance?.name == .aqua,
-                       "CSV: the bar takes the light theme")
-            },
-            snapshot("contextbar-csv-light-on.png"),
-            sync {
-                guard let csvTab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "bar.csv" }),
-                      let eye = csvTab.contextBar?.buttons["preview"] else { expect(false, "the CSV tab"); return }
-                click(eye, at: NSPoint(x: eye.bounds.midX, y: eye.bounds.midY))
-                expect(!csvTab.previewVisible && eye.state == .off && eye.accessibilityValue() as? String == "off",
-                       "CSV: a second click hides the grid, and the toggle follows")
-            },
-            snapshot("contextbar-csv-light-off.png"),
-            sync {
-                // TSV (.tsv is CSV / TSV too): the same toggle, by VoiceOver's press and ⌥⌘P.
-                let tsvTab = app.open(write("bar.tsv", "a\tb\n1,5\t2\n"))!
-                sized(tsvTab)
-                focus(tsvTab)
-                tsvTab.window?.layoutIfNeeded()
-                guard let eye = tsvTab.contextBar?.buttons["preview"] else { expect(false, "a TSV tab shows the Preview toggle"); return }
-                expect(tsvTab.contextBar?.buttons.count == 1 && eye.state == .off && !tsvTab.previewVisible, "TSV: one Preview toggle, off")
-                _ = eye.accessibilityPerformPress()
-                expect(tsvTab.previewVisible && eye.state == .on, "TSV: VoiceOver's press shows the grid, and the toggle follows")
-            },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
-            sync {
-                guard let tsvTab = app.tabs.first(where: { $0.doc.fileURL?.lastPathComponent == "bar.tsv" }),
-                      let eye = tsvTab.contextBar?.buttons["preview"] else { expect(false, "the TSV tab"); return }
-                let grid = tsvTab.previewPane?.renderer as? CSVPreview
-                expect(grid?.data.delimiter == 9 && grid?.table.numberOfRows == 1, "TSV: the grid is tab-separated",
-                       "\(String(describing: grid?.data.delimiter)) \(grid?.table.numberOfRows ?? -1)")
-                focus(tsvTab)
-                key("p", [.command, .option])
-                expect(!tsvTab.previewVisible && eye.state == .off && eye.accessibilityValue() as? String == "off", "TSV: ⌥⌘P hides it, and the toggle follows")
-                key("p", [.command, .option, .shift])
-                expect(tsvTab.previewDetached && eye.state == .on, "TSV: ⇧⌥⌘P opens it detached, the toggle shows on")
-                tsvTab.previewWindow?.window?.performClose(nil)
-                expect(!tsvTab.previewVisible && eye.state == .off && eye.accessibilityValue() as? String == "off",
-                       "TSV: closing the detached window turns the toggle off")
-                TypingCheck.apply(TypingCheck.ThemeCase(name: "dark", theme: .dark, system: nil))
-                // Closed again: the Markdown steps below run as before.
-                for t in app.tabs where ["bar.csv", "bar.tsv"].contains(t.doc.fileURL?.lastPathComponent ?? "") {
-                    t.doc.markSaved()
-                    t.window?.performClose(nil)
-                }
-                expect(!app.tabs.contains { $0.doc.language == .csv }, "the CSV and TSV tabs are closed again")
-                focus(tab)
-            },
             sync {
                 // A tab switched to Markdown gets the bar; back to Swift, it goes.
                 code.setLanguage(.markdown)
                 expect(code.contextBar != nil, "a tab switched to Markdown gets the bar")
                 code.setLanguage(.swift)
                 expect(code.contextBar == nil, "and loses it back in Swift")
+                // CSV / TSV: no Context Bar (its Preview eye is on the status bar: statuszoom).
                 code.setLanguage(.csv)
-                expect(code.contextBar?.buttons.keys.sorted() == ["preview"], "a tab switched to CSV / TSV gets the Preview toggle only")
+                expect(code.contextBar == nil && !code.stack.arrangedSubviews.contains { $0 is ContextBarView },
+                       "a tab switched to CSV / TSV gets no Context Bar")
                 code.setLanguage(.swift)
-                expect(code.contextBar == nil, "and loses it back in Swift (from CSV)")
             },
             sync { typingRounds(tab, toggle: toggleBar) },
             sync {
@@ -389,17 +289,6 @@ extension DevChecks {
                 expect(fresh.text.contains("**world**"), "a click on Bold works on that tab", fresh.text.debugDescription)
             },
         ])
-    }
-
-    /// Every separator box in `view` (the bar's bottom rule, the divider
-    /// before the view toggles).
-    static func separators(in view: NSView) -> [NSBox] {
-        var found: [NSBox] = []
-        for v in view.subviews {
-            if let b = v as? NSBox, b.boxType == .separator { found.append(b) }
-            found += separators(in: v)
-        }
-        return found
     }
 
     /// Keystrokes into the Markdown tab, bar hidden and shown in

@@ -7,7 +7,7 @@ are its section below (`Scripts/changelog-section.sh`).
 ## [Unreleased]
 
 ### Added
-- **A Preview toggle for CSV and TSV files.** CSV and TSV files get a compact Preview button on the Context Bar, the same eye as Markdown's preview button, so you can show or hide the table without the View menu or ⌥⌘P.
+- **A Preview toggle for CSV and TSV files.** CSV and TSV files get a Preview eye on the status bar, right beside the format picker (“CSV / TSV”), so you can show or hide the table without the View menu or ⌥⌘P. It turns on while the table is shown, docked or detached, and off when it's closed.
 
 ### Fixed
 - **Detaching the preview focuses its window.** View › Detach Preview (⇧⌥⌘P) and the preview's Detach button bring the detached preview window to the front with the focus, for Markdown, CSV and TSV, HTML and the other preview types, instead of returning the focus to the editor. A detached preview restored with your session still leaves the focus where it was.
