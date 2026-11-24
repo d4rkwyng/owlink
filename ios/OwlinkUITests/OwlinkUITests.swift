@@ -214,21 +214,43 @@ final class OwlinkUITests: XCTestCase {
         let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
         // Seven rows (0.5.2 (18)): Save, Share & Export › | Find ›,
-        // Preview ›, Ask Cedric | More ›, Settings; eight with Edit first
-        // on an iPhone in read mode (its bar button collapsed).
-        // (The menu's cells don't expose their titles to XCUITest: counted,
-        // and the order checked by where the rows' buttons are.)
-        let rows = app.collectionViews.firstMatch.cells.count
-        print("MENU-TOP-ROWS \(device): \(rows)")
-        let edit = app.collectionViews.buttons["Edit"].firstMatch
-        let editInMenu = edit.exists
-        XCTAssertEqual(rows, editInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Edit in it: \(editInMenu))")
+        // Preview ›, Ask Cedric | More ›, Settings; eight when the bar's
+        // Undo and Redo collapse into it: one row first, side by side, with
+        // Edit / Done (read mode, an iPhone) if that collapsed too. Never
+        // more than eight (b18 gate: nine, Undo and Redo a row each).
+        // (The menu's cells don't expose their titles to XCUITest: rows
+        // counted by where its cells are, side-by-side cells one row, and
+        // the order checked by where the rows' buttons are.)
+        let menuList = app.collectionViews.containing(.button, identifier: "Settings").firstMatch
+        XCTAssertTrue(menuList.waitForExistence(timeout: 5), "no ••• menu list")
+        let cells = menuList.cells.allElementsBoundByIndex.map(\.frame).filter { !$0.isEmpty }
+        let rows = Set(cells.map { Int($0.midY.rounded()) }).count
+        print("MENU-TOP-ROWS \(device): \(rows) (\(cells.count) cells)")
+        let undo = menuList.buttons["editor.menu.undo"].firstMatch
+        let redo = menuList.buttons["editor.menu.redo"].firstMatch
+        let historyInMenu = undo.exists || redo.exists
+        XCTAssertEqual(rows, historyInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Undo and Redo in it: \(historyInMenu))")
+        XCTAssertLessThanOrEqual(rows, 8, "\(rows) rows at the top of the ••• menu")
+        // Undo and Redo by touch: in the bar, or both side by side in one row.
+        if historyInMenu {
+            XCTAssertTrue(undo.exists && redo.exists, "Undo and Redo not both in the ••• menu")
+            XCTAssertEqual(undo.frame.midY, redo.frame.midY, accuracy: 2, "Undo and Redo not in one row")
+        } else {
+            XCTAssertTrue(app.navigationBars.buttons["editor.undo"].exists && app.navigationBars.buttons["editor.redo"].exists,
+                          "Undo and Redo neither in the bar nor in the ••• menu")
+        }
+        // Edit (read mode, on an iPhone): in the bar, or in that row.
+        let editInMenu = menuList.buttons["editor.menu.edit"].firstMatch.exists
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertTrue(editInMenu || app.navigationBars.buttons["editor.edit"].exists, "no Edit in the bar or the ••• menu")
+        }
+        if editInMenu { XCTAssertEqual(menuList.buttons["editor.menu.edit"].frame.midY, undo.frame.midY, accuracy: 2, "Edit not in the Undo / Redo row") }
         var order = ["Save", "Share & Export", "Find", "Preview", "Ask Cedric", "More", "Settings"]
-        if editInMenu { order.insert("Edit", at: 0) }
-        let ys = order.map { app.collectionViews.buttons[$0].firstMatch.frame.minY }
+        if historyInMenu { order.insert("editor.menu.undo", at: 0) }
+        let ys = order.map { menuList.buttons[$0].firstMatch.frame.minY }
         XCTAssertEqual(ys, ys.sorted(), "the ••• menu's rows not in the order \(order): \(ys)")
         XCTAssertEqual(Set(ys).count, ys.count, "two rows at the same place: \(ys)")
-        if editInMenu { shoot("menu-readmode") }
+        if historyInMenu { shoot("menu-history-row") }
         preview.tap()
         let focus = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")

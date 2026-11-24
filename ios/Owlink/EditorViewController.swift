@@ -724,11 +724,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // iPhone Duo's): Edit / Done, Find and Save. Undo and Redo give way
         // first (to the ••• menu): with them equal, a 402-pt iPhone kept
         // the two (disabled in read mode) and hid Edit, so a file opened
-        // read-only showed no way to edit it.
+        // read-only showed no way to edit it. Collapsed, the two are one
+        // row of the menu (historyMenuRow, Undo's), with Edit / Done in it
+        // too: Redo never goes before Undo, nor Edit before both, so the
+        // row is there whenever one of them has gone.
         if #available(iOS 27.0, *) {
             items.forEach { $0.visibilityPriority = .standard }
             undoItem.visibilityPriority = .standard
-            redoItem.visibilityPriority = .standard
+            redoItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.standard.rawValue + 1)
             for i in [find, saveItem] { i.visibilityPriority = .high }
             // Edit / Done above all: the way out of read mode (iPhone's default).
             editItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.high.rawValue + 1)
@@ -816,8 +819,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // Notes, Runestone: file actions first, Settings last): Save, Share
         // & Export › | Find ›, Preview › (View › without a preview), Ask
         // Cedric | More ›, Settings. The bar's buttons that collapse into
-        // the menu add nothing to it but Edit / Done (read mode, on an
-        // iPhone), before Save: eight rows at most.
+        // the menu add nothing to it but one row before Save: Undo, Redo
+        // and Edit / Done (read mode, on an iPhone) side by side. Eight
+        // rows at most, whatever the bar's width.
         let share = UIAction(title: String(localized: "Share…"), image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
             self?.shareDocumentCopy()
         }
@@ -4151,6 +4155,53 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let um = textView.undoManager
         undoItem.isEnabled = editGate.isEditable && um?.canUndo ?? false
         redoItem.isEnabled = editGate.isEditable && um?.canRedo ?? false
+        updateHistoryMenuRow()
+    }
+
+    /// Collapsed into the ••• menu (a narrow bar): Undo, Redo and Edit /
+    /// Done side by side in one row at its top, not a row each (b18 gate:
+    /// a 402-pt iPhone showed nine rows, Undo and Redo a row each). Undo's
+    /// button carries the row; Redo's and Edit's add nothing: by priority
+    /// they collapse only after Undo's, so the row is there when they go.
+    private func updateHistoryMenuRow() {
+        undoItem.menuRepresentation = historyMenuRow()
+        redoItem.menuRepresentation = Self.notInOverflowMenu
+        editItem.menuRepresentation = Self.notInOverflowMenu
+    }
+
+    /// Undo, Redo (and Edit / Done, in read mode's use) as one row of small
+    /// items (as the edit menu's Cut / Copy / Paste), enabled as the bar's
+    /// buttons are.
+    func historyMenuRow() -> UIMenu {
+        let undo = UIAction(title: String(localized: "Undo"), image: UIImage(systemName: "arrow.uturn.backward"),
+                            attributes: undoItem.isEnabled ? [] : .disabled) { [weak self] _ in
+            self?.textView.undoManager?.undo()
+        }
+        undo.accessibilityIdentifier = "editor.menu.undo"
+        let redo = UIAction(title: String(localized: "Redo"), image: UIImage(systemName: "arrow.uturn.forward"),
+                            attributes: redoItem.isEnabled ? [] : .disabled) { [weak self] _ in
+            self?.textView.undoManager?.redo()
+        }
+        redo.accessibilityIdentifier = "editor.menu.redo"
+        var children: [UIMenuElement] = [undo, redo]
+        let edit: (title: String, symbol: String)?
+        switch editGate.button {
+        case .none: edit = nil
+        case .edit: edit = (String(localized: "Edit"), "pencil")
+        case .done: edit = (String(localized: "Done"), "checkmark")
+        case .readOnly: edit = (String(localized: "Read Only"), "lock")
+        }
+        if let edit {
+            let a = UIAction(title: edit.title, image: UIImage(systemName: edit.symbol),
+                             attributes: editGate.button == .readOnly ? .disabled : []) { [weak self] _ in
+                self?.toggleEditing()
+            }
+            a.accessibilityIdentifier = "editor.menu.edit"
+            children.append(a)
+        }
+        let row = UIMenu(options: .displayInline, children: children)
+        row.preferredElementSize = .small
+        return row
     }
 
     /// Sets one reason the text is read-only, and the text view to match.
@@ -4165,8 +4216,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             if !editable { textView.resignFirstResponder() }
             textView.isEditable = editable
         }
-        updateUndoItems()
         _ = configuredEditItem()
+        updateUndoItems()
         if isViewLoaded { updateStatus() }
         askModel?.documentEdited()
         contextBar?.refreshStates()

@@ -89,10 +89,11 @@ final class MenuReachabilityTests: XCTestCase {
         UIMenu(children: collapsing.map(overflowRepresentation) + editor.moreMenuItems())
     }
 
-    /// The bar buttons a narrow bar collapses: all but Undo and Redo (an
-    /// iPhone keeps those two in the bar, as the UI dump shows).
-    private func narrowCollapse(_ editor: EditorViewController) -> [UIBarButtonItem] {
-        barItems(editor).filter { !["editor.undo", "editor.redo"].contains($0.accessibilityIdentifier ?? "") }
+    /// Every set of bar buttons a narrow bar may collapse, by the buttons'
+    /// visibility priorities (BarCollapse), Undo and Redo included: a
+    /// 402-pt iPhone collapsed those two and kept Edit (the b18 gate).
+    private func collapseSets(_ editor: EditorViewController) -> [[UIBarButtonItem]] {
+        BarCollapse.collapseSets(barItems(editor))
     }
 
     private func titles(_ element: UIMenuElement) -> [String] {
@@ -118,6 +119,9 @@ final class MenuReachabilityTests: XCTestCase {
     func topLevelRows(_ elements: [UIMenuElement]) -> [String] {
         elements.flatMap { e -> [String] in
             switch e {
+            case let menu as UIMenu where menu.options.contains(.displayInline) && [.small, .medium].contains(menu.preferredElementSize) && !menu.children.isEmpty:
+                // Small or medium elements: side by side, one row.
+                return [topLevelRows(menu.children).joined(separator: " | ")]
             case let menu as UIMenu where menu.options.contains(.displayInline) || menu.title.isEmpty:
                 return topLevelRows(menu.children)
             case let menu as UIMenu:
@@ -173,7 +177,9 @@ final class MenuReachabilityTests: XCTestCase {
                 out += "            keys: [\(list(r.keys))]),\n"
                 let editor = editor(sc, ext)
                 print("MENU-ROWS \(key(sc, ext)) none collapsed: \(topLevelRows(editor.moreMenuItems()))")
-                print("MENU-ROWS \(key(sc, ext)) narrow: \(topLevelRows(narrowCollapse(editor).map(overflowRepresentation) + editor.moreMenuItems()))")
+                for set in collapseSets(editor) {
+                    print("MENU-ROWS \(key(sc, ext)) collapsed \(set.compactMap(\.accessibilityIdentifier)): \(topLevelRows(set.map(overflowRepresentation) + editor.moreMenuItems()))")
+                }
             }
         }
         out += "    ]\n}\n"
@@ -232,21 +238,40 @@ final class MenuReachabilityTests: XCTestCase {
     }
 
     /// At most seven rows at the top of the ••• menu, for each size class
-    /// and document: with no bar button collapsed into it, and with the
-    /// ones a narrow bar collapses (all but Undo and Redo). Eight only on
-    /// an iPhone in read mode with the bar collapsed, where the eighth is
-    /// Edit.
+    /// and document: with no bar button collapsed into it, and with every
+    /// set of buttons a narrow bar may collapse (Undo and Redo too, by
+    /// their priorities, whatever the width: 375, 402, 440 pt or a split).
+    /// Eight at most: the eighth is the one row the history buttons make,
+    /// first (Undo, Redo, and Edit / Done on an iPhone in read mode).
     func testTopLevelHasAtMostSevenRows() {
         for sc in Self.sizeClasses {
             for ext in Self.documents {
                 let editor = editor(sc, ext)
                 let none = topLevelRows(editor.moreMenuItems())
-                let narrow = topLevelRows(narrowCollapse(editor).map(overflowRepresentation) + editor.moreMenuItems())
                 XCTAssertLessThanOrEqual(none.count, 7, "\(key(sc, ext)), none collapsed: \(none.count) rows: \(none)")
-                let withEdit = sc.readMode && !sc.iPad
-                XCTAssertLessThanOrEqual(narrow.count, withEdit ? 8 : 7, "\(key(sc, ext)), narrow bar: \(narrow.count) rows: \(narrow)")
-                if narrow.count == 8 { XCTAssertEqual(narrow.first, "Edit", "\(key(sc, ext)): the eighth row is Edit") }
+                let sets = collapseSets(editor)
+                XCTAssertGreaterThan(sets.count, 2, "\(key(sc, ext)): the bar's priorities give no order to collapse in")
+                for set in sets {
+                    assertRowBudget(editor, collapsed: set, "\(key(sc, ext)), collapsed \(set.compactMap(\.accessibilityIdentifier))")
+                }
             }
+        }
+    }
+
+    /// The row budget with `collapsed` in the ••• menu: seven rows, eight
+    /// at most, the eighth the history row (Undo and Redo side by side,
+    /// with Edit / Done), first; and every collapsed button's command still
+    /// in the menu, by touch.
+    private func assertRowBudget(_ editor: EditorViewController, collapsed: [UIBarButtonItem], _ name: String, file: StaticString = #filePath, line: UInt = #line) {
+        let rows = topLevelRows(collapsed.map(overflowRepresentation) + editor.moreMenuItems())
+        let history = rows.filter { $0.contains("Undo") || $0.contains("Redo") || ["Edit", "Done", "Read Only"].contains($0) }
+        XCTAssertLessThanOrEqual(history.count, 1, "\(name): Undo, Redo and Edit take \(history.count) rows: \(rows)", file: file, line: line)
+        XCTAssertLessThanOrEqual(rows.count, history.isEmpty ? 7 : 8, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
+        if !history.isEmpty { XCTAssertEqual(rows.first, history.first, "\(name): the history row not first: \(rows)", file: file, line: line) }
+        let menu = Set(titles(UIMenu(children: collapsed.map(overflowRepresentation) + editor.moreMenuItems())))
+        for item in collapsed where ["editor.undo", "editor.redo", "editor.edit"].contains(item.accessibilityIdentifier ?? "") {
+            let title = item.title ?? item.accessibilityLabel ?? "?"
+            XCTAssertTrue(menu.contains(title), "\(name): \(title) collapsed and not in the ••• menu: \(rows)", file: file, line: line)
         }
     }
 }
