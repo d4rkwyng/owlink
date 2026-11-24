@@ -169,11 +169,26 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(preview.waitForExistence(timeout: 5), "no Preview submenu in the ••• menu")
         let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
+        // Six or seven rows (0.5.2 (18)): Find ›, Preview ›, Ask Cedric,
+        // Save, More ›, Settings, and Edit on an iPhone (read mode).
+        // (The menu's cells don't expose their titles to XCUITest: counted only.)
+        let rows = app.collectionViews.firstMatch.cells.count
+        print("MENU-TOP-ROWS \(device): \(rows)")
+        XCTAssertTrue((6...7).contains(rows), "\(rows) rows at the top of the ••• menu")
         preview.tap()
         let focus = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
         XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
         XCTAssertEqual(focus.count, 1, "Focus Preview more than once in the Preview submenu")
         shoot("menu-preview-submenu")
+        // More › and its Export & Print › (0.5.2 (18)).
+        closeMenu(app)
+        more.tap()
+        openSubmenu(app, "More")
+        XCTAssertTrue(app.collectionViews.buttons["Go to Line…"].firstMatch.waitForExistence(timeout: 5), "no Go to Line… in More ›")
+        shoot("menu-more")
+        openSubmenu(app, "Export & Print")
+        XCTAssertTrue(app.collectionViews.buttons["Export as PDF…"].firstMatch.waitForExistence(timeout: 5), "no Export as PDF… in Export & Print ›")
+        shoot("menu-export")
     }
 
     // MARK: Settings and the back chevron (0.5.2 (17))
