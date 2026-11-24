@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.5.2 (16), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.5.2 (17), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -53,6 +53,27 @@ its changes where they apply on iOS:
 Not on iOS: the Mac's • tab and title mark (iOS shows "Edited"), Finder
 document icons, and the Mac's multi-tab session (unsaved untitled tabs,
 Reopen Closed Tab).
+
+Build 17 (fixes from a device check of build 16):
+
+- **The ••• menu is tidied.** Focus Preview is in it once, in its Preview
+  submenu beside Preview and Open Preview in New Window, on iPhone and
+  iPad at any width (bar buttons that don't fit no longer add themselves
+  to the menu a second time). The menu is in groups: view and preview;
+  Save, Print and Export; find, marks and navigation; then the rest.
+- **The format bar hides under Ask Cedric.** The Markdown format bar
+  leaves the keyboard while the Ask Cedric sheet is up and comes back,
+  as it was, when the sheet closes (Done, swipe down, or any other way).
+- **US English spellings** throughout: Summarize, color, center, license.
+- **Settings opens without Ask Cedric.** ⌘, and the menu bar's Settings…
+  (and the other menu-bar commands) reach the editor with nothing in it
+  selected, and from a sheet over it; Settings opens on top of Ask
+  Cedric, which stays open.
+- **The back button works again** whatever is shown over the document:
+  closing takes the editor away with any sheet over it.
+- **Front matter is collapsed in the preview.** YAML front matter is one
+  line, "Front matter · title"; a tap opens it, nested values as nested
+  tables and lists, and the preview remembers whether you left it open.
 
 ## New in 0.5.1 (15)
 
