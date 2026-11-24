@@ -8,7 +8,7 @@ import CedricCore
 /// lays out the top and the end, types at the end, then pastes a 30,000-
 /// character line: chunks turn on and TextKit's elements stay contiguous,
 /// with ranges, forwards and backwards across the long line, and none
-/// forwards from the end. Scripts/
+/// forwards from the end; Revert to Saved turns chunks off again. Scripts/
 /// bigfile-check.sh generates the log (CEDRIC_BIGFILE=path) and fails on
 /// a crash report too; without CEDRIC_BIGFILE the check writes its own.
 extension DevChecks {
@@ -110,6 +110,17 @@ extension DevChecks {
                 tab.window?.displayIfNeeded()
                 layOutEnd()
                 expect(tab.window?.isVisible == true, "still up after laying out top and end")
+                // Revert to Saved: the log on disk has no long line.
+                tab.reloadFromDisk()
+            },
+            sync {
+                expect(tab.largeReason == .size && tab.textView.contentStorage?.chunkLimit == nil,
+                       "Revert to Saved: still large (size), chunks off again", String(describing: tab.textView.contentStorage?.chunkLimit))
+                expect((tab.text as NSString).length == tab.lineIndex.length && !tab.text.contains(longLine), "…with the file's text")
+                layOutEnd()
+                tab.textView.scrollToBeginningOfDocument(nil)
+                tab.window?.displayIfNeeded()
+                expect(tab.window?.isVisible == true, "still up after laying out the reverted text")
             },
             snapshot("bigfile-end.png"),
         ])

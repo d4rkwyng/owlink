@@ -521,6 +521,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// (else an undo after a save left the tab marked saved, and its text
     /// unsaved).
     private var storageEdits = 0
+    /// Character edits so far (large mode's queued steps check nothing
+    /// changed in between).
+    var textEditCount: Int { storageEdits }
     private var handledEdits = 0
     private var sniffTimer: Timer?
 
@@ -1088,8 +1091,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             let all = NSRange(location: 0, length: storage.length)
             textView.breakUndoCoalescing()
             if textView.shouldChangeText(in: all, replacementString: d.text) {
-                storage.replaceCharacters(in: all, with: NSAttributedString(string: d.text, attributes: baseAttributes()))
-                textView.didChangeText()
+                largeModeReplacingAll {
+                    storage.replaceCharacters(in: all, with: NSAttributedString(string: d.text, attributes: baseAttributes()))
+                    textView.didChangeText()
+                }
                 textView.undoManager?.setActionName(String(localized: "Reload"))
             }
             doc.apply(d)

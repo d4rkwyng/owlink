@@ -3,7 +3,8 @@
 # 0.5.2 crash: any text file past 25 M characters crashed in TextKit
 # layout on macOS 26), opens it in a check build with CEDRIC_CHECK=bigfile
 # (BigFileCheck.swift: large mode without chunks, layout at the top and
-# the end, typing, a pasted 30,000-character line turning chunks on) and
+# the end, typing, a pasted 30,000-character line turning chunks on,
+# Revert to Saved turning them off) and
 # fails on a FAIL line, no result, or a new Cedric*.ips crash report.
 # The log is generated each run in a temp folder, never stored in git.
 #

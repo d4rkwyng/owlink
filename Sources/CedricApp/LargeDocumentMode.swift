@@ -136,9 +136,16 @@ extension EditorWindowController {
             // A large file of short lines (no chunks) just got a long line:
             // chunks from the next turn, once TextKit is done with the edit.
             largePending = true
+            let storage = textView.contentStorage, edits = textEditCount
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.applyLargeMode(reason, newText: false, chunks: true)
+                guard let self, self.largePending else { return }   // replaced meanwhile (setText)
+                self.largePending = false
+                // Still this text, still large and unchunked, and (after
+                // more edits, whole text) still a line that needs chunks.
+                guard self.textView.contentStorage === storage, self.largeReason != nil, storage?.chunkLimit == nil,
+                      self.textEditCount == edits ? LargeDocument.needsChunks(afterEditOf: lines, in: self.lineIndex)
+                                                  : LargeDocument.needsChunks(self.lineIndex) else { return }
+                self.applyLargeMode(self.largeReason, newText: false, chunks: true)
             }
             return
         }
@@ -149,9 +156,30 @@ extension EditorWindowController {
         largePending = true
         owlChat?.refreshCards()
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.largeReason == nil else { return }
+            guard let self, self.largePending, self.largeReason == nil else { return }
             self.applyLargeMode(reason, newText: false,
                                 chunks: LargeDocument.needsChunks(afterEditOf: lines, in: self.lineIndex))
+        }
+    }
+
+    /// Call before replacing the whole text as an edit (File › Revert to
+    /// Saved, Reload on the changed-on-disk bar); `done` after it. An
+    /// edit's check sees only the edited lines (here line 0 when the line
+    /// count stays), so large mode and chunks follow all of the new text
+    /// instead, on the next turn: a revert that takes a pasted long line
+    /// away turns chunks off, one that brings a long line further down
+    /// turns them on, and one that is no longer large leaves large mode.
+    func largeModeReplacingAll(_ replace: () -> Void) {
+        largePending = true   // the edit's own check stands aside
+        replace()
+        let storage = textView.contentStorage
+        DispatchQueue.main.async { [weak self] in
+            // Always, from the whole text: it also settles any edit step queued before.
+            guard let self, self.textView.contentStorage === storage else { return }
+            let wasPaused = self.extrasPaused
+            self.applyLargeMode(LargeDocument.reason(for: self.lineIndex), newText: false,
+                                chunks: LargeDocument.needsChunks(self.lineIndex))
+            if wasPaused, !self.extrasPaused { self.colorizer.recolorAll() }
         }
     }
 }
