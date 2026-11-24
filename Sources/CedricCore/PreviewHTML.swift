@@ -48,7 +48,7 @@ public enum PreviewHTML {
         table.frontmatter th { text-align: left; font-weight: 600; color: \(hex(p.color(for: .key))); vertical-align: top; }
         table.frontmatter td { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
         details.frontmatter { font-size: 12px; margin: 0 0 1.2em; color: \(hex(p.color(for: .comment))); }
-        details.frontmatter > summary { cursor: pointer; font-weight: 600; color: \(hex(p.color(for: .key))); padding: 2px 0; }
+        details.frontmatter > summary { cursor: pointer; font-weight: 600; color: \(hex(p.color(for: .key))); padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         details.frontmatter > table.frontmatter { margin: .4em 0 0; }
         table.fm-map { font-size: inherit; margin: 0; }
         table.fm-map th { text-align: left; font-weight: 600; color: \(hex(p.color(for: .key))); vertical-align: top; }

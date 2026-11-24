@@ -163,6 +163,31 @@ final class FrontMatterPreviewTests: XCTestCase {
         XCTAssertNil(PreviewController.frontMatterChange(read: nil, renderedOpen: false, readFor: 3, shown: 3), "no block")
     }
 
+    /// Codex review of 0.5.2 (17), should-fix 2: a long title in a narrow
+    /// preview at a large text size: one line, cut with an ellipsis, the
+    /// whole title still the summary's text.
+    func testALongTitleIsOneLine() async throws {
+        let title = String(repeating: "Owls of the World ", count: 12).trimmingCharacters(in: .whitespaces)
+        let p = preview("---\ntitle: \(title)\n---\n# Owls\n")
+        p.view.window?.frame = CGRect(x: 0, y: 0, width: 320, height: 700)
+        p.view.window?.layoutIfNeeded()
+        _ = try await block(p)
+        _ = try await js(p, "document.querySelector('details.frontmatter').style.fontSize = '20px'; return true;")
+        let r = try await js(p, """
+        const s = document.querySelector('details.frontmatter > summary');
+        const cs = getComputedStyle(s);
+        return { h: s.getBoundingClientRect().height, line: parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4,
+                 cut: s.scrollWidth > s.clientWidth, overflow: cs.textOverflow, text: s.textContent };
+        """) as? [String: Any]
+        let height = (r?["h"] as? NSNumber)?.doubleValue ?? 0
+        let line = (r?["line"] as? NSNumber)?.doubleValue ?? 0
+        XCTAssertLessThan(height, line * 1.6 + 4, "the summary wrapped: \(r ?? [:])")
+        XCTAssertEqual(r?["cut"] as? Bool, true, "a long title isn't cut")
+        XCTAssertEqual(r?["overflow"] as? String, "ellipsis")
+        XCTAssertEqual(r?["text"] as? String, "Front matter · " + title)
+        try await snapshot(p, "front-matter-long-title")
+    }
+
     /// The summary is a native disclosure: VoiceOver reads it as a button
     /// that is collapsed or expanded (WebKit's own `<summary>` semantics),
     /// its name the summary line with the title.
