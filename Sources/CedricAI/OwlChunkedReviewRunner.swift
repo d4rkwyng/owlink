@@ -294,9 +294,12 @@ public enum OwlChunkedReviewRunner {
     }
 
     /// The combined answer with no finding dropped and the verdict not
-    /// softened: a finding whose lines the answer doesn't cite is added
-    /// after it, and the verdict is the most cautious of the parts' and
-    /// the answer's own.
+    /// softened: a finding the answer doesn't keep in substance is added
+    /// after it, with its continuation rows, and the verdict is the most
+    /// cautious of the parts' and the answer's own. A cited finding is kept
+    /// only by a passage that cites one of its lines and says most of what
+    /// it says ("Line 12 starts the setup" doesn't keep "Line 12: downloads
+    /// unsigned code"); an uncited one, by the answer saying most of it.
     static func keepFindings(_ answer: String, _ findings: Findings) -> String {
         var rows = answer.components(separatedBy: "\n")
         var verdicts: [String] = []
@@ -308,11 +311,19 @@ public enum OwlChunkedReviewRunner {
             }
         }
         var text = rows.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        let cited = OwlCitations.lines(in: text)
+        let passages = findingGroups(text).map { (lines: OwlCitations.lines(in: $0), words: substance($0)) }
+        let everything = substance(text)
+        func says(_ words: Set<String>, _ finding: Set<String>) -> Bool {
+            words.intersection(finding).count * 2 >= finding.count
+        }
         var missing: [String] = []
-        for row in findings.items.components(separatedBy: "\n") {
-            let lines = OwlCitations.lines(in: row)
-            if !lines.isEmpty, lines.isDisjoint(with: cited) { missing.append(row) }
+        for finding in findingGroups(findings.items) {
+            let words = substance(finding)
+            let lines = OwlCitations.lines(in: finding)
+            let kept = lines.isEmpty
+                ? says(everything, words)
+                : passages.contains { !$0.lines.isDisjoint(with: lines) && says($0.words, words) }
+            if !kept { missing.append(finding) }
         }
         if !missing.isEmpty {
             text += (text.isEmpty ? "" : "\n\n") + missing.joined(separator: "\n")
@@ -322,6 +333,68 @@ public enum OwlChunkedReviewRunner {
         }
         return text
     }
+
+    /// Findings (or an answer's passages), each with its continuation
+    /// rows: a row that cites a line or starts a list item begins one, a
+    /// blank row ends one, any other row continues the one before it.
+    static func findingGroups(_ text: String) -> [String] {
+        var groups: [[String]] = []
+        var open = false
+        for row in text.components(separatedBy: "\n") {
+            let t = row.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty { open = false; continue }
+            let starts = !OwlCitations.find(row).isEmpty || t.hasPrefix("- ") || t.hasPrefix("* ") || t.hasPrefix("• ")
+                || t.range(of: #"^\d+[.)]\s"#, options: .regularExpression) != nil
+            if starts || !open { groups.append([row]); open = true } else { groups[groups.count - 1].append(row) }
+        }
+        return groups.map { $0.joined(separator: "\n") }
+    }
+
+    private static let filler: Set<String> = [
+        "line", "lines", "this", "that", "with", "from", "which", "there", "their", "then", "than", "have", "does",
+        "will", "into", "these", "those", "also", "when", "where", "here", "what", "were", "been", "being", "about",
+        "some", "more", "very", "should", "could", "would", "uses", "used", "using", "high", "medium", "critical",
+        "severity", "issue", "issues", "problem", "problems", "finding", "findings", "note", "notes",
+    ]
+
+    /// What a finding says, roughly: its words of four letters or more,
+    /// not line numbers or filler, cut to five letters ("downloads" and
+    /// "download" match).
+    static func substance(_ text: String) -> Set<String> {
+        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap { word -> String? in
+            guard word.count >= 4, !word.allSatisfy(\.isNumber), !filler.contains(String(word)) else { return nil }
+            return String(word.prefix(5))
+        })
+    }
+
+    static func splitLine(_ line: String, fits: (String) -> Bool) -> [String]? {
+        let vouched = OwlCitations.evidence(in: line)
+        var out: [String] = []
+        var rest = Substring(line)
+        while !rest.isEmpty {
+            if fits(String(rest)) { out.append(String(rest)); break }
+            // The longest prefix that fits.
+            var n = 0, lo = 1, hi = rest.count
+            while lo <= hi {
+                let mid = (lo + hi) / 2
+                if fits(String(rest.prefix(mid))) { n = mid; lo = mid + 1 } else { hi = mid - 1 }
+            }
+            guard n > 0 else { return nil }
+            let chars = Array(rest.prefix(n))
+            func safe(_ k: Int) -> Bool {
+                OwlCitations.evidence(in: String(rest.prefix(k)))
+                    .union(OwlCitations.evidence(in: String(rest.dropFirst(k)))).isSubset(of: vouched)
+            }
+            let ends = stride(from: n, to: 0, by: -1)
+            guard let cut = ends.first(where: { chars[$0 - 1].isWhitespace && safe($0) }) ?? ends.first(where: safe) else {
+                return nil
+            }
+            out.append(String(rest.prefix(cut)))
+            rest = rest.dropFirst(cut)
+        }
+        return out
+    }
+
 
     // MARK: Reduce
 
@@ -412,8 +485,8 @@ public enum OwlChunkedReviewRunner {
         }
 
         /// `note` in pieces that each fit one merge call alone, cut at
-        /// lines (a line longer than a call, at characters). Every
-        /// character is carried forward; nothing is clipped away.
+        /// lines (a line longer than a call, at characters, `splitLine`).
+        /// Every character is carried forward; nothing is clipped away.
         func pieces(_ note: OwlChatSection) throws -> [OwlChatSection] {
             func alone(_ text: String) -> Bool { fits(merge([OwlChatSection(first: note.first, last: note.last, text: text)])) }
             if alone(note.text) { return [note] }
@@ -424,18 +497,9 @@ public enum OwlChunkedReviewRunner {
                 if alone(joined) { current = joined; continue }
                 if !current.isEmpty { out.append(current); current = "" }
                 if alone(line) { current = line; continue }
-                var rest = Substring(line)
-                while !rest.isEmpty {
-                    var n = 0, lo = 1, hi = rest.count
-                    while lo <= hi {
-                        let mid = (lo + hi) / 2
-                        if alone(String(rest.prefix(mid))) { n = mid; lo = mid + 1 } else { hi = mid - 1 }
-                    }
-                    guard n > 0 else { throw noRoom }
-                    if n == rest.count { current = String(rest); break }
-                    out.append(String(rest.prefix(n)))
-                    rest = rest.dropFirst(n)
-                }
+                guard var cut = splitLine(line, fits: alone), let last = cut.popLast() else { throw noRoom }
+                out += cut
+                current = last
             }
             if !current.isEmpty { out.append(current) }
             return out.map { OwlChatSection(first: note.first, last: note.last, text: $0) }

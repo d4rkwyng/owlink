@@ -212,6 +212,45 @@ import CedricCore
         for part in plan.parts { #expect(final.contains("TAIL-\(part.last)"), "part \(part.first)–\(part.last)") }
     }
 
+    @Test func splittingANoteNeverTurnsAFlaggedCitationIntoEvidence() async throws {
+        // Each part's note has one paragraph longer than a merge call, full
+        // of a citation of line 9999 that the part filter flagged as unread.
+        // Wherever the splitter cuts, no piece may vouch for 9999.
+        for pad in [0, 11] {
+            let part: @Sendable (Int, Int) -> String = { a, _ in
+                "- Line \(a): opens.\nOverview of line \(a): " + String(repeating: "x", count: pad)
+                    + String(repeating: "and line 9999 here, ", count: 160)
+            }
+            // A merge invents line 9999; it stands only if its notes vouch for it.
+            let merge: @Sendable (String) -> String = { u in
+                u.contains(OwlChunkedReviewRunner.notesLabel) ? "Combined."
+                    : "- Line \(Self.firstCited(u)): merged.\n- Line 9999: invented."
+            }
+            let engine = Recorder(budget: 3_600, partReply: part, reduceReply: merge)
+            let req = Self.request(Self.doc282(), action: .summarise, budget: 3_600)
+            let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+            let result = await Self.run(req, plan, engine)
+            #expect(engine.reduceCalls.count > 1, "pad \(pad)")
+            for call in engine.reduceCalls {
+                #expect(!Recorder.user(call).contains("9999: invented"), "pad \(pad)")
+            }
+            #expect(!result.outcome.answer.contains("invented"), "pad \(pad)")
+        }
+    }
+
+    @Test func anOversizedLineIsCutOnlyWhereNoCitationGainsEvidence() {
+        let flagged = "Line 999\(OwlCitations.flag)"
+        let line = "Line 4 says " + String(repeating: "\(flagged) again, ", count: 20)
+        for limit in 20...60 {
+            let pieces = OwlChunkedReviewRunner.splitLine(line, fits: { ($0 as NSString).length <= limit })
+            guard let got = pieces else { Issue.record("no split at limit \(limit)"); continue }
+            #expect(got.joined() == line, "limit \(limit)")
+            for p in got {
+                #expect(OwlCitations.evidence(in: p).isSubset(of: IndexSet(integer: 4)), "limit \(limit): \(p)")
+            }
+        }
+    }
+
     @Test func notesThatNeverShortenFailHonestlyAndKeepTheNotes() async throws {
         let long: @Sendable (Int, Int) -> String = { a, b in
             (a...min(b, a + 11)).map { "- Line \($0): " + String(repeating: "detail ", count: 22) }.joined(separator: "\n")
@@ -341,6 +380,25 @@ import CedricCore
         }
         // No tools in the combine call.
         #expect(engine.reduceCalls.allSatisfy { m in !m.contains { if case .toolCalls = $0 { return true }; return false } })
+    }
+
+    @Test func aFindingWhoseLineIsCitedForSomethingElseIsStillKept() {
+        let items = "- Line 12: downloads unsigned code.\n- Line 40: writes /etc/hosts\n  without asking first.\n"
+            + "- The installer never verifies a checksum.\n  It trusts any mirror."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        // Same line, different claim: the risk on line 12 is not in the answer.
+        let answer = "Line 12 starts the setup. Line 40 writes /etc/hosts without asking first."
+        let kept = OwlChunkedReviewRunner.keepFindings(answer, findings)
+        #expect(kept.hasPrefix(answer))
+        #expect(kept.contains("- Line 12: downloads unsigned code."))
+        // The line-40 finding is in the answer in substance: not repeated.
+        #expect(!kept.contains("- Line 40"))
+        // An uncited finding the answer left out comes back with its continuation row.
+        #expect(kept.contains("- The installer never verifies a checksum.\n  It trusts any mirror."))
+        // An answer that keeps every finding (in its own words) gets nothing added.
+        let full = "Line 12 downloads code that is unsigned. Line 40 writes /etc/hosts without asking. "
+            + "The installer never verifies a checksum and trusts any mirror."
+        #expect(OwlChunkedReviewRunner.keepFindings(full, findings) == full)
     }
 
     @Test func checkForRisksKeepsTheMostCautiousVerdictThroughSynthesis() async throws {
