@@ -85,6 +85,15 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         get { UserDefaults.standard.bool(forKey: FrontMatterDisclosure.preferenceKey) }
         set { UserDefaults.standard.set(newValue, forKey: FrontMatterDisclosure.preferenceKey) }
     }
+    /// Close-time front matter reads still out (keepFrontMatterState), and
+    /// the renders waiting for them: a preview reopened at once takes the
+    /// state the closed one was left in, not the preference from before
+    /// its read came back (Codex review round 2 of the 0.5.2 (17) fixes).
+    private static var closingReads = 0
+    private static var afterClosingReads: [() -> Void] = []
+    private static func whenClosingReadsDone(_ run: @escaping () -> Void) {
+        if closingReads == 0 { run() } else { afterClosingReads.append(run) }
+    }
     private let latest = RenderTicket()
     /// Called after a whole page load (the tab scrolls it in step).
     var onLoaded: (() -> Void)?
@@ -312,21 +321,25 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let ticket = latest
         // An immutable copy, whatever `text` is backed by (the storage keeps changing).
         let text = (text as NSString).copy() as! NSString as String
-        let frontMatterExpanded = Self.frontMatterExpanded
-        Self.queue.async {
-            // Skip a render a newer one has already replaced.
-            guard ticket.value == gen else { return }
-            let t0 = DispatchTime.now()
-            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
-                                                                  : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard gen == self.generation else { return }
-                    let applyStart = DispatchTime.now()
-                    self.lastRenderMs = ms
-                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
-                    self.noteMainThread(applyStart)
+        // The preference once any close-time read has come back.
+        Self.whenClosingReadsDone { [self] in
+            guard gen == generation else { return }
+            let frontMatterExpanded = Self.frontMatterExpanded
+            Self.queue.async {
+                // Skip a render a newer one has already replaced.
+                guard ticket.value == gen else { return }
+                let t0 = DispatchTime.now()
+                let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
+                                                                      : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard gen == self.generation else { return }
+                        let applyStart = DispatchTime.now()
+                        self.lastRenderMs = ms
+                        self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
+                        self.noteMainThread(applyStart)
+                    }
                 }
             }
         }
@@ -407,9 +420,23 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// it is kept (Codex review of the 0.5.2 (17) fixes: opened, then
     /// closed with no edit or refresh between, the change was lost). The
     /// same read in the app's own world; the read holds this controller
-    /// (and its web view) until it comes back.
+    /// (and its web view) until it comes back. Renders wait for it (a
+    /// preview reopened at once), for a second at most.
     func keepFrontMatterState() {
-        readFrontMatter { [self] _ in withExtendedLifetime(self) {} }
+        guard pageFrontMatterOpen != nil, !loadingShell else { return }
+        Self.closingReads += 1
+        var done = false
+        let finish = {
+            guard !done else { return }
+            done = true
+            Self.closingReads -= 1
+            guard Self.closingReads == 0 else { return }
+            let waiting = Self.afterClosingReads
+            Self.afterClosingReads = []
+            waiting.forEach { $0() }
+        }
+        readFrontMatter { [self] _ in withExtendedLifetime(self) {}; finish() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { finish() } }
     }
 
     /// Keeps `read` as the preference when it is the reader's change on

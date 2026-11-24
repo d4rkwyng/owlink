@@ -120,6 +120,19 @@ extension DevChecks {
             sync { tab.togglePreview() },
             waitForPreview(tab, contains: "They hunt at night", "the preview opens again"),
             expectState("true", "the reopened preview has the block open"),
+            // Codex review round 2, should-fix: reopened at once, before
+            // the close-time read has come back, the new preview still
+            // shows the block as the reader left it.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once"),
+            expectState("false", "reopened at once, the closed block is still closed"),
+            sync { expect(!PreviewController.frontMatterExpanded, "closing it at once is kept as the preference") },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again"),
+            expectState("true", "reopened at once, the opened block is still open"),
+            sync { expect(PreviewController.frontMatterExpanded, "opening it at once is kept as the preference") },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
