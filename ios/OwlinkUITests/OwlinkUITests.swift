@@ -642,10 +642,42 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue([.button, .disclosureTriangle].contains(summary.elementType), "the summary isn't a button: \(summary.elementType.rawValue)")
         XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists, "the values show while collapsed")
         shoot("front-matter-collapsed")
+        try auditPreview(app, web, "collapsed front matter")
         summary.tap()
         XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
         shoot("front-matter-expanded")
+        try auditPreview(app, web, "expanded front matter")
     }
+
+    /// The system accessibility audit, on the preview: every issue it
+    /// finds on an element inside the preview's web view fails the test.
+    /// One narrow exception: "Label not human-readable" on a label that is
+    /// exactly one of the document's own front-matter values (the sample's
+    /// `icon: owl.png`). The preview shows the writer's text as written, and
+    /// VoiceOver reading "owl.png" is right. Issues on the rest of the
+    /// screen (the editor's bar and status line, the text) and issues the
+    /// audit can't place on an element are printed, not failed: they
+    /// aren't this test's subject.
+    private func auditPreview(_ app: XCUIApplication, _ web: XCUIElement, _ state: String,
+                              documentValues: Set<String> = ["owl.png", "/", "/notes"]) throws {
+        let area = web.frame
+        var inPreview: [String] = []
+        try app.performAccessibilityAudit(for: .all) { issue in
+            let element = issue.element
+            let frame = element?.frame ?? .null
+            let label = element?.label ?? ""
+            let line = "\(state): \(issue.auditType.rawValue) \(issue.compactDescription) (\(issue.detailedDescription)) — " +
+                "\(element.map { "\($0.elementType.rawValue) '\($0.label)' \(frame)" } ?? "no element")"
+            let inside = !frame.isNull && !frame.isEmpty && area.contains(CGPoint(x: frame.midX, y: frame.midY))
+            let documentText = issue.auditType == .sufficientElementDescription && documentValues.contains(label)
+            let verdict = !inside ? (element == nil ? "unplaced" : "outside") : documentText ? "PREVIEW-document-text" : "PREVIEW"
+            print("A11Y-AUDIT \(verdict) \(line)")
+            if inside && !documentText { inPreview.append(line) }
+            return !(inside && !documentText)
+        }
+        XCTAssertTrue(inPreview.isEmpty, "accessibility audit issues in the preview: \(inPreview)")
+    }
+
 
     // MARK: ⌘, from the hardware keyboard (iPad, 0.5.2 (16) findings)
 
