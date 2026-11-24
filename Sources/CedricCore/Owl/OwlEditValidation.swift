@@ -418,6 +418,8 @@ public enum OwlEditValidation {
             guard name != "_", !reported.contains(name) else { continue }
             let source = b.range(at: 2).location != NSNotFound
                 ? ns.substring(with: b.range(at: 2)).trimmingCharacters(in: .whitespaces) : nil
+            // `let x: Int` and a later `x = …`: Swift's deferred initialisation, legal.
+            let deferred = source == nil && ns.substring(with: b.range).contains(":")
             let esc = NSRegularExpression.escapedPattern(for: name)
             let pattern = #"(?<![\w.$])"# + esc + #"((?:\s*(?:\.\s*[A-Za-z_]\w*|\[[^\]\n]*\]|[!?]))*)\s*"# + assignOps
             guard let re = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -430,6 +432,7 @@ public enum OwlEditValidation {
                 if lead.hasSuffix("let") || lead.hasSuffix("var") || lead.hasSuffix("case") { continue }
                 let suffix = ns.substring(with: m.range(at: 1)).replacingOccurrences(of: " ", with: "")
                 let op = ns.substring(with: m.range(at: 2))
+                if deferred, suffix.isEmpty, op == "=" { continue }
                 let message: String
                 if suffix.isEmpty {
                     message = String(localized: "`\(name)` is a `let`, so `\(name) \(op) …` won’t build unless another `\(name)` is in scope. Declare it with `var`.")
@@ -532,7 +535,7 @@ extension OwlEditGate {
             out.proposal = checked
             if let h = checked.check.hardIssue {
                 out.text = "proposed, but it still fails the check (\(h.described)): the user will see that and can't apply it. "
-                    + "Say what you propose and that it doesn't parse yet."
+                    + "Say what you propose and that it isn't ready to apply."
             }
             return out
         }

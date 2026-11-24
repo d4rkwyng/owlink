@@ -102,7 +102,7 @@ import CedricCore
         // Failing again (any edit): proposed, marked, Apply off.
         let second = box.run(Self.edit("\"ok\": true", "\"ok\": true,"))
         #expect(second.ok)
-        #expect(!second.text.contains("applied") || second.text.contains("can't apply"))
+        #expect(second.text.hasPrefix("proposed, but it still fails the check (") && second.text.contains("can't apply it"))
         let p = try? #require(box.proposals.first)
         #expect(box.proposals.count == 1)
         #expect(p?.check.failsValidation == true)

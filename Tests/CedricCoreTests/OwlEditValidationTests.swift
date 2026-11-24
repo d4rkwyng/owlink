@@ -136,6 +136,9 @@ import Testing
         // Reassigning the let name itself is a warning too.
         let re = OwlEditValidation.ruleIssues(language: "swift", original: "a()", replacement: "let n = 1\nn += 2", firstLine: 1)
         #expect(re.map(\.check) == [.swiftLetMutation] && re.allSatisfy { $0.severity == .warning })
+        // Deferred initialisation of a typed let is legal.
+        #expect(OwlEditValidation.ruleIssues(language: "swift", original: "a()", replacement: "let n: Int\nif ok { n = 1 } else { n = 2 }",
+                                             firstLine: 1).isEmpty)
         // Only what the edit adds: the same let mutation before and after isn't new.
         let same = "let item = items[k]!\nitem.count -= 1"
         #expect(OwlEditValidation.ruleIssues(language: "swift", original: same, replacement: same + "\nprint(1)", firstLine: 1).isEmpty)
