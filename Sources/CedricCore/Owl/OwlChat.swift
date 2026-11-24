@@ -426,6 +426,9 @@ public struct OwlEditProposal: Sendable, Equatable {
         case stale
         /// The document can't be edited (read-only tab, iOS read mode).
         case readOnly
+        /// The edit's validation found a hard problem (`OwlEditCheck`):
+        /// "Doesn't parse: …". Apply stays off.
+        case failsValidation(String)
     }
 
     /// Why propose_edit refused a find/replace pair.
@@ -444,6 +447,9 @@ public struct OwlEditProposal: Sendable, Equatable {
     /// The snapshot's edit generation.
     public let generation: Int
     public let anchor: Anchor
+    /// The edit validation's verdict (`OwlEditValidation`); clean unless
+    /// the propose_edit handler or the quick action's block path set it.
+    public var check: OwlEditCheck = .clean
 
     public init(range: NSRange, original: String, replacement: String, reason: String,
                 firstLine: Int, lastLine: Int, generation: Int, anchor: Anchor = .lines) {
@@ -522,12 +528,24 @@ public struct OwlEditProposal: Sendable, Equatable {
         switch anchor {
         case .text:
             let hits = Self.occurrences(of: original, in: text)
-            return hits.count == 1 ? .ready(hits[0]) : .stale
+            return hits.count == 1 ? validated(.ready(hits[0])) : .stale
         case .lines:
             guard generation == self.generation, NSMaxRange(range) <= text.length,
                   text.substring(with: range) == original else { return .stale }
-            return .ready(range)
+            return validated(.ready(range))
         }
+    }
+
+    /// A ready state, unless the validation failed (then Apply stays off).
+    func validated(_ s: ApplyState) -> ApplyState {
+        if case .ready = s, let why = check.failureText { return .failsValidation(why) }
+        return s
+    }
+
+    /// Apply may be offered: ready, and nothing hard found by the validation.
+    public func canApply(text: NSString, generation: Int, readOnly: Bool = false) -> Bool {
+        if case .ready = state(text: text, generation: generation, readOnly: readOnly) { return true }
+        return false
     }
 
     /// The edit can be applied to the live document now (`state`).
