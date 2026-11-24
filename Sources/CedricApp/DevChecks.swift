@@ -237,6 +237,7 @@ enum DevChecks {
         case "readable": readableWidthCheck(app)
         case "writingrestore": writingRestoreCheck(app)
         case "settings": settingsCheck(app)
+        case "splittyping": splitTypingCheck(app)
         default:
             if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
         }

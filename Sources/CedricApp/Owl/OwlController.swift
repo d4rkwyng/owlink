@@ -575,20 +575,42 @@ final class OwlController: NSObject, NSPopoverDelegate {
         owl.needsDisplay = true
     }
 
+    /// A caret look put off until TextKit has finished an edit.
+    private var caretLookPending = false
+
     /// Fades the owl (and the bubble) while the caret is close to them.
     /// `byUser`: a selection change or typing (ends the just-turned-on hold).
     func caretMoved(byUser: Bool = false) {
         if byUser { holdVisible = false }
         guard !holdVisible || bubble != nil, !isDragging else { return }
         guard let tv = tab?.primaryTextView, let window = tv.window else { return }
+        // TextKit fixes the selection up from inside an edit
+        // (NSTextContentStorage synchronizeTextLayoutManagers), so the
+        // window hears of the new selection before the layout manager has
+        // taken the edit in. Any layout question then runs on half-updated
+        // layout: in a chunked long line, after the split was closed,
+        // ensureLayoutForBounds walked the chunks over and over and never
+        // came back (0.5.4 QA hang). Look once the edit is over.
+        if tv.textLayoutManager?.textContentManager?.hasEditingTransaction == true {
+            guard !caretLookPending else { return }
+            caretLookPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.caretLookPending = false
+                self.caretMoved()
+            }
+            return
+        }
         let sel = tv.selectedRange()
         let caretAt = sel.location + sel.length
-        // In a chunked long line (large mode), a caret scrolled out of
-        // view can't be near the owl. (Asking TextKit for its rect lays
-        // out up to it, which re-anchored the viewport there: scrolling
-        // stalled near the caret.)
+        // In a chunked long line (large mode), a caret outside what TextKit
+        // has laid out for the viewport is out of view: it can't be near
+        // the owl. Never ask for more layout here: the caret's rect lays out
+        // up to it (that re-anchored the viewport there: scrolling stalled
+        // near the caret), and the visible rect's fragments can mean
+        // estimating across millions of characters.
         let caret: NSRect
-        if tv.contentStorage?.chunkLimit != nil, let vis = tv.visibleCharacterRange, !NSLocationInRange(caretAt, NSRange(location: vis.location, length: vis.length + 1)) {
+        if tv.contentStorage?.chunkLimit != nil, !(tv.viewportCharacterRange.map { NSLocationInRange(caretAt, NSRange(location: $0.location, length: $0.length + 1)) } ?? false) {
             caret = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
         } else {
             let screen = tv.firstRect(forCharacterRange: NSRange(location: caretAt, length: 0), actualRange: nil)

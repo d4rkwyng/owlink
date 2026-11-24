@@ -188,10 +188,14 @@ final class EditorTextView: NSTextView {
     }
 
     /// Characters from the top of the visible rect to its bottom, joined
-    /// with TextKit's viewport range.
+    /// with TextKit's viewport range. Inside an edit (a selection change
+    /// TextKit makes while it takes the edit in) only the viewport range:
+    /// laying out there runs on half-updated layout (it never came back
+    /// in a chunked long line).
     var visibleCharacterRange: NSRange? {
         guard let tlm = textLayoutManager else { return nil }
         var result = viewportCharacterRange
+        if tlm.textContentManager?.hasEditingTransaction == true { return result }
         let top = CGPoint(x: 0, y: max(0, visibleRect.minY - textContainerOrigin.y))
         let bottom = CGPoint(x: 0, y: max(0, visibleRect.maxY - textContainerOrigin.y))
         if let a = tlm.textLayoutFragment(for: top), let b = tlm.textLayoutFragment(for: bottom) ?? tlm.textLayoutFragment(for: top) {
