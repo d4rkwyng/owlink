@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.5.2 (17), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.5.2 (18), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -53,6 +53,15 @@ its changes where they apply on iOS:
 Not on iOS: the Mac's • tab and title mark (iOS shows "Edited"), Finder
 document icons, and the Mac's multi-tab session (unsaved untitled tabs,
 Reopen Closed Tab).
+
+Build 18 (from a device check of build 17):
+
+- **A shorter ••• menu.** Six or seven rows, with marks, navigation,
+  view toggles and the less used commands in submenus; nothing that was
+  in the menu is gone (the iPad menu bar and its shortcuts are unchanged).
+- **Front matter on the Mac** (shared code): a preview closed and reopened
+  at once shows the block as it was left even when reading it back is
+  slow, and that read no longer holds up previews in other tabs.
 
 Build 17 (fixes from a device check of build 16):
 
