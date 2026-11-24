@@ -28,7 +28,12 @@ public struct ServerContextReport: Sendable, Equatable {
     /// Below this a number is not a context window (a parse slip): ignored.
     static let minimumTokens = 512
 
-    static func plausible(_ n: Int?) -> Int? { n.flatMap { $0 >= minimumTokens ? $0 : nil } }
+    /// At least `minimumTokens`; a larger number than any window
+    /// (`ContextWindow.maximumWindowTokens`, up to Int.max from a server)
+    /// counts as that, so nothing downstream does arithmetic on it.
+    static func plausible(_ n: Int?) -> Int? {
+        n.flatMap { $0 >= minimumTokens ? min($0, ContextWindow.maximumWindowTokens) : nil }
+    }
 
     private static func int(_ v: Any?) -> Int? { (v as? NSNumber)?.intValue }
 

@@ -62,6 +62,25 @@ import Testing
         #expect(ServerContextReport.ollama(loaded: 8_192, show: parsed) == ServerContextReport(tokens: 8_192, source: .loaded))
     }
 
+    /// A server reporting an absurd window (up to Int.max): parsed as the
+    /// largest window, and its budget is the cap, without trapping.
+    @Test func aHugeReportedWindowIsClampedAndBudgetsToTheCap() throws {
+        let big = Int.max, maxWindow = ContextWindow.maximumWindowTokens
+        let lm = data(["data": [["id": "m", "state": "loaded", "loaded_context_length": big, "max_context_length": big]]])
+        let report = try #require(ServerContextReport.lmStudio(lm, model: "m"))
+        #expect(report == ServerContextReport(tokens: maxWindow, source: .loaded))
+        #expect(ContextWindow.serverBudget(contextTokens: report.tokens) == 32_000)
+        let ps = data(["models": [["name": "m:latest", "model": "m:latest", "context_length": big]]])
+        #expect(ServerContextReport.ollamaLoaded(ps, model: "m") == maxWindow)
+        let show = try #require(ServerContextReport.ollamaShow(data([
+            "parameters": "num_ctx \(big)", "model_info": ["general.architecture": "x", "x.context_length": big]])))
+        #expect(show.configured == maxWindow && show.maximum == maxWindow)
+        let configured = try #require(ServerContextReport.ollama(loaded: nil, show: show))
+        #expect(ContextWindow.serverBudget(contextTokens: configured.tokens) == 32_000)
+        // A report built directly with Int.max (not through the parser) is safe too.
+        #expect(ContextWindow.serverBudget(contextTokens: ServerContextReport(tokens: big, source: .loaded).tokens) == 32_000)
+    }
+
     @Test func ollamaWithoutNumCtxUsesItsDefaultLoad() throws {
         let plain = try #require(ServerContextReport.ollamaShow(data(["model_info": ["llama.context_length": 131_072]])))
         #expect(ServerContextReport.ollama(loaded: nil, show: plain) == ServerContextReport(tokens: 4_096, source: .serverDefault))

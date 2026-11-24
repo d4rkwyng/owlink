@@ -21,6 +21,20 @@ import Testing
         #expect(ContextWindow.serverBudget(contextTokens: 22_358) == 32_000)
         #expect(ContextWindow.serverBudget(contextTokens: 131_072) == 32_000, "never above the cap")
     }
+
+    /// 0.5.3 multiplied the reported window by three before the 32 000
+    /// cap: a server reporting a window near Int.max trapped (overflow).
+    @Test func anyReportedWindowGivesABudgetWithoutTrapping() {
+        for huge in [Int.max, Int.max - 1, Int.max / 2, Int.max / 3 + 1, 1 << 62, 1 << 40, ContextWindow.maximumWindowTokens + 1] {
+            #expect(ContextWindow.serverBudget(contextTokens: huge) == 32_000, "\(huge)")
+            #expect(ContextWindow.budgetUnits(contextTokens: huge) == ContextWindow.budgetUnits(contextTokens: ContextWindow.maximumWindowTokens))
+        }
+        #expect(ContextWindow.budgetUnits(contextTokens: ContextWindow.maximumWindowTokens) == (ContextWindow.maximumWindowTokens - 1_024) * 3 / 2)
+        for low in [Int.min, Int.min + 1, -1, 0] {
+            #expect(ContextWindow.budgetUnits(contextTokens: low) == 0)
+            #expect(ContextWindow.serverBudget(contextTokens: low) == 0)
+        }
+    }
 }
 
 @Suite struct BuiltInContextTests {
