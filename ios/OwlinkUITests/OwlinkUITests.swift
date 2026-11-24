@@ -291,14 +291,14 @@ final class OwlinkUITests: XCTestCase {
     /// An item of the open ••• menu (or of an open submenu). The ••• menu's
     /// top level is short (0.5.2 (18): seven or eight rows) and a swipe on a
     /// list that fits closes the menu, so the list is scrolled only if it
-    /// runs past its frame (More › and Language › can, on an iPhone).
+    /// runs past the screen (More › and Language › can, on an iPhone).
     private func menuItem(_ app: XCUIApplication, _ label: String) -> XCUIElement {
         let item = app.collectionViews.buttons[label].firstMatch
         // Down the list, then back up if a swipe went past it.
         for i in 0..<14 {
             if item.waitForExistence(timeout: 1), item.isHittable { return item }
             guard let list = scrollingMenuList(app) else { break }
-            if i < 7 { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
+            swipeMenu(app, list, up: i < 7)
         }
         XCTAssertTrue(item.exists && item.isHittable, "no \(label) in the ••• menu")
         return item
@@ -333,13 +333,44 @@ final class OwlinkUITests: XCTestCase {
         guard let list = scrollingMenuList(app) else { return }
         var swipes = 0
         while swipes < 7, list.exists {
-            list.swipeUp(velocity: .slow)
+            swipeMenu(app, list, up: true)
             swipes += 1
             XCTAssertTrue(list.exists, "\(what) closed on a swipe through it")
             guard list.exists else { return }
             look()
         }
-        for _ in 0..<swipes where list.exists { list.swipeDown(velocity: .slow) }
+        for _ in 0..<swipes where list.exists { swipeMenu(app, list, up: false) }
+    }
+
+    /// A swipe on a menu's list that scrolls, over the rows shown: a drag
+    /// from the middle shown row to the top (or bottom) one, by screen
+    /// point. An element swipe isn't used: on an iPad mini, Language ›'s
+    /// list and its rows (on screen) fail it with "visible frame is empty".
+    private func swipeMenu(_ app: XCUIApplication, _ list: XCUIElement, up: Bool) {
+        guard let shot = try? list.snapshot() else { return }
+        // The rows (cells, in the query's order), top first.
+        var rows: [CGRect] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if e.elementType == .cell { rows.append(e.frame) }
+            e.children.forEach(walk)
+        }
+        walk(shot)
+        let cells = list.cells
+        let order = rows.indices.sorted { rows[$0].minY < rows[$1].minY }
+        // The shown run: from the first hittable row to the last.
+        var shown: [CGRect] = []
+        for i in order {
+            if cells.element(boundBy: i).isHittable { shown.append(rows[i]) } else if !shown.isEmpty { break }
+        }
+        guard shown.count >= 3 else {
+            if up { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
+            return
+        }
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func point(_ r: CGRect) -> XCUICoordinate { origin.withOffset(CGVector(dx: r.midX, dy: r.midY)) }
+        let from = shown[shown.count / 2], to = up ? shown[0] : shown[shown.count - 1]
+        point(from).press(forDuration: 0.05, thenDragTo: point(to), withVelocity: .slow, thenHoldForDuration: 0)
+        sleep(1) // the scroll's deceleration
     }
 
     /// Opens a submenu of the open ••• menu (More ›, Share & Export ›, …).
