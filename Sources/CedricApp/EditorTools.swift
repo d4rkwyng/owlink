@@ -308,7 +308,7 @@ extension EditorWindowController {
         doc.apply(d)
         setText(d.text)
         doc.markSaved()
-        doc.fileModified = DiskStamp.of(url)?.modified
+        doc.noteDisk(DiskStamp.of(url))
         updateTitle()
         setEditable(false)
         // setText dropped the cards proposed against the editable buffer;
@@ -352,7 +352,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.fileModified = doc.fileURL.flatMap { DiskStamp.of($0)?.modified }
+        doc.noteDisk(doc.fileURL.flatMap { DiskStamp.of($0) })
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {

@@ -969,7 +969,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         do {
             let (d, mod) = try EditorDocument.read(url, encoding: enc)
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             setText(d.text)
             doc.markSaved()
             updateTitle()
@@ -1108,17 +1108,23 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             showDiskBar()
             return
         }
-        guard let (d, newMod) = try? EditorDocument.read(url, encoding: doc.encoding) else { return }
+        guard let (d, newMod) = try? EditorDocument.read(url, encoding: doc.encoding) else {
+            // Changed into something that can't be read (a link pointed
+            // at a folder): say so rather than keep it quiet. The text
+            // stays; Reload shows the error, Keep Mine keeps this text.
+            if !doc.changedOnDisk { doc.changedOnDisk = true; showDiskBar() }
+            return
+        }
         hideDiskBar()
         if case .held = binary {
             // Not shown yet (Open Anyway): only what it will show changes.
             binary = .held(d.text)
-            doc.fileModified = newMod
+            doc.noteDisk(newMod)
             return
         }
         let sels = panes.map { $0.textView.selectedRange() }
         doc.apply(d)
-        doc.fileModified = newMod
+        doc.noteDisk(newMod)
         setText(d.text)
         doc.markSaved()
         let len = (textView.string as NSString).length
@@ -1150,7 +1156,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             }
             guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             doc.markSaved()
             resetPreviewTrust()
             if previewVisible { renderPreview() }

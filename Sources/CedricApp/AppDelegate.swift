@@ -534,7 +534,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let (d, mod) = try EditorDocument.read(std)
             let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             PerfTrace.mark("read_decode")
             doc.languageChoice = .forFile(named: std.lastPathComponent, content: d.text)
             PerfTrace.mark("detect_language")
@@ -655,6 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               language: d.languageIsManual ? d.language : nil,
                                               selectionLocation: sel.location, selectionLength: sel.length,
                                               topLine: t.primaryTopLine, fileModified: d.fileModified,
+                                              fileSize: d.diskStamp.size, fileID: d.diskStamp.identity,
                                               bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                               indentation: d.indentation,
                                               previewDetached: t.previewDetached ? true : nil,
@@ -818,13 +819,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if st.hasBuffer { text = store.readBuffer(st.id) }
         if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             text = d.text
             binary = d.looksBinary
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.fileModified = st.fileModified
+            doc.noteDisk(st.diskStamp)
         }
         guard let body = text else { return nil } // the file is gone and there was no buffer
         if let l = st.language {

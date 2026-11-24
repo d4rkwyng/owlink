@@ -22,14 +22,13 @@ final class EditorDocument {
     var language: Language { languageChoice.language }
     /// Picked from the menu: never re-detected (typing, paste, save).
     var languageIsManual: Bool { languageChoice.isManual }
-    /// The file's date at the last read or save. Setting it drops the
-    /// size (unknown until `noteDisk`), so a stale size never fakes a change.
-    var fileModified: Date? { didSet { fileSize = nil } }
-    /// The file's size at the last read or save, when known.
-    private(set) var fileSize: Int?
-    /// What the file looked like when last read or written (DiskStamp).
-    var diskStamp: DiskStamp { DiskStamp(modified: fileModified, size: fileSize) }
-    func noteDisk(_ s: DiskStamp?) { fileModified = s?.modified; fileSize = s?.size }
+    /// What the file looked like when last read or written (DiskStamp:
+    /// date, size and identity), set only as a whole by `noteDisk` so a
+    /// date never pairs with another file's size or identity.
+    private(set) var diskStamp = DiskStamp(modified: nil)
+    /// The file's date at the last read or save.
+    var fileModified: Date? { diskStamp.modified }
+    func noteDisk(_ s: DiskStamp?) { diskStamp = s ?? DiskStamp(modified: nil) }
 
     /// Edits since open (a generation: grammar results, owl proposals
     /// and session buffer writes compare it). Unsaved is `edited`'s call.
@@ -124,21 +123,24 @@ final class EditorDocument {
         }
     }
 
-    /// Reads and decodes a file; returns the LF-normalised text.
-    static func read(_ url: URL, encoding: TextEncoding? = nil) throws -> (DecodedText, Date?) {
+    /// Reads and decodes a file; returns the LF-normalised text and the
+    /// file's stamp. The stamp is taken before the bytes are read: if the
+    /// file changes (or a link is pointed elsewhere) in between, the next
+    /// check sees a change rather than missing one.
+    static func read(_ url: URL, encoding: TextEncoding? = nil) throws -> (DecodedText, DiskStamp?) {
         let data: Data
         if let kind = SpecialFile.kind(atPath: url.path) {
             throw LoadError.unreadable(url, NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey:
                 String(localized: "It is \(kind), not a regular file.")]))
         }
+        let stamp = DiskStamp.of(url)
         do {
             data = try Data(contentsOf: url, options: .mappedIfSafe)
         } catch {
             throw LoadError.unreadable(url, error)
         }
         guard let decoded = TextCodec.decode(data, as: encoding) else { throw LoadError.notText(url) }
-        let mod = DiskStamp.of(url)?.modified
-        return (decoded, mod)
+        return (decoded, stamp)
     }
 
     func apply(_ d: DecodedText) {
@@ -156,9 +158,9 @@ final class EditorDocument {
         // Through a symbolic link: replace its target (keeping the link and
         // the target's permissions), not the link itself; never a read-only
         // file (FileWriteAccess: permissions, locked, read-only volume).
-        try DocumentWrite.write(data, to: url)
+        let stamp = try DocumentWrite.write(data, to: url)
         fileURL = url
-        noteDisk(DiskStamp.of(url))
+        noteDisk(stamp)
         mixedLineEndings = false
         markSaved()
     }

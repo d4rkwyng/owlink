@@ -126,4 +126,93 @@ import Testing
         #expect(DiskStamp.of(link) == nil)
         #expect(DiskStamp.status(known: known, at: link) == .missing)
     }
+
+    /// Codex 0.5.4 review: a link pointed at another file with the same
+    /// date and size (a timestamp-preserving copy) went unseen, and ⌘S
+    /// wrote over that file. The stamp carries the target's identity.
+    @Test func aLinkRetargetedToAFileWithTheSameDateAndSizeIsAChange() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("cedric-stamp-twin-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("real.md"), twin = dir.appendingPathComponent("twin.md")
+        try Data("same size".utf8).write(to: real)
+        try Data("SAME SIZE".utf8).write(to: twin)
+        for u in [real, twin] { try fm.setAttributes([.modificationDate: t], ofItemAtPath: u.path) }
+        let link = dir.appendingPathComponent("a.md")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "real.md")
+        let known = try #require(DiskStamp.of(link))
+        #expect(known.identity != nil)
+
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "twin.md")
+        let now = try #require(DiskStamp.of(link))
+        #expect(now.modified == known.modified && now.size == known.size, "the same date and size")
+        #expect(DiskStamp.status(known: known, at: link) == .changed)
+        // A link to a folder is a change too (a save there fails), not a crash.
+        try fm.createDirectory(at: dir.appendingPathComponent("folder"), withIntermediateDirectories: true)
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "folder")
+        #expect(DiskStamp.status(known: known, at: link) == .changed)
+        #expect(throws: (any Error).self) { try DocumentWrite.write(Data("mine".utf8), to: link) }
+        #expect(try fm.contentsOfDirectory(atPath: dir.appendingPathComponent("folder").path).isEmpty, "the folder is untouched")
+    }
+
+    /// QA S10 "replace-same-stamp": another app atomically replaces the
+    /// file with one of the same size and date. Another inode: a change.
+    @Test func anAtomicReplaceWithTheSameDateAndSizeIsAChange() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("cedric-stamp-replace-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let u = dir.appendingPathComponent("open.md"), next = dir.appendingPathComponent(".next")
+        try Data("version 1".utf8).write(to: u)
+        try fm.setAttributes([.modificationDate: t], ofItemAtPath: u.path)
+        let known = try #require(DiskStamp.of(u))
+        try Data("version 2".utf8).write(to: next)
+        try fm.setAttributes([.modificationDate: t], ofItemAtPath: next.path)
+        #expect(rename(next.path, u.path) == 0)
+        #expect(DiskStamp.of(u)?.modified == known.modified && DiskStamp.of(u)?.size == known.size)
+        #expect(DiskStamp.status(known: known, at: u) == .changed)
+    }
+
+    /// A stamp without identity (a session saved before 0.5.4) compares
+    /// the date and size only, so an upgrade alone shows no change.
+    @Test func identityCountsOnlyWhenBothKnowIt() {
+        let a = DiskStamp.FileID(device: 1, inode: 2), b = DiskStamp.FileID(device: 1, inode: 3)
+        #expect(DiskStamp.changed(known: DiskStamp(modified: t, size: 4, identity: a), current: DiskStamp(modified: t, size: 4, identity: b)))
+        #expect(!DiskStamp.changed(known: DiskStamp(modified: t), current: DiskStamp(modified: t, size: 4, identity: b)))
+        #expect(!DiskStamp.changed(known: DiskStamp(modified: t, size: 4, identity: a), current: DiskStamp(modified: t, size: 4, identity: a)))
+        // And the session keeps it: an older session file decodes without it.
+        let old = #"{"id":"6F9619FF-8B86-D011-B42D-00CF4FC964FF","hasBuffer":true,"encoding":"utf8","lineEnding":"lf","selectionLocation":0,"selectionLength":0,"topLine":0,"fileModified":800000000}"#
+        let tab = try? JSONDecoder().decode(SessionTab.self, from: Data(old.utf8))
+        #expect(tab != nil && tab?.diskStamp.identity == nil && tab?.diskStamp.size == nil)
+        var withID = SessionTab(fileModified: t, fileSize: 4, fileID: a)
+        withID.hasBuffer = true
+        let round = try? JSONDecoder().decode(SessionTab.self, from: JSONEncoder().encode(withID))
+        #expect(round?.diskStamp == DiskStamp(modified: t, size: 4, identity: a))
+    }
+
+    /// Owlink's own saves stamp the file they wrote: the atomic replace
+    /// (a new inode, through a link too) and the in-place save return the
+    /// stamp the path shows afterwards, so the tab sees no change.
+    @Test func aSaveReturnsTheStampOfTheFileItWrote() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("cedric-stamp-save-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { _ = chmod(dir.path, 0o755); try? fm.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("target.md"), link = dir.appendingPathComponent("link.md")
+        try Data("before".utf8).write(to: target)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "target.md")
+        let before = try #require(DiskStamp.of(link))
+        let saved = try DocumentWrite.write(Data("after, atomically".utf8), to: link)
+        #expect(saved.identity != before.identity, "the atomic replace is a new file")
+        #expect(DiskStamp.status(known: saved, at: link) == .same, "and its own stamp is no change")
+        #expect(saved == DiskStamp.of(target))
+        // In place, in a folder that refuses new files: the same file.
+        #expect(chmod(dir.path, 0o555) == 0)
+        let inPlace = try DocumentWrite.write(Data("in place".utf8), to: link)
+        #expect(inPlace.identity == saved.identity && inPlace.size == 8)
+        #expect(DiskStamp.status(known: inPlace, at: link) == .same)
+    }
 }

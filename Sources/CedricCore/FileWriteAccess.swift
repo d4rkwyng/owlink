@@ -126,7 +126,12 @@ public enum DocumentWrite {
     /// a read-only file of the same name. A folder that refuses the new
     /// file (0555) gets the checked file written in place instead, still
     /// through the open folder (`overwrite`).
-    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws {
+    ///
+    /// Returns the stamp of the file it wrote (from the open file, before
+    /// the rename): the date, size and identity a tab should compare with
+    /// later, not whatever the path shows by the time it asks.
+    @discardableResult
+    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws -> DiskStamp {
         try write(data, to: url, fileManager: fm, afterCheck: nil)
     }
 
@@ -142,8 +147,9 @@ public enum DocumentWrite {
     }
 
     /// `afterCheck`: tests only, runs between the check and the write.
+    @discardableResult
     static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?,
-                      faults: Faults? = nil) throws {
+                      faults: Faults? = nil) throws -> DiskStamp {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
@@ -157,12 +163,11 @@ public enum DocumentWrite {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
             afterCheck?()
-            if try replace(name, in: dir, with: data, url: url) { return }
+            if let stamp = try replace(name, in: dir, with: data, url: url) { return stamp }
             // The folder refuses a new file (0555, or search-only 0100):
             // write the checked file in place, through the same folder.
             guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
-            try overwrite(name, in: dir, checked: checked, with: data, url: url, faults: faults)
-            return
+            return try overwrite(name, in: dir, checked: checked, with: data, url: url, faults: faults)
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
     }
@@ -186,18 +191,19 @@ public enum DocumentWrite {
     }
 
     /// Writes `data` to a new file in `dir` and renames it over `name`.
-    /// False, with nothing written, when the folder refuses a new file
-    /// (`overwrite` then writes the checked file in place).
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
+    /// The new file's stamp; nil, with nothing written, when the folder
+    /// refuses a new file (`overwrite` then writes the checked file in place).
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> DiskStamp? {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
         guard fd >= 0 else {
             let code = errno
-            if code == EACCES || code == EPERM { return false }
+            if code == EACCES || code == EPERM { return nil }
             throw writeError(code, url)
         }
         var renamed = false
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
+        var written = stat()
         do {
             // What an atomic save keeps of the file it replaces.
             // Only a regular file's, and never a blocking open: a FIFO
@@ -212,6 +218,7 @@ public enum DocumentWrite {
                 }
             }
             try writeAll(data, to: fd, at: 0, url: url)
+            guard fstat(fd, &written) == 0 else { throw writeError(errno, url) }
         } catch {
             close(fd)
             throw error
@@ -219,7 +226,7 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
-        return true
+        return DiskStamp(written)
     }
 
     /// The save into a folder that refuses a new file (a writable file
@@ -260,7 +267,7 @@ public enum DocumentWrite {
     /// Not covered (0.6): another program writing the file during the
     /// save; its changes can be lost, as with any in-place write.
     private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL,
-                                  faults: Faults?) throws {
+                                  faults: Faults?) throws -> DiskStamp {
         let fd = openat(dir, name, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw writeError(errno, url) }
         defer { close(fd) }
@@ -286,7 +293,7 @@ public enum DocumentWrite {
         // Changed while it was copied (another program writing it): the
         // copy may not be the file, so nothing is written. (The baseline
         // is taken after preallocating, which can touch the times.)
-        var before = stat(), now = stat()
+        var before = stat(), now = stat(), written = stat()
         guard fstat(fd, &before) == 0, before.st_size == st.st_size else { throw writeError(EBUSY, url) }
         let recovery = try makeRecoveryCopy(of: fd, count: oldCount, name: name, url: url)
         guard fstat(fd, &now) == 0, now.st_size == before.st_size,
@@ -302,7 +309,7 @@ public enum DocumentWrite {
             }
             try writeAll(data, to: fd, at: 0, url: url)
             if data.count < oldCount, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
-            guard fsync(fd) == 0 else { throw writeError(errno, url) }
+            guard fsync(fd) == 0, fstat(fd, &written) == 0 else { throw writeError(errno, url) }
         } catch {
             do {
                 if faults?.failRestore == true { throw writeError(EIO, url) }
@@ -314,6 +321,7 @@ public enum DocumentWrite {
             throw error
         }
         removeRecoveryCopy(recovery)
+        return DiskStamp(written)
     }
 
     /// For the app to call once at launch: a write past the file-size

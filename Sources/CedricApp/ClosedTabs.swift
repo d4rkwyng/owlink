@@ -69,6 +69,7 @@ extension AppDelegate {
                                language: d.languageIsManual ? d.language : nil,
                                selectionLocation: sel.location, selectionLength: sel.length, topLine: t.primaryTopLine,
                                fileModified: d.fileModified,
+                               fileSize: d.diskStamp.size, fileID: d.diskStamp.identity,
                                bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                indentation: d.indentation, folds: t.sessionFolds, split: t.sessionSplit,
                                writing: t.sessionWriting, wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil)
@@ -109,12 +110,12 @@ extension AppDelegate {
         doc.indentation = st.indentation
         if text == nil, let url, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             text = d.text
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.fileModified = st.fileModified
+            doc.noteDisk(st.diskStamp)
         }
         guard let body = text else {
             // The file has gone and there was no unsaved text.

@@ -114,6 +114,88 @@ extension DevChecks {
                 expect(disk() == "clean reload\n" && !tab.doc.isDirty && !tab.doc.missingOnDisk && tab.diskBar?.isHidden == true,
                        "Save writes it back where it was", disk())
             },
-        ])
+        ] + linkSteps(app))
+    }
+
+    /// A tab opened through a symbolic link (0.5.4 QA, F2): its stamp is
+    /// the target's, with the target's identity. A save through the link
+    /// shows no bar; another file with the same date and size, put in
+    /// place by an atomic replace or by pointing the link at it, is a
+    /// change; a dangling link and a link to a folder keep the text.
+    static func linkSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let fm = FileManager.default
+        let target = write("link-target.txt", "linked\n")
+        let folder = target.deletingLastPathComponent()
+        let link = folder.appendingPathComponent("link.txt")
+        try? fm.removeItem(at: link)
+        try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: "link-target.txt")
+        var tab: EditorWindowController!
+        func disk() -> String { (try? String(contentsOf: target, encoding: .utf8)) ?? "-" }
+        func becomeKey() { tab.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: tab.window)) }
+        /// Another file with `target`'s date and size, `text` the same length.
+        func twin(_ name: String, _ text: String) -> URL {
+            let u = write(name, text)
+            let date = (try? fm.attributesOfItem(atPath: target.path)[.modificationDate]) as? Date
+            try? fm.setAttributes([.modificationDate: date as Any], ofItemAtPath: u.path)
+            return u
+        }
+        return [
+            sync {
+                tab = app.open(link)
+                sized(tab)
+                focus(tab)
+                tab.textView.setSelectedRange(NSRange(location: 6, length: 0))
+                type("!")
+                key("s", [.command])
+            },
+            sync {
+                expect(tab.window?.attachedSheet == nil && disk() == "linked!\n", "⌘S through a link saves without asking", disk())
+                expect((try? fm.destinationOfSymbolicLink(atPath: link.path)) == "link-target.txt", "and keeps the link")
+                becomeKey()
+            },
+            sync {
+                expect(tab.diskBar?.isHidden != false && !tab.doc.isDirty, "a save through a link shows no Changed on disk bar")
+                // Same date and size, another file renamed over the target.
+                let other = twin("link-other.txt", "Linked!\n")
+                expect(rename(other.path, target.path) == 0, "replace the target")
+                expect(tab.fileChangedOnDisk(link), "an atomic replace with the same date and size is a change")
+                tab.reloadIfChangedOnDisk()
+                expect(tab.text == "Linked!\n", "and a tab without edits reloads it", tab.text)
+                // Same date and size, the link pointed at another file.
+                let third = twin("link-third.txt", "LINKED!\n")
+                try? fm.removeItem(at: link)
+                try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: third.lastPathComponent)
+                type(" mine")
+                key("s", [.command])
+            },
+            sync {
+                expect(tab.window?.attachedSheet != nil, "⌘S after the link is pointed at a file with the same date and size asks")
+                expect((try? String(contentsOfFile: folder.appendingPathComponent("link-third.txt").path, encoding: .utf8)) == "LINKED!\n",
+                       "and doesn't write over it")
+                sheetButton(tab, "Cancel")?.performClick(nil)
+            },
+            sync {
+                expect(tab.window?.attachedSheet == nil && tab.doc.isDirty, "Cancel leaves the tab unsaved")
+                // Dangling: the file the link points at is gone.
+                try? fm.removeItem(at: folder.appendingPathComponent("link-third.txt"))
+                tab.reloadIfChangedOnDisk()
+            },
+            sync {
+                expect(tab.diskBar?.label.stringValue.contains("was deleted or moved") == true && tab.doc.isDirty
+                       && tab.text.contains(" mine"), "a dangling link shows the deleted bar and keeps the text",
+                       "\(tab.text) / \(tab.diskBar?.label.stringValue ?? "no bar") / sheet \(tab.window?.attachedSheet != nil)")
+                // A link to a folder.
+                let sub = folder.appendingPathComponent("link-folder", isDirectory: true)
+                try? fm.createDirectory(at: sub, withIntermediateDirectories: true)
+                try? fm.removeItem(at: link)
+                try? fm.createSymbolicLink(atPath: link.path, withDestinationPath: "link-folder")
+                tab.reloadIfChangedOnDisk()
+            },
+            sync {
+                expect(tab.text.contains(" mine") && tab.doc.isDirty, "a link to a folder keeps the text, unsaved", tab.text)
+                expect(tab.diskBar?.isHidden == false && tab.diskBar?.label.stringValue.contains("changed on disk") == true,
+                       "and shows the Changed on disk bar", tab.diskBar?.label.stringValue ?? "no bar")
+            },
+        ]
     }
 }
