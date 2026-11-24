@@ -258,12 +258,39 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         }
     }
 
-    /// Frees every loaded model synchronously (exit, app termination).
+    /// How long exit waits for llama.cpp's queue to free the models. A
+    /// request or warm-up stops at the abort flag (set first) within a
+    /// graph node or a batch; only a decode the flag can't reach (a GPU
+    /// that hung) or an unstoppable context creation takes longer.
+    static let exitWait: TimeInterval = 5
+
+    /// Frees every loaded model synchronously, at exit (the atexit hook).
+    ///
+    /// The model is registered before its warm-up decode, so a warm-up the
+    /// watchdog gave up on (a GPU that hung, the abort flag never read) is
+    /// in `live` while it blocks the queue. Waiting for the queue without
+    /// a limit made Quit hang there (0.5.3). If the queue doesn't free them
+    /// within `exitWait`, the process ends at once with `_exit`: freeing
+    /// would wait forever, and running ggml's Metal device destructor with
+    /// a context still alive aborts.
     static func freeAllNow() {
         let models = liveLock.withLock { Array(live.values) }
+        guard !models.isEmpty else { return }
         for m in models { m.stop.set() }
-        let free = { for m in models { m.freeOnQueue() } }
-        if DispatchQueue.getSpecific(key: queueKey) != nil { free() } else { queue.sync(execute: free) }
+        let free: @Sendable () -> Void = { for m in models { m.freeOnQueue() } }
+        if DispatchQueue.getSpecific(key: queueKey) != nil { free(); return }
+        if runBounded(on: queue, timeout: exitWait, free) { return }
+        fflush(nil)
+        _exit(0)
+    }
+
+    /// Runs `work` on `queue` and waits at most `timeout` seconds for it:
+    /// true if it ran, false if the queue was still busy (`work` stays
+    /// queued). Exit's wait (`freeAllNow`).
+    static func runBounded(on queue: DispatchQueue, timeout: TimeInterval, _ work: @escaping @Sendable () -> Void) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { work(); done.signal() }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     private static let queueKey = DispatchSpecificKey<Bool>()

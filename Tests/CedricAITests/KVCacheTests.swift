@@ -85,3 +85,36 @@ import Testing
         #expect(GenerationResult(text: "x").reusedTokens == 0)
     }
 }
+
+/// Quit after a warm-up the watchdog gave up on. The model is registered
+/// for exit before its warm-up decode; if that decode never returns (a
+/// GPU that hung, the abort flag never read), the exit hook used to wait
+/// on llama.cpp's queue with no limit, behind it: Quit hung. The hook now
+/// waits at most `LlamaModel.exitWait`. Without llama.cpp: a plain queue
+/// blocked by a semaphore stands in for the hung decode.
+@Suite struct LlamaExitWaitTests {
+    @Test func exitFreesOnAQueueThatIsFree() {
+        let q = DispatchQueue(label: "cedric.test.exit-free")
+        let ran = Box(false)
+        #expect(LlamaModel.runBounded(on: q, timeout: 5) { ran.mutate { $0 = true } })
+        #expect(ran.value)
+    }
+
+    @Test func exitDoesNotWaitForeverBehindAHungDecode() {
+        let q = DispatchQueue(label: "cedric.test.exit-blocked")
+        let hung = DispatchSemaphore(value: 0)
+        q.async { hung.wait() }   // the warm-up decode that never returns
+        let ran = Box(false)
+        let t0 = Date()
+        #expect(!LlamaModel.runBounded(on: q, timeout: 0.2) { ran.mutate { $0 = true } })
+        #expect(Date().timeIntervalSince(t0) < 4, "gave up after its limit, not when the queue freed")
+        #expect(!ran.value, "nothing was freed under a running decode")
+        hung.signal()
+        q.sync {}
+        #expect(ran.value)
+    }
+
+    @Test func theExitWaitIsShortButNotZero() {
+        #expect(LlamaModel.exitWait > 0 && LlamaModel.exitWait <= 10)
+    }
+}
