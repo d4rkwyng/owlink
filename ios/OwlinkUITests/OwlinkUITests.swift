@@ -22,6 +22,14 @@ final class OwlinkUITests: XCTestCase {
         return tv
     }
 
+    /// A finger's tap in the text (its middle). XCUIElement.tap() on the
+    /// text view never gives it focus on the iPad simulators (iOS 27.2: no
+    /// caret, no keyboard, textViewDidBeginEditing not called), while a tap
+    /// at the same point does, on iPhone and iPad alike.
+    private func tapText(_ tv: XCUIElement) {
+        tv.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
     /// Shows the preview and returns its web view: the eye button in the
     /// bar, or on a narrow iPhone the system overflow menu (More ›
     /// Preview › Preview).
@@ -65,7 +73,7 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["editor.language"].label.contains("Swift"))
         // Opened read-only on iPhone (the default): Edit first.
         beginEditing(app)
-        tv.tap()
+        tapText(tv)
         tv.typeText("\n// typed by the UI test\n")
         XCTAssertTrue((tv.value as? String ?? "").contains("typed by the UI test"))
         // The system overflow menu (the "More" button the system adds).
@@ -87,7 +95,7 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertFalse(hide.exists && hide.isHittable)
         // Opened read-only on iPhone: a tap alone brings up no keyboard.
         beginEditing(app)
-        tv.tap()
+        tapText(tv)
         XCTAssertTrue(hide.waitForExistence(timeout: 5), "no hide-keyboard button while editing")
         XCTAssertEqual(hide.label, "Hide Keyboard")
         hide.tap()
@@ -571,17 +579,14 @@ final class OwlinkUITests: XCTestCase {
         app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'contextbar.'")).firstMatch
     }
 
-    /// Editing with the keyboard (and so the format bar) up. The iPad
-    /// simulator with its hardware keyboard shows no input accessory at
-    /// all (before Ask Cedric too): nothing to check there.
-    private func startTyping(_ app: XCUIApplication, _ tv: XCUIElement) throws {
-        let edit = app.buttons["editor.edit"]
-        if edit.exists, edit.label == "Edit" { edit.tap() }
-        tv.tap()
-        if !formatBar(app).waitForExistence(timeout: 8), device == "ipad" {
-            throw XCTSkip("no format bar on screen while editing (hardware keyboard, no input accessory shown)")
-        }
-        XCTAssertTrue(formatBar(app).exists, "no format bar while editing Markdown")
+    /// Editing with the keyboard (and so the format bar) up, on every
+    /// device. (It used to skip on iPad as "hardware keyboard, no input
+    /// accessory": the real cause was XCUIElement.tap() not focusing the
+    /// text there; with a real tap the iPad shows the format bar.)
+    private func startTyping(_ app: XCUIApplication, _ tv: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        beginEditing(app, file: file, line: line)
+        tapText(tv)
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "no format bar while editing Markdown", file: file, line: line)
     }
 
     private func waitGone(_ e: XCUIElement, _ message: String) {
@@ -593,19 +598,25 @@ final class OwlinkUITests: XCTestCase {
     func testFormatBarHiddenUnderAskCedric() throws {
         let app = launch("README.md", fresh: true)
         let tv = editor(app)
-        try startTyping(app, tv)
+        startTyping(app, tv)
         openAsk(app, sheet: true)
         waitGone(formatBar(app), "the format bar shows under Ask Cedric")
+        // Not merely covered: off the keyboard altogether (an iPad's sheet
+        // leaves the bottom of the screen in view).
+        XCTAssertFalse(formatBar(app).exists, "the format bar is still on screen under Ask Cedric")
         shoot("ask-cedric-no-format-bar")
         closeAskWithDone(app)
-        tv.tap()
+        tapText(tv)
         XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after Done")
         shoot("format-bar-restored")
         // And after a swipe down.
         openAsk(app, sheet: true)
         waitGone(formatBar(app), "the format bar shows under Ask Cedric (again)")
+        // Not merely covered: off the keyboard altogether (an iPad's sheet
+        // leaves the bottom of the screen in view).
+        XCTAssertFalse(formatBar(app).exists, "the format bar is still on screen under Ask Cedric (again)")
         closeAskBySwipe(app)
-        tv.tap()
+        tapText(tv)
         XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after a swipe down")
     }
 
