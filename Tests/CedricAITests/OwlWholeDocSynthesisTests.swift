@@ -636,6 +636,27 @@ import CedricCore
         #expect(!result.outcome.answer.contains(OwlCitations.flag + OwlCitations.flag))
     }
 
+    /// A part's item the chat runner flagged for running past the part
+    /// ("Line 4 through 999") is still about the part's own line 4, so
+    /// the whole-document runner keeps it, though its other citation (a
+    /// line the conversation named, outside the part) is not in the part.
+    /// 0.5.4's follow-up 6 dropped the item.
+    @Test func aPartsItemWhoseFlaggedSpanStartsInThePartIsKept() async throws {
+        let history = [OwlChatEntry(role: .user, text: "Anything odd?"),
+                       OwlChatEntry(role: .owl, text: "The note on line 150 repeats itself.")]
+        let engine = Recorder(partReply: { a, _ in "Overview.\n- Line \(a) through 999 and line 150: setup." })
+        let req = Self.request(Self.doc282(), action: nil, question: "Why does it repeat?", history: history)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, plan, engine)
+        #expect(result.outcome.sections.count >= 2)
+        for note in result.outcome.sections {
+            #expect(note.text.contains("- Line \(note.first) through 999\(OwlCitations.flag) and line 150"), "\(note.text.debugDescription)")
+            #expect(note.text.components(separatedBy: OwlCitations.flag).count == (note.first...note.last ~= 150 ? 2 : 3),
+                    "\(note.text.debugDescription)")
+            #expect(!note.text.contains(OwlCitations.flag + OwlCitations.flag))
+        }
+    }
+
     @Test func theCombinedAnswerMayCiteLinesTheConversationSentWithItNamed() async throws {
         let history = [OwlChatEntry(role: .user, text: "Anything odd?"),
                        OwlChatEntry(role: .owl, text: "The note on line 150 repeats itself.")]

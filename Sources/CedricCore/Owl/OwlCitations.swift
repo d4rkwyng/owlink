@@ -201,9 +201,11 @@ public enum OwlCitations {
         let all = find(text)
         guard !all.isEmpty else { return result }
         let marked = flaggedAlready(text)
-        // A citation already flagged (an answer filtered twice) is left as
-        // it is: never flagged again.
-        func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) && !marked.contains(c.range.location) }
+        // A citation already flagged (an answer filtered twice) still
+        // counts for whether its item touches the lines given ("Line 4
+        // through 99 (flagged) and line 31" read again for lines 1–18 is
+        // about line 4, so it stays), but is never flagged again.
+        func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) }
         func untouched(_ c: Cite) -> Bool { !c.lines.contains { allowed.contains($0) } }
         // Rows, joined where a citation runs across the break between them
         // ("Line 4 through" / "9999"): a citation is checked whole, never
@@ -238,7 +240,7 @@ public enum OwlCitations {
             result = Filtered(text: text, dropped: [], flagged: [])
             for (index, unit) in units.enumerated() {
                 let row = ns.substring(with: unit)
-                let cites = all.filter { NSLocationInRange($0.range.location, unit) && !marked.contains($0.range.location) }
+                let cites = all.filter { NSLocationInRange($0.range.location, unit) }
                     .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
                 let trimmed = row.trimmingCharacters(in: .whitespaces)
                 if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
@@ -258,10 +260,11 @@ public enum OwlCitations {
                     dropStart = index
                     continue
                 }
-                let marked = NSMutableString(string: row)
-                for c in bad.reversed() { marked.insert(flag, at: NSMaxRange(c.range)) }
-                result.flagged.append(contentsOf: bad.map(\.lines))
-                kept.append(marked as String)
+                let fresh = bad.filter { !marked.contains($0.range.location + unit.location) }
+                let flagged = NSMutableString(string: row)
+                for c in fresh.reversed() { flagged.insert(flag, at: NSMaxRange(c.range)) }
+                result.flagged.append(contentsOf: fresh.map(\.lines))
+                kept.append(flagged as String)
             }
             guard result.changed else { return result }
             let joined = kept.joined(separator: "\n")

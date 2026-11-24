@@ -363,4 +363,28 @@ import Testing
             #expect(Self.streamed(flagged, size: size, allowed: Self.lines1to18).all == flagged)
         }
     }
+
+    /// A citation the chat runner flagged still counts when the part's
+    /// filter decides whether an item is about lines it read: "Line 4
+    /// through 99" touches line 4, so the item stays, though its other
+    /// citation (line 31, citable from the conversation but not in the
+    /// part) is not in the part. 0.5.4's follow-up 6 left the flagged span
+    /// out of that check and dropped the item.
+    @Test func aSecondFilterKeepsAnItemWhoseFlaggedSpanTouchesTheLinesRead() {
+        let answer = "Overview.\n- Line 4 through 99 and line 31: setup."
+        let chat = OwlCitations.filter(answer, allowed: Self.lines1to18.union(IndexSet(integer: 31)))
+        #expect(chat.text == "Overview.\n- Line 4 through 99\(OwlCitations.flag) and line 31: setup.")
+        let part = OwlCitations.filter(chat.text, allowed: Self.lines1to18)
+        #expect(part.text == "Overview.\n- Line 4 through 99\(OwlCitations.flag) and line 31\(OwlCitations.flag): setup.",
+                "\(part.text.debugDescription)")
+        #expect(part.dropped.isEmpty && part.flagged == [31...31])
+        #expect(part.text.components(separatedBy: OwlCitations.flag).count == 3)
+        #expect(!part.text.contains(OwlCitations.flag + OwlCitations.flag))
+        // Read again, it is left as it is.
+        #expect(OwlCitations.filter(part.text, allowed: Self.lines1to18) == OwlCitations.Filtered(text: part.text, dropped: [], flagged: []))
+        // An item whose every citation, flagged or not, misses the lines
+        // read is still dropped.
+        let elsewhere = OwlCitations.filter("Overview.\n- Line 40 through 99\(OwlCitations.flag) and line 31: setup.", allowed: Self.lines1to18)
+        #expect(elsewhere.text == "Overview.")
+    }
 }
