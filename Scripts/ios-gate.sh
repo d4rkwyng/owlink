@@ -2,9 +2,9 @@
 # ios-gate.sh — the iOS test gate: build Owlink for the simulator, run
 # OwlinkSnapshotTests and OwlinkUITests on four dedicated simulators
 # (gate-iphone, gate-ipad-mini, gate-ipad-pro-11, gate-ipad-pro-13): these
-# XCUITest/snapshot results are the gate's pass/fail source of truth. Then
-# AXe (Scripts/ios-gate-axe.py) drives the real app on each device as a
-# second, independent touch path: open a document, the ••• menu and its
+# XCUITest/snapshot results are the gate's pass/fail source of truth. Before
+# them, on a fresh boot of each device, AXe (Scripts/ios-gate-axe.py) drives
+# the real app as a second, independent touch path: open a document, the ••• menu and its
 # Preview submenu, Ask Cedric and Done, ⌘, (axe key-combo --modifiers 227
 # --key 54), the back chevron; it saves describe-ui JSON and screenshots
 # and checks them. Screenshots of the main screens (and AXe's) are saved
@@ -16,6 +16,8 @@
 #   GATE_SERIAL=1                 devices one after another (default: in parallel)
 #   GATE_DIFF_THRESHOLD=2.0       percent of differing pixels that counts as a change
 #   GATE_DIFF_STRICT=1            a screenshot change above the threshold fails the gate too
+#   GATE_FRESH_BOOT=0             don't shut down and boot each gate device first (AXe's ⌘, then
+#                                 meets whatever an earlier XCUITest run left; see run_device)
 #   GATE_AXE=0                    skip the AXe touch driver (default: run it; AXe 2.1.x at
 #                                 /opt/homebrew/bin/axe or on PATH)
 #   GATE_SHOTS=~/Orchestrator/scratch/owlink-ios-gate/shots   where build folders go
@@ -25,7 +27,7 @@
 # first run, or new names such as AXe's) is saved, never a failure.
 #
 # Safe to re-run: it reuses (or creates) only the gate-* simulators, never
-# shuts anything down (it boots a gate device only if it isn't booted),
+# shuts down anything but a gate-* device it is about to boot fresh,
 # never calls xcode-select, and writes each run to a
 # new /tmp/ios-gate-run-<time> folder (derived data: /tmp/ios-gate-dd).
 set -u
@@ -81,7 +83,7 @@ VERSION=$(sed -n 's/.*MARKETING_VERSION = "\{0,1\}\([0-9.]*\)"\{0,1\};/\1/p' "$P
 BUILD=$(sed -n 's/.*CURRENT_PROJECT_VERSION = \([0-9]*\);/\1/p' "$PROJECT/project.pbxproj" | head -1)
 SHA=$(git -C "$REPO" rev-parse --short HEAD)
 LABEL=$VERSION-$BUILD-$SHA
-echo "== iOS gate: Owlink $VERSION ($BUILD) at $SHA; run folder $RUN"
+echo "== iOS gate: Owlink $VERSION ($BUILD) at $SHA; run folder $RUN; AXe: $AXE_VERSION"
 
 # 1. Build once for every simulator.
 echo "== build (build-for-testing)"
@@ -93,14 +95,37 @@ if ! xcodebuild -project "$PROJECT" -scheme Owlink -destination 'generic/platfor
 fi
 grep -E "\*\* TEST BUILD SUCCEEDED \*\*" "$RUN/build.log"
 
-# 2. Tests, per device and target.
+# 2. Per device: a fresh boot, the AXe touch driver, then the tests.
+OUT=$SHOTS/$LABEL
+APP=$DD/Build/Products/Debug-iphonesimulator/Owlink.app
+mkdir -p "$OUT/axe"
+run_axe() {
+    local name=$1 udid=$2
+    if [[ $AXE_VERSION == v2.1.* || $AXE_VERSION == 2.1.* ]]; then
+        AXE=$AXE python3 -I "$REPO/Scripts/ios-gate-axe.py" "$udid" "$name" "$APP" "$OUT/axe" > "$RUN/$name-axe.log" 2>&1
+        echo $? > "$RUN/$name-axe.exit"
+    else
+        echo "AXE $name FAIL: AXe 2.1.x needed ($AXE_VERSION)" > "$RUN/$name-axe.log"
+        echo 1 > "$RUN/$name-axe.exit"
+    fi
+}
 run_device() {
     local name=$1 udid=$2 t
-    # A steady status bar for the screenshots (the gate device only).
+    # A fresh boot of this gate device (only gate-* devices get here). After
+    # XCUITest has sent ⌘-chords (typeKey) in a boot, the simulator hands a
+    # real ⌘, (AXe's HID key-down) to the system Settings app instead of
+    # Owlink until the next boot (2026-11-24, all three iPads; a fresh boot
+    # or a UI test without key events leaves it with Owlink). So AXe goes
+    # first, on a fresh boot; the XCUITests follow.
+    if [ "${GATE_FRESH_BOOT:-1}" != 0 ]; then
+        xcrun simctl shutdown "$udid" > /dev/null 2>&1
+    fi
     xcrun simctl boot "$udid" > /dev/null 2>&1
     xcrun simctl bootstatus "$udid" > /dev/null 2>&1
+    # A steady status bar for the screenshots (the gate device only).
     xcrun simctl status_bar "$udid" override --time 9:41 --batteryState charged --batteryLevel 100 \
         --wifiBars 3 --cellularBars 4 > /dev/null 2>&1
+    [ "$RUN_AXE" != 0 ] && run_axe "$name" "$udid"
     for t in $TARGETS; do
         xcodebuild -project "$PROJECT" -scheme Owlink -destination "platform=iOS Simulator,id=$udid" \
             -derivedDataPath "$DD" -resultBundlePath "$RUN/$name-$t.xcresult" \
@@ -114,37 +139,13 @@ udid_of() { eval "echo \$UDID_$(echo "$1" | tr -- '-' '_')"; }
 for d in $DEVICES; do
     udid=$(gate_udid "$d") || { echo "GATE FAIL: couldn't find or create $d"; exit 1; }
     declare_udid "$d" "$udid"
-    echo "== $d ($udid): $TARGETS"
+    echo "== $d ($udid): fresh boot, AXe, $TARGETS"
     if [ -n "${GATE_SERIAL:-}" ]; then run_device "$d" "$udid"; else run_device "$d" "$udid" & fi
 done
 wait
 
 # 3. Screenshots of the main screens (testGateScreenshots' attachments).
-OUT=$SHOTS/$LABEL
-mkdir -p "$OUT"
 
-# 3a. AXe, the touch driver (after the XCUITests, never instead of them).
-APP=$DD/Build/Products/Debug-iphonesimulator/Owlink.app
-if [ "$RUN_AXE" != 0 ]; then
-    echo "== AXe touch driver: $AXE_VERSION"
-    mkdir -p "$OUT/axe"
-    for d in $DEVICES; do
-        udid=$(udid_of "$d")
-        (
-            # Boot only if needed (a gate device; never any other).
-            xcrun simctl list devices | grep -q "($udid) (Booted)" || xcrun simctl boot "$udid" > /dev/null 2>&1
-            xcrun simctl bootstatus "$udid" > /dev/null 2>&1
-            if [[ $AXE_VERSION == v2.1.* || $AXE_VERSION == 2.1.* ]]; then
-                AXE=$AXE python3 -I "$REPO/Scripts/ios-gate-axe.py" "$udid" "$d" "$APP" "$OUT/axe" > "$RUN/$d-axe.log" 2>&1
-                echo $? > "$RUN/$d-axe.exit"
-            else
-                echo "AXE $d FAIL: AXe 2.1.x needed ($AXE_VERSION)" > "$RUN/$d-axe.log"
-                echo 1 > "$RUN/$d-axe.exit"
-            fi
-        ) &
-    done
-    wait
-fi
 for d in $DEVICES; do
     bundle=$RUN/$d-OwlinkUITests.xcresult
     [ -d "$bundle" ] || continue

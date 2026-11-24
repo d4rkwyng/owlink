@@ -164,14 +164,28 @@ class Driver:
             time.sleep(0.4)
         return False
 
+    def menu_open(self, tree):
+        """Any menu row on screen (a submenu has too few rows for
+        menu_container), or the ••• button gone behind the menu."""
+        rows = [h for h in self.find(tree, kind="Button")
+                if str(h[0].get("AXUniqueId") or "").startswith("editor.menu.") and self.visible(h[1], 2)]
+        more = [h for h in self.find(tree, ident="TopOverflowBarButtonItem") if self.visible(h[1], 2)]
+        return bool(rows) or bool(self.menu_buttons(tree)) or not more
+
     def close_menu(self):
-        self.axe("key", "41", check=False)  # Escape
-        time.sleep(1)
-        if self.menu_buttons(self.tree()):
+        """Escape, then a tap outside the menu (on the status line), until
+        the menu is gone and the ••• button is back."""
+        for attempt in range(4):
             tree = self.tree()
-            app = tree[0]["frame"] if tree else {"width": 400, "height": 800}
-            self.axe("tap", "-x", f"{app['width'] / 2:.0f}", "-y", f"{app['height'] * 0.98:.0f}", check=False)
-            time.sleep(1)
+            if not self.menu_open(tree):
+                return True
+            if attempt % 2 == 0:
+                self.axe("key", "41", check=False)  # Escape
+            else:
+                app = tree[0]["frame"] if tree else {"width": 400, "height": 800}
+                self.axe("tap", "-x", f"{app['width'] / 2:.0f}", "-y", f"{app['height'] * 0.98:.0f}", check=False)
+            time.sleep(1.2)
+        return not self.menu_open(self.tree())
 
     def tap_menu_item(self, label):
         """Scrolls the open menu until the item is inside the menu's visible
@@ -237,19 +251,20 @@ class Driver:
         if self.tap_menu_item("Preview"):
             time.sleep(1.5)
             tree = self.save("menu-preview")
-            sub = [e["AXLabel"] for e, _ in self.menu_buttons(tree)] or \
-                  [e.get("AXLabel") for e, _, _ in self.find(tree, kind="Button")]
-            n = sub.count("Focus Preview")
-            # The bar's own ↖↘ button (editor.focusPreview) isn't a menu item.
-            bar = len(self.find(tree, ident="editor.focusPreview"))
-            n_menu = n - min(bar, n) if not self.menu_buttons(tree) else n
+            # Every Focus Preview on screen but the bar's own ↖↘ button
+            # (editor.focusPreview), which isn't a menu item.
+            n_menu = sum(1 for e, vis, _ in self.find(tree, label="Focus Preview", kind="Button")
+                         if e.get("AXUniqueId") != "editor.focusPreview" and self.visible(vis, 2))
             if n_menu > 1:
                 self.fail(f"the Preview submenu lists Focus Preview {n_menu} times")
             else:
                 self.ok(f"Preview submenu: Focus Preview {n_menu}x")
         else:
             self.fail("no Preview item in the ••• menu")
-        self.close_menu()
+        if not self.close_menu():
+            self.save("menu-close")
+            self.fail("the ••• menu didn't close (Escape, then a tap outside)")
+            return
 
         # 4. Ask Cedric, then Done.
         if not self.open_menu() or not self.tap_menu_item("Ask Cedric"):
