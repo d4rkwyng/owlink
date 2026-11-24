@@ -860,15 +860,15 @@ extension RulesHintProvider {
         }
         if lang == "plain", facts.isWholeDocument, let r = Self.todoList(text, lines: lines) {
             hint(Self.todoListID, .fix, String(localized: "It looks like you’re writing a to-do list. Checkboxes?"),
-                 String(localized: "Turns \(r.count) lines into Markdown checkboxes (- [ ]) and colours the tab as Markdown."),
+                 String(localized: "Turns \(r.count) lines into Markdown checkboxes (- [ ]) and colors the tab as Markdown."),
                  r.range, r.replacement)
         }
         if lang == "plain", !facts.languageIsManual {
             let guess = LanguageDetector.sniff(c.text)
             if guess == .markdown || guess == .html || guess == .json {
                 hint(Self.languageGuessPrefix + guess.rawValue, .tip,
-                     String(localized: "This looks like \(guess.displayName). Colour it that way?"),
-                     String(localized: "Only changes the colouring in Owlink, not the file. The language menu in the status bar changes it back."),
+                     String(localized: "This looks like \(guess.displayName). Color it that way?"),
+                     String(localized: "Only changes the coloring in Owlink, not the file. The language menu in the status bar changes it back."),
                      nil, nil)
             }
         }

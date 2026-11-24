@@ -184,7 +184,7 @@ func randomBlob(_ n: Int) -> Data {
         let old = try #require(catalog.model(id: "qwen2.5-coder-3b-instruct-q4_k_m"))
         #expect(!old.isDefault)
         #expect(old.license.contains("non-commercial"))
-        #expect(old.summary.hasPrefix("Non-commercial licence"))
+        #expect(old.summary.hasPrefix("Non-commercial license"))
         for m in catalog.models where m.license.lowercased().contains("non-commercial") { #expect(!m.isDefault) }
     }
 

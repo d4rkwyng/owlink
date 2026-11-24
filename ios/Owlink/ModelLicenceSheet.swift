@@ -26,10 +26,10 @@ struct ModelLicenceSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 12) {
                 if confirmation.isNonCommercial {
-                    Text(String(localized: "NON-COMMERCIAL licence"))
+                    Text(String(localized: "NON-COMMERCIAL license"))
                         .font(.headline).foregroundStyle(.red)
                 }
-                Text(String(localized: "Licence: \(confirmation.licenseName). Review the full licence below before downloading."))
+                Text(String(localized: "License: \(confirmation.licenseName). Review the full license below before downloading."))
                 GeometryReader { viewport in
                     ScrollView {
                         VStack(spacing: 0) {
@@ -115,10 +115,10 @@ struct ModelLicencePreview: View {
             .sheet(item: $request) { request in
                 ModelLicenceSheet(confirmation: request.confirmation) {}
             }
-            .alert(String(localized: "Couldn’t load the model licence"), isPresented: $missingLicence) {
+            .alert(String(localized: "Couldn’t load the model license"), isPresented: $missingLicence) {
                 Button(String(localized: "OK"), role: .cancel) {}
             } message: {
-                Text(String(localized: "The bundled licence text is missing. No download was started."))
+                Text(String(localized: "The bundled license text is missing. No download was started."))
             }
     }
 }

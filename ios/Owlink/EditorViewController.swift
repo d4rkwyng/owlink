@@ -1913,8 +1913,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     private func showWritingPaused(_ reason: LargeDocument.Reason) {
         switch reason {
-        case .longLine: toast(String(localized: "Very long lines: colouring, spell check, the owl and Writing Mode are paused for speed."))
-        case .size: toast(String(localized: "Large file: colouring, spell check, the owl and Writing Mode are paused for speed."))
+        case .longLine: toast(String(localized: "Very long lines: coloring, spell check, the owl and Writing Mode are paused for speed."))
+        case .size: toast(String(localized: "Large file: coloring, spell check, the owl and Writing Mode are paused for speed."))
         }
     }
 

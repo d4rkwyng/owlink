@@ -238,7 +238,7 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Writing"))
                 } footer: {
-                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nSpelling and grammar use the system’s checker: on for Markdown and plain text, off for code and data files. The system marks the whole document, including code blocks in Markdown.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
+                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nSpelling and grammar use the system’s checker: on for Markdown and plain text, off for code and data files. The system marks the whole document, including code blocks in Markdown.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centers the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
                 }
                 .onChange(of: useProseFont) { AppSettings.useProseFont = useProseFont }
                 .onChange(of: proseFontName) { AppSettings.proseFontName = proseFontName.isEmpty ? nil : proseFontName }
@@ -317,10 +317,10 @@ struct SettingsView: View {
                     models.startIfUnchanged(request.model)
                 }
             }
-            .alert(String(localized: "Couldn’t load the model licence"), isPresented: $models.missingLicence) {
+            .alert(String(localized: "Couldn’t load the model license"), isPresented: $models.missingLicence) {
                 Button(String(localized: "OK"), role: .cancel) {}
             } message: {
-                Text(String(localized: "The bundled licence text is missing. No download was started."))
+                Text(String(localized: "The bundled license text is missing. No download was started."))
             }
             .onAppear {
                 address = ai.backend.usesServer ? ai.baseURL.absoluteString : ""

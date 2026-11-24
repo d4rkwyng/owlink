@@ -320,7 +320,7 @@ public enum OwlQuickAction: String, Sendable, CaseIterable {
         case .explainLine: return String(localized: "Explain Line")
         case .scriptSafety: return String(localized: "Check for Risks")
         case .explain: return String(localized: "Explain")
-        case .summarise: return String(localized: "Summarise")
+        case .summarise: return String(localized: "Summarize")
         case .findProblems: return String(localized: "Find Problems")
         case .rewrite: return prose ? String(localized: "Rewrite") : String(localized: "Simplify")
         case .addComments: return String(localized: "Add Comments")
@@ -637,7 +637,7 @@ public enum OwlTools {
             return OwlToolSpec(name: name, description: "The text of one Markdown section, found by its heading (a close match is enough), with line numbers.",
                                parameters: obj(["heading": .object(["type": .string("string"), "maxLength": .number(Double(maxPatternLength))])], required: ["heading"]))
         case .describeImage:
-            return OwlToolSpec(name: name, description: "Looks at the picture this document draws (rendered on this Mac): what it shows, any text in it, its size and colours.",
+            return OwlToolSpec(name: name, description: "Looks at the picture this document draws (rendered on this Mac): what it shows, any text in it, its size and colors.",
                                parameters: obj([:], required: []))
         }
     }

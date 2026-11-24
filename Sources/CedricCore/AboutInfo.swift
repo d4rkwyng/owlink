@@ -28,7 +28,7 @@ public enum AboutInfo {
     public static let author = String(localized: "Made by d4rkwyng")
     public static let licence = keepTogether(String(localized: "BSD-2-Clause license"))
     public static let llamaCredit = String(localized: "Built-in AI runs on llama.cpp (MIT license).")
-    public static let modelsCredit = String(localized: "AI models are downloaded on request, each under its own licence.")
+    public static let modelsCredit = String(localized: "AI models are downloaded on request, each under its own license.")
     /// Cedric the owl, honestly and briefly: a fan's nod, nothing official.
     public static let tribute = String(localized: "Cedric the owl is a fan’s tribute. Owlink is not affiliated with or endorsed by Sierra or its successors.")
     /// In the owner's name, as Tankard's; LICENSE keeps "Cedric contributors".

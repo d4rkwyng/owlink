@@ -1621,4 +1621,4 @@ network fetch is made just to show it. Non-commercial terms are flagged
 clearly. The default, Qwen3 4B Instruct (2507, the Q4_K_M GGUF quantised
 by Unsloth), is Apache-2.0, as are Qwen2.5-Coder 1.5B and 7B and Qwen3
 4B. Qwen2.5-Coder 3B, the default before, stays an optional download
-labelled "Non-commercial licence" (Qwen Research License).
+labeled "Non-commercial license" (Qwen Research License).

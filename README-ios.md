@@ -111,7 +111,7 @@ Details for both are under What it does below.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line
   ending are detected and written back unchanged (the core's `TextCodec`).
-- Syntax colouring (the core's highlighter), the seven themes including
+- Syntax coloring (the core's highlighter), the seven themes including
   Dracula, font size, wrap, and **Show Line Numbers** (on by default).
   Settings can pick the monospaced editor font (SF Mono or another installed
   monospaced family); the choice is remembered.
@@ -289,7 +289,7 @@ hint is asked for an empty or near-empty document (`HintPrompt.hasEnoughText`).
   device". iPhones (and iPads without an M chip) are offered the small
   models (up to 2B parameters, about 1.1 GB); M-series iPads also the 3–4B
   ones. Downloads come from huggingface.co only when asked, show the full
-  bundled licence text first (Confirm once its end has been on screen;
+  bundled license text first (Confirm once its end has been on screen;
   `-OwlinkShowLicence <id|first>` shows the sheet in Debug builds), are checked against their SHA-256, and are kept out of iCloud
   backups. Before loading, the app checks `os_proc_available_memory()` and
   refuses with a message rather than being killed for using too much memory.
