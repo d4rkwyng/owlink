@@ -415,4 +415,34 @@ import Testing
                 "\(mixed.text.debugDescription)")
         #expect(!mixed.text.contains(OwlCitations.flag + OwlCitations.flag))
     }
+
+    /// A continuation under a dropped item citing a huge span is judged by
+    /// ranges, not a line at a time: 0.5.4's follow-up 8 walked every
+    /// line from 42 to a trillion before it could drop the row, and the
+    /// part's filter hung. Lines 42 through a trillion touch none of the
+    /// lines read, so the row goes with its item, at once.
+    @Test(.timeLimit(.minutes(1))) func aHugeSpanUnderADroppedItemIsDroppedAtOnce() {
+        let answer = "Overview.\n- Line 31: setup.\n  Lines 42 through 1000000000000: detail."
+        let clock = ContinuousClock()
+        let start = clock.now
+        let chat = OwlCitations.filter(answer, allowed: Self.lines1to18.union(IndexSet(integer: 31)))
+        #expect(chat.text == "Overview.\n- Line 31: setup.\n  Lines 42 through 1000000000000\(OwlCitations.flag): detail.",
+                "\(chat.text.debugDescription)")
+        let part = OwlCitations.filter(chat.text, allowed: Self.lines1to18)
+        #expect(part.text == "Overview.", "\(part.text.debugDescription)")
+        #expect(part.dropped == [31...31] && part.flagged.isEmpty)
+        // Unflagged, the same, and the same span on a row that is not a
+        // continuation is flagged where it stands.
+        let direct = OwlCitations.filter(answer, allowed: Self.lines1to18)
+        #expect(direct.text == "Overview.", "\(direct.text.debugDescription)")
+        #expect(direct.dropped == [31...31, 42...1_000_000_000_000])
+        let alone = OwlCitations.filter("Lines 42 through 1000000000000 and line 5: detail.", allowed: Self.lines1to18)
+        #expect(alone.text == "Lines 42 through 1000000000000\(OwlCitations.flag) and line 5: detail.")
+        // Streamed, it is flagged as the filter flags it.
+        var stream = OwlCitations.Stream()
+        let shown = stream.feed(answer, allowed: Self.lines1to18.union(IndexSet(integer: 31)))
+            + stream.finish(allowed: Self.lines1to18.union(IndexSet(integer: 31)))
+        #expect(shown == chat.text, "\(shown.debugDescription)")
+        #expect(clock.now - start < .seconds(1))
+    }
 }

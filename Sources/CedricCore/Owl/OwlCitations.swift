@@ -206,8 +206,12 @@ public enum OwlCitations {
         // counts for whether its item touches the lines given ("Line 4
         // through 99 (flagged) and line 31" read again for lines 1–18 is
         // about line 4, so it stays), but is never flagged again.
+        // Both judged by ranges, never a line at a time: a citation may
+        // span a trillion lines ("Lines 42 through 1000000000000").
+        // `outside`: not wholly among the lines given; `untouched`: none
+        // of its lines among them.
         func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) }
-        func untouched(_ c: Cite) -> Bool { !c.lines.contains { allowed.contains($0) } }
+        func untouched(_ c: Cite) -> Bool { !allowed.intersects(integersIn: c.lines) }
         // Rows, joined where a citation runs across the break between them
         // ("Line 4 through" / "9999"): a citation is checked whole, never
         // a row at a time.
