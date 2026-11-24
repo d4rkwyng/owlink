@@ -49,7 +49,15 @@ public enum FileWriteAccess {
     /// be retargeted between the check and the write.
     static func blocked(in dir: Int32, name: String) -> Blocked? {
         var st = stat()
-        guard fstatat(dir, name, &st, 0) == 0 else { return nil }
+        return blocked(in: dir, name: name, checked: &st)
+    }
+
+    /// As `blocked(in:name:)`; `checked` gets the file the check looked
+    /// at (`st_ino` 0 when there is none), so a write can make sure it
+    /// opened that same file.
+    static func blocked(in dir: Int32, name: String, checked st: inout stat) -> Blocked? {
+        st = stat()
+        guard fstatat(dir, name, &st, 0) == 0 else { st = stat(); return nil }
         if st.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) != 0 { return .locked }
         var fs = statfs()
         if fstatfs(dir, &fs) == 0, fs.f_flags & UInt32(MNT_RDONLY) != 0 { return .readOnlyVolume }
@@ -115,7 +123,9 @@ public enum DocumentWrite {
     /// link retargeted in between have a writable file checked and a
     /// read-only one replaced; writing by path (0.5.4 before review) still
     /// let a link to a folder on the way be retargeted at a folder holding
-    /// a read-only file of the same name.
+    /// a read-only file of the same name. A folder that refuses the new
+    /// file (0555) gets the checked file written in place instead, still
+    /// through the open folder (`overwrite`).
     public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws {
         try write(data, to: url, fileManager: fm, afterCheck: nil)
     }
@@ -130,11 +140,16 @@ public enum DocumentWrite {
             defer { close(dir) }
             var st = stat()
             if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFLNK { continue }
-            if let reason = FileWriteAccess.blocked(in: dir, name: name) {
+            var checked = stat()
+            if let reason = FileWriteAccess.blocked(in: dir, name: name, checked: &checked) {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
             afterCheck?()
-            try replace(name, in: dir, with: data, url: url)
+            if try replace(name, in: dir, with: data, url: url) { return }
+            // The folder refuses a new file (0555, or search-only 0100):
+            // write the checked file in place, through the same folder.
+            guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
+            try overwrite(name, in: dir, checked: checked, with: data, url: url)
             return
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
@@ -143,10 +158,12 @@ public enum DocumentWrite {
     /// The folder a save checks and writes through. One this user may
     /// write in but not read (0300) is opened for search only
     /// (`O_SEARCH`), which is all `fstatat`, `openat` and `renameat`
-    /// need. A folder that can't be opened at all fails the save: 0.5.4
-    /// before review then checked and wrote by path, and a folder on that
-    /// path replaced by a link in between had the check pass on a
-    /// writable file and the rename replace a read-only one elsewhere.
+    /// need; so is one this user may only search (0100). A folder that
+    /// can't be opened even for search can't be passed through to reach
+    /// the file either, so the save fails with that error. 0.5.4 before
+    /// review then checked and wrote by path, and a folder on that path
+    /// replaced by a link in between had the check pass on a writable
+    /// file and the rename replace a read-only one elsewhere.
     private static func openFolder(_ path: String, url: URL) throws -> Int32 {
         var dir = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         if dir < 0, errno == EACCES || errno == EPERM {
@@ -157,12 +174,16 @@ public enum DocumentWrite {
     }
 
     /// Writes `data` to a new file in `dir` and renames it over `name`.
-    /// A folder that refuses a new file fails the save (no write by path:
-    /// see `openFolder`).
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws {
+    /// False, with nothing written, when the folder refuses a new file
+    /// (`overwrite` then writes the checked file in place).
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
-        guard fd >= 0 else { throw writeError(errno, url) }
+        guard fd >= 0 else {
+            let code = errno
+            if code == EACCES || code == EPERM { return false }
+            throw writeError(code, url)
+        }
         var renamed = false
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
         do {
@@ -184,6 +205,35 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
+        return true
+    }
+
+    /// The save into a folder that refuses a new file (a writable file
+    /// in a 0555 folder): not atomic, but bound to the checked file. It
+    /// is opened for writing through the same open folder, never through
+    /// a link (`O_NOFOLLOW`), and only if it is still the file the check
+    /// looked at (device and inode) is it truncated and written. Opening
+    /// for writing is itself the kernel's permission check on that very
+    /// file, so a read-only file put in its place can't be opened, and a
+    /// different writable one fails the identity match: either way the
+    /// save fails with an error and nothing else is touched. (0.5.3 fell
+    /// back to Foundation's atomic write by path here.)
+    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
+        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw writeError(errno, url) }
+        do {
+            var st = stat()
+            guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
+            guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
+                throw writeError(EBUSY, url)
+            }
+            guard ftruncate(fd, 0) == 0 else { throw writeError(errno, url) }
+            try writeAll(data, to: fd, url: url)
+        } catch {
+            close(fd)
+            throw error
+        }
+        guard close(fd) == 0 else { throw writeError(errno, url) }
     }
 
     private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {

@@ -275,6 +275,107 @@ import Testing
         #expect(try fm.contentsOfDirectory(atPath: bad.path) == ["doc.md"])
     }
 
+    /// A writable file in a folder that doesn't allow new files (0555)
+    /// saved in 0.5.3 (by path) and must still save (0.5.4 review round 2
+    /// briefly failed it): the checked file is written in place through
+    /// the open folder. A read-only file there is still refused, and a
+    /// new file there still can't be created.
+    @Test func aWritableFileInAFolderThatRefusesNewFilesStillSaves() throws {
+        let url = try file("doc.md", "before\n")
+        let dir = url.deletingLastPathComponent()
+        let locked = dir.appendingPathComponent("locked.md")
+        try Data("read-only\n".utf8).write(to: locked)
+        #expect(chmod(locked.path, 0o444) == 0)
+        #expect(chmod(url.path, 0o640) == 0)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+        let probe = open(dir.appendingPathComponent("probe").path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        if probe >= 0 { close(probe) }
+        #expect(probe == -1, "the folder refuses a new file")
+
+        try DocumentWrite.write(Data("after, and longer than before\n".utf8), to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "after, and longer than before\n")
+        try DocumentWrite.write(Data("short\n".utf8), to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "short\n", "the old bytes are truncated away")
+        #expect(mode(url) == 0o640, "written in place, the file keeps its mode")
+        #expect(throws: ReadOnlyFileError.self) { try DocumentWrite.write(Data("x\n".utf8), to: locked) }
+        #expect(throws: CocoaError.self) { try DocumentWrite.write(Data("new\n".utf8), to: dir.appendingPathComponent("new.md")) }
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
+        #expect(mode(locked) == 0o444)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["doc.md", "locked.md"],
+                "no temporary or new file is left")
+    }
+
+    /// Folders that can't be opened for reading: 0300 (write and search)
+    /// saves with the usual replace through a search-only handle, and
+    /// 0100 (search only, so it also refuses new files) saves in place.
+    /// Either way the file holds the new bytes and nothing else is left.
+    @Test func aWritableFileInAnUnreadableFolderIsWritten() throws {
+        for folderMode: mode_t in [0o300, 0o100] {
+            let url = try file("doc.md", "before\n")
+            let dir = url.deletingLastPathComponent()
+            defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+            #expect(chmod(dir.path, folderMode) == 0)
+            let probe = open(dir.path, O_RDONLY | O_DIRECTORY)
+            if probe >= 0 { close(probe) }
+            #expect(probe == -1, "the \(String(folderMode, radix: 8)) folder can't be opened for reading")
+
+            try DocumentWrite.write(Data("after\n".utf8), to: url)
+            #expect(chmod(dir.path, 0o755) == 0)
+            #expect(try String(contentsOf: url, encoding: .utf8) == "after\n", "the \(String(folderMode, radix: 8)) folder's file got the save")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["doc.md"])
+        }
+    }
+
+    /// The in-place save (folder refusing new files) is bound to the
+    /// checked file: swapped between the check and the write for another
+    /// writable file, a link to one, or a read-only file, the save fails
+    /// with an error and neither file changes.
+    @Test func theInPlaceSaveCantBeRedirectedToAnotherFile() throws {
+        enum Swap: CaseIterable { case otherFile, link, readOnly }
+        for swap in Swap.allCases {
+            let url = try file("doc.md", "checked\n")
+            let dir = url.deletingLastPathComponent()
+            let fm = FileManager.default
+            let moved = dir.appendingPathComponent("moved.md"), other = dir.appendingPathComponent("other.md")
+            try Data("other\n".utf8).write(to: other)
+            defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+            #expect(chmod(dir.path, 0o555) == 0)
+
+            #expect(throws: CocoaError.self) {
+                try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {
+                    // Between the check and the write: another file takes the checked file's name.
+                    #expect(chmod(dir.path, 0o755) == 0)
+                    #expect(rename(url.path, moved.path) == 0)
+                    switch swap {
+                    case .otherFile:
+                        #expect(rename(other.path, url.path) == 0)
+                    case .link:
+                        #expect(symlink("other.md", url.path) == 0)
+                    case .readOnly:
+                        #expect((try? Data("read-only\n".utf8).write(to: url)) != nil)
+                        #expect(chmod(url.path, 0o444) == 0)
+                    }
+                    #expect(chmod(dir.path, 0o555) == 0)
+                }
+            }
+            #expect(chmod(dir.path, 0o755) == 0)
+            #expect(try String(contentsOf: moved, encoding: .utf8) == "checked\n", "\(swap): the checked file is untouched")
+            switch swap {
+            case .otherFile:
+                #expect(try String(contentsOf: url, encoding: .utf8) == "other\n", "the other writable file is untouched")
+            case .link:
+                #expect(try fm.destinationOfSymbolicLink(atPath: url.path) == "other.md", "the link stays a link")
+                #expect(try String(contentsOf: other, encoding: .utf8) == "other\n", "the link's target is untouched")
+            case .readOnly:
+                #expect(try String(contentsOf: url, encoding: .utf8) == "read-only\n", "the read-only file is untouched")
+                #expect(mode(url) == 0o444)
+            }
+            #expect(try fm.contentsOfDirectory(atPath: dir.path).allSatisfy { !$0.hasPrefix(".owlink-save-") })
+        }
+    }
+
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {
         let url = try file()
         defer { cleanUp(url) }
