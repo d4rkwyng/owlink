@@ -17,7 +17,8 @@ import Testing
         for q in ["Fix the spelling mistakes.", "fix typos", "check spelling", "any misspellings?", "Spellcheck this",
                   "Are there any typos?", "Please correct the spelling", "Can you fix the typos in this?", "spelling",
                   "Find spelling errors", "Proofread the spelling",
-                  "Fix a typo", "Fix a spelling mistake", "Is there a typo?", "Fix the typo"] {
+                  "Fix a typo", "Fix a spelling mistake", "Is there a typo?", "Fix the typo",
+                  "Check spelling in the document", "Fix the typos in my note", "check spelling here", "Fix typos in this selection"] {
             #expect(OwlSpellingIntent.isSpellingRequest(q), "\(q)")
         }
     }
@@ -29,7 +30,8 @@ import Testing
                   "Rewrite this paragraph and fix typos", "Why is spelling important in reports?", "Fix the typo in the test",
                   "the spelling variable is unused", "Rewrite line 3",
                   "Check the spelling bee results", "List the spelling rules", "Check a spelling bee result",
-                  "Fix a typo in the test"] {
+                  "Fix a typo in the test",
+                  "Check spelling in the screenshot", "Fix the typos in the email", "Check spelling on my website"] {
             #expect(!OwlSpellingIntent.isSpellingRequest(q), "\(q)")
         }
         // The typos corpus' own text isn't a request either.

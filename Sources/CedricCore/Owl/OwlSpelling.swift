@@ -16,9 +16,11 @@ public enum OwlSpellingIntent {
 
     /// A request shape, the whole question: an imperative or a yes/no
     /// question whose verb is followed (after "the", "a", "any", "all"…) by the
-    /// spelling term itself, then at most "mistakes"/"errors" and a place
-    /// ("in this", "in the document", "here"). "Check the spelling bee
-    /// results" and "List the spelling rules" don't fit.
+    /// spelling term itself, then at most "mistakes"/"errors" and the
+    /// active text as the place: "this", "here", or "the/this/my" document,
+    /// file, text, note, page or selection (optionally after "in", "on"…),
+    /// or nothing. "Check spelling in the screenshot", "Check the spelling
+    /// bee results" and "List the spelling rules" don't fit.
     static let request = try! NSRegularExpression(
         pattern: #"^(?:please\s+|can you\s+|could you\s+|would you\s+|pls\s+)?"#
             + #"(?:(?:fix|correct|check|find|catch|spot|look for|clean up|repair|show|list|highlight|proofread|any|are there|is there|do you see|did i make)"#
@@ -26,7 +28,7 @@ public enum OwlSpellingIntent {
             + #"\s+(?:spelling|spellings|typos?|misspell\w*|misspelt|(?:words?\s+)?(?:spelled|spelt)\s+wrong)"#
             + #"(?:\s+(?:mistakes?|errors?|issues?|problems?))?"#
             + #"|spell[- ]?check)"#
-            + #"(?:\s+(?:here|anywhere|it|this|(?:in|on|throughout|across)\s+(?:it|this|here|(?:the|this|my)\s+\w+)|(?:the|my)\s+\w+))?"#
+            + #"(?:\s+(?:(?:in|on|throughout|across)\s+)?(?:this|here|(?:the|this|my)\s+(?:document|file|text|note|page|selection)))?"#
             + #"(?:\s+please)?[\s.?!]*$"#,
         options: [.caseInsensitive])
 
