@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.5.1 (15), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.5.2 (16), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -16,6 +16,43 @@ The project file is generated: edit `ios/Scripts/gen-xcodeproj.py` and run
 in Xcode (a change made in Xcode is lost the next time the script runs).
 Source files can be added in Xcode or Finder: `ios/Owlink`,
 `ios/OwlinkUITests` and `Tests/*` are synchronized folders.
+
+## New in 0.5.2 (16)
+
+Brings the shared code up to Mac Owlink 0.5.2 (tag v0.5.2) and matches
+its changes where they apply on iOS:
+
+- **Web links always ask first.** A tap on a web link in the preview no
+  longer opens the page in the preview's own browser: it asks first, and
+  only Open hands it to Safari (or your default browser). The question
+  names the site on a line of its own (a name in non-Latin look-alike
+  letters is shown as its plain-ASCII form and flagged), points out a
+  user name placed before the site to disguise it, and has Cancel as its
+  default; one question at a time. Redirects, refreshes, forms and frames
+  can't load a web page in the preview either, and a link to a place in
+  the page needs a real `#` in the page itself. **Open in Browser** is
+  gone from the preview, with the in-preview browser.
+- **Linked documents load from their real location.** A document opened
+  through a symbolic link takes its type (Markdown or HTML) and its
+  folder for images and links from the file that was checked and read.
+- **Obsidian vault bounds.** A stray `.obsidian` folder in the app's own
+  container or above it never becomes the vault; a vault found inside a
+  folder you granted follows the same rules. A granted folder with no
+  vault in it is still the vault, as an opened folder is on the Mac.
+- **Reopen files from last session** reads its setting as the Mac does,
+  so a `-reopenFilesFromLastSession NO` launch argument turns it off.
+  It was already on unless turned off in Owlink; unsaved text from the
+  last session is still offered at launch when it doesn't reopen.
+- **Edited** already followed the text, as the Mac's new unsaved mark
+  does: it clears on save, on Revert, and on undo back to the saved
+  text. A test now covers it.
+- Shared speed tests hold this thread's CPU time, scaled by how busy the
+  machine is, to their bounds (best of several tries), so they no longer
+  fail on a loaded Mac or simulator without loosening what they check.
+
+Not on iOS: the Mac's • tab and title mark (iOS shows "Edited"), Finder
+document icons, and the Mac's multi-tab session (unsaved untitled tabs,
+Reopen Closed Tab).
 
 ## New in 0.5.1 (15)
 
