@@ -54,7 +54,10 @@
 # Not covered: a failure after the N-second window, and resources the app
 # only reads on user action (owl art when the owl first shows, licences at
 # download time). Step 1 checks those files are where the app looks, and
-# step 2 makes sure nothing else could answer for them.
+# step 2 makes sure nothing else could answer for them. Opening a big
+# file isn't covered either (a release build has no switch to open one
+# with): Scripts/bigfile-check.sh opens a generated 55 MiB log in a check
+# build and fails on a crash report (0.5.2's macOS 26 crash).
 set -euo pipefail
 
 SECONDS_UP=10

@@ -171,6 +171,13 @@ its first 8 KB; never UTF-16) opens with a bar, "This looks like a
 binary file", and nothing shown: **Open Anyway** shows it as text,
 read-only, with Save off so it can't be rewritten by accident; **Allow
 Editing** on the bar makes it an ordinary text tab.
+A file you can't write (no write permission, such as `chmod 444`; locked
+in the Finder's Get Info; or on a read-only volume) opens read-only, with
+"— Read-Only" in the title and a bar that says why. **Allow Editing** on
+the bar lets you type, but Owlink still won't save over the file: ⌘S
+offers **Save As…** instead, and Cedric's Apply stays off. Owlink checks
+again when you save and when the window comes to the front, so after a
+`chmod 644` (or unlocking it) the tab is an ordinary text tab again.
 
 ### Print
 

@@ -283,6 +283,7 @@ extension EditorWindowController {
             tail = nil
             setEditable(true)
             window?.subtitle = ""
+            recheckWriteAccess()
             return
         }
         guard let url = doc.fileURL else { NSSound.beep(); return }

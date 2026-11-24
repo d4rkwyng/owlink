@@ -17,6 +17,17 @@ import CedricCore
 /// copy, save and find see the one long line. Chunks start at fixed
 /// offsets from the paragraph start, nudged so they never split a
 /// composed character sequence (surrogate pairs, combining marks).
+///
+/// The enumeration must behave exactly like NSTextContentStorage's own
+/// (Scripts/chunks-check.sh compares them from every offset): lines that
+/// fit are TextKit's own paragraph objects, and nothing is handed out
+/// forwards from the end of the text or backwards from nil. It used to
+/// hand out the last line (or chunk) forwards from the end: an element
+/// lying before the location asked from. NSTextLayoutManager's
+/// estimatedSizeForLastTextContainer asks from there, and that is where
+/// macOS 26 raised in NSCountableTextLocation compare: while dropping the
+/// layout fragments in front of the element (0.5.2 on every big log, and
+/// a big log after a long-line paste).
 final class ChunkedContentStorage: NSTextContentStorage {
     /// Paragraphs longer than this are split; nil: TextKit's own paragraphs.
     var chunkLimit: Int? {
@@ -46,6 +57,7 @@ final class ChunkedContentStorage: NSTextContentStorage {
     }
 
     /// The chunk holding `offset` (offset == length: the last chunk).
+    /// Enumeration only asks for offsets inside the text.
     /// `whole`: the line fits in one chunk.
     func chunkRange(at offset: Int, in text: NSString, limit: Int) -> (NSRange, whole: Bool) {
         let probe = min(offset, max(0, text.length - 1))
@@ -69,9 +81,14 @@ final class ChunkedContentStorage: NSTextContentStorage {
         }
         let p = ChunkParagraph(attributedString: storage.attributedSubstring(from: r))
         p.elementRange = NSTextRange(location: s, end: e)
-        // The content range is the chunk without its trailing newline, if any.
-        let hasNewline = r.length > 0 && (storage.string as NSString).character(at: NSMaxRange(r) - 1) == 10
-        if hasNewline, let ce = location(s, offsetBy: r.length - 1) {
+        // The content range is the chunk without its trailing line break
+        // ("\n" or "\r\n", as TextKit's own paragraphs), if any.
+        let text = storage.string as NSString
+        var sepLength = 0
+        if r.length > 0, text.character(at: NSMaxRange(r) - 1) == 10 {
+            sepLength = r.length > 1 && text.character(at: NSMaxRange(r) - 2) == 13 ? 2 : 1
+        }
+        if sepLength > 0, let ce = location(s, offsetBy: r.length - sepLength) {
             p.content = NSTextRange(location: s, end: ce)
             p.separator = NSTextRange(location: ce, end: e)
         } else {
@@ -91,10 +108,11 @@ final class ChunkedContentStorage: NSTextContentStorage {
         let text = storage.string as NSString
         let len = text.length
         let reverse = options.contains(.reverse)
-        var offset = textLocation.map { self.offset(from: documentRange.location, to: $0) } ?? (reverse ? len : 0)
         if reverse {
+            // As NSTextContentStorage: backwards from nil hands out nothing.
+            guard let textLocation else { return documentRange.location }
             // From a location, backwards: the element ending at or containing it.
-            var at = offset - 1
+            var at = min(self.offset(from: documentRange.location, to: textLocation), len) - 1
             while at >= 0 {
                 let (r, whole) = chunkRange(at: at, in: text, limit: limit)
                 guard let p = element(for: r, in: storage, whole: whole) else { return nil }
@@ -103,8 +121,10 @@ final class ChunkedContentStorage: NSTextContentStorage {
             }
             return documentRange.location
         }
-        offset = max(0, min(offset, len))
-        var at = offset == len ? max(0, len - 1) : offset
+        // Forwards: the element holding the location, then the ones after
+        // it. From the end there is none (as NSTextContentStorage): never
+        // an element that ends at or before the location asked from.
+        var at = max(0, min(textLocation.map { self.offset(from: documentRange.location, to: $0) } ?? 0, len))
         while at < len {
             let (r, whole) = chunkRange(at: at, in: text, limit: limit)
             guard let p = element(for: r, in: storage, whole: whole) else { return nil }
