@@ -155,7 +155,8 @@ public final class OwlToolbox: @unchecked Sendable {
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
-                _linesShown.formUnion(OwlCitations.quotedLines(in: r.text))
+                // Only rows the tool emitted (and that survived its cap).
+                _linesShown.formUnion(OwlCitations.quotedLines(in: r.text).intersection(r.rows))
                 if let name, name == .searchDocument || name == .getOutline { _looks.insert(name) }
             }
         }

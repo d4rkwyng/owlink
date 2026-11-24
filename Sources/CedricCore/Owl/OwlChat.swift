@@ -592,9 +592,16 @@ public struct OwlToolResult: Sendable, Equatable {
     /// The document lines the model was shown in full (get_lines), for
     /// what Cedric says he has seen.
     public var lines: ClosedRange<Int>?
+    /// The line numbers of the numbered document rows ("12| text") this
+    /// result was built with. Only these count as shown: a "31| …" that
+    /// came from inside a row's or a key's text (an outline's JSON key
+    /// with a newline in it) is not a row the tool emitted.
+    public var rows: IndexSet
 
-    public init(text: String, proposal: OwlEditProposal?, summary: String, ok: Bool, lines: ClosedRange<Int>? = nil) {
+    public init(text: String, proposal: OwlEditProposal?, summary: String, ok: Bool, lines: ClosedRange<Int>? = nil,
+                rows: IndexSet = IndexSet()) {
         self.text = text; self.proposal = proposal; self.summary = summary; self.ok = ok; self.lines = lines
+        self.rows = rows
     }
 }
 
@@ -895,7 +902,8 @@ public enum OwlTools {
         }
         guard let h = matchHeading(query, heads), let i = heads.firstIndex(of: h) else {
             let list = heads.prefix(60).map { "\($0.line + 1)| " + String(repeating: "#", count: $0.level) + " " + $0.title }.joined(separator: "\n")
-            return OwlToolResult(text: cap("No heading matches “\(query.prefix(60))”. The headings are:\n" + list), proposal: nil, summary: summary, ok: true)
+            return OwlToolResult(text: cap("No heading matches “\(query.prefix(60))”. The headings are:\n" + list), proposal: nil, summary: summary, ok: true,
+                                 rows: IndexSet(heads.prefix(60).map { $0.line + 1 }))
         }
         let first = h.line + 1
         let next = heads[(i + 1)...].first { $0.level <= h.level }
@@ -906,7 +914,8 @@ public enum OwlTools {
         let body = s.numbered(lines: first, last)
         let room = maxOutputBytes - 120
         if body.utf8.count <= room {
-            return OwlToolResult(text: "Section (lines \(first)-\(last)):\n" + body, proposal: nil, summary: summary, ok: true, lines: first...last)
+            return OwlToolResult(text: "Section (lines \(first)-\(last)):\n" + body, proposal: nil, summary: summary, ok: true, lines: first...last,
+                                 rows: IndexSet(integersIn: first...last))
         }
         // Too long: the lines that fit whole, and where the rest is.
         var shown = first, used = 0
@@ -918,7 +927,8 @@ public enum OwlTools {
         }
         let text = "Section (lines \(first)-\(last)), first part:\n" + s.numbered(lines: first, shown)
             + "\n[… cut: the section goes on to line \(last); call get_lines from line \(shown + 1) for the rest]"
-        return OwlToolResult(text: text, proposal: nil, summary: summary, ok: true, lines: first...shown)
+        return OwlToolResult(text: text, proposal: nil, summary: summary, ok: true, lines: first...shown,
+                             rows: IndexSet(integersIn: first...shown))
     }
 
     static let statsWords: Set<String> = ["words", "characters", "chars", "count", "length", "long", "filename", "language", "size", "stats", "statistics"]
@@ -955,7 +965,8 @@ public enum OwlTools {
             let body = text.count <= 1500
                 ? "Selected text (lines \(span.first)-\(span.last)):\n" + s.numbered(lines: span.first, span.last)
                 : "Selected text (lines \(span.first)-\(span.last)), first part:\n" + s.numbered(lines: span.first, min(span.last, span.first + maxLines - 1))
-            return OwlToolResult(text: cap(body), proposal: nil, summary: String(localized: "Looked at the selection"), ok: true)
+            return OwlToolResult(text: cap(body), proposal: nil, summary: String(localized: "Looked at the selection"), ok: true,
+                                 rows: IndexSet(integersIn: span.first...max(span.first, span.last)))
         case .getLines:
             guard let start = a["start"]?.int else { return fail("get_lines needs start and end") }
             let end = a["end"]?.int ?? start
@@ -966,7 +977,7 @@ public enum OwlTools {
             let shown = text.utf8.count > maxOutputBytes ? start + max(0, cap(text).components(separatedBy: "\n").count - 3) : last
             return OwlToolResult(text: cap(text), proposal: nil,
                                  summary: String(localized: "Looked at lines \(start)–\(last)"), ok: true,
-                                 lines: shown >= start ? start...shown : nil)
+                                 lines: shown >= start ? start...shown : nil, rows: IndexSet(integersIn: start...last))
         case .searchDocument:
             guard let q = a["query"]?.string, !q.isEmpty else { return fail("search_document needs a query") }
             guard q.count <= maxPatternLength else { return fail("query too long") }
@@ -1007,9 +1018,10 @@ public enum OwlTools {
                 return "\(l)| \(t)"
             }.joined(separator: "\n")
             if total > lines.count { body += "\n(\(total - lines.count) more lines match)" }
-            return OwlToolResult(text: cap(body), proposal: nil, summary: summary, ok: true)
+            return OwlToolResult(text: cap(body), proposal: nil, summary: summary, ok: true, rows: IndexSet(lines))
         case .getOutline:
-            return OwlToolResult(text: cap(outline(s)), proposal: nil, summary: String(localized: "Read the outline"), ok: true)
+            let o = outlineRows(s)
+            return OwlToolResult(text: cap(o.text), proposal: nil, summary: String(localized: "Read the outline"), ok: true, rows: o.rows)
         case .documentStats:
             let c = TextStats.count(s.text as NSString, range: NSRange(location: 0, length: s.length))
             var body = "lines: \(s.lineCount)\ncharacters: \(c?.characters ?? s.length)\n"
@@ -1120,7 +1132,10 @@ public enum OwlTools {
 
     /// Markdown headings; JSON top-level keys; CSV header; else lines that
     /// start at column 0 and look like declarations (code), at most 60.
-    public static func outline(_ s: OwlDocumentSnapshot) -> String {
+    public static func outline(_ s: OwlDocumentSnapshot) -> String { outlineRows(s).text }
+
+    /// `outline`, with the line numbers of the numbered rows in it.
+    static func outlineRows(_ s: OwlDocumentSnapshot) -> (text: String, rows: IndexSet) {
         if s.language == "markdown" || (s.fileName?.lowercased().hasSuffix(".md") ?? false) {
             let h = MarkdownOutline.headings(in: s.text, limit: 60)
             if !h.isEmpty {
@@ -1139,18 +1154,19 @@ public enum OwlTools {
                     let more = h.count < sections.filter({ $0.heading != nil }).count ? "; more headings than listed" : ""
                     out.insert("Total in all \(s.countedLines) lines: \(items) list items, \(rows) table rows\(more)", at: 0)
                 }
-                return out.joined(separator: "\n")
+                return (out.joined(separator: "\n"), IndexSet(h.map { $0.line + 1 }))
             }
         }
         if s.language == "json", let obj = OwlJSON.parse(s.text)?.object {
-            return "top-level keys: " + obj.keys.sorted().prefix(60).joined(separator: ", ")
+            return ("top-level keys: " + obj.keys.sorted().prefix(60).joined(separator: ", "), IndexSet())
         }
         if s.language == "csv" || s.language == "tsv" {
             let rows = (1..<max(1, s.lineCount)).filter { s.lines.contentRange(ofLine: $0).length > 0 }.count
-            return "\(rows) data rows; header: " + s.substring(s.lines.contentRange(ofLine: 0))
+            return ("\(rows) data rows; header: " + s.substring(s.lines.contentRange(ofLine: 0)), IndexSet())
         }
         let decl = try! NSRegularExpression(pattern: #"^(?:export\s+|public\s+|private\s+|static\s+|async\s+)*(?:func|function|def|class|struct|enum|protocol|extension|interface|type|fn|impl|module|sub|procedure|const|let|var)\b"#)
         var out: [String] = []
+        var numbers = IndexSet()
         let ns = s.text as NSString
         for i in 0..<s.lineCount where out.count < 60 {
             let r = s.lines.contentRange(ofLine: i)
@@ -1159,9 +1175,10 @@ public enum OwlTools {
             let isHeading = line.hasPrefix("#") && s.language != "python" && s.language != "shell"
             if isHeading || decl.firstMatch(in: line, range: NSRange(location: 0, length: (line as NSString).length)) != nil {
                 out.append("\(i + 1)| \(line)")
+                numbers.insert(i + 1)
             }
         }
-        return out.isEmpty ? "(no outline: \(s.lineCount) lines)" : out.joined(separator: "\n")
+        return (out.isEmpty ? "(no outline: \(s.lineCount) lines)" : out.joined(separator: "\n"), numbers)
     }
 }
 
