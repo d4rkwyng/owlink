@@ -602,7 +602,68 @@ extension DevChecks {
                 expect(broken.text == String(full.dropLast(3)) + "\n", "a file that isn't valid JSON as a whole is left alone")
                 expect(said != nil, "and the reason is given", said ?? "-")
             },
-        ], gap: 0.6)
+        ] + staleJSONHintSteps(app), gap: 0.6)
+    }
+
+    /// "Looks like JSON. Format it?" shown again from Recent hints after
+    /// the text changed (0.5.4 QA #12): still one-line JSON, the question
+    /// with a Fix it that formats the text as it is now; not JSON any
+    /// more, a past hint that asks nothing (OK, Don't show again).
+    static func staleJSONHintSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let first = #"{"a":1,"b":[1,2]}"#, second = #"{"a":2,"b":[3,4],"c":"x"}"#
+        var tab: EditorWindowController!
+        var shown: OwlCoordinator.Shown?
+        func titles() -> [String] { tab.owl?.bubble?.buttons.map(\.title) ?? [] }
+        func replace(_ text: String) {
+            tab.textView.setSelectedRange(NSRange(location: 0, length: (tab.text as NSString).length))
+            tab.textView.insertText(text, replacementRange: tab.textView.selectedRange())
+        }
+        return [
+            sync {
+                guard let t = app.open(write("stale.json", first)) else { expect(false, "stale JSON: opened stale.json"); return }
+                tab = t
+                sized(t)
+                t.setOwlVisible(true)
+                let w = t.owlContextWindow()
+                let hub = OwlHub.shared
+                guard let hint = RulesHintProvider().check(w.context, facts: t.owlFacts(wholeDocument: w.isWholeDocument))
+                        .first(where: { $0.id == RulesHintProvider.jsonID }) else { expect(false, "stale JSON: the rules offer to format it"); return }
+                hub.coordinator.markShown(hint, documentID: t.doc.id, context: w.context)
+                shown = hub.coordinator.recent.first { $0.hint.id == RulesHintProvider.jsonID && $0.documentID == t.doc.id }
+                expect(shown != nil && t.owl != nil, "stale JSON: the hint is under Recent hints")
+                focus(t)
+                replace(second)
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(tab.text == second, "stale JSON: the text changed, still one-line JSON", tab.text)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: still JSON, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(titles().first == String(localized: "Fix it"), "stale JSON: …with a Fix it that works", "\(titles())")
+                owl.bubble?.buttons.first { $0.title == String(localized: "Fix it") }?.performClick(nil)
+            },
+            sync {
+                guard let tab else { return }
+                expect(tab.text == JSONFormatter.prettyIfMinified(second), "stale JSON: Fix it formatted the text as it is now", tab.text)
+                replace("not JSON any more\n")
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                let title = owl.presentedHint?.hint.title ?? "-"
+                expect(title == "Looked like JSON (the text has changed since).", "stale JSON: not JSON now, a past hint", title)
+                expect(!title.contains("?"), "stale JSON: …that asks nothing", title)
+                expect(titles() == [String(localized: "OK"), String(localized: "Don’t show again")], "stale JSON: …OK and Don’t show again",
+                       "\(titles())")
+                expect(owl.presentedHint?.documentRange == nil, "stale JSON: …and no range")
+                owl.bubble?.buttons.first { $0.title == String(localized: "OK") }?.performClick(nil)
+                expect(owl.bubble == nil, "stale JSON: OK closes it")
+                tab.setOwlVisible(false)
+                tab.doc.markSaved()
+                tab.window?.performClose(nil)
+            },
+        ]
     }
 
     // MARK: Colouring stays right after edits

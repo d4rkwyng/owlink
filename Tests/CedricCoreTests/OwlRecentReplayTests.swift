@@ -131,4 +131,78 @@ import Testing
         #expect(!again.isStale)
         #expect(RulesHintProvider.formatsWholeJSONFile(again.hint, isStale: again.isStale))
     }
+
+    /// 0.5.4 QA #12: the stale JSON hint kept asking "Format it?" with no
+    /// way to say yes. Checked again on the text now: still one-line JSON,
+    /// a fresh hint for that text (its own replacement, never the
+    /// whole-file formatter); not JSON, or closed, a past hint with no question.
+    @Test func aStaleJSONHintIsCheckedAgainOnTheTextNow() throws {
+        let (c, _) = make([])
+        let doc = UUID()
+        let minified = #"{"a":1,"b":[1,2]}"#
+        let inView = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?",
+                             range: NSRange(location: 0, length: (minified as NSString).length),
+                             replacement: "{\n  \"a\" : 1,\n  \"b\" : [1, 2]\n}", source: "rules")
+        c.markShown(inView, documentID: doc, context: window(minified, doc: doc).context)
+        let shown = try #require(c.recent.first)
+
+        // Unchanged: as before.
+        let same = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: minified as NSString), document: minified as NSString)
+        #expect(same == OwlCoordinator.replay(shown, document: minified as NSString))
+
+        // Changed, still one-line JSON: the question, with a replacement for the text now.
+        let now = #"{"a":2,"b":[3,4],"c":"x"}"# as NSString
+        let again = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: now), document: now)
+        #expect(!again.isStale)
+        #expect(again.hint.title == "Looks like JSON. Format it?")
+        #expect(again.documentRange == NSRange(location: 0, length: now.length) && again.expected == now as String)
+        #expect(again.hint.replacement == JSONFormatter.prettyIfMinified(now as String))
+        #expect(again.hint.replacement != nil)
+        #expect(!RulesHintProvider.formatsWholeJSONFile(again.hint, isStale: again.isStale), "its own Fix it, not the whole-file one")
+        #expect(!RulesHintProvider.isPastJSONHint(again.hint))
+
+        // Not JSON any more (or JSON over several lines, or empty): a past hint, no question.
+        for text in ["not json at all", "{\n  \"a\": 1\n}", "", "{}"] as [NSString] {
+            let r = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: text), document: text)
+            #expect(r.isStale && r.documentRange == nil && r.hint.replacement == nil && r.hint.range == nil)
+            #expect(r.hint.title == "Looked like JSON (the text has changed since).", "\(text)")
+            #expect(!r.hint.title.contains("?") && r.hint.detail == nil)
+            #expect(RulesHintProvider.isPastJSONHint(r.hint))
+            #expect(!RulesHintProvider.formatsWholeJSONFile(r.hint, isStale: r.isStale))
+        }
+        // Too long to check again on the main thread: past.
+        let long = ("[" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]") as NSString
+        #expect(long.length > RulesHintProvider.replayJSONLimit)
+        #expect(RulesHintProvider.isPastJSONHint(RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: long), document: long).hint))
+        // Its document closed.
+        let closed = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: nil), document: nil)
+        #expect(closed.hint.title == "Looked like JSON." && closed.isStale && RulesHintProvider.isPastJSONHint(closed.hint))
+
+        // Other hints and the long one-line file's hint (never stale) are left alone.
+        let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+        c.markShown(longLine, documentID: doc, context: window(minified, doc: doc).context)
+        let l = OwlCoordinator.replay(try #require(c.recent.first), document: "x" as NSString)
+        #expect(RulesHintProvider.replayJSON(l, document: "x" as NSString) == l)
+        c.markShown(Self.doubled, documentID: doc, context: window(Self.text, doc: doc).context)
+        let d = OwlCoordinator.replay(try #require(c.recent.first), document: "changed" as NSString)
+        #expect(d.isStale && RulesHintProvider.replayJSON(d, document: "changed" as NSString) == d)
+    }
+
+    /// VoiceOver's label for a Recent hints row: "Format it?." in 0.5.4.
+    @Test func theSpokenRowHasNoDoubledPunctuation() {
+        #expect(OwlCoordinator.spokenRecent(time: "11:50 AM", title: "Looks like JSON. Format it?",
+                                            detail: "Pretty-prints it with two-space indents; key order is kept.")
+                == "11:50 AM, Looks like JSON. Format it? Pretty-prints it with two-space indents; key order is kept.")
+        #expect(OwlCoordinator.spokenRecent(time: "9:00", title: "“the” twice", detail: "The word “the” is repeated.")
+                == "9:00, “the” twice. The word “the” is repeated.")
+        #expect(OwlCoordinator.spokenRecent(time: "9:00", title: "Looked like JSON.", detail: "x") == "9:00, Looked like JSON. x")
+        #expect(OwlCoordinator.spokenRecent(time: "9:00", title: "Fix 3 typos?", detail: nil) == "9:00, Fix 3 typos?")
+        #expect(OwlCoordinator.spokenRecent(time: "9:00", title: "Hi!", detail: "") == "9:00, Hi!")
+        let long = String(repeating: "a", count: 130)
+        #expect(OwlCoordinator.spokenRecent(time: "t", title: "T", detail: long) == "t, T. " + String(repeating: "a", count: 120) + "…")
+        for title in ["Fix it?", "Done.", "Wow!", "Wait…"] {
+            let s = OwlCoordinator.spokenRecent(time: "t", title: title, detail: "More.")
+            #expect(!s.contains("?.") && !s.contains("..") && !s.contains("!.") && !s.contains("….") , "\(s)")
+        }
+    }
 }

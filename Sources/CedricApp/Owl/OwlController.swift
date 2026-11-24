@@ -679,7 +679,8 @@ final class OwlController: NSObject, NSPopoverDelegate {
     /// otherwise (its document is closed) only OK.
     func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
         guard let tab else { return }
-        let r = OwlCoordinator.replay(shown, document: document)
+        // A stale "Looks like JSON. Format it?": checked again on the text now.
+        let r = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: document), document: document)
         replays += 1
         presented = (r.hint, r.documentRange, r.expected)
         let buttons = own ? buttons(for: r.hint, tab: tab, isStale: r.isStale)
@@ -729,6 +730,13 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let hub = OwlHub.shared
         if hint.id == RulesHintProvider.letterID {
             return [.init(title: String(localized: "No thanks, I’m an owl"), isDefault: false) { [weak self] in self?.hideBubble() }]
+        }
+        if RulesHintProvider.isPastJSONHint(hint) {
+            // "Looked like JSON (the text has changed since).": asks nothing.
+            return [.init(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() },
+                    .init(title: String(localized: "Don’t show again"), isDefault: false) { [weak self] in
+                        hub.coordinator.neverShowAgain(hint.id); self?.hideBubble()
+                    }]
         }
         if hint.id == Self.askIntroID {
             return [.init(title: String(localized: "Ask Cedric…"), isDefault: true) { [weak self, weak tab] in
@@ -984,10 +992,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         for r in recent {
             // A button that looks like the label it was: shows the hint again.
             let time = f.string(from: r.date)
-            var spoken = "\(time), \(r.hint.title)"
-            if let d = r.hint.detail, !d.isEmpty {
-                spoken += ". " + (d.count > 120 ? String(d.prefix(120)) + "…" : d)
-            }
+            let spoken = OwlCoordinator.spokenRecent(time: time, title: r.hint.title, detail: r.hint.detail)
             let row = OwlRecentHintRow(text: "\(time)  \(r.hint.title)", accessibilityText: spoken,
                                        toolTip: r.hint.detail) { [weak self] in self?.replay(r) }
             stack.addArrangedSubview(row)
