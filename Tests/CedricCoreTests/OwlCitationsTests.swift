@@ -38,11 +38,26 @@ import Testing
     }
 
     @Test func formsItReads() {
-        let cites = OwlCitations.find("See lines 3, 7 and 9-11, L12, line 4 to 5.\n31| quoted text")
-        #expect(cites.map(\.lines) == [3...3, 7...7, 9...11, 12...12, 4...5, 31...31])
-        // Not citations: a count of lines, a heading number, a time.
-        #expect(OwlCitations.find("It has 282 lines. ## 2 Plans at 12:30, #4.").isEmpty)
+        let cites = OwlCitations.find("See lines 3, 7 and 9-11, line 4 to 5.\n31| quoted text")
+        #expect(cites.map(\.lines) == [3...3, 7...7, 9...11, 4...5, 31...31])
+        // Not citations: a count of lines, a heading number, a time, L2/L1 terms.
+        #expect(OwlCitations.find("It has 282 lines. ## 2 Plans at 12:30, #4. L2 regularization, an L1 cache.").isEmpty)
+        // A list stops at a number that doesn't end a clause.
+        #expect(OwlCitations.find("On line 5, 2026 changed it.").map(\.lines) == [5...5])
+        #expect(OwlCitations.find("Line 3, 100 items are read.").map(\.lines) == [3...3])
         #expect(OwlCitations.filter("Nothing cited here.", allowed: IndexSet()).changed == false)
+    }
+
+    @Test func ordinaryProseIsNeverCutOnlyFlagged() {
+        // Selection 40–60; paragraphs (not list items) about other lines keep their words.
+        let allowed = IndexSet(integersIn: 40...60)
+        let text = "This uses L2 regularization on line 45.\n\nThe setup on line 2 matters too.\n\n\n    indented code"
+        let f = OwlCitations.filter(text, allowed: allowed)
+        #expect(f.text == "This uses L2 regularization on line 45.\n\nThe setup on line 2\(OwlCitations.flag) matters too.\n\n\n    indented code")
+        #expect(f.dropped.isEmpty && f.flagged == [2...2])
+        // Nothing out of range: the text is returned exactly.
+        let clean = "\n  code\n\n\n\nLine 45 is fine.\n"
+        #expect(OwlCitations.filter(clean, allowed: allowed).text == clean)
     }
 
     @Test func zeroBasedOrShiftedCitationsAreCaught() {

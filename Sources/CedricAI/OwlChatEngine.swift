@@ -419,7 +419,8 @@ public struct OwlChatRequest: Sendable {
 
     /// The lines an answer to this request may cite: those it was sent,
     /// those a tool read, the digest showed or the offline checks and scan
-    /// name, and any the question itself names. nil (no filter) when a
+    /// name, and any the question or the conversation sent with it names
+    /// (a follow-up about "line 210" from an earlier answer). nil (no filter) when a
     /// whole-document search or outline tool ran (it lists lines from
     /// anywhere) or for an edit (its proposal is checked on its own).
     public func citableLines(linesRead: IndexSet = IndexSet(), digest: Digest? = nil, checks: String? = nil,
@@ -432,6 +433,8 @@ public struct OwlChatRequest: Sendable {
             s.formUnion(OwlCitations.lines(in: digest.text))
         }
         for text in [checks, scan, question] { if let text { s.formUnion(OwlCitations.lines(in: text)) } }
+        for case .user(let t) in OwlPrompts.chatHistoryMessages(history) { s.formUnion(OwlCitations.lines(in: t)) }
+        for case .assistant(let t) in OwlPrompts.chatHistoryMessages(history) { s.formUnion(OwlCitations.lines(in: t)) }
         if let scanFindings { for f in scanFindings { s.insert(f.line) } }
         return s
     }

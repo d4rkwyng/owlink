@@ -125,8 +125,9 @@ import CedricCore
         #expect(result.outcome.sections.map(\.first) == plan.parts.map(\.first))
         #expect(result.outcome.sections.allSatisfy { $0.text.contains("opens this part") })
         #expect(!result.outcome.answer.contains("opens this part"))
-        // The combine call has no tools and the answer never mentions the process.
-        #expect(!result.outcome.answer.localizedCaseInsensitiveContains("section"))
+        // The combine call is told not to describe the process or new edits.
+        #expect(last.contains("don't mention notes, parts, sections or a review"))
+        #expect(last.contains("don't propose or describe new edits"))
     }
 
     @Test func reduceUsesFakeChatEngineEndToEnd() async throws {
@@ -304,5 +305,18 @@ import CedricCore
         #expect(outcome.answer.contains("Line 3 sets the title."))
         #expect(outcome.answer.contains("Lines 12–14 describe the walk."))
         #expect(!outcome.answer.contains("19") && !outcome.answer.contains("31"))
+    }
+
+    @Test func aFollowUpMayCiteLinesTheConversationNamed() async throws {
+        let s = Self.doc282()
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!
+        let history = [OwlChatEntry(role: .user, text: "Anything odd?"),
+                       OwlChatEntry(role: .owl, text: "The note on line 210 repeats itself.")]
+        let engine = Recorder(partReply: { _, _ in "- Line 210 repeats the walk.\n- Line 250 is new." })
+        let req = OwlChatRequest(question: "Why is that a problem?", context: ctx, snapshot: s, history: history,
+                                 useTools: false, prose: true)
+        let outcome = try await OwlChatRunner.run(req, engine: engine) { _ in }
+        #expect(outcome.answer.contains("- Line 210 repeats the walk."))
+        #expect(!outcome.answer.contains("250"))
     }
 }

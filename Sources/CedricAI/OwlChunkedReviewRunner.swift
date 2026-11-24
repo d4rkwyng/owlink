@@ -287,12 +287,15 @@ public enum OwlChunkedReviewRunner {
     static func clip(_ text: String, cap: Int) -> String {
         guard (text as NSString).length > cap else { return text }
         var out = ""
+        var started = false
         for line in text.components(separatedBy: "\n") {
-            let next = out.isEmpty ? line : out + "\n" + line
+            let next = started ? out + "\n" + line : line
+            started = true
             if (next as NSString).length + 1 > cap { break }
             out = next
         }
-        if out.isEmpty {
+        if out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            out = ""
             var used = 0
             for ch in text {
                 used += ch.utf16.count

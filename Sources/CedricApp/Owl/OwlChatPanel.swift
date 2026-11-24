@@ -1412,6 +1412,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate, NSTex
     @objc func clearHistory(_ sender: Any?) {
         guard !running, let id = docID else { return }
         OwlChatStore.shared.clear(id)
+        // Keyed by history index: a cleared history starts closed.
+        expandedSections = []
         discardProposal(nil)
         render()
     }
