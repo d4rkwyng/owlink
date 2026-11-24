@@ -188,10 +188,12 @@ public enum DocumentWrite {
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
         do {
             // What an atomic save keeps of the file it replaces.
+            // Only a regular file's, and never a blocking open: a FIFO
+            // put there in between would stall a plain read open.
             var st = stat()
-            if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0 {
+            if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFREG {
                 _ = fchmod(fd, st.st_mode & 0o7777)
-                let old = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                let old = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
                 if old >= 0 {
                     _ = fcopyfile(old, fd, nil, copyfile_flags_t(COPYFILE_ACL | COPYFILE_XATTR))
                     close(old)
@@ -216,10 +218,13 @@ public enum DocumentWrite {
     /// for writing is itself the kernel's permission check on that very
     /// file, so a read-only file put in its place can't be opened, and a
     /// different writable one fails the identity match: either way the
-    /// save fails with an error and nothing else is touched. (0.5.3 fell
-    /// back to Foundation's atomic write by path here.)
+    /// save fails with an error and nothing else is touched. The open
+    /// doesn't block (`O_NONBLOCK`): a FIFO put there with no reader
+    /// fails it (ENXIO) instead of stalling the save before the
+    /// regular-file check. (0.5.3 fell back to Foundation's atomic write
+    /// by path here.)
     private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
-        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_CLOEXEC)
+        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw writeError(errno, url) }
         do {
             var st = stat()
@@ -227,6 +232,9 @@ public enum DocumentWrite {
             guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
                 throw writeError(EBUSY, url)
             }
+            // The checked regular file: back to ordinary blocking writes.
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
             guard ftruncate(fd, 0) == 0 else { throw writeError(errno, url) }
             try writeAll(data, to: fd, url: url)
         } catch {

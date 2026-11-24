@@ -376,6 +376,70 @@ import Testing
         }
     }
 
+    /// A FIFO (no reader) takes the checked file's name between the check
+    /// and the write. In a folder refusing new files the in-place save
+    /// fails with an error; in a writable one the usual replace renames
+    /// the new file over the name. Neither blocks on opening the FIFO
+    /// (opened without `O_NONBLOCK`, it waits for a reader forever), the
+    /// checked file keeps its bytes, and no other file changes. The save
+    /// runs on its own thread with a bound, and a stuck one is released
+    /// by opening the FIFO, so a hang fails the test instead of the suite.
+    @Test func aFIFOInTheCheckedFilesPlaceDoesntHangTheSave() throws {
+        final class Outcome: @unchecked Sendable {
+            var swapped = false, error: Error?
+        }
+        for folderMode: mode_t in [0o555, 0o755] {
+            let url = try file("doc.md", "checked\n")
+            let dir = url.deletingLastPathComponent()
+            let moved = dir.appendingPathComponent("moved.md"), other = dir.appendingPathComponent("other.md")
+            try Data("other\n".utf8).write(to: other)
+            defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+            #expect(chmod(dir.path, folderMode) == 0)
+
+            let outcome = Outcome()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                do {
+                    try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {
+                        // Between the check and the write: a FIFO takes the checked file's name.
+                        outcome.swapped = chmod(dir.path, 0o755) == 0
+                            && rename(url.path, moved.path) == 0
+                            && mkfifo(url.path, 0o666) == 0
+                            && chmod(dir.path, folderMode) == 0
+                    }
+                } catch {
+                    outcome.error = error
+                }
+                done.signal()
+            }
+            let finished = done.wait(timeout: .now() + 20) == .success
+            if !finished {
+                // Stuck opening the FIFO: give it the other end so the save returns.
+                let release = open(url.path, O_RDWR | O_NONBLOCK)
+                _ = done.wait(timeout: .now() + 20)
+                if release >= 0 { close(release) }
+            }
+            let label = String(folderMode, radix: 8)
+            #expect(finished, "the \(label) folder's save doesn't block on the FIFO")
+            #expect(outcome.swapped, "the FIFO took the checked file's name")
+            #expect(chmod(dir.path, 0o755) == 0)
+            #expect(try String(contentsOf: moved, encoding: .utf8) == "checked\n", "\(label): the checked file is untouched")
+            #expect(try String(contentsOf: other, encoding: .utf8) == "other\n", "\(label): the other file is untouched")
+            var st = stat()
+            #expect(lstat(url.path, &st) == 0)
+            if folderMode == 0o555 {
+                #expect(outcome.error is CocoaError, "in place: the save fails with an error")
+                #expect(st.st_mode & S_IFMT == S_IFIFO, "the FIFO is left as it was")
+            } else {
+                #expect(outcome.error == nil, "a writable folder still saves with the usual replace")
+                #expect(st.st_mode & S_IFMT == S_IFREG)
+                #expect(try String(contentsOf: url, encoding: .utf8) == "saved\n")
+            }
+            #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted() == ["doc.md", "moved.md", "other.md"],
+                    "\(label): no temporary file is left")
+        }
+    }
+
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {
         let url = try file()
         defer { cleanUp(url) }
