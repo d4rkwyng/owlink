@@ -405,3 +405,62 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         #expect(rt.unloaded.value.isEmpty)
     }
 }
+
+/// One load at a time, across models. Before 0.5.4 a request for model B
+/// while model A was still loading started a second load: if both
+/// finished, B's publication dropped A without unloading it (llama.cpp's
+/// exit registry still held it); if both hung, each replaced the
+/// watchdog's record of the stuck load, and either finishing cleared it
+/// while the other still ran.
+@Suite(.serialized) struct BuiltInLoadSerialTests {
+    let a = URL(fileURLWithPath: "/tmp/serial-a.gguf"), b = URL(fileURLWithPath: "/tmp/serial-b.gguf")
+    let req = GenerationRequest(system: "s", user: "u")
+
+    @Test func anotherModelWaitsForTheLoadUnderWayThenSwapsItOut() async throws {
+        let rt = HangingRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        let (a, b, req) = (a, b, req)
+        let first = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
+        #expect(await eventually { rt.attempts.value == 1 })
+        let second = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(rt.attempts.value == 1, "no second load while the first is in flight")
+        #expect(await host.loadAttempts == 1)
+        rt.release()
+        _ = try await first.value
+        _ = try await second.value
+        #expect(rt.attempts.value == 2)
+        #expect(await host.loadedPath == b)
+        #expect(rt.fake.unloaded.value == ["serial-a.gguf"], "the first model was unloaded, not dropped")
+        #expect(await host.loadCount == 2)
+        #expect(await host.unloadCount == 1)
+        #expect(host.session.unhealthy == nil)
+    }
+
+    @Test func anotherModelDuringAHungLoadStartsNothingAndTheStuckRecordHolds() async throws {
+        let rt = HangingRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        let (a, b, req) = (a, b, req)
+        let first = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
+        #expect(await eventually { rt.attempts.value == 1 && clock.pendingSleepers >= 1 })
+        let second = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        #expect(rt.attempts.value == 1, "no second load while the first is in flight")
+        clock.advance(BuiltInWatchdog.seconds + 1)
+        await #expect(throws: BuiltInError.loadTimedOut(seconds: Int(BuiltInWatchdog.seconds))) { try await first.value }
+        // The waiting request sees the stuck load: no load of its own, the retry kept.
+        await #expect(throws: BuiltInError.stillLoading) { try await second.value }
+        #expect(rt.attempts.value == 1)
+        #expect(await host.loadAttempts == 1)
+        #expect(await host.hasStuckLoad)
+        // The stuck load finishes: freed, the record cleared, nothing loaded.
+        rt.release()
+        #expect(await eventually { await !host.hasStuckLoad })
+        #expect(rt.fake.unloaded.value == ["serial-a.gguf"])
+        #expect(await host.loadedPath == nil)
+        // The user's one retry is still there, for the other model.
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) }
+        #expect(rt.attempts.value == 2)
+        #expect(await host.loadedPath == b)
+    }
+}

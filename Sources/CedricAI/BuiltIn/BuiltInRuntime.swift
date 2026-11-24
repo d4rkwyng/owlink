@@ -139,11 +139,14 @@ public actor BuiltInModelHost {
     public nonisolated let session: BuiltInSession
 
     private var loaded: (path: URL, model: any LoadedModel)?
-    private var loading: (path: URL, task: Task<any LoadedModel, Error>)?
-    /// A load the watchdog gave up on that has not returned yet. While it
-    /// is set nothing else is loaded (llama.cpp has one queue: a second
-    /// load would only wait behind it).
-    private var stuck: Task<any LoadedModel, Error>?
+    /// The one load under way. A request for another model waits for it
+    /// to end before starting its own, so two loads are never in flight
+    /// and only one can publish (`model(at:)`).
+    private var loading: (attempt: Int, path: URL, task: Task<any LoadedModel, Error>)?
+    /// A load the watchdog gave up on that has not returned yet, by
+    /// attempt. While it is set nothing else is loaded (llama.cpp has one
+    /// queue: a second load would only wait behind it).
+    private var stuck: (attempt: Int, task: Task<any LoadedModel, Error>)?
     private var active = 0
     private var lastUse: TimeInterval = 0
     private var idleTimer: Task<Void, Never>?
@@ -205,35 +208,67 @@ public actor BuiltInModelHost {
     /// Refuses an automatic request unless the model is already in memory,
     /// and any request while the engine is unhealthy (except one explicit
     /// retry, once the stuck load has stopped).
+    ///
+    /// One load at a time. A request for a different model while one is
+    /// loading waits for that load to end (loaded, failed or given up on
+    /// by the watchdog), then looks again. Before 0.5.4 it started a second
+    /// load: if both finished, the second dropped the first model without
+    /// unloading it (llama.cpp's exit registry still held it), and if both
+    /// hung, each replaced the watchdog's record of the stuck load and
+    /// either one finishing cleared it while the other still ran.
     public func model(at path: URL) async throws -> any LoadedModel {
         let intent = BuiltInLoad.intent
-        if let loaded, loaded.path == path { return loaded.model }
-        try admit(intent)
-        if let loading, loading.path == path { return try await loading.task.value }
-        if let old = loaded {
-            loaded = nil
-            unloadCount += 1
-            session.markUnloaded()
-            old.model.unload()
+        while true {
+            if let loaded, loaded.path == path { return loaded.model }
+            try admit(intent)
+            guard let other = loading else { break }
+            if other.path == path { return try await other.task.value }
+            // Ends after that load's bookkeeping (`runLoad`): `loading` is
+            // clear and its model published or its stuck load recorded.
+            _ = await other.task.result
+            try Task.checkCancellation()
         }
-        let runtime = self.runtime, clock = self.clock, limit = loadTimeout
+        // No suspension from here to `loading` being set: this is the one load.
+        if let old = loaded { drop(old) }
         loadAttempts += 1
+        let attempt = loadAttempts
+        // Actor-isolated: it can't start before `loading` is set below.
+        let task = Task { try await self.runLoad(attempt: attempt, path: path) }
+        loading = (attempt, path, task)
+        return try await task.value
+    }
+
+    /// Load attempt `attempt`, under the watchdog: publishes the model, or
+    /// records the stuck load, then clears `loading`, all before anyone
+    /// waiting on it resumes.
+    private func runLoad(attempt: Int, path: URL) async throws -> any LoadedModel {
+        defer { if loading?.attempt == attempt { loading = nil } }
+        let runtime = self.runtime, clock = self.clock, limit = loadTimeout
         let raw = Task { try await runtime.load(modelAt: path) }
-        let guarded = Task { try await BuiltInWatchdog.race(raw, seconds: limit, clock: clock) }
-        loading = (path, guarded)
-        defer { if loading?.path == path { loading = nil } }
         let model: any LoadedModel
         do {
-            model = try await guarded.value
+            model = try await BuiltInWatchdog.race(raw, seconds: limit, clock: clock)
         } catch BuiltInError.loadTimedOut(let s) {
-            gaveUp(on: raw, seconds: s)
+            gaveUp(on: raw, attempt: attempt, seconds: s)
             throw BuiltInError.loadTimedOut(seconds: s)
         }
-        if let current = loaded, current.path == path { model.unload(); return current.model }
+        if let current = loaded {
+            // Nothing else publishes while this load is `loading`; if a
+            // model is here anyway, never drop one without unloading it.
+            if current.path == path { model.unload(); return current.model }
+            drop(current)
+        }
         loaded = (path, model)
         loadCount += 1
         session.markLoaded()
         return model
+    }
+
+    private func drop(_ old: (path: URL, model: any LoadedModel)) {
+        loaded = nil
+        unloadCount += 1
+        session.markUnloaded()
+        old.model.unload()
     }
 
     private func admit(_ intent: BuiltInLoadIntent) throws {
@@ -261,32 +296,31 @@ public actor BuiltInModelHost {
     /// command buffer already submitted. Those are left to finish on
     /// llama.cpp's queue; nothing waits for them, and no other load starts
     /// until they do. A model that loads after all is freed, not used.
-    private func gaveUp(on raw: Task<any LoadedModel, Error>, seconds: Int) {
+    private func gaveUp(on raw: Task<any LoadedModel, Error>, attempt: Int, seconds: Int) {
         session.markUnhealthy(seconds: seconds)
         AILog.logger.error("owl-ai builtin load watchdog fired after \(seconds)s; automatic AI off for this session")
         raw.cancel()
-        stuck = raw
+        stuck = (attempt, raw)
         Task { [weak self] in
             let r = await raw.result
-            await self?.stuckFinished(r)
+            await self?.stuckFinished(r, attempt: attempt)
         }
         DispatchQueue.main.async {
             NotificationCenter.default.post(name: .cedricBuiltInModelUnhealthy, object: nil, userInfo: ["seconds": seconds])
         }
     }
 
-    private func stuckFinished(_ r: Result<any LoadedModel, Error>) {
+    /// Attempt `attempt`'s stuck load returned. Clears the record only if
+    /// it is still that attempt's.
+    private func stuckFinished(_ r: Result<any LoadedModel, Error>, attempt: Int) {
         if case .success(let m) = r { m.unload(); unloadCount += 1 }
-        stuck = nil
+        if stuck?.attempt == attempt { stuck = nil }
     }
 
     /// Frees the model now (Settings "Unload", a model deleted, idle).
     public func unload() {
         guard let old = loaded else { return }
-        loaded = nil
-        unloadCount += 1
-        session.markUnloaded()
-        old.model.unload()
+        drop(old)
     }
 
     private func armIdleTimer() {
