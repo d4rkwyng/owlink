@@ -26,7 +26,8 @@ import Testing
                   "Fix the grammar", "Is the grammar right?", "Fix spelling and grammar", "How does the spelling checker work?",
                   "Write a spell checker", "What does `spelling` hold?", "Fix the bug in the typo detector", "Summarise this",
                   "Rewrite this paragraph and fix typos", "Why is spelling important in reports?", "Fix the typo in the test",
-                  "the spelling variable is unused", "Rewrite line 3"] {
+                  "the spelling variable is unused", "Rewrite line 3",
+                  "Check the spelling bee results", "List the spelling rules"] {
             #expect(!OwlSpellingIntent.isSpellingRequest(q), "\(q)")
         }
         // The typos corpus' own text isn't a request either.
