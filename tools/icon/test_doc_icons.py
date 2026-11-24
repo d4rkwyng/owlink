@@ -49,7 +49,8 @@ class DocumentIconTests(unittest.TestCase):
                     self.assertEqual(image.getpixel((0, 0))[3], 0)
 
     def fold_mask(self, size, factor=1):
-        """Pixels wholly inside the fold at size * factor px."""
+        """How much of each pixel the fold covers at size * factor px
+        (255: wholly inside; 16/32 and the supersampled canvas are 0 or 255)."""
         if size in (16, 32):
             mask = Image.new('L', (size, size))
             ImageDraw.Draw(mask).polygon(icons.SMALL_FOLD[size], fill=255)
@@ -65,22 +66,45 @@ class DocumentIconTests(unittest.TestCase):
         # Compare the lightest channel with the fold colour, so a Lanczos
         # blend of white ink fails as well as pure white.
         fold = min(icons.shade(icons.ci.hx(icons.STYLES[text][0]), 255, .16)[:3])
-        pixels, inside = image.load(), mask.load()
+        pixels, coverage = image.load(), mask.load()
         for y in range(mask.height):
             for x in range(mask.width):
-                if inside[x, y] == 255:
+                if coverage[x, y] == 255:
                     self.assertLessEqual(min(pixels[x, y][:3]) - fold, tolerance,
-                                         (text, size, x, y, pixels[x, y]))
+                                         ('inside', text, size, x, y, pixels[x, y]))
+                elif coverage[x, y]:
+                    # Partly covered: the fold's edge, mixed with the page,
+                    # the outline ring or the transparent margin, all no
+                    # lighter than the fold, so the same bound holds. White
+                    # ink blended into an edge pixel still fails it (TOML's
+                    # nick at 2b2bacb showed only here, 20-90 levels over).
+                    self.assertLessEqual(min(pixels[x, y][:3]) - fold, tolerance,
+                                         ('edge', coverage[x, y], text, size, x, y, pixels[x, y]))
 
     def test_white_ink_stays_clear_of_fold(self):
         # Shipped pixels: 16/32 are drawn on the pixel grid; 64 and up are
-        # Lanczos downsamples. Seams where the fold meets the outline ring by
-        # at most a few levels; a blended glyph stroke is far above 16.
+        # Lanczos downsamples, checked on every pixel the fold touches.
+        # Seams where the fold meets the outline ring are at most a few
+        # levels over the fold; a blended glyph stroke is far above 16.
         for size in (16, 32, 64, 128, 256):
             mask = self.fold_mask(size)
             for text, _ in icons.TYPES:
                 with self.subTest(text=text, size=size):
                     self.assert_fold_has_no_light_ink(icons.doc_icon(text, size), mask, text, size, 16)
+
+    def test_fold_check_sees_ink_on_partly_covered_pixels(self):
+        # A near-white blend in one edge pixel only (none inside) must fail.
+        size, text = 128, 'TOML'
+        mask = self.fold_mask(size)
+        image = icons.doc_icon(text, size)
+        self.assert_fold_has_no_light_ink(image, mask, text, size, 16)
+        edge = [(x, y) for y in range(size) for x in range(size) if 0 < mask.getpixel((x, y)) < 255]
+        self.assertTrue(edge)
+        x, y = edge[len(edge) // 2]
+        fold = min(icons.shade(icons.ci.hx(icons.STYLES[text][0]), 255, .16)[:3])
+        image.putpixel((x, y), (fold + 40,) * 3 + (255,))
+        with self.assertRaises(AssertionError):
+            self.assert_fold_has_no_light_ink(image, mask, text, size, 16)
 
     def test_supersampled_glyph_stays_clear_of_fold(self):
         # Before the downsample the fold is one flat colour, so no glyph ink at all.
