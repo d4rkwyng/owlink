@@ -275,7 +275,11 @@ final class OwlinkUITests: XCTestCase {
     }
 
     /// Share… (Share & Export ›) brings up the share sheet with the
-    /// document's copy; it is dismissed without sharing.
+    /// document's copy (its caption names the document); it is dismissed
+    /// without sharing, and goes. The sheet is the system's: its remote
+    /// container and activity list, the caption an Other (not a
+    /// StaticText) in a popover on an iPad (b18 gate: the old check looked
+    /// for neither and failed with the popover up).
     func testShareOpensTheShareSheet() throws {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
@@ -284,12 +288,33 @@ final class OwlinkUITests: XCTestCase {
         let share = app.collectionViews.buttons["editor.menu.share"].firstMatch
         XCTAssertTrue(share.waitForExistence(timeout: 5), "no Share… in Share & Export ›")
         share.tap()
-        let sheet = app.descendants(matching: .any)["editor.shareSheet"].firstMatch
-        let named = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "README")).firstMatch
-        XCTAssertTrue(sheet.waitForExistence(timeout: 10) || named.waitForExistence(timeout: 5), "no share sheet")
+        let sheet = app.otherElements["ShareSheet.RemoteContainerView"].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 15), "no share sheet")
+        XCTAssertFalse(sheet.frame.isEmpty, "the share sheet isn't on screen: \(sheet.frame)")
+        let activities = sheet.collectionViews["activityCollectionView"].firstMatch
+        XCTAssertTrue(activities.waitForExistence(timeout: 10), "no activities in the share sheet")
+        let caption = sheet.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "README")).firstMatch
+        XCTAssertTrue(caption.waitForExistence(timeout: 10), "the share sheet doesn't name the document")
+        let popover = app.popovers.containing(.other, identifier: "ShareSheet.RemoteContainerView").firstMatch
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(popover.exists, "the share sheet isn't a popover on an iPad")
+        }
         shoot("share-sheet")
-        let close = app.buttons["Close"].firstMatch
-        if close.exists { close.tap() } else { closeMenu(app) }
+        // Dismissed without sharing: outside the popover (iPad), or the
+        // sheet's Close (iPhone).
+        let outside = app.otherElements["PopoverDismissRegion"].firstMatch
+        let close = sheet.buttons["Close"].firstMatch.exists ? sheet.buttons["Close"].firstMatch : app.buttons["Close"].firstMatch
+        if popover.exists, outside.exists {
+            outside.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.9)).tap()
+        } else if close.waitForExistence(timeout: 3) {
+            close.tap()
+        } else {
+            XCTFail("no way to dismiss the share sheet (no popover outside, no Close)")
+        }
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 10), "the share sheet is still up after its dismissal")
+        // (A hidden, offscreen activity list may stay in the tree: none is shown.)
+        let left = app.collectionViews["activityCollectionView"].firstMatch
+        XCTAssertFalse(left.exists && left.isHittable, "the share sheet's activities are still up")
     }
 
     // MARK: Settings and the back chevron (0.5.2 (17))
