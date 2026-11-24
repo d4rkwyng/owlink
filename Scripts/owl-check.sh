@@ -12,7 +12,9 @@
 # while Ask Cedric is key never become tabs of the panel. Recent hints in
 # the popover show a hint again (OwlHistoryCapCheck.swift), and a log over
 # the auto-review cap is never checked on its own: a quiet note, and Ask AI
-# Now only after a confirmation. Snapshots go to the directory given
+# Now only after a confirmation. With the built-in engine (a spy, never
+# llama.cpp), opening and idling never load the model (BuiltInGateCheck).
+# Snapshots go to the directory given
 # (default: a temp dir) for a look; CEDRIC_OWL_CHECK_SHOTS=dir also copies
 # the recent-hint and cap snapshots there.
 #
@@ -142,6 +144,22 @@ CEDRIC_SESSION_DIR="$WORK/session-cap" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAV
 CEDRIC_OPEN="$WORK/pwnagotchi.log" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_SOURCE=rulesAndAI CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
 CEDRIC_AI=1 CEDRIC_AI_FAKE=0.3 CEDRIC_AI_AUTO=1 CEDRIC_AI_PAUSE=0.2 CEDRIC_AI_MIN_IDLE=0.2 CEDRIC_AI_INTERVAL=0.2 \
 CEDRIC_AI_DEFAULTS="$SUITE" CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/cap" CEDRIC_OWL_CHECK_CAP=1 "$BIN" || status=1
+# The freeze path (BuiltInGateCheck.swift): Built-in, automatic checks on,
+# Rules + AI, Load model at launch off. Opening, typing and idling load
+# nothing; Ask AI Now loads once; the watchdog's notice; the setting.
+# CEDRIC_BUILTIN_SPY=1: a spy instead of llama.cpp (never a real model),
+# and a stand-in "installed" default model in a temp models dir.
+MODELS="$WORK/models"
+mkdir -p "$MODELS"
+read -r MFILE MSIZE MSHA < <(python3 -I -c 'import json,sys; m=[x for x in json.load(open(sys.argv[1]))["models"] if x.get("isDefault")][0]; print(m["fileName"], m["sizeBytes"], m["sha256"])' Resources/AI/models.json)
+mkfile -n "$MSIZE" "$MODELS/$MFILE"
+printf '%s\n' "$MSHA" > "$MODELS/$MFILE.verified"
+printf 'func total(_ items: [Int]) -> Int {\n    var t = 0\n    for i in items { t += i }\n    return t\n}\n' > "$WORK/Gate.swift"
+CEDRIC_SESSION_DIR="$WORK/session-builtin" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/Gate.swift" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_SOURCE=rulesAndAI CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_AI=1 CEDRIC_AI_BACKEND=builtIn CEDRIC_AI_AUTO=1 CEDRIC_AI_PAUSE=0.5 CEDRIC_AI_MIN_IDLE=1 CEDRIC_AI_INTERVAL=1 \
+CEDRIC_BUILTIN_SPY=1 CEDRIC_MODELS_DIR="$MODELS" \
+CEDRIC_AI_DEFAULTS="$SUITE" CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/builtin" CEDRIC_OWL_CHECK_BUILTIN=1 "$BIN" || status=1
 defaults delete "$SUITE" >/dev/null 2>&1 || true
 rm -f "$HOME/Library/Preferences/$SUITE.plist"
 echo "owl-check: snapshots in $OUT"

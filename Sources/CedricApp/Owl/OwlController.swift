@@ -638,6 +638,18 @@ final class OwlController: NSObject, NSPopoverDelegate {
         showBubble(hint, buttons: buttons(for: hint, tab: tab))
     }
 
+    // MARK: Notices
+
+    static let builtInUnhealthyID = "cedric.builtin-unhealthy"
+
+    /// A notice in the owl's bubble (not an alert: it takes no focus and
+    /// blocks nothing). OK, or the close button, dismisses it.
+    func showNotice(id: String, title: String, detail: String) {
+        let hint = OwlHint(id: id, kind: .warning, title: title, detail: detail, source: "notice")
+        presented = (hint, nil, nil)
+        showBubble(hint, buttons: [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }])
+    }
+
     // MARK: Recent hints, again
 
     /// Hints shown again from the popover (checks).

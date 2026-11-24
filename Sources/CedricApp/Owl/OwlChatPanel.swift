@@ -779,7 +779,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         flushes = 0
         updateButtons()
         tab.owl?.chatCue(.asked)
-        task = Task { @MainActor [weak self] in
+        // The user asked: this request may load the built-in model
+        // (BuiltInLoadIntent). Everything it starts inherits that.
+        task = BuiltInLoad.$intent.withValue(.userAsked) { Task { @MainActor [weak self] in
             guard let self else { return }
             guard let engine = await OwlChatStore.shared.engine() else {
                 self.finish(nil, error: String(localized: "No AI engine is ready. Set one up in Cedric › Cedric AI Settings…"))
@@ -897,7 +899,7 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             } catch {
                 self.finish(nil, error: Self.describe(error))
             }
-        }
+        } }
     }
 
     nonisolated static func describe(_ e: Error) -> String {
@@ -907,6 +909,9 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         case LocalAIError.http(let c): return String(localized: "The AI server answered with an error (\(c)).")
         case BuiltInError.promptTooLong: return String(localized: "Too much text for this model: select less and ask again.")
         case BuiltInError.notInstalled: return String(localized: "No model downloaded yet: download one in Settings › Cedric.")
+        case BuiltInError.loadTimedOut: return String(localized: "The built-in model didn’t finish loading. Automatic AI is off for now; ask again to retry once, or restart Owlink.")
+        case BuiltInError.unhealthy: return String(localized: "The built-in model didn’t finish loading earlier. Restart Owlink to try it again.")
+        case BuiltInError.automaticLoadNotAllowed: return String(localized: "The built-in model isn’t loaded yet: ask again.")
         default: return String(localized: "Something went wrong: \(String(String(describing: e).prefix(160)))")
         }
     }

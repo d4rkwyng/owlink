@@ -44,6 +44,10 @@ final class OwlHub {
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { OwlHub.shared.appActiveChanged() }
         }
+        NotificationCenter.default.addObserver(forName: .cedricBuiltInModelUnhealthy, object: nil, queue: .main) { n in
+            let seconds = n.userInfo?["seconds"] as? Int ?? Int(BuiltInWatchdog.seconds)
+            MainActor.assumeIsolated { OwlHub.shared.builtInModelUnhealthy(seconds: seconds) }
+        }
         ai.onThinking = { [weak self] id, on in self?.tab(for: id)?.owl?.setThinking(on) }
         ai.onHints = { [weak self] ctx, hints in self?.presentAI(hints, context: ctx) }
         ai.onStateChange = { [weak self] in self?.applySource() }
@@ -64,6 +68,23 @@ final class OwlHub {
         await ai.apply(s)
         let source = Settings.shared.owlHintSource.afterAIApply(wasActive: wasActive, isActive: ai.isActive)
         if source != Settings.shared.owlHintSource { Settings.shared.owlHintSource = source }
+    }
+
+    /// Notices shown for a built-in load that hung (checks).
+    private(set) var unhealthyNotices = 0
+
+    /// The built-in model did not finish loading within the watchdog's
+    /// limit: say so once in the front tab's owl bubble (no alert, no
+    /// focus change). Automatic AI is already off (BuiltInSession); the
+    /// popover's status line says so too.
+    func builtInModelUnhealthy(seconds: Int) {
+        unhealthyNotices += 1
+        applySource()
+        let target = activeTab ?? tabs.first { $0.window?.isKeyWindow == true } ?? tabs.first
+        target?.owl?.showNotice(
+            id: OwlController.builtInUnhealthyID,
+            title: String(localized: "The built-in model didn’t finish loading"),
+            detail: String(localized: "It was still loading after \(seconds) seconds. Automatic AI is off for now; rules hints keep working. Ask Cedric or Review can try it once more, or restart Owlink."))
     }
 
     func appActiveChanged() {

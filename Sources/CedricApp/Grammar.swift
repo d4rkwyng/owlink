@@ -260,10 +260,21 @@ final class EditorGrammar {
         // Automatic AI grammar only where automatic AI checks are on (never
         // on Intel by default), at most once per the AI's interval, and
         // never over the auto-review cap.
+        // The built-in engine only once the user has loaded its model this
+        // session (or "Load model at launch"): this pass never loads it.
         if prose, !tab.autoReviewCapped, Settings.shared.owlChat, OwlHub.shared.ai.isActive, OwlHub.shared.ai.isAutomatic,
+           Self.automaticAIAllowed(),
            Date().timeIntervalSince(lastAIPass ?? .distantPast) >= AIStore.load().minInterval {
             checkWithAI(userAsked: false)
         }
+    }
+
+    /// Automatic AI grammar may run: not on the built-in engine before its
+    /// model was loaded by the user (or at launch) this session, nor after
+    /// a load hung. Other engines: as before.
+    static func automaticAIAllowed() -> Bool {
+        guard AskCedricEngine.fakeDelay == nil, AskCedricEngine.settings()?.backend == .builtIn else { return true }
+        return BuiltInModelHost.shared.session.allowsAutomatic
     }
 
     // MARK: Check Grammar with Cedric
@@ -297,7 +308,9 @@ final class EditorGrammar {
         aiPasses += 1
         lastAIPass = Date()
         tab.owl?.setThinking(true)
-        Task { @MainActor [weak self] in
+        // Asked for: may load the built-in model. Automatic: may not
+        // (BuiltInModelHost refuses; `automaticAIAllowed` already checked).
+        BuiltInLoad.$intent.withValue(userAsked ? .userAsked : .automatic) { Task { @MainActor [weak self] in
             let masked = await Task.detached(priority: .utility) {
                 ProseMask.masked(text as NSString, language: language, openFence: lead.fence, blankPrefix: lead.frontMatter)
             }.value
@@ -328,7 +341,7 @@ final class EditorGrammar {
                 }
             }
             done?(found.count)
-        }
+        } }
     }
 
     /// The owl's bubble for the issue nearest after the caret in view, if
