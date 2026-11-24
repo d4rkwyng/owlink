@@ -4,6 +4,12 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **Large text files no longer crash on open.** On macOS 26, opening a text file over about 25 MB (a 30 MB or 55 MB log, for example) made Owlink quit within a second. Large files of ordinary lines now open in large-document mode as before, without the crash.
+- **Read-only files stay read-only.** A file you can't write (no write permission, such as `chmod 444`, locked in the Finder, or on a read-only volume) opens read-only, with “Read-Only” in the title and a bar that says why. ⌘S no longer replaces it silently: Owlink offers Save As instead. **Allow Editing** on the bar lets you type, but the file is still never saved over. Cedric's Apply is off for these files. If the file's permissions change while it is open, Owlink notices when you save or come back to the window.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security
