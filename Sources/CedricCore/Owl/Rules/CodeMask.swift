@@ -19,8 +19,9 @@ public struct CodeMask {
         public var prefix: String = ""
     }
 
-    /// Sorted by location, not overlapping (a string inside an
-    /// interpolation is part of the string around it).
+    /// Sorted by location, not overlapping. A string with interpolations
+    /// is one span per literal segment (the interpolated code is in none);
+    /// a segment after an interpolation is blanked whole, closing quote too.
     public let spans: [Span]
     /// The text with comments and string insides blanked (see above), as
     /// an NSString made from UTF-16 units: fast `character(at:)` and

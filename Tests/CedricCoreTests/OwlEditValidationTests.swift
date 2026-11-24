@@ -201,6 +201,19 @@ import Testing
         #expect(OwlEditValidation.bracketProblems("s = \"\"\"\n( [ {\n\"\"\"\nf(s)\n", language: .python).isEmpty)
         #expect(OwlEditValidation.bracketProblems("let r = /[(]/\n", language: .swift).isEmpty)
         #expect(OwlEditValidation.bracketProblems("let r = #/[(]/#\n", language: .swift).isEmpty)
+        // Interpolated code is code: its brackets count, the literal around it doesn't.
+        #expect(OwlEditValidation.bracketProblems("let s = \"\\(items[0]\"\n", language: .swift).isEmpty == false)
+        #expect(OwlEditValidation.bracketProblems("const t = `a ${b(}`;\n", language: .typescript).isEmpty == false)
+        #expect(OwlEditValidation.bracketProblems("const t = `a ${b(c)}`;\n", language: .typescript).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("const t = `a ${b(c)} ) ${d[0]} [`;\n", language: .javascript).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("let s = \"(\\(a[0]) ]\\(f(\"x)\"))\"\n", language: .swift).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("let s = #\"(\\#(a[0]) ]\"#\n", language: .swift).isEmpty)
+        // An unclosed interpolation no longer hides a closer further on.
+        #expect(OwlEditValidation.bracketProblems("let s = \"\\(a\"\nf(x)\n", language: .swift).isEmpty == false)
+        // Through validate: an edit adding the unclosed "[" turns Apply off.
+        let interp = OwlEditValidation.validate(language: "swift", fileName: "a.swift", before: "let s = \"\\(items)\"\n",
+                                                after: "let s = \"\\(items[0]\"\n", original: "items)", replacement: "items[0]", script: nil)
+        #expect(interp.hardIssue?.check == .brackets)
         // A string past the highlighter's 20,000-unit line limit is still a string.
         let long = "const s = \"" + String(repeating: "a", count: 25_000) + "(\";\n"
         #expect(OwlEditValidation.bracketProblems(long, language: .javascript).isEmpty)
