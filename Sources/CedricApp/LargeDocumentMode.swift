@@ -76,13 +76,15 @@ extension EditorWindowController {
     /// The owl's rules and AI stay off for this tab (unless clicked).
     var owlIdleForSpeed: Bool { extrasPaused }
 
-    func applyLargeMode(_ reason: LargeDocument.Reason?, newText: Bool) {
+    /// `chunks`: TextKit sees long lines in chunks (LargeDocument.needsChunks);
+    /// nil keeps the current choice. Only large mode chunks.
+    func applyLargeMode(_ reason: LargeDocument.Reason?, newText: Bool, chunks: Bool? = nil) {
         let wasPaused = extrasPaused
         let wasChunked = textView.contentStorage?.chunkLimit != nil
         largeReason = reason
         largePending = false
         if newText { largeOverride = false }
-        let chunk = reason != nil ? LargeDocument.chunkLength : nil
+        let chunk = reason != nil && (chunks ?? wasChunked) ? LargeDocument.chunkLength : nil
         // Folding is off in large mode (the chunks can't skip hidden lines).
         if reason != nil { foldingContextChanged() }
         textView.contentStorage?.chunkLimit = chunk
@@ -129,6 +131,17 @@ extension EditorWindowController {
     /// threshold turns large mode on (once per run loop turn, after
     /// TextKit has finished with the edit).
     func checkLargeAfterEdit(lines: Range<Int>) {
+        if let reason = largeReason, !largePending, textView.contentStorage?.chunkLimit == nil,
+           LargeDocument.needsChunks(afterEditOf: lines, in: lineIndex) {
+            // A large file of short lines (no chunks) just got a long line:
+            // chunks from the next turn, once TextKit is done with the edit.
+            largePending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.applyLargeMode(reason, newText: false, chunks: true)
+            }
+            return
+        }
         guard largeReason == nil, !largePending, let reason = LargeDocument.reason(afterEditOf: lines, in: lineIndex) else { return }
         // Paused from now (no sniff, spell check or owl for this edit).
         // Any edit card shows Apply off before the bar appears on the next
@@ -137,7 +150,8 @@ extension EditorWindowController {
         owlChat?.refreshCards()
         DispatchQueue.main.async { [weak self] in
             guard let self, self.largeReason == nil else { return }
-            self.applyLargeMode(reason, newText: false)
+            self.applyLargeMode(reason, newText: false,
+                                chunks: LargeDocument.needsChunks(afterEditOf: lines, in: self.lineIndex))
         }
     }
 }

@@ -534,14 +534,24 @@ What Cedric does now:
   content and separator ranges supplied (TextKit raises without them).
   Lines that fit in one chunk get TextKit's own paragraph (making those
   ourselves broke its height estimates: scrolling a 6 MB many-line file
-  snapped back).
+  snapped back). The storage chunks only when a line is over 20,000
+  characters (`LargeDocument.needsChunks`, also after an edit): a file
+  that is large by size alone keeps TextKit's own enumeration. In 0.5.2
+  every large document chunked, and a log past 25 M characters (the size
+  threshold) went through this override one short line at a time; on
+  macOS 26.6.2 that crashed in layout within a second of opening
+  (`-[NSCountableTextLocation compare:]` raising from
+  `_NSTextLayoutFragmentStorage` under `estimatedSizeForLastTextContainer`;
+  macOS 27 was fine). `Scripts/bigfile-check.sh` opens a generated 55 MiB
+  log (`CEDRIC_CHECK=bigfile`).
   Chunk size, measured: 500 → 31 ms per keystroke (too many elements),
   1,000 → 6–10 ms, 2,048 → 6.5 ms, 4,096 → 6.7 ms, 8,192 → 7.6 ms.
   Wrapping stays as the user set it: chunked, wrapped and unwrapped cost
   the same, so there's no reason to turn it off.
 - **Large mode** (`LargeDocument` in CedricCore): on when any line is
   longer than 20,000 characters (from the table above: well under a frame
-  on slower Macs) or the document is longer than 5,000,000 UTF-16 units.
+  on slower Macs) or the document is longer than 25,000,000 UTF-16 units
+  (`LargeDocument.sizeThreshold`).
   Checked before the text reaches TextKit on open, reload and restore, and
   after each edit for the edited lines only (a long paste turns it on; the
   pause takes effect for that same edit, the chunks a run-loop turn later).

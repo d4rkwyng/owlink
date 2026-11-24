@@ -427,7 +427,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         loading = true
         doc.detectedIndentation = nil
         // Large mode first, so TextKit never lays out a huge line whole.
-        applyLargeMode(LargeDocument.reason(for: LineIndex(text as NSString)), newText: true)
+        let incoming = LineIndex(text as NSString)
+        applyLargeMode(LargeDocument.reason(for: incoming), newText: true, chunks: LargeDocument.needsChunks(incoming))
         PerfTrace.mark("large_check")
         let attrs = baseAttributes()
         let storage = textView.textStorage!
