@@ -63,16 +63,62 @@ import Testing
         #expect(chmod(dir.path, 0o555) == 0)
         let opened = try #require(DiskStamp.of(url))
         var failed = false
+        var thrown: Error?
         do {
             try DocumentWrite.write(Data(repeating: UInt8(ascii: "n"), count: 120_000), to: url, fileManager: .default,
                                     afterCheck: nil, faults: .init(failWriteAfter: 40_000))
-        } catch { failed = true }
+        } catch { failed = true; thrown = error }
         #expect(failed)
         #expect(try Data(contentsOf: url) == original, "put back")
         let after = try #require(DiskStamp.of(url))
         #expect(DiskStamp.changed(known: opened, current: after), "the failed save moved the stamp, so ⌘S will ask")
         let cause = DiskConflict.cause(known: opened, lastSaved: nil, failedSave: after, otherTabsSaved: [], current: DiskStamp.of(url))
         #expect(cause == .ownFailedSave)
+        // What the tab records (EditorWindowController.write(to:) calls
+        // this): the writer's own word for how it left the file.
+        let error = try #require(thrown)
+        let recorded = try #require(DiskConflict.failedSaveStamp(error, saving: url, fileURL: url), "the writer says it wrote into the file")
+        #expect(recorded == after)
+        #expect(DiskConflict.cause(known: opened, lastSaved: nil, failedSave: recorded, otherTabsSaved: [], current: DiskStamp.of(url))
+                == .ownFailedSave)
+        #expect(SaveFailure.cause(of: error) != .changedWhileSaving, "still an I/O failure, not \"replaced\"")
+        // A Save As to somewhere else that fails records nothing for this tab.
+        #expect(DiskConflict.failedSaveStamp(error, saving: url, fileURL: dir.appendingPathComponent("other.md")) == nil)
+    }
+
+    /// Codex round 2: another app replacing the file while Owlink saves it
+    /// (the in-place save then refuses it: EBUSY) moved the stamp across
+    /// the failed save, and the next ⌘S said Owlink's own save didn't
+    /// finish. Owlink never touched it: nothing recorded, neutral words.
+    @Test func aFileReplacedByAnotherAppDuringTheSaveIsNotOwlinks() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-conflict-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { _ = chmod(dir.path, 0o755); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("swapped.md")
+        try Data("mine\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: url.path)
+        #expect(chmod(dir.path, 0o555) == 0)
+        let opened = try #require(DiskStamp.of(url))
+        var thrown: Error?
+        do {
+            try DocumentWrite.write(Data("new\n".utf8), to: url, fileManager: .default, afterCheck: {
+                // Another app swaps the file between Owlink's check and its write.
+                _ = chmod(dir.path, 0o755)
+                let other = dir.appendingPathComponent(".other")
+                try? Data("theirs, longer\n".utf8).write(to: other)
+                _ = rename(other.path, url.path)
+                _ = chmod(dir.path, 0o555)
+            })
+        } catch { thrown = error }
+        let error = try #require(thrown, "the in-place save refuses the swapped file")
+        #expect(SaveFailure.cause(of: error) == .changedWhileSaving)
+        #expect(try Data(contentsOf: url) == Data("theirs, longer\n".utf8), "Owlink didn't write into it")
+        let now = try #require(DiskStamp.of(url))
+        #expect(DiskStamp.changed(known: opened, current: now), "the stamp moved (another app), so ⌘S will ask")
+        #expect(DocumentWrite.fileLeft(by: error) == nil)
+        let recorded = DiskConflict.failedSaveStamp(error, saving: url, fileURL: url)
+        #expect(recorded == nil, "not put down to Owlink")
+        #expect(DiskConflict.cause(known: opened, lastSaved: nil, failedSave: recorded, otherTabsSaved: [], current: now) == .sinceOpened)
     }
 
     /// The owl's "Reload?" for the same change doesn't blame another app either.

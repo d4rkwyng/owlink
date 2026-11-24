@@ -312,14 +312,16 @@ public enum DocumentWrite {
             if data.count < oldCount, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
             guard fsync(fd) == 0, fstat(fd, &written) == 0 else { throw writeError(errno, url) }
         } catch {
+            // From here on the error says Owlink wrote into the file, and
+            // how it left it (DiskConflict: "Owlink's last save … didn't finish").
             do {
                 if faults?.failRestore == true { throw writeError(EIO, url) }
                 try restore(fd, from: recovery, count: oldCount, url: url)
             } catch {
-                throw keptRecoveryCopy(recovery, after: error, url: url)
+                throw leftFile(fd, keptRecoveryCopy(recovery, after: error, url: url))
             }
             removeRecoveryCopy(recovery)
-            throw error
+            throw leftFile(fd, error)
         }
         removeRecoveryCopy(recovery)
         return DiskStamp(written)
@@ -376,6 +378,29 @@ public enum DocumentWrite {
     private static func removeRecoveryCopy(_ copy: URL) {
         _ = unlink(copy.path)
         _ = rmdir(copy.deletingLastPathComponent().path)
+    }
+
+    /// The key under which a failed save's error carries the stamp of
+    /// the file as that save left it (`fileLeft(by:)`).
+    static let leftStampKey = "OwlinkSaveLeftFile"
+
+    /// The file as a failed save left it, when that save wrote into it
+    /// (an in-place write that stopped part way, put back or not): read
+    /// from the open file by the writer itself. Nil when the save failed
+    /// before touching the file, whatever happened to the file meanwhile.
+    public static func fileLeft(by error: Error) -> DiskStamp? {
+        (error as NSError).userInfo[leftStampKey] as? DiskStamp
+    }
+
+    /// `error`, carrying the stamp of `fd` now (`fileLeft(by:)`).
+    private static func leftFile(_ fd: Int32, _ error: Error) -> Error {
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { return error }
+        let ns = error as NSError
+        var info = ns.userInfo
+        info[leftStampKey] = DiskStamp(st)
+        return CocoaError(CocoaError.Code(rawValue: ns.domain == NSCocoaErrorDomain ? ns.code : CocoaError.fileWriteUnknown.rawValue),
+                          userInfo: info)
     }
 
     /// The save's error, saying where the recovery copy is: the file

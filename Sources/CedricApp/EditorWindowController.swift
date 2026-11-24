@@ -1069,14 +1069,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     func write(to url: URL) -> Bool {
-        let before = url == doc.fileURL ? DiskStamp.of(url) : nil
         do {
             try doc.write(textView.string, to: url)
         } catch {
-            // This tab's own file, changed by the save that failed: the
-            // next ⌘S's sheet says Owlink did it (DiskConflict).
-            if let before, let after = DiskStamp.of(url), DiskStamp.changed(known: before, current: after) {
-                doc.failedSaveStamp = after
+            // This tab's own file, written into by the save that failed
+            // (the writer says so): the next ⌘S's sheet says Owlink did it
+            // (DiskConflict). Anything else keeps the neutral wording.
+            if let left = DiskConflict.failedSaveStamp(error, saving: url, fileURL: doc.fileURL) {
+                doc.failedSaveStamp = left
             }
             showSaveError(error, saving: url, offer: .saveAs)
             return false

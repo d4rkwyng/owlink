@@ -38,6 +38,19 @@ public enum DiskConflict {
         return .sinceOpened
     }
 
+    /// What a tab records after a save of `url` failed with `error`, for
+    /// `cause(failedSave:)`: the file as that save left it, only when the
+    /// writer says the save wrote into it (`DocumentWrite.fileLeft(by:)`),
+    /// and only for the tab's own file (`fileURL`; a Save As elsewhere
+    /// leaves it alone). A save that failed before touching the file
+    /// records nothing, even if the file changed meanwhile: another app
+    /// replacing it is not Owlink's doing (Codex round 2: any change of
+    /// stamp across the failed save was put down to Owlink).
+    public static func failedSaveStamp(_ error: Error, saving url: URL, fileURL: URL?) -> DiskStamp? {
+        guard url == fileURL else { return nil }
+        return DocumentWrite.fileLeft(by: error)
+    }
+
     /// The sheet's bold line.
     public static func message(name: String) -> String {
         String(localized: "“\(name)” changed on disk.")
