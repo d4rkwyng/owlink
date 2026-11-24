@@ -683,4 +683,47 @@ final class OwlinkUITests: XCTestCase {
         expectSettings("right after Ask Cedric's sheet closed")
         assertBackReturnsToFiles(app, "after ⌘, in every state")
     }
+
+    // MARK: Focus Preview listed once (0.5.2 (16) findings)
+
+    /// Focus Preview is listed once: never in the ••• menu's main list (not
+    /// as a collapsed bar button either, with the preview off or on), once
+    /// in its Preview submenu, at most once in the bar. On every device
+    /// the gate runs (iPhone, iPad mini, iPad Pro 13).
+    func testFocusPreviewListedOnce() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        let named = NSPredicate(format: "label == %@", "Focus Preview")
+        for previewOn in [false, true] {
+            let state = previewOn ? "preview on" : "preview off"
+            XCTAssertLessThanOrEqual(app.navigationBars.descendants(matching: .any).matching(named).count, 1,
+                                     "\(state): Focus Preview more than once in the bar")
+            openMore(app)
+            let preview = app.collectionViews.buttons["Preview"].firstMatch
+            XCTAssertTrue(preview.waitForExistence(timeout: 5), "\(state): no Preview submenu in the ••• menu")
+            // The whole main list, scrolled through (it is long).
+            var seen = 0
+            let list = app.collectionViews.firstMatch
+            for _ in 0..<6 {
+                seen = max(seen, app.collectionViews.descendants(matching: .any).matching(named).count)
+                list.swipeUp(velocity: .slow)
+            }
+            seen = max(seen, app.collectionViews.descendants(matching: .any).matching(named).count)
+            XCTAssertEqual(seen, 0, "\(state): Focus Preview in the ••• menu's main list")
+            for _ in 0..<6 { list.swipeDown(velocity: .slow) }
+            menuItem(app, "Preview").tap()
+            let focus = app.collectionViews.buttons.matching(named)
+            XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "\(state): no Focus Preview in the Preview submenu")
+            XCTAssertEqual(app.collectionViews.descendants(matching: .any).matching(named).count, 1,
+                           "\(state): Focus Preview more than once in the Preview submenu")
+            shoot("focus-preview-once-\(previewOn ? "on" : "off")")
+            if !previewOn {
+                // The submenu's Preview toggle: shown for the second round.
+                app.buttons["editor.menu.preview"].firstMatch.tap()
+                XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 10), "the preview didn't show")
+            } else {
+                closeMenu(app)
+            }
+        }
+    }
 }
