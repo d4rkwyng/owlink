@@ -269,9 +269,9 @@ final class EditorGrammar {
         }
     }
 
-    /// Automatic AI grammar may run: not on the built-in engine before its
-    /// model was loaded by the user (or at launch) this session, nor after
-    /// a load hung. Other engines: as before.
+    /// Automatic AI grammar may run: on the built-in engine only while a
+    /// model the user (or the launch opt-in) loaded is in memory, and not
+    /// after a load hung. Other engines: as before.
     static func automaticAIAllowed() -> Bool {
         guard AskCedricEngine.fakeDelay == nil, AskCedricEngine.settings()?.backend == .builtIn else { return true }
         return BuiltInModelHost.shared.session.allowsAutomatic

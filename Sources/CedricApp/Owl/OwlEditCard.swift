@@ -72,7 +72,7 @@ final class OwlEditCard: NSStackView {
         titleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         badgeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
         badgeLabel.textColor = .systemOrange
-        reasonLabel.stringValue = p.reason
+        reasonLabel.stringValue = OwlProposalWording.guardReason(p.reason)
         reasonLabel.font = .systemFont(ofSize: 11)
         reasonLabel.textColor = .secondaryLabelColor
         reasonLabel.isHidden = p.reason.isEmpty
@@ -269,7 +269,7 @@ final class OwlEditCard: NSStackView {
 
     private func updateAccessLabel() {
         var label = titleLabel.stringValue + ". " + badgeLabel.stringValue
-        if !proposal.reason.isEmpty { label += ": " + proposal.reason }
+        if !proposal.reason.isEmpty { label += ": " + OwlProposalWording.guardReason(proposal.reason) }
         if warnsInvisible { label += ". " + OwlEditInvisibles.warning }
         setAccessibilityLabel(label)
     }

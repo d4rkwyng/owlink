@@ -188,6 +188,55 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         #expect(rt.requests.value.count == 2)
     }
 
+    /// After the user's load is unloaded for idleness, automatic checks
+    /// (open, edit, idle) never load it again; the next request the user
+    /// makes, or the launch opt-in, does.
+    @Test func afterAnIdleUnloadAutomaticChecksDoNotReload() async throws {
+        let rt = FakeRuntime(), clock = FakeClock()
+        let host = BuiltInModelHost(runtime: rt, clock: clock)
+        var fast = Self.dereks
+        fast.minInterval = 0.1; fast.pauseDelay = 0.05; fast.minIdle = 0
+        let b = try await bridge(host, clock: clock, settings: fast)
+        let doc = UUID()
+        // Ask AI Now: loads.
+        #expect(b.checkNow(context(gen: 1, doc: doc)))
+        #expect(await eventually { rt.loads.value.count == 1 && rt.requests.value.count == 1 })
+        #expect(await eventually { await MainActor.run { b.lastCheck != nil } })
+        #expect(b.automaticAllowedNow)
+        let path = try #require(await host.loadedPath)
+        // Idle past the timeout: unloaded.
+        await pass(BuiltInModelHost.defaultIdleTimeout + 10, clock, step: 5)
+        #expect(await eventually { await host.loadedPath == nil })
+        #expect(rt.unloaded.value.count == 1)
+        #expect(host.session.explicitlyLoaded && !host.session.modelInMemory)
+        #expect(!b.automaticAllowedNow)
+        // Open another file, edit, idle: gated, no load, no request.
+        let gatedBefore = await b.scheduler?.gatedAutomatic ?? 0
+        let other = UUID()
+        b.contextChanged(context(gen: 1, doc: other))
+        await pass(2, clock, step: 0.1)
+        b.contextChanged(context("let value = items.count + 4", gen: 2, doc: doc))
+        await pass(30, clock, step: 1)
+        #expect(await eventually { await b.scheduler?.gatedAutomatic ?? 0 > gatedBefore })
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(rt.loads.value.count == 1, "automatic checks did not reload the model")
+        #expect(rt.requests.value.count == 1)
+        // Even a direct automatic request (past the scheduler's gate) is
+        // refused without loading.
+        await #expect(throws: BuiltInError.automaticLoadNotAllowed) {
+            _ = try await host.generate(modelAt: path, GenerationRequest(system: "s", user: "u"))
+        }
+        #expect(rt.loads.value.count == 1)
+        // The user asks again: loads again, and automatic may use it.
+        #expect(b.checkNow(context("let value = items.count + 5", gen: 3, doc: doc)))
+        #expect(await eventually { rt.loads.value.count == 2 })
+        #expect(b.automaticAllowedNow)
+        // The launch opt-in may load after an idle unload too.
+        await host.unload()
+        try await host.preload(modelAt: path)
+        #expect(rt.loads.value.count == 3)
+    }
+
     @Test func applyingSettingsLoadsNothingUnlessLoadAtLaunchIsOn() async throws {
         let rt = HangingRuntime(hanging: false), clock = FakeClock()
         let host = BuiltInModelHost(runtime: rt, clock: clock)
@@ -279,9 +328,12 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         for _ in 0..<3 {
             await #expect(throws: BuiltInError.unhealthy) { _ = try await host.generate(modelAt: path, req) }
         }
-        // Explicit, while the stuck load still runs: no second load.
-        await #expect(throws: BuiltInError.unhealthy) {
-            _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: path, req) }
+        // Explicit, while the stuck load still runs: no second load, and
+        // the user is told it is still loading (the retry is kept).
+        for _ in 0..<2 {
+            await #expect(throws: BuiltInError.stillLoading) {
+                _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: path, req) }
+            }
         }
         #expect(rt.attempts.value == 1)
         #expect(await host.loadAttempts == 1)
@@ -293,6 +345,11 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         // Still unhealthy: automatic paths never retry.
         await #expect(throws: BuiltInError.unhealthy) { _ = try await host.generate(modelAt: path, req) }
         #expect(rt.attempts.value == 1)
+        // Now that it has stopped, the user's one retry is still there
+        // (asking while it was stuck didn't use it up).
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: path, req) }
+        #expect(rt.attempts.value == 2)
+        #expect(host.session.unhealthy == nil)
     }
 
     @Test func theUserMayRetryOnceStillWatchdogged() async throws {

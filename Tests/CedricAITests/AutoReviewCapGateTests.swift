@@ -181,11 +181,13 @@ import CedricCore
         #expect(rt.loads.value.isEmpty, "no model loaded")
         #expect(rt.requests.value.isEmpty)
         #expect(await b.scheduler?.requestCount == 0)
-        // An uncapped document on the same engine does load it (the rig
-        // works), once the user has loaded the model this session
-        // (automatic checks never make the first load: BuiltInLoadGateTests).
-        host.session.noteExplicitLoadForTesting()
+        // An uncapped document on the same engine does ask it (the rig
+        // works), once the user has loaded the model (automatic checks
+        // never load it: BuiltInLoadGateTests).
+        #expect(b.checkNow(context(gen: 1, doc: UUID())))
+        #expect(await eventually { rt.loads.value.count == 1 && rt.requests.value.count == 1 })
         b.contextChanged(context(gen: 1, doc: UUID()))
-        #expect(await eventually { !rt.loads.value.isEmpty })
+        #expect(await eventually { rt.requests.value.count == 2 })
+        #expect(rt.loads.value.count == 1)
     }
 }

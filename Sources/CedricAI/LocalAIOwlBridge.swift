@@ -155,8 +155,8 @@ public final class LocalAIOwlBridge {
     public private(set) var preloadsStarted = 0
 
     /// Automatic requests can reach the engine now (always for engines
-    /// without a gate; for the built-in one, once its model was loaded by
-    /// the user or the launch opt-in, and not after a load hung).
+    /// without a gate; for the built-in one, while a model the user or the
+    /// launch opt-in loaded is still in memory, and not after a load hung).
     public var automaticAllowedNow: Bool { automaticGate?.allowsAutomaticRequests ?? true }
     /// The built-in model's load hung this session (`BuiltInWatchdog`).
     public var engineUnhealthy: Bool { automaticGate?.isUnhealthy ?? false }

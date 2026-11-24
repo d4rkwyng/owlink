@@ -925,7 +925,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         case BuiltInError.promptTooLong: return String(localized: "Too much text for this model: select less and ask again.")
         case BuiltInError.notInstalled: return String(localized: "No model downloaded yet: download one in Settings › Cedric.")
         case BuiltInError.loadTimedOut: return String(localized: "The built-in model didn’t finish loading. Automatic AI is off for now; ask again to retry once, or restart Owlink.")
-        case BuiltInError.unhealthy: return String(localized: "The built-in model didn’t finish loading earlier. Restart Owlink to try it again.")
+        case BuiltInError.stillLoading: return String(localized: "The built-in model didn’t finish loading in time and is still busy with that load. Try again in a little while, or restart Owlink.")
+        case BuiltInError.unhealthy: return String(localized: "The built-in model didn’t finish loading earlier, and the one retry didn’t work either. Restart Owlink to try it again.")
         case BuiltInError.automaticLoadNotAllowed: return String(localized: "The built-in model isn’t loaded yet: ask again.")
         default: return String(localized: "Something went wrong: \(String(String(describing: e).prefix(160)))")
         }

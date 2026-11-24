@@ -77,6 +77,12 @@ public enum OwlProposalWording {
         return s
     }
 
+    /// A card's reason ("Fixed the typo"), worded as a proposal: the card
+    /// is itself the one thing to apply.
+    public static func guardReason(_ reason: String) -> String {
+        guardClaims(reason, proposals: 1)
+    }
+
     private static func entry(_ past: String) -> (past: String, noun: String, gerund: String)? {
         verbs.first { $0.past == past.lowercased() }
     }

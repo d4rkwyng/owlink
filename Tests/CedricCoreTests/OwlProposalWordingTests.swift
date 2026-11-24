@@ -39,6 +39,13 @@ import Testing
         #expect(!once.contains("Fixed") && !once.contains("changed"))
     }
 
+    @Test func aCardReasonReadsAsAProposal() {
+        #expect(OwlProposalWording.guardReason("Fixed the typo") == "Proposed fix: the typo")
+        #expect(OwlProposalWording.guardReason("I changed the loop to a guard.") == "I propose changing the loop to a guard.")
+        #expect(OwlProposalWording.guardReason("Typo in a comment") == "Typo in a comment")
+        #expect(OwlProposalWording.guardReason("") == "")
+    }
+
     @Test func headerAndBadge() {
         #expect(OwlProposalWording.badge == "Proposed, not applied")
         #expect(OwlProposalWording.header(count: 1) == "Proposed 1 change, not applied")

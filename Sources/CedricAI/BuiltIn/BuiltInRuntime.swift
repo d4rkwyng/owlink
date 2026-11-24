@@ -59,8 +59,9 @@ public enum BuiltInError: Error, Equatable, Sendable {
     case promptTooLong(tokens: Int, limit: Int)
     case generationFailed(String)
     case cancelled
-    /// An automatic check asked before any explicit load this session
-    /// (`BuiltInLoadIntent`): nothing was loaded.
+    /// An automatic check asked while no model was in memory (before any
+    /// explicit load, or after an idle unload; `BuiltInLoadIntent`):
+    /// nothing was loaded.
     case automaticLoadNotAllowed
     /// The load (or its first decode) did not return within the
     /// watchdog's limit (`BuiltInWatchdog`).
@@ -68,6 +69,10 @@ public enum BuiltInError: Error, Equatable, Sendable {
     /// An earlier load hung this session; the engine is not loaded again
     /// until the user retries (once) or restarts.
     case unhealthy
+    /// The user asked while a load the watchdog gave up on is still
+    /// running: no second load starts, and the one retry is kept for
+    /// when it has stopped.
+    case stillLoading
 }
 
 /// The inference library behind the built-in engine (llama.cpp in the app,
@@ -100,15 +105,18 @@ extension LoadedModel {
 /// RAM back. Never unloads during a generation.
 ///
 /// Who may load (`BuiltInLoad.intent`): a request the user made, or the
-/// "Load model at launch" opt-in. An automatic request gets
-/// `BuiltInError.automaticLoadNotAllowed` until one of those has loaded a
-/// model this session (`session`); after that it may use the model, and
-/// reload it after an idle unload.
+/// "Load model at launch" opt-in. An automatic request may only use a
+/// model that is already in memory; it never loads one (not the first
+/// time, not after an idle unload, not a different model) and gets
+/// `BuiltInError.automaticLoadNotAllowed` instead. After an idle unload,
+/// automatic hints are rules-only until the user asks again or the
+/// launch opt-in loads the model.
 ///
 /// Every load runs under a watchdog (`loadTimeout`, `BuiltInWatchdog`). If
 /// it fires, the engine is unhealthy for the session: automatic requests
 /// never load again, the user's next request may retry once, and no second
-/// load starts while the stuck one is still running.
+/// load starts while the stuck one is still running (a request then gets
+/// `BuiltInError.stillLoading` and the retry is kept for later).
 public actor BuiltInModelHost {
     public static let defaultIdleTimeout: TimeInterval = 300
 
@@ -194,8 +202,9 @@ public actor BuiltInModelHost {
     }
 
     /// Loads (or reuses) the model at `path`, dropping any other one.
-    /// Refuses an automatic request before an explicit load, and any
-    /// request while the engine is unhealthy (except one explicit retry).
+    /// Refuses an automatic request unless the model is already in memory,
+    /// and any request while the engine is unhealthy (except one explicit
+    /// retry, once the stuck load has stopped).
     public func model(at path: URL) async throws -> any LoadedModel {
         let intent = BuiltInLoad.intent
         if let loaded, loaded.path == path { return loaded.model }
@@ -204,6 +213,7 @@ public actor BuiltInModelHost {
         if let old = loaded {
             loaded = nil
             unloadCount += 1
+            session.markUnloaded()
             old.model.unload()
         }
         let runtime = self.runtime, clock = self.clock, limit = loadTimeout
@@ -227,20 +237,18 @@ public actor BuiltInModelHost {
     }
 
     private func admit(_ intent: BuiltInLoadIntent) throws {
-        if stuck != nil {
-            if intent == .automatic { refusedAutomatic += 1 }
-            throw BuiltInError.unhealthy
+        // Only reached when the model isn't in memory (`model(at:)`
+        // returned it otherwise): an automatic caller never loads.
+        if intent == .automatic {
+            refusedAutomatic += 1
+            throw session.unhealthy != nil || stuck != nil ? BuiltInError.unhealthy : BuiltInError.automaticLoadNotAllowed
         }
+        // No second load while the stuck one runs; the retry is kept.
+        if stuck != nil { throw BuiltInError.stillLoading }
         if session.unhealthy != nil {
-            guard intent != .automatic else { refusedAutomatic += 1; throw BuiltInError.unhealthy }
             // Joining a retry already under way doesn't use another one.
             if loading != nil { return }
             guard session.takeRetry() else { throw BuiltInError.unhealthy }
-            return
-        }
-        if intent == .automatic, !session.explicitlyLoaded {
-            refusedAutomatic += 1
-            throw BuiltInError.automaticLoadNotAllowed
         }
     }
 
@@ -277,6 +285,7 @@ public actor BuiltInModelHost {
         guard let old = loaded else { return }
         loaded = nil
         unloadCount += 1
+        session.markUnloaded()
         old.model.unload()
     }
 

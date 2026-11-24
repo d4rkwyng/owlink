@@ -97,8 +97,8 @@ public struct BuiltInHintProvider: OwlHintProvider, OwlAutomaticGate, OwlPreload
 
     public var name: String { "local:\(model.id)" }
 
-    /// Automatic checks only once the user (or "Load model at launch")
-    /// has loaded a model this session, and not after a load hung.
+    /// Automatic checks only while a model the user (or "Load model at
+    /// launch") loaded is in memory, and not after a load hung.
     public var allowsAutomaticRequests: Bool { host.session.allowsAutomatic }
     public var isUnhealthy: Bool { host.session.unhealthy != nil }
 

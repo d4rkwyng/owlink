@@ -5,7 +5,7 @@ import CedricCore
 
 /// Why the built-in model is being asked for. Only an explicit request
 /// (or the "Load model at launch" opt-in) may load it into memory; an
-/// automatic one may use it only once that has happened this session.
+/// automatic one may only use a model already in memory.
 ///
 /// A freeze on an M5 Max (GPU and WindowServer hung, power-button reset)
 /// came from the first in-process load of Qwen3 4B, which the automatic
@@ -100,23 +100,29 @@ public final class BuiltInSession: @unchecked Sendable {
 
     private let lock = NSLock()
     private var _loaded = false
+    private var _inMemory = false
     private var _unhealthy: Unhealthy?
     private var _retryUsed = false
 
     public init() {}
 
     /// A model was loaded this session by an explicit request or by the
-    /// launch opt-in. Automatic checks may use the engine (and reload it
-    /// after an idle unload) only after this.
+    /// launch opt-in (it may have been unloaded since).
     public var explicitlyLoaded: Bool { lock.withLock { _loaded } }
+    /// A model is in memory now. Automatic checks never load one, so after
+    /// an idle unload they wait (rules-only) until the user asks again.
+    public var modelInMemory: Bool { lock.withLock { _inMemory } }
     /// A load or its first decode passed the watchdog this session.
     public var unhealthy: Unhealthy? { lock.withLock { _unhealthy } }
-    /// Automatic checks may ask the built-in engine.
-    public var allowsAutomatic: Bool { lock.withLock { _loaded && _unhealthy == nil } }
+    /// Automatic checks may ask the built-in engine: a model is in memory
+    /// and no load hung.
+    public var allowsAutomatic: Bool { lock.withLock { _inMemory && _unhealthy == nil } }
 
     func markLoaded() {
-        lock.withLock { _loaded = true; _unhealthy = nil; _retryUsed = false }
+        lock.withLock { _loaded = true; _inMemory = true; _unhealthy = nil; _retryUsed = false }
     }
+
+    func markUnloaded() { lock.withLock { _inMemory = false } }
 
     func markUnhealthy(seconds: Int) {
         lock.withLock { _unhealthy = Unhealthy(seconds: seconds) }
@@ -131,9 +137,6 @@ public final class BuiltInSession: @unchecked Sendable {
             return true
         }
     }
-
-    /// Tests: as if the user had already asked (no load).
-    func noteExplicitLoadForTesting() { lock.withLock { _loaded = true } }
 }
 
 extension Notification.Name {
