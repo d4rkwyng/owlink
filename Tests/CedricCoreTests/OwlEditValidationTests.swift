@@ -357,6 +357,19 @@ import Testing
         #expect(fine.check == .clean)
     }
 
+    @Test func theRefusalSummaryMatchesTheCardTitle() throws {
+        let text = "let a = 1;\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
+        var gate = OwlEditGate(script: nil)
+        let p = try OwlEditProposal.anchored(find: "let a = 1;", replace: "const a = a;", in: s).get()
+        let r = gate.screen(OwlToolResult(text: "proposed", proposal: p, summary: "Proposed an edit", ok: true), in: s)
+        #expect(!r.ok)
+        #expect(r.summary == "Won’t run")
+        var gate2 = OwlEditGate(script: nil)
+        let q = try OwlEditProposal.anchored(find: "let a = 1;", replace: "let a = (1;", in: s).get()
+        #expect(gate2.screen(OwlToolResult(text: "proposed", proposal: q, summary: "Proposed an edit", ok: true), in: s).summary == "Doesn’t parse")
+    }
+
     @Test func noCompilesOrVerifiedWording() {
         let texts = [OwlEditCheck(issues: [OwlEditIssue(check: .json, severity: .hard, message: "m", line: 1)]).failureText,
                      OwlEditCheck(issues: [OwlEditIssue(check: .selfInitialization, severity: .hard, message: "m")]).retryFeedback,

@@ -556,13 +556,18 @@ public struct OwlEditGate: Sendable {
     }
 
     public mutating func review(_ p: OwlEditProposal, in s: OwlDocumentSnapshot) -> Verdict {
+        checked(p, in: s).verdict
+    }
+
+    /// The verdict and the check it came from.
+    mutating func checked(_ p: OwlEditProposal, in s: OwlDocumentSnapshot) -> (verdict: Verdict, check: OwlEditCheck) {
         var p = p
         p.check = OwlEditValidation.validate(p, in: s, script: script)
         if p.check.failsValidation, !retried, let feedback = p.check.retryFeedback {
             retried = true
-            return .retry(feedback)
+            return (.retry(feedback), p.check)
         }
-        return .propose(p)
+        return (.propose(p), p.check)
     }
 }
 
@@ -573,10 +578,12 @@ extension OwlEditGate {
     /// (and the model is told it doesn't parse, never that it is applied).
     public mutating func screen(_ r: OwlToolResult, in s: OwlDocumentSnapshot) -> OwlToolResult {
         guard let p = r.proposal else { return r }
-        switch review(p, in: s) {
+        let (verdict, check) = checked(p, in: s)
+        switch verdict {
         case .retry(let feedback):
+            // "Doesn't parse" or "Won't run", as the card would say.
             return OwlToolResult(text: "error: " + feedback, proposal: nil,
-                                 summary: String(localized: "the edit doesn’t parse"), ok: false)
+                                 summary: check.failureTitle ?? String(localized: "Doesn’t parse"), ok: false)
         case .propose(let checked):
             var out = r
             out.proposal = checked
