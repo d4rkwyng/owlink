@@ -131,4 +131,28 @@ import Testing
         let export = SaveFailure.text(for: error, saving: url, offer: .none)
         #expect(export.detail.hasSuffix(" Your text is still in this tab."))
     }
+
+    /// Codex round 2: a read-only (or locked) target of a copy or an
+    /// export got the tab's "use Save As to keep your edits", though the
+    /// alert offers Save a Copy… or only OK, and Save As can't redo either.
+    @Test func readOnlyCopiesAndExportsSayWhatTheAlertOffers() {
+        let url = URL(fileURLWithPath: "/tmp/f/locked.html")
+        for reason in [FileWriteAccess.Blocked.permissions, .locked, .readOnlyVolume] {
+            let error = ReadOnlyFileError(url: url, reason: reason)
+            let copy = SaveFailure.text(for: error, saving: url, offer: .saveCopy)
+            let export = SaveFailure.text(for: error, saving: url, offer: .none)
+            for t in [copy, export] {
+                #expect(t.message == "“locked.html” is read-only.")
+                #expect(!t.detail.contains("Save As"), "\(reason): \(t.detail)")
+                #expect(t.detail.contains("Your text is still in this tab"), "\(t.detail)")
+                #expect(t.detail.hasPrefix(reason == .readOnlyVolume ? "“locked.html” is on a read-only volume." : "“locked.html” is "), "\(t.detail)")
+            }
+            #expect(copy.detail.hasSuffix("Nothing was copied. Your text is still in this tab; choose another place for the copy."), "\(copy.detail)")
+            #expect(export.detail.hasSuffix(" Your text is still in this tab."), "\(export.detail)")
+        }
+        #expect(SaveFailure.text(for: ReadOnlyFileError(url: url, reason: .locked), saving: url, offer: .none).detail
+                == "“locked.html” is locked (you can unlock it in the Finder’s Get Info). Your text is still in this tab.")
+        #expect(SaveFailure.text(for: ReadOnlyFileError(url: url, reason: .permissions), saving: url, offer: .none).detail
+                == "“locked.html” is read-only: you don’t have permission to change it. Your text is still in this tab.")
+    }
 }

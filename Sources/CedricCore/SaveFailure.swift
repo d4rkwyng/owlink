@@ -33,7 +33,7 @@ public enum SaveFailure {
     }
 
     /// What the alert offers besides Cancel.
-    public enum Offer: Sendable {
+    public enum Offer: Equatable, Sendable {
         /// The tab's own save (⌘S, Save As, Keep What’s in This Tab): Save As….
         case saveAs
         /// Save a Copy: choose another place for the copy.
@@ -95,12 +95,21 @@ public enum SaveFailure {
     public static func text(for cause: Cause, saving url: URL, offer: Offer) -> Text {
         let name = url.lastPathComponent
         let folder = url.deletingLastPathComponent().lastPathComponent
-        if case .readOnly(let reason) = cause {
-            // The same words as ⌘S on a file that is read-only already.
-            return Text(message: String(localized: "“\(name)” is read-only."), detail: FileWriteAccess.notice(reason, name: name))
-        }
         let reason: String
         switch cause {
+        case .readOnly(let blocked) where offer == .saveAs:
+            // The same words as ⌘S on a file that is read-only already.
+            return Text(message: String(localized: "“\(name)” is read-only."), detail: FileWriteAccess.notice(blocked, name: name))
+        case .readOnly(let blocked):
+            // A copy or an export: no "use Save As" (Codex round 2), the
+            // alert's own action follows.
+            let why: String
+            switch blocked {
+            case .permissions: why = String(localized: "“\(name)” is read-only: you don’t have permission to change it.")
+            case .locked: why = String(localized: "“\(name)” is locked (you can unlock it in the Finder’s Get Info).")
+            case .readOnlyVolume: why = String(localized: "“\(name)” is on a read-only volume.")
+            }
+            return Text(message: String(localized: "“\(name)” is read-only."), detail: why + " " + next(offer))
         case .changedWhileSaving:
             reason = String(localized: "“\(name)” was replaced or changed while Owlink was saving it, so Owlink stopped rather than write over it.")
         case .notAFile:
@@ -119,15 +128,16 @@ public enum SaveFailure {
             reason = String(localized: "Owlink couldn’t put “\(name)” back as it was before the save. A copy of it as it was is at \(path).")
         case .other(let said):
             reason = said
-        case .readOnly:
-            reason = ""
         }
-        let next: String
+        return Text(message: String(localized: "Couldn’t save “\(name)”."), detail: reason + " " + next(offer))
+    }
+
+    /// What is left, and what the alert's button does.
+    private static func next(_ offer: Offer) -> String {
         switch offer {
-        case .saveAs: next = String(localized: "Your text is still in this tab; use Save As to keep it somewhere else.")
-        case .saveCopy: next = String(localized: "Nothing was copied. Your text is still in this tab; choose another place for the copy.")
-        case .none: next = String(localized: "Your text is still in this tab.")
+        case .saveAs: return String(localized: "Your text is still in this tab; use Save As to keep it somewhere else.")
+        case .saveCopy: return String(localized: "Nothing was copied. Your text is still in this tab; choose another place for the copy.")
+        case .none: return String(localized: "Your text is still in this tab.")
         }
-        return Text(message: String(localized: "Couldn’t save “\(name)”."), detail: reason + " " + next)
     }
 }

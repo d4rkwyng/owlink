@@ -4,7 +4,8 @@ import CedricCore
 /// Part of CEDRIC_CHECK=readonly: a save that fails says why (0.5.4 QA
 /// #6). A pipe put in a file's place in a 0555 folder, then ⌘S and Keep
 /// (QA A1f): the alert names the reason, says the text is still in the
-/// tab and offers Save As… and Cancel, not a lone OK with an empty body.
+/// tab and offers Save As… and Cancel, not a lone OK with an empty body;
+/// Save As… saves the tab's text to the place chosen.
 @MainActor
 extension DevChecks {
     /// The sheet's labels (message and informative text), in view order.
@@ -23,6 +24,7 @@ extension DevChecks {
         let folder = url.deletingLastPathComponent()
         var tab: EditorWindowController!
         func restore() { chmod(folder.path, 0o755) }
+        let elsewhere = write("sf-elsewhere/saved-elsewhere.md", "old\n")
         return [
             sync {
                 guard let t = app.open(url) else { expect(false, "save failure: opened fifo.md"); return }
@@ -58,9 +60,30 @@ extension DevChecks {
                 guard let tab else { return }
                 sheetButton(tab, "Cancel")?.performClick(nil)
                 expect(tab.text == "mine one\n" && tab.doc.isDirty, "save failure: Cancel keeps the text, unsaved", tab.text)
+                // Codex round 2: and Save As… from the same alert saves it elsewhere.
+                key("s", [.command])
+            },
+            sync {
+                guard let tab else { return }
+                sheetButton(tab, EditorWindowController.conflictKeep)?.performClick(nil)
+            },
+            sync {
+                guard let tab else { return }
+                expect(sheetButton(tab, "Save As…") != nil, "save failure: the alert again, with Save As…")
+                EditorWindowController.checkSaveAsURL = elsewhere
+                sheetButton(tab, "Save As…")?.performClick(nil)
+            },
+            waitFor("save failure: Save As… saves it elsewhere") { tab?.doc.fileURL == elsewhere },
+            sync {
+                guard let tab else { return }
+                expect(EditorWindowController.checkSaveAsURL == nil, "save failure: Save As… opened the panel (the check's choice used)")
+                expect((try? Data(contentsOf: elsewhere)) == Data("mine one\n".utf8), "save failure: …the tab's text, in the new file",
+                       (try? String(contentsOf: elsewhere, encoding: .utf8)) ?? "-")
+                expect(tab.doc.fileURL == elsewhere, "save failure: …the tab is that file now", tab.doc.fileURL?.path ?? "-")
+                expect(!tab.doc.isDirty && tab.window?.attachedSheet == nil, "save failure: …saved, clean, no sheet left")
+                expect(tab.window?.title.hasPrefix("saved-elsewhere.md") == true, "save failure: …and titled so", tab.window?.title ?? "-")
                 restore()
                 unlink(url.path)
-                tab.doc.markSaved()
                 tab.window?.performClose(nil)
             },
         ]

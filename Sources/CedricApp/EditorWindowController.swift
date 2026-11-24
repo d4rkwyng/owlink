@@ -1064,9 +1064,18 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         panel.directoryURL = doc.fileURL?.deletingLastPathComponent()
         panel.isExtensionHidden = false
         panel.allowsOtherFileTypes = true
+        #if CEDRIC_CHECKS
+        // Checks only: the place a check "chooses" in the panel.
+        if let url = Self.checkSaveAsURL { Self.checkSaveAsURL = nil; return write(to: url) }
+        #endif
         guard panel.runModal() == .OK, let url = panel.url else { return false }
         return write(to: url)
     }
+
+    #if CEDRIC_CHECKS
+    /// Checks only: what the next Save As panel chooses, without showing it.
+    static var checkSaveAsURL: URL?
+    #endif
 
     func write(to url: URL) -> Bool {
         do {
