@@ -445,4 +445,44 @@ import Testing
         #expect(shown == chat.text, "\(shown.debugDescription)")
         #expect(clock.now - start < .seconds(1))
     }
+
+    /// A citation ending at `Int.max` does not trap. Foundation's
+    /// `IndexSet` turns a closed range into a half-open one, and
+    /// `Int.max + 1` overflowed inside `intersects(integersIn:)` on
+    /// 0.5.4's follow-up 9; a cited number is kept at `Int.max - 1`.
+    @Test(.timeLimit(.minutes(1))) func aCitationEndingAtIntMaxDoesNotTrap() {
+        let big = String(Int.max)
+        let answer = "Overview.\n- Line 31: setup.\n  Lines 42 through \(big): detail."
+        let clock = ContinuousClock()
+        let start = clock.now
+        let given = Self.lines1to18.union(IndexSet(integer: 31))
+        let chat = OwlCitations.filter(answer, allowed: given)
+        #expect(chat.text == "Overview.\n- Line 31: setup.\n  Lines 42 through \(big)\(OwlCitations.flag): detail.",
+                "\(chat.text.debugDescription)")
+        let part = OwlCitations.filter(chat.text, allowed: Self.lines1to18)
+        #expect(part.text == "Overview.", "\(part.text.debugDescription)")
+        #expect(part.dropped == [31...31] && part.flagged.isEmpty)
+        let direct = OwlCitations.filter(answer, allowed: Self.lines1to18)
+        #expect(direct.text == "Overview.", "\(direct.text.debugDescription)")
+        #expect(direct.dropped == [31...31, 42...(Int.max - 1)])
+        // A lone citation of line Int.max, in prose, in an item, quoted.
+        let lone = OwlCitations.filter("Line \(big) and line 5: detail.", allowed: given)
+        #expect(lone.text == "Line \(big)\(OwlCitations.flag) and line 5: detail.", "\(lone.text.debugDescription)")
+        let item = OwlCitations.filter("Overview.\n- \(big): detail.", allowed: given)
+        #expect(item.text == "Overview.", "\(item.text.debugDescription)")
+        #expect(OwlCitations.find("Line \(big).").map(\.lines) == [(Int.max - 1)...(Int.max - 1)])
+        #expect(OwlCitations.lines(in: answer).contains(Int.max - 1))
+        #expect(OwlCitations.evidence(in: answer).contains(31))
+        #expect(OwlCitations.evidence(in: answer, retained: (answer as NSString).length).contains(31))
+        #expect(OwlCitations.quotedLines(in: "\(big)| text").contains(Int.max - 1))
+        // Streamed, the same.
+        var stream = OwlCitations.Stream()
+        let shown = stream.feed(answer, allowed: given) + stream.finish(allowed: given)
+        #expect(shown == chat.text, "\(shown.debugDescription)")
+        var loneStream = OwlCitations.Stream()
+        let loneShown = loneStream.feed("Line \(big) and line 5: detail.", allowed: given)
+            + loneStream.finish(allowed: given)
+        #expect(loneShown == lone.text, "\(loneShown.debugDescription)")
+        #expect(clock.now - start < .seconds(1))
+    }
 }

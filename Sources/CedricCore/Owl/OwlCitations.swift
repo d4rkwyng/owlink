@@ -60,14 +60,21 @@ public enum OwlCitations {
     private static let item = try! NSRegularExpression(pattern: #"^\s*[-*•]\s*(\d+)(?:\s*[-–—]\s*(\d+))?:(?=\s|$)"#,
                                                        options: [.anchorsMatchLines])
 
+    /// A cited line number as it is kept: at most `Int.max - 1`. Foundation
+    /// turns a closed range into a half-open one inside `IndexSet`
+    /// (`insert`, `contains`, `intersects(integersIn:)`), and a range ending
+    /// at `Int.max` traps there; no document has that many lines, so "line
+    /// 9223372036854775807" means the same as one line fewer.
+    static func lineNumber(_ n: Int) -> Int { min(n, Int.max - 1) }
+
     /// Every citation in `text`, in order.
     public static func find(_ text: String) -> [Cite] {
         let ns = text as NSString
         let all = NSRange(location: 0, length: ns.length)
         var out: [Cite] = []
         func make(_ a: NSRange, _ b: NSRange, whole: NSRange) -> Cite? {
-            guard let x = Int(ns.substring(with: a)) else { return nil }
-            let y = b.location == NSNotFound ? x : (Int(ns.substring(with: b)) ?? x)
+            guard let x = Int(ns.substring(with: a)).map(lineNumber) else { return nil }
+            let y = b.location == NSNotFound ? x : (Int(ns.substring(with: b)).map(lineNumber) ?? x)
             return Cite(range: whole, lines: min(x, y)...max(x, y))
         }
         for m in listed.matches(in: text, range: all) {
@@ -184,7 +191,7 @@ public enum OwlCitations {
         let ns = text as NSString
         var s = IndexSet()
         for m in quoted.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            if let n = Int(ns.substring(with: m.range(at: 1))), n >= 1 { s.insert(n) }
+            if let n = Int(ns.substring(with: m.range(at: 1))).map(lineNumber), n >= 1 { s.insert(n) }
         }
         return s
     }
