@@ -726,4 +726,81 @@ final class OwlinkUITests: XCTestCase {
             }
         }
     }
+
+    // MARK: US English on the real screens (0.5.2 (16) findings)
+
+    /// British-only stems, as in USEnglishCopyTests' source scan (US:
+    /// summarize, color, center, license…), word-aware, any case.
+    private static let british = try! NSRegularExpression(pattern: #"(?i)\b\w*(summaris|organis|customis|recognis|optimis|initialis|normalis|authoris|synchronis|categoris|visualis|prioritis|standardis|minimis|maximis|emphasis(e|ing)|apologis|colour|behaviour|favourit|honour|neighbour|catalogue|cancell(ed|ing)|labell(ed|ing)|centre|licence)\w*"#)
+
+    /// The visible copy now (labels, titles, placeholders, but not the
+    /// document's own text in the editor or the preview).
+    private func visibleCopy(_ app: XCUIApplication) -> [String] {
+        guard let root = try? app.snapshot() else { return [] }
+        var out: [String] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if [.textView, .webView, .keyboard].contains(e.elementType) { return }
+            for t in [e.label, e.title, e.placeholderValue ?? ""] where !t.isEmpty { out.append(t) }
+            e.children.forEach(walk)
+        }
+        walk(root)
+        return out
+    }
+
+    private func britishSpellings(_ copy: [String]) -> [String] {
+        copy.flatMap { text -> [String] in
+            let ns = text as NSString
+            return Self.british.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
+                "\(ns.substring(with: $0.range)) in “\(text)”"
+            }
+        }
+    }
+
+    func testTheVisibleCopyScanCatchesBritishSpellings() {
+        XCTAssertEqual(britishSpellings(["Summarise", "Summarising…", "Text colour", "CENTRE"]).count, 4)
+        XCTAssertTrue(britishSpellings(["Summarize", "Color", "Center", "License", "Centered"]).isEmpty)
+    }
+
+    /// Settings, the ••• menu (and its Preview submenu), the format bar,
+    /// and Ask Cedric, opened for real: no Summarise, colour, centre….
+    func testVisibleCopyIsUSEnglish() throws {
+        let app = launch("README.md", fresh: true)
+        let tv = editor(app)
+        var found: [String: [String]] = [:]
+        func scan(_ screen: String) {
+            let bad = britishSpellings(visibleCopy(app))
+            if !bad.isEmpty { found[screen, default: []] += bad }
+        }
+        scan("editor")
+        // The ••• menu, scrolled through, and its Preview submenu.
+        openMore(app)
+        let list = app.collectionViews.firstMatch
+        for _ in 0..<7 { scan("••• menu"); list.swipeUp(velocity: .slow) }
+        scan("••• menu")
+        for _ in 0..<7 { list.swipeDown(velocity: .slow) }
+        menuItem(app, "Preview").tap()
+        sleep(1)
+        scan("••• › Preview")
+        closeMenu(app)
+        // Settings, scrolled through.
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        let form = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+        for _ in 0..<10 { scan("Settings"); form.swipeUp(velocity: .slow) }
+        scan("Settings")
+        closeSettings(app)
+        // Ask Cedric (its action buttons: Explain, Summarize, …).
+        openAsk(app, sheet: true)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier == 'ask.action'")).firstMatch.waitForExistence(timeout: 5),
+                      "no Ask Cedric actions")
+        scan("Ask Cedric")
+        shoot("ask-cedric-us-english")
+        closeAskWithDone(app)
+        // The format bar (the keyboard's input accessory), last: the
+        // keyboard would sit over the menus' taps.
+        startTyping(app, tv)
+        scan("format bar")
+        XCTAssertTrue(found.isEmpty, "British spellings on screen: \(found)")
+    }
 }
