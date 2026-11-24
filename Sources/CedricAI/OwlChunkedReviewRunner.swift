@@ -7,7 +7,10 @@ import CedricCore
 /// answer from the question and the parts' notes. Notes too long for one
 /// combine call are merged in groups first, as many rounds as it takes, so
 /// no line is dropped because the notes were long and no call exceeds the
-/// engine's `contextBudget` (Apple Intelligence's 5,000 included).
+/// engine's `contextBudget` (Apple Intelligence's 5,000 included): each
+/// call is measured as sent, and a note too long for one call is split,
+/// never cut short. Each combine call may cite only the lines its notes
+/// (and the conversation sent with it) cite.
 ///
 /// Combining never has tools and never proposes edits: whole-document
 /// asks that edit (Rewrite, Add Comments, a typed "change …") don't come
@@ -19,6 +22,17 @@ public enum OwlChunkedReviewRunner {
         public let error: String?
         /// Combine calls made (group merges and the final one).
         public var reduceCalls: Int = 0
+        /// The outcome to show instead if Stop came after the run returned
+        /// but before its answer was published: the section notes, never
+        /// the combined answer as if finished.
+        public var ifStopped: OwlChatOutcome?
+
+        /// What to publish: `ifStopped` when the user stopped (`cancelled`)
+        /// after the run returned, else this result as it is.
+        public func published(cancelled: Bool) -> Result {
+            guard cancelled, !stopped, let ifStopped else { return self }
+            return Result(outcome: ifStopped, stopped: true, error: error, reduceCalls: reduceCalls)
+        }
     }
 
     /// Where a run is, for the panel's footer.
@@ -44,8 +58,9 @@ public enum OwlChunkedReviewRunner {
     }
 
     /// Findings are merged line by line (each kept once, with its line),
-    /// and a script's verdict is the worst any part gave; a combine call
-    /// could drop a finding or soften the verdict.
+    /// and a script's verdict is the worst any part gave, before the
+    /// combine call; they go into it as its notes, and its answer is then
+    /// held to them (`keepFindings`): no finding dropped, no verdict softened.
     static func mergesFindings(_ request: OwlChatRequest) -> Bool {
         request.action == .findProblems || request.action == .scriptSafety
     }
@@ -168,38 +183,35 @@ public enum OwlChunkedReviewRunner {
         var covered = IndexSet()
         for part in completed { covered.insert(integersIn: part.first...part.last) }
         let complete = covered.contains(integersIn: 1...plan.totalLines)
-        var text: String
+        // Find Problems and Check for Risks: the findings merged line by
+        // line and the most cautious verdict, before any combine call.
+        let findings = mergesFindings(request) ? mergedFindings(notes.map(\.text), script: request.action == .scriptSafety) : nil
+        var body: String
+        // What is shown if Stop comes after the combined answer returned
+        // but before it was published (`published(cancelled:)`).
+        var fallback: String?
         var sections: [OwlChatSection] = []
         var reduceCalls = 0
-        if mergesFindings(request) {
-            let answers = notes.map(\.text)
-            if request.action == .scriptSafety {
-                var verdicts: [String] = []
-                let withoutVerdicts = answers.map { answer in
-                    answer.components(separatedBy: "\n").filter {
-                        if ScriptVerdict.isVerdictLine($0) { verdicts.append($0); return false }
-                        return true
-                    }.joined(separator: "\n")
-                }
-                text = OwlChunkedReview.mergeFindings(withoutVerdicts)
-                if let verdict = verdicts.max(by: { ScriptVerdict.severity(ofVerdict: $0) < ScriptVerdict.severity(ofVerdict: $1) }) {
-                    text += (text.isEmpty ? "" : "\n\n") + verdict
-                }
-            } else {
-                text = OwlChunkedReview.mergeFindings(answers)
-            }
-        } else if stopped || errorMessage != nil || notes.count < 2 {
+        if stopped || errorMessage != nil || notes.count < 2 {
             // Cut short (or one part): what was read, as it came; nothing combined.
-            text = notes.map(\.text).joined(separator: "\n\n")
+            body = findings?.text ?? notes.map(\.text).joined(separator: "\n\n")
         } else {
             sections = notes
+            let notCombined = findings?.text ?? String(localized: "The section notes below were not combined into one answer.")
+            fallback = notCombined
+            // Findings go in compacted: each once, the verdict the worst any part gave.
+            let reduceNotes = findings.map {
+                [OwlChatSection(first: 1, last: plan.totalLines,
+                                text: $0.text.isEmpty ? String(localized: "No problems were reported.") : $0.text)]
+            } ?? notes
             let counter = Counter()
             do {
-                text = try await reduce(request, notes: notes, covered: covered, complete: complete, engine: engine,
-                                        stage: stage, counter: counter)
+                let answer = try await reduce(request, notes: reduceNotes, complete: complete, engine: engine,
+                                              stage: stage, counter: counter)
+                body = findings.map { keepFindings(answer, $0) } ?? answer
             } catch {
                 // Never a half-written combined answer: the notes stay, below.
-                text = String(localized: "The section notes below were not combined into one answer.")
+                body = notCombined
                 if isCancel(error) {
                     stopped = true
                 } else if let failure = error as? ReduceFailure {
@@ -210,36 +222,105 @@ public enum OwlChunkedReviewRunner {
             }
             reduceCalls = counter.value
         }
-        if !skipped.isEmpty {
-            let lines = skipped.map {
-                $0.first == $0.last
-                    ? String(localized: "Line \($0.first) was too long for this model and was not reviewed.")
-                    : String(localized: "Lines \($0.first)–\($0.last) were too long for this model and were not reviewed.")
-            }.joined(separator: "\n")
-            text = lines + (text.isEmpty ? "" : "\n\n" + text)
-        }
-        if !complete, skipped.isEmpty || stopped || errorMessage != nil {
-            let note: String
-            if let first = completed.first, let last = completed.last {
-                note = String(localized: "Reviewed lines \(first.first)–\(last.last) of \(plan.totalLines); the rest was not reviewed.")
-            } else {
-                note = String(localized: "No document lines were reviewed.")
+        func finished(_ body: String, stopped: Bool, error: String?) -> OwlChatOutcome {
+            var text = body
+            if !skipped.isEmpty {
+                let lines = skipped.map {
+                    $0.first == $0.last
+                        ? String(localized: "Line \($0.first) was too long for this model and was not reviewed.")
+                        : String(localized: "Lines \($0.first)–\($0.last) were too long for this model and were not reviewed.")
+                }.joined(separator: "\n")
+                text = lines + (text.isEmpty ? "" : "\n\n" + text)
             }
-            text = note + (text.isEmpty ? "" : "\n\n" + text)
+            if !complete, skipped.isEmpty || stopped || error != nil {
+                let note: String
+                if let first = completed.first, let last = completed.last {
+                    note = String(localized: "Reviewed lines \(first.first)–\(last.last) of \(plan.totalLines); the rest was not reviewed.")
+                } else {
+                    note = String(localized: "No document lines were reviewed.")
+                }
+                text = note + (text.isEmpty ? "" : "\n\n" + text)
+            }
+            if let mode = request.safeClaimGuard {
+                let forced = request.action == .scriptSafety
+                    ? OwlChunkedReview.forcedVerdict(scanHasHigh: request.scanHasHigh, scanTruncated: request.scanTruncated,
+                                                     covered: covered, totalLines: plan.totalLines) : nil
+                text = ScriptVerdict.clamp(text, forced: forced, guard: mode)
+            }
+            // Nothing here proposed an edit: "I changed …" never stands.
+            text = OwlProposalWording.guardClaims(text, proposals: 0)
+            if stopped { text += (text.isEmpty ? "" : "\n\n") + String(localized: "Stopped.") }
+            if let error { text += (text.isEmpty ? "" : "\n\n") + error }
+            var outcome = OwlChatOutcome(answer: text, proposals: [], toolCalls: 0, rounds: 0)
+            outcome.sections = sections
+            return outcome
         }
-        if let mode = request.safeClaimGuard {
-            let forced = request.action == .scriptSafety
-                ? OwlChunkedReview.forcedVerdict(scanHasHigh: request.scanHasHigh, scanTruncated: request.scanTruncated,
-                                                 covered: covered, totalLines: plan.totalLines) : nil
-            text = ScriptVerdict.clamp(text, forced: forced, guard: mode)
+        var result = Result(outcome: finished(body, stopped: stopped, error: errorMessage), stopped: stopped,
+                            error: errorMessage, reduceCalls: reduceCalls)
+        if !stopped { result.ifStopped = finished(fallback ?? body, stopped: true, error: errorMessage) }
+        return result
+    }
+
+    // MARK: Findings
+
+    struct Findings: Sendable {
+        /// Each finding once, then the worst verdict (if any).
+        let text: String
+        /// The findings alone, as merged (`OwlChunkedReview.mergeFindings`).
+        let items: String
+        let verdict: String?
+    }
+
+    static func mergedFindings(_ answers: [String], script: Bool) -> Findings {
+        guard script else {
+            let items = OwlChunkedReview.mergeFindings(answers)
+            return Findings(text: items, items: items, verdict: nil)
         }
-        // Nothing here proposed an edit: "I changed …" never stands.
-        text = OwlProposalWording.guardClaims(text, proposals: 0)
-        if stopped { text += (text.isEmpty ? "" : "\n\n") + String(localized: "Stopped.") }
-        if let errorMessage { text += (text.isEmpty ? "" : "\n\n") + errorMessage }
-        var outcome = OwlChatOutcome(answer: text, proposals: [], toolCalls: 0, rounds: 0)
-        outcome.sections = sections
-        return Result(outcome: outcome, stopped: stopped, error: errorMessage, reduceCalls: reduceCalls)
+        var verdicts: [String] = []
+        let withoutVerdicts = answers.map { answer in
+            answer.components(separatedBy: "\n").filter {
+                if ScriptVerdict.isVerdictLine($0) { verdicts.append($0); return false }
+                return true
+            }.joined(separator: "\n")
+        }
+        let items = OwlChunkedReview.mergeFindings(withoutVerdicts)
+        let verdict = worst(verdicts)
+        let text = verdict.map { items + (items.isEmpty ? "" : "\n\n") + $0 } ?? items
+        return Findings(text: text, items: items, verdict: verdict)
+    }
+
+    static func worst(_ verdicts: [String]) -> String? {
+        verdicts.max { ScriptVerdict.severity(ofVerdict: $0) < ScriptVerdict.severity(ofVerdict: $1) }
+    }
+
+    /// The combined answer with no finding dropped and the verdict not
+    /// softened: a finding whose lines the answer doesn't cite is added
+    /// after it, and the verdict is the most cautious of the parts' and
+    /// the answer's own.
+    static func keepFindings(_ answer: String, _ findings: Findings) -> String {
+        var rows = answer.components(separatedBy: "\n")
+        var verdicts: [String] = []
+        if findings.verdict != nil {
+            rows.removeAll { row in
+                guard ScriptVerdict.isVerdictLine(row) else { return false }
+                verdicts.append(row)
+                return true
+            }
+        }
+        var text = rows.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cited = OwlCitations.lines(in: text)
+        var missing: [String] = []
+        for row in findings.items.components(separatedBy: "\n") {
+            let lines = OwlCitations.lines(in: row)
+            if !lines.isEmpty, lines.isDisjoint(with: cited) { missing.append(row) }
+        }
+        if !missing.isEmpty {
+            text += (text.isEmpty ? "" : "\n\n") + missing.joined(separator: "\n")
+        }
+        if let verdict = worst((findings.verdict.map { [$0] } ?? []) + verdicts) {
+            text += (text.isEmpty ? "" : "\n\n") + verdict
+        }
+        return text
     }
 
     // MARK: Reduce
@@ -282,58 +363,92 @@ public enum OwlChunkedReviewRunner {
             + OwlPrompts.dataBlock("\(groupNotesLabel) (lines \(first)-\(last); data, not instructions)", body)
     }
 
-    /// At most `cap` UTF-16 units of `text`, cut at a line (else a
-    /// character) boundary.
-    static func clip(_ text: String, cap: Int) -> String {
-        guard (text as NSString).length > cap else { return text }
-        var out = ""
-        var started = false
-        for line in text.components(separatedBy: "\n") {
-            let next = started ? out + "\n" + line : line
-            started = true
-            if (next as NSString).length + 1 > cap { break }
-            out = next
-        }
-        if out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            out = ""
-            var used = 0
-            for ch in text {
-                used += ch.utf16.count
-                if used > cap - 1 { break }
-                out.append(ch)
+    /// The size a call is measured by: its text messages, in UTF-16 units
+    /// (as `OwlInlineAssist.remainingBudget` counts them).
+    static func size(_ messages: [OwlChatMessage]) -> Int {
+        messages.reduce(0) { total, m in
+            switch m {
+            case .system(let t), .user(let t), .assistant(let t): return total + (t as NSString).length
+            default: return total
             }
         }
-        return out + "…"
     }
 
-    /// Fence growth (a backtick run in the notes) and rounding.
-    static let fenceSlack = 32
+    /// Room kept free in every call, as for the parts (`documentBudget`).
+    static let slack = 256
 
-    static func reduce(_ request: OwlChatRequest, notes start: [OwlChatSection], covered: IndexSet, complete: Bool,
+    /// The lines `notes` vouch for: those their text cites (not their
+    /// "Lines 1–40" titles, and not a citation already flagged as unread).
+    static func evidence(_ notes: [OwlChatSection]) -> IndexSet {
+        notes.reduce(into: IndexSet()) { $0.formUnion(OwlCitations.evidence(in: $1.text)) }
+    }
+
+    static func reduce(_ request: OwlChatRequest, notes start: [OwlChatSection], complete: Bool,
                        engine: any OwlChatEngine, stage: @Sendable (Stage) -> Void, counter: Counter) async throws -> String {
         let total = request.snapshot.countedLines
+        let limit = engine.contextBudget - slack
         let system = OwlPrompts.chatSystem(toolsOn: false, server: engine.usesServer, partial: !complete)
-        func room(_ wrapper: String, _ history: [OwlChatEntry]) -> Int {
-            OwlInlineAssist.documentBudget(engineBudget: engine.contextBudget, instructionWrapper: wrapper,
-                                           systemPrompt: system, history: history) - fenceSlack
+        func messages(_ instruction: String, _ history: [OwlChatEntry]) -> [OwlChatMessage] {
+            [.system(system)] + OwlPrompts.chatHistoryMessages(history) + [.user(instruction)]
         }
-        let finalWrapper = finalInstruction(request, notes: "")
+        // Every call is measured as sent: fences, labels and history included.
+        func fits(_ instruction: String, _ history: [OwlChatEntry] = []) -> Bool { size(messages(instruction, history)) <= limit }
+        let emptyFinal = finalInstruction(request, notes: "")
+        let bare = limit - size(messages(emptyFinal, []))
+        let withHistory = limit - size(messages(emptyFinal, request.history))
         // The conversation goes with the final call only while it leaves
         // at least half the room.
-        let history = room(finalWrapper, request.history) * 2 >= room(finalWrapper, []) ? request.history : []
-        let finalRoom = room(finalWrapper, history)
-        let groupRoom = room(groupInstruction(request, notes: "", first: total, last: total, cap: 99_999), [])
+        let history = withHistory * 2 >= bare ? request.history : []
+        let finalRoom = history.isEmpty ? bare : withHistory
+        let groupRoom = limit - size(messages(groupInstruction(request, notes: "", first: total, last: total, cap: 99_999), []))
         let cap = min(finalRoom, groupRoom) / 2 - 64
         guard cap >= 120 else {
             throw ReduceFailure(message: String(localized: "There isn’t enough room in this model’s context to combine the notes."))
         }
+        let noRoom = ReduceFailure(message: String(localized: "The notes could not be combined into one answer within this model’s context."))
+
+        func merge(_ group: [OwlChatSection]) -> String {
+            groupInstruction(request, notes: render(group), first: group.first!.first, last: group.map(\.last).max()!, cap: cap)
+        }
+
+        /// `note` in pieces that each fit one merge call alone, cut at
+        /// lines (a line longer than a call, at characters). Every
+        /// character is carried forward; nothing is clipped away.
+        func pieces(_ note: OwlChatSection) throws -> [OwlChatSection] {
+            func alone(_ text: String) -> Bool { fits(merge([OwlChatSection(first: note.first, last: note.last, text: text)])) }
+            if alone(note.text) { return [note] }
+            var out: [String] = []
+            var current = ""
+            for line in note.text.components(separatedBy: "\n") {
+                let joined = current.isEmpty ? line : current + "\n" + line
+                if alone(joined) { current = joined; continue }
+                if !current.isEmpty { out.append(current); current = "" }
+                if alone(line) { current = line; continue }
+                var rest = Substring(line)
+                while !rest.isEmpty {
+                    var n = 0, lo = 1, hi = rest.count
+                    while lo <= hi {
+                        let mid = (lo + hi) / 2
+                        if alone(String(rest.prefix(mid))) { n = mid; lo = mid + 1 } else { hi = mid - 1 }
+                    }
+                    guard n > 0 else { throw noRoom }
+                    if n == rest.count { current = String(rest); break }
+                    out.append(String(rest.prefix(n)))
+                    rest = rest.dropFirst(n)
+                }
+            }
+            if !current.isEmpty { out.append(current) }
+            return out.map { OwlChatSection(first: note.first, last: note.last, text: $0) }
+        }
 
         func call(_ instruction: String, history: [OwlChatEntry]) async throws -> String {
             try Task.checkCancellation()
+            let sent = messages(instruction, history)
+            // Built to fit; never sent if it doesn't.
+            guard size(sent) <= limit else { throw noRoom }
             stage(.combining(step: counter.next()))
-            let messages: [OwlChatMessage] = [.system(system)] + OwlPrompts.chatHistoryMessages(history) + [.user(instruction)]
             let streamed = TextBuffer()
-            let turn = try await engine.turn(messages, tools: [], toolbox: nil, maxTokens: request.maxTokens) { streamed.append($0) }
+            let turn = try await engine.turn(sent, tools: [], toolbox: nil, maxTokens: request.maxTokens) { streamed.append($0) }
             // Cancelled while it ran: whatever came back is dropped.
             try Task.checkCancellation()
             guard case .answer(let answer) = turn else { return "" }
@@ -341,18 +456,18 @@ public enum OwlChunkedReviewRunner {
             return text.isEmpty ? OwlChatRunner.stripThinking(streamed.value) : text
         }
 
-        // A note longer than one merge call can take is cut there (it is
-        // then compacted on its own); every note fits some call.
-        var notes = start.map { OwlChatSection(first: $0.first, last: $0.last, text: clip($0.text, cap: groupRoom - 64)) }
+        func length(_ notes: [OwlChatSection]) -> Int { notes.reduce(0) { $0 + ($1.text as NSString).length } }
+
+        var notes = try start.flatMap(pieces)
         var rounds = 0
-        while (render(notes) as NSString).length > finalRoom {
+        while !fits(finalInstruction(request, notes: render(notes)), history) {
             rounds += 1
-            guard rounds <= 32 else { throw ReduceFailure(message: String(localized: "The notes could not be combined.")) }
+            guard rounds <= 32 else { throw noRoom }
             // Consecutive notes, as many as fit one merge call.
             var groups: [[OwlChatSection]] = []
             var current: [OwlChatSection] = []
             for note in notes {
-                if !current.isEmpty, (render(current + [note]) as NSString).length > groupRoom {
+                if !current.isEmpty, !fits(merge(current + [note])) {
                     groups.append(current)
                     current = []
                 }
@@ -361,24 +476,36 @@ public enum OwlChunkedReviewRunner {
             if !current.isEmpty { groups.append(current) }
             var next: [OwlChatSection] = []
             for group in groups {
-                let first = group.first!.first, last = group.last!.last
                 if group.count == 1, (group[0].text as NSString).length <= cap {
                     next.append(group[0])
                     continue
                 }
-                let merged = try await call(groupInstruction(request, notes: render(group), first: first, last: last, cap: cap),
-                                            history: [])
-                let allowed = covered.intersection(IndexSet(integersIn: first...last))
-                var text = OwlCitations.filter(merged, allowed: allowed).text
-                if text.isEmpty { text = render(group) }
-                next.append(OwlChatSection(first: first, last: last, text: clip(text, cap: cap)))
+                let merged = try await call(merge(group), history: [])
+                // Only lines this call was shown may be cited: those its notes cite.
+                let text = OwlCitations.filter(merged, allowed: evidence(group)).text
+                if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    next += group
+                } else {
+                    next += try pieces(OwlChatSection(first: group.first!.first, last: group.map(\.last).max()!, text: text))
+                }
             }
+            // A round that didn't shorten the notes would go on forever:
+            // say so rather than cut any of them.
+            guard length(next) < length(notes) else { throw noRoom }
             notes = next
         }
         let answer = try await call(finalInstruction(request, notes: render(notes)), history: history)
         guard !answer.isEmpty else {
             throw ReduceFailure(message: String(localized: "The model returned no combined answer; the section notes are below."))
         }
-        return OwlCitations.filter(answer, allowed: covered).text
+        // Citable: the lines the notes sent cite, and those named in the
+        // conversation sent with it (and a typed question).
+        var allowed = evidence(notes)
+        for message in OwlPrompts.chatHistoryMessages(history) {
+            if case .user(let t) = message { allowed.formUnion(OwlCitations.lines(in: t)) }
+            if case .assistant(let t) = message { allowed.formUnion(OwlCitations.lines(in: t)) }
+        }
+        if request.action == nil { allowed.formUnion(OwlCitations.lines(in: request.question)) }
+        return OwlCitations.filter(answer, allowed: allowed).text
     }
 }

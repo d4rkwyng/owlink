@@ -189,8 +189,13 @@ import CedricCore
     }
 
     @Test func largeSummariesAreCombinedInRoundsWithoutPartLabels() async throws {
-        let engine = Engine(reply: String(repeating: "summary ", count: 800))
+        // Long part answers; a combine call answers briefly. (A combine
+        // that never shortens the notes now fails rather than clipping them:
+        // OwlWholeDocSynthesisTests.notesThatNeverShortenFailHonestlyAndKeepTheNotes.)
         let req = Self.request(Self.snapshot(), action: .explain)
+        let parts = try #require(OwlChunkedReviewRunner.plan(req, engine: Engine())).parts.count
+        let long = String(repeating: "summary ", count: 800)
+        let engine = Engine(reply: "A short summary.", replies: Dictionary(uniqueKeysWithValues: (1...parts).map { ($0, long) }))
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
@@ -224,7 +229,8 @@ import CedricCore
         #expect(plan.parts.count > 8 && plan.isComplete)
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == plan.parts.count)
+        // Every part, then the combine step (Check for Risks is synthesized too).
+        #expect(result.reduceCalls >= 1 && engine.calls == plan.parts.count + result.reduceCalls)
         #expect(!result.outcome.answer.contains("rest was not reviewed"))
         #expect(!result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
         #expect(result.outcome.answer.contains("Line 10"))
@@ -279,7 +285,8 @@ import CedricCore
             let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                           describeError: { String(describing: $0) }) { _, _ in }
             #expect(!result.stopped && result.error == nil)
-            #expect(engine.calls == (action == .explain || action == nil ? 4 : 3))
+            // Three parts and one combine call, for every action (findings too).
+            #expect(engine.calls == 4)
             #expect(!result.outcome.answer.contains("Part 1"))
             #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
             for (index, part) in plan.parts.enumerated() {
@@ -358,7 +365,8 @@ import CedricCore
         ])
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: mixed,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(mixed.calls == 2)
+        // Two parts, then one combine call; it answers with a reassuring verdict (the default reply).
+        #expect(mixed.calls == 3)
         #expect(result.outcome.answer.localizedCaseInsensitiveContains("don’t run")
                || result.outcome.answer.localizedCaseInsensitiveContains("don't run"))
         #expect(!result.outcome.answer.contains(ScriptVerdict.noRedFlags))

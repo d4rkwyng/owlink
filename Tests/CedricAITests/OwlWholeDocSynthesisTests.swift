@@ -93,6 +93,11 @@ import CedricCore
                               useTools: false, prose: prose)
     }
 
+    /// The first line `text` cites (1 if none): a merge reply that cites only what it was given.
+    static func firstCited(_ text: String) -> Int {
+        OwlCitations.evidence(in: text.components(separatedBy: "\n").filter { $0.hasPrefix("- ") }.joined(separator: "\n")).first ?? 1
+    }
+
     static func covered(_ plan: OwlChunkedReview.Plan) -> IndexSet {
         var c = IndexSet()
         for p in plan.parts where p.fits { c.insert(integersIn: p.first...p.last) }
@@ -148,16 +153,79 @@ import CedricCore
             (a...min(b, a + 11)).map { "- Line \($0): " + String(repeating: "detail ", count: 22) }.joined(separator: "\n")
         }
         for budget in [5_000, 3_200] {
+            // A merge returns a shorter note that cites a line it was shown.
+            // (One that never shortens fails honestly: see below.)
             let engine = Recorder(budget: budget, partReply: long,
-                                  reduceReply: { u in u.contains(OwlChunkedReviewRunner.notesLabel) ? "Combined." : "- Line 1: merged " + String(repeating: "m", count: 3_000) })
+                                  reduceReply: { u in u.contains(OwlChunkedReviewRunner.notesLabel) ? "Combined."
+                                      : "- Line \(Self.firstCited(u)): merged " + String(repeating: "m", count: 400) })
             let req = Self.request(Self.doc282(), action: .summarise, budget: budget)
             let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
             let result = await Self.run(req, plan, engine)
-            #expect(result.error == nil && !result.stopped, "budget \(budget)")
+            #expect(result.error == nil && !result.stopped, "budget \(budget): \(result.error ?? "")")
             #expect(engine.reduceCalls.count > 1, "the notes were merged in groups first (budget \(budget))")
             for call in engine.calls { #expect(Self.size(call) <= budget, "budget \(budget)") }
             #expect(result.outcome.answer == "Combined.")
         }
+    }
+
+    @Test func aLongBacktickRunInTheNotesStillFitsEveryCall() async throws {
+        // Each note holds a 300-backtick run: the data fence grows to 301 on each side.
+        let ticks: @Sendable (Int, Int) -> String = { a, b in
+            "- Line \(a): " + String(repeating: "`", count: 300) + "\n"
+                + (a...min(b, a + 8)).map { "- Line \($0): " + String(repeating: "note ", count: 30) }.joined(separator: "\n")
+        }
+        for budget in [5_000, 3_600] {
+            let engine = Recorder(budget: budget, partReply: ticks,
+                                  reduceReply: { u in u.contains(OwlChunkedReviewRunner.notesLabel) ? "Combined."
+                                      : "- Line \(Self.firstCited(u)): merged." })
+            let req = Self.request(Self.doc282(), action: .summarise, budget: budget)
+            let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+            let result = await Self.run(req, plan, engine)
+            #expect(result.error == nil && result.outcome.answer == "Combined.", "budget \(budget)")
+            #expect(engine.reduceCalls.contains { Recorder.user($0).contains(String(repeating: "`", count: 301)) })
+            for call in engine.calls { #expect(Self.size(call) <= budget, "budget \(budget)") }
+        }
+    }
+
+    @Test func aNoteLongerThanOneCallIsSplitNotClipped() async throws {
+        // Every part's note is longer than one merge call can hold, and its
+        // last finding is at its very end.
+        let long: @Sendable (Int, Int) -> String = { a, b in
+            (0..<40).map { _ in "- Line \(a): " + String(repeating: "filler ", count: 25) }.joined(separator: "\n")
+                + "\n- Line \(b): TAIL-\(b)"
+        }
+        // A merge keeps the TAIL findings it was given (and one line otherwise).
+        let merge: @Sendable (String) -> String = { u in
+            if u.contains(OwlChunkedReviewRunner.notesLabel) { return "Combined." }
+            let tails = u.components(separatedBy: "\n").filter { $0.contains("TAIL-") && $0.hasPrefix("- ") }
+            return tails.isEmpty ? "- Line \(Self.firstCited(u)): filler." : tails.joined(separator: "\n")
+        }
+        let budget = 3_600
+        let engine = Recorder(budget: budget, partReply: long, reduceReply: merge)
+        let req = Self.request(Self.doc282(), action: .summarise, budget: budget)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, plan, engine)
+        #expect(result.error == nil && result.outcome.answer == "Combined.")
+        for call in engine.calls { #expect(Self.size(call) <= budget) }
+        // Every part's last finding reached the final call.
+        let final = Recorder.user(engine.reduceCalls.last!)
+        for part in plan.parts { #expect(final.contains("TAIL-\(part.last)"), "part \(part.first)–\(part.last)") }
+    }
+
+    @Test func notesThatNeverShortenFailHonestlyAndKeepTheNotes() async throws {
+        let long: @Sendable (Int, Int) -> String = { a, b in
+            (a...min(b, a + 11)).map { "- Line \($0): " + String(repeating: "detail ", count: 22) }.joined(separator: "\n")
+        }
+        // A merge that only ever grows its notes.
+        let engine = Recorder(budget: 3_600, partReply: long,
+                              reduceReply: { u in "- Line \(Self.firstCited(u)): " + String(repeating: "grown ", count: 2_000) })
+        let req = Self.request(Self.doc282(), action: .summarise, budget: 3_600)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, plan, engine)
+        #expect(result.error == "The notes could not be combined into one answer within this model’s context.")
+        #expect(result.outcome.answer.contains("not combined into one answer"))
+        #expect(result.outcome.sections.count == plan.parts.count)
+        for call in engine.calls { #expect(Self.size(call) <= 3_600) }
     }
 
     // MARK: Coverage
@@ -252,13 +320,49 @@ import CedricCore
         }
     }
 
-    @Test func findingsAreMergedNotRewrittenAndKeepTheirLines() async throws {
-        let engine = Recorder(partReply: { a, _ in "- Line \(a + 1): a real problem." })
+    @Test func findProblemsIsSynthesizedFromTheMergedFindingsAndDropsNone() async throws {
+        // The combine call mentions only the first finding.
+        let engine = Recorder(partReply: { a, _ in "- Line \(a + 1): a real problem." },
+                              reduceReply: { _ in "The main problem is on line 2." })
         let req = Self.request(Self.doc282(), action: .findProblems)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
         let result = await Self.run(req, plan, engine)
-        #expect(engine.reduceCalls.isEmpty)
-        for part in plan.parts { #expect(result.outcome.answer.contains("Line \(part.first + 1): a real problem.")) }
+        #expect(result.error == nil && !result.stopped)
+        // One synthesized answer first, the parts' notes below.
+        #expect(engine.reduceCalls.count == 1 && result.reduceCalls == 1)
+        #expect(result.outcome.answer.hasPrefix("The main problem is on line 2."))
+        #expect(result.outcome.sections.count == plan.parts.count)
+        // The merged findings went into the combine call as its notes …
+        let final = Recorder.user(engine.reduceCalls[0])
+        for part in plan.parts { #expect(final.contains("Line \(part.first + 1): a real problem.")) }
+        // … and none is dropped from the answer, each once.
+        for part in plan.parts where part.first + 1 != 2 {
+            #expect(result.outcome.answer.components(separatedBy: "Line \(part.first + 1): a real problem.").count == 2)
+        }
+        // No tools in the combine call.
+        #expect(engine.reduceCalls.allSatisfy { m in !m.contains { if case .toolCalls = $0 { return true }; return false } })
+    }
+
+    @Test func checkForRisksKeepsTheMostCautiousVerdictThroughSynthesis() async throws {
+        let dontRun = "Verdict: \(ScriptVerdict.dontRun)."
+        // One part says don't run; the others trust the source; the combine call softens it.
+        let engine = Recorder(partReply: { a, _ in
+            "- Line \(a): downloads code.\n" + (a == 1 ? dontRun : "Verdict: \(ScriptVerdict.trustSource).")
+        }, reduceReply: { _ in "It downloads code on line 1.\nVerdict: \(ScriptVerdict.noRedFlags)." })
+        let req = Self.request(Self.doc282(), action: .scriptSafety)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let result = await Self.run(req, plan, engine)
+        #expect(engine.reduceCalls.count == 1)
+        // The worst verdict went in, once …
+        let notes = Recorder.user(engine.reduceCalls[0]).components(separatedBy: OwlChunkedReviewRunner.notesLabel).last!
+        #expect(notes.contains(dontRun) && !notes.contains("Verdict: \(ScriptVerdict.trustSource)"))
+        // … and comes out: the answer's own softer verdict does not stand.
+        let answer = result.outcome.answer
+        #expect(answer.hasPrefix("It downloads code on line 1."))
+        #expect(answer.hasSuffix(dontRun))
+        #expect(!answer.contains(ScriptVerdict.noRedFlags))
+        for part in plan.parts { #expect(answer.contains("Line \(part.first): downloads code.") || part.first == 1) }
+        #expect(result.outcome.sections.count == plan.parts.count)
     }
 
     // MARK: Citations
@@ -281,16 +385,36 @@ import CedricCore
         var lines = (1...120).map { "line \($0) " + String(repeating: "w", count: 40) }
         lines[2] = String(repeating: "z", count: 6_000)
         let s = OwlDocumentSnapshot(text: lines.joined(separator: "\n"), generation: 1, fileName: "t.txt", language: "plain")
-        let engine = Recorder(budget: 3_000, reduceReply: { _ in "- Line 3 hides a secret.\n- Line 40 starts the list.\n- Lines 400-410 end it." })
         let req = Self.request(s, action: .summarise, budget: 3_000)
-        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: Recorder(budget: 3_000)))
         #expect(plan.parts.contains { !$0.fits && $0.first == 3 })
         #expect(OwlChunkedReview.label(plan) == "Whole document (120 lines; 1 too long to read)")
+        // The notes cite each part's first and last line only; an interior
+        // line was read by a part but neither its text nor number is in them.
+        let part = try #require(plan.parts.first { $0.fits && $0.last - $0.first >= 2 && $0.first > 3 })
+        let interior = part.first + 1
+        let reply = "- Line 3 hides a secret.\n- Line \(part.first) starts the list.\n- Line \(interior) is in the middle.\n- Lines 400-410 end it."
+        let engine = Recorder(budget: 3_000, reduceReply: { _ in reply })
         let result = await Self.run(req, plan, engine)
-        #expect(result.outcome.answer.contains("Line 40 starts the list."))
+        #expect(result.outcome.answer.contains("Line \(part.first) starts the list."))
+        #expect(!result.outcome.answer.contains("in the middle"))
         #expect(!result.outcome.answer.contains("hides a secret"))
         #expect(!result.outcome.answer.contains("400"))
         #expect(result.outcome.answer.contains("Line 3 was too long for this model and was not reviewed."))
+    }
+
+    @Test func theCombinedAnswerMayCiteLinesTheConversationSentWithItNamed() async throws {
+        let history = [OwlChatEntry(role: .user, text: "Anything odd?"),
+                       OwlChatEntry(role: .owl, text: "The note on line 150 repeats itself.")]
+        let engine = Recorder(reduceReply: { _ in "- Line 150 repeats the walk.\n- Line 151 is new.\n- Line 1 opens it." })
+        let req = Self.request(Self.doc282(), action: nil, question: "Why does it repeat?", history: history)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        #expect(!plan.parts.contains { $0.first == 151 || $0.last == 151 })
+        let result = await Self.run(req, plan, engine)
+        // Sent with the final call: the conversation's line 150 is citable, 151 is not.
+        #expect(engine.reduceCalls.last!.contains(.assistant("The note on line 150 repeats itself.")))
+        #expect(result.outcome.answer.contains("- Line 150 repeats the walk."))
+        #expect(!result.outcome.answer.contains("151"))
     }
 
     @Test func anOrdinaryAnswerCitingUnsentLinesIsFiltered() async throws {
