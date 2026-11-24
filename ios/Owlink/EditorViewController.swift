@@ -671,6 +671,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         })
         find.accessibilityIdentifier = "editor.find"
         find.title = String(localized: "Find")
+        // Collapsed into the ••• menu (a narrow bar), Find would be a row of
+        // its own there; the menu's Find submenu has it already.
+        find.menuRepresentation = Self.notInOverflowMenu
         // Cedric himself is the owl in the editor's corner (OwlSprite), not
         // a small bar icon; Ask Cedric is also in the overflow menu.
         var items = [find]
@@ -801,19 +804,35 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        // View and preview; file; find, marks and navigation; then the rest.
-        var viewGroup: [UIMenuElement] = []
-        if let preview = previewSubmenu() { viewGroup.append(preview) }
-        viewGroup += [wrap, invisibles, readable]
-        let fileGroup: [UIMenuElement] = [save, print, exportHTML, exportPDF]
-        let findGroup: [UIMenuElement] = [replace] + markActions() + [goTo, quickly, todos]
-        var tools: [UIMenuElement] = [statistics, fixTyposAction(), ask, check]
+        // Six rows (0.5.2 (18): the menu was too long): Find ›, Preview ›
+        // (View › without a preview), Ask Cedric, Save, More ›, Settings.
+        // The bar's buttons that collapse into the menu add nothing to it
+        // but Edit / Done (read mode, on an iPhone): seven rows at most.
+        let findNow = UIAction(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+            self?.textView.findInteraction?.presentFindNavigator(showingReplace: false)
+        }
+        findNow.accessibilityIdentifier = "editor.menu.find"
+        let findMenu = UIMenu(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass"), children: [
+            UIMenu(options: .displayInline, children: [findNow, replace, todos]),
+            UIMenu(options: .displayInline, children: markActions()),
+        ])
+        let viewMenu = UIMenu(title: String(localized: "View"), image: UIImage(systemName: "eyeglasses"), children: [wrap, invisibles, readable])
+        let exportMenu = UIMenu(title: String(localized: "Export & Print"), image: UIImage(systemName: "square.and.arrow.up"),
+                                children: [print, exportHTML, exportPDF])
+        let preview = previewSubmenu()
+        var tools: [UIMenuElement] = [fixTyposAction(), check]
         if let checkScript = checkScriptAction() { tools.append(checkScript) }
-        if UIApplication.shared.supportsMultipleScenes { tools.append(Self.newWindowAction()) }
-        return [UIMenu(options: .displayInline, children: viewGroup), UIMenu(options: .displayInline, children: fileGroup),
-                UIMenu(options: .displayInline, children: findGroup), UIMenu(options: .displayInline, children: tools),
-                UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu(),
+        var fileGroup: [UIMenuElement] = [revert, previousVersionsMenu()]
+        if UIApplication.shared.supportsMultipleScenes { fileGroup.append(Self.newWindowAction()) }
+        let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
+            UIMenu(options: .displayInline, children: [exportMenu] + (preview == nil ? [] : [viewMenu])),
+            UIMenu(options: .displayInline, children: [goTo, quickly, statistics]),
+            UIMenu(options: .displayInline, children: tools),
+            UIMenu(options: .displayInline, children: [writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu()]),
+            UIMenu(options: .displayInline, children: fileGroup),
+        ])
+        return [UIMenu(options: .displayInline, children: [findMenu, preview ?? viewMenu, ask]),
+                UIMenu(options: .displayInline, children: [save, more]),
                 UIMenu(options: .displayInline, children: [settings])]
     }
 

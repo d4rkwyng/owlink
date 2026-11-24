@@ -202,7 +202,8 @@ final class BookmarkTests: XCTestCase {
         caret(editor, line: 0)
         XCTAssertEqual(try menuItem(editor, "editor.bookmarkLine").title, "Bookmark Line")
         // In the ⋯ menu.
-        let more = editor.moreMenuItems().compactMap { $0 as? UIMenu }
+        // (Under More › since 0.5.2 (18).)
+        let more = allSubmenus(editor.moreMenuItems())
         XCTAssertTrue(more.contains { $0.title == "Bookmarks" })
     }
 

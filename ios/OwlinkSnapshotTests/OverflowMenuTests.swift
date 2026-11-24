@@ -113,17 +113,27 @@ final class OverflowMenuTests: XCTestCase {
         }
     }
 
-    /// The groups: view/preview, file, find/marks/navigation, then the rest.
+    /// The groups (0.5.2 (18), six rows: the menu was too long): Find ›,
+    /// Preview ›, Ask Cedric | Save, More › | Settings. Same intent as
+    /// before the trim: the preview modes first in their submenu, the view
+    /// toggles together, Save beside Print and the exports (now in More ›
+    /// Export & Print), find, marks and navigation together, and nothing
+    /// dropped.
     func testMenuIsGroupedInline() throws {
         let editor = markdownEditor(width: .compact)
         let groups = editor.moreMenuItems().compactMap { $0 as? UIMenu }
-        XCTAssertGreaterThanOrEqual(groups.count, 4)
-        let titles = groups.prefix(3).map { flatten($0).map(\.title) }
-        XCTAssertEqual(groups.prefix(4).map { $0.options.contains(.displayInline) }, [true, true, true, true])
-        XCTAssertEqual(Array(titles[0].prefix(2)), ["Preview", "Focus Preview"])
-        XCTAssertTrue(titles[0].contains("Wrap Lines") && titles[0].contains("Readable Width"))
-        XCTAssertEqual(titles[1], ["Save", "Print…", "Export as HTML…", "Export as PDF…"])
-        XCTAssertEqual(Array(titles[2].prefix(5)), ["Find and Replace", "Mark All", "Clear Marks", "Go to Line…", "Open Quickly…"])
+        XCTAssertGreaterThanOrEqual(groups.count, 3)
+        XCTAssertEqual(groups.prefix(3).map { $0.options.contains(.displayInline) }, [true, true, true])
+        let tops = groups.map { $0.children.map { e in (e as? UIMenu).map { $0.title + " ›" } ?? (e as? UIAction)?.title ?? "?" } }
+        XCTAssertEqual(tops, [["Find ›", "Preview ›", "Ask Cedric"], ["Save", "More ›"], ["Settings"]])
+        let all = flatten(UIMenu(children: editor.moreMenuItems()))
+        func titles(under path: [String]) -> [String] { all.filter { $0.path == path }.map(\.title) }
+        XCTAssertEqual(Array(titles(under: ["Preview"]).prefix(2)), ["Preview", "Focus Preview"])
+        let view = titles(under: ["More", "View"])
+        XCTAssertTrue(view.contains("Wrap Lines") && view.contains("Readable Width") && view.contains("Show Invisibles"), "\(view)")
+        XCTAssertEqual(titles(under: ["More", "Export & Print"]), ["Print…", "Export as HTML…", "Export as PDF…"])
+        XCTAssertEqual(titles(under: ["Find"]), ["Find", "Find and Replace", "Find TODOs", "Mark All", "Clear Marks"])
+        XCTAssertEqual(Array(titles(under: ["More"]).prefix(3)), ["Go to Line…", "Open Quickly…", "Statistics…"])
         // Nothing dropped: the identifiers the UI tests use are all there.
         let ids = Set(actions(editor.moreMenuItems()).compactMap(\.accessibilityIdentifier))
         for id in ["editor.menu.focusPreview", "editor.menu.print", "editor.menu.exportHTML", "editor.menu.exportPDF",
@@ -133,6 +143,30 @@ final class OverflowMenuTests: XCTestCase {
         }
         for title in ["Ask Cedric", "Check with Cedric", "Settings", "Statistics…", "Find TODOs"] {
             XCTAssertTrue(flatten(UIMenu(children: editor.moreMenuItems())).contains { $0.title == title }, "\(title) missing")
+        }
+    }
+
+    /// Without a preview (plain text) the view toggles take Preview's
+    /// place at the top, as View ›; no title twice, collapsed or not, on
+    /// any width (an iPad in a split is compact too).
+    func testPlainTextMenuHasViewAndNoDuplicates() {
+        for width in [UIUserInterfaceSizeClass.compact, .regular] {
+            let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt"))
+            doc.text = "Owls\n"
+            let editor = EditorViewController(document: doc, readModeOnOpen: width == .compact)
+            let nav = UINavigationController(rootViewController: editor)
+            nav.traitOverrides.horizontalSizeClass = width
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: width == .compact ? 390 : 1024, height: 800))
+            window.rootViewController = nav
+            window.makeKeyAndVisible()
+            window.layoutIfNeeded()
+            windows.append(window)
+            for collapsed in [false, true] {
+                let menu = overflowMenu(editor, collapsed: collapsed)
+                assertNoDuplicates(menu, "plain text, width \(width.rawValue), collapsed \(collapsed)")
+                XCTAssertFalse(flatten(menu).contains { $0.title == "Focus Preview" })
+                XCTAssertEqual(flatten(menu).filter { $0.path == ["View"] }.map(\.title), ["Wrap Lines", "Show Invisibles", "Readable Width"])
+            }
         }
     }
 
@@ -182,4 +216,10 @@ final class OverflowMenuTests: XCTestCase {
             XCTAssertEqual(view?.first { $0.title == "Preview" }?.modifierFlags, [.command, .shift])
         }
     }
+}
+
+/// Every submenu of a menu tree, nested ones too (the ••• menu keeps most
+/// of its commands in submenus: More ›, View ›, …).
+@MainActor func allSubmenus(_ elements: [UIMenuElement]) -> [UIMenu] {
+    elements.compactMap { $0 as? UIMenu }.flatMap { [$0] + allSubmenus($0.children) }
 }

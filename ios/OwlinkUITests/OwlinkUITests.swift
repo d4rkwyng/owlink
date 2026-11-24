@@ -208,6 +208,12 @@ final class OwlinkUITests: XCTestCase {
         return item
     }
 
+    /// Opens a submenu of the open ••• menu (More ›, Export & Print ›, …).
+    private func openSubmenu(_ app: XCUIApplication, _ label: String) {
+        menuItem(app, label).tap()
+        sleep(1) // the submenu's animation
+    }
+
     /// Closes an open menu by tapping outside it (on the status line).
     private func closeMenu(_ app: XCUIApplication) {
         app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
@@ -387,6 +393,8 @@ final class OwlinkUITests: XCTestCase {
         // text view in this simulator: see testHideKeyboardButton): CRLF
         // line endings, an undoable change written on Save.
         openMore(app)
+        // In More › since 0.5.2 (18).
+        openSubmenu(app, "More")
         menuItem(app, "Encoding and Line Endings").tap()
         let crlf = app.buttons["CRLF"].firstMatch
         XCTAssertTrue(crlf.waitForExistence(timeout: 5), "no CRLF item")
@@ -499,6 +507,8 @@ final class OwlinkUITests: XCTestCase {
         sleep(1)
         closeMenu(app)
         openMore(app)
+        // In More › since 0.5.2 (18).
+        openSubmenu(app, "More")
         menuItem(app, "Writing Mode").tap()
         sleep(1)
         closeMenu(app)

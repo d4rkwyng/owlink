@@ -56,9 +56,15 @@ Reopen Closed Tab).
 
 Build 18 (from a device check of build 17):
 
-- **A shorter ••• menu.** Six or seven rows, with marks, navigation,
-  view toggles and the less used commands in submenus; nothing that was
-  in the menu is gone (the iPad menu bar and its shortcuts are unchanged).
+- **A shorter ••• menu.** Six rows: Find › (Find, Find and Replace,
+  Find TODOs, Mark All, Clear Marks), Preview › (View › for a document
+  without a preview: Wrap Lines, Show Invisibles, Readable Width), Ask
+  Cedric, Save, More › and Settings; an iPhone adds Edit / Done when its
+  button doesn't fit the bar. More › has Export & Print ›, View ›, Go to
+  Line…, Open Quickly…, Statistics…, Cedric's checks, Writing Mode,
+  Language, Indentation, Bookmarks, Folding, Encoding and Line Endings,
+  Revert and Restore Previous Version. Nothing that was reachable is gone,
+  and the iPad menu bar and its shortcuts are unchanged.
 - **Front matter on the Mac** (shared code): a preview closed and reopened
   at once shows the block as it was left even when reading it back is
   slow, and that read no longer holds up previews in other tabs.
@@ -121,7 +127,7 @@ sidebar), Finder document icons, and the Mac's multi-tab session restore
 
 ## New in 0.4.6 (14)
 
-- **Code folding**, as on the Mac: the ⋯ menu's Folding submenu (and iPad
+- **Code folding**, as on the Mac: the ⋯ menu's More › Folding submenu (and iPad
   Text › Folding), fold marks in the line-number gutter, and a "⋯ N lines"
   pill that unfolds. Folded text is only hidden; save, undo, find, copy,
   print and export see all of it.
@@ -136,7 +142,7 @@ Details for both are under What it does below.
 
 - Text menu and touch line commands, indentation conversion, and cancellable keep/delete lines matching.
 - Settings › Editor sets the default indent for files without detected indentation.
-- This document's Indent Using Spaces/Tabs and Tab Width are in the ⋯ menu (Indentation) and apply until the document is closed or reloaded.
+- This document's Indent Using Spaces/Tabs and Tab Width are in the ⋯ menu (More › Indentation) and apply until the document is closed or reloaded.
 - Read-only CSV and TSV grid preview in the editor palette: pinned header, zoom, sortable columns (a third tap restores file order), VoiceOver sort state, and field navigation back into the text.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line
@@ -166,9 +172,9 @@ Details for both are under What it does below.
 - Show Invisibles marks spaces, tabs and line endings without changing the text, even on long lines.
 - Highlight occurrences (on by default) and matching brackets (always on, as on the Mac), using the current theme without repainting all occurrences on each caret move.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
-- Mark All / Clear Marks (the ⋯ menu, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
-- Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
-- Code folding (0.4.6), as on the Mac: Fold, Unfold, Fold All, Unfold All and Fold to Level 1–3 are in the ⋯ menu's Folding submenu (and on iPad Text › Folding, with `⌥⌘←`, `⌥⌘→`, `⌥⇧⌘←` and `⌥⇧⌘→`). Languages that fold show ▾ beside each foldable line in the gutter and ▸ on a folded one; tap it to fold or unfold, or tap the "⋯ N lines" pill. Folded text is only hidden: save, undo, find, copy, print and export see all of it, and arrow keys step over a fold. Plain text, CSV, diffs, batch, .reg, HTML and XML don't fold, and a large document turns folding off. Folds aren't kept when the document closes.
+- Mark All / Clear Marks (the ⋯ menu's Find ›, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
+- Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu's More › Bookmarks (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
+- Code folding (0.4.6), as on the Mac: Fold, Unfold, Fold All, Unfold All and Fold to Level 1–3 are in the ⋯ menu's More › Folding submenu (and on iPad Text › Folding, with `⌥⌘←`, `⌥⌘→`, `⌥⇧⌘←` and `⌥⇧⌘→`). Languages that fold show ▾ beside each foldable line in the gutter and ▸ on a folded one; tap it to fold or unfold, or tap the "⋯ N lines" pill. Folded text is only hidden: save, undo, find, copy, print and export see all of it, and arrow keys step over a fold. Plain text, CSV, diffs, batch, .reg, HTML and XML don't fold, and a large document turns folding off. Folds aren't kept when the document closes.
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
   and Find TODOs in the edit and document menus. Results stay on the device.
 - Statistics: word count in the status line, document and selection counts,
