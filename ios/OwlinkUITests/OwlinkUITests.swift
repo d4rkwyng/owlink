@@ -22,6 +22,26 @@ final class OwlinkUITests: XCTestCase {
         return tv
     }
 
+    /// Shows the preview and returns its web view: the eye button in the
+    /// bar, or on a narrow iPhone the system overflow menu (More ›
+    /// Preview › Preview).
+    private func showPreview(_ app: XCUIApplication) -> XCUIElement {
+        let web = app.webViews["editor.previewWeb"]
+        if !web.waitForExistence(timeout: 2) {
+            let eye = app.buttons["editor.preview"]
+            if eye.exists { eye.tap() } else {
+                app.navigationBars.buttons["More"].firstMatch.tap()
+                // The eye's own submenu there: its first item is the toggle.
+                app.buttons["Preview"].firstMatch.tap()
+                let toggle = app.cells.buttons["Preview"].firstMatch
+                XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview item in the overflow menu")
+                toggle.tap()
+            }
+        }
+        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        return web
+    }
+
     func testOpenEditSaveReopen() throws {
         var app = launch("sample.swift", fresh: true)
         var tv = editor(app)
@@ -80,9 +100,8 @@ final class OwlinkUITests: XCTestCase {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         XCTAssertTrue(app.buttons["editor.language"].label.contains("Markdown"))
-        app.buttons["editor.preview"].tap()
-        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.webViews.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
+        let web = showPreview(app)
+        XCTAssertTrue(web.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
     }
 
     /// A web link in the preview asks first (Mac 0.5.2 S1): the tap itself
@@ -93,20 +112,7 @@ final class OwlinkUITests: XCTestCase {
     func testWebLinkOpenInBrowserAsksFirst() throws {
         let app = launch("links.md", fresh: true)
         _ = editor(app)
-        let web = app.webViews["editor.previewWeb"]
-        if !web.waitForExistence(timeout: 2) {
-            // In the bar, or (a narrow iPhone) in the system overflow menu.
-            let eye = app.buttons["editor.preview"]
-            if eye.exists { eye.tap() } else {
-                app.navigationBars.buttons["More"].firstMatch.tap()
-                // The eye's own submenu there: its first item is the toggle.
-                app.buttons["Preview"].firstMatch.tap()
-                let toggle = app.cells.buttons["Preview"].firstMatch
-                XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview item in the overflow menu")
-                toggle.tap()
-            }
-        }
-        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        let web = showPreview(app)
         let link = web.links["The Owlink site"].firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 10), "no web link in the preview")
         link.tap()
