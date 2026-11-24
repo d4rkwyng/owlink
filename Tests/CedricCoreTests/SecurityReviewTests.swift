@@ -85,27 +85,31 @@ import Testing
 
     /// Renders on a thread with a main-thread-sized stack (as Copy as HTML
     /// does; the preview's own queue is checked in release builds). Returns
-    /// wall-clock seconds, the render thread's CPU seconds, and that
-    /// thread's `Timing.slowdown()`: the larger of the two measured just
-    /// before and just after the render, since a render of several seconds
-    /// may move between fast and slow cores.
-    static func timedRender(_ s: String) -> (html: String, seconds: Double, cpu: Double, slowdown: Double) {
-        final class Box: @unchecked Sendable { var html = ""; var seconds = 0.0; var cpu = 0.0; var slowdown = 1.0 }
+    /// monotonic wall-clock seconds, the render thread's CPU seconds, and
+    /// that thread's `Timing.slowdown()` measured just before the render
+    /// (what to scale by, as `Timing.best` does) and just after it (for
+    /// the message only: a render of several seconds may move between fast
+    /// and slow cores, and scaling by the larger factor would only loosen
+    /// the bound).
+    static func timedRender(_ s: String) -> (html: String, seconds: Double, cpu: Double, slowdown: Double, slowdownAfter: Double) {
+        final class Box: @unchecked Sendable {
+            var html = ""; var seconds = 0.0; var cpu = 0.0; var slowdown = 1.0; var slowdownAfter = 1.0
+        }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         let t = Thread {
-            let before = Timing.slowdown()
-            let start = Date(), cpuStart = Timing.threadCPU()
+            box.slowdown = Timing.slowdown()
+            let start = Timing.now(), cpuStart = Timing.threadCPU()
             box.html = Markdown.render(s)
             box.cpu = Timing.threadCPU() - cpuStart
-            box.seconds = Date().timeIntervalSince(start)
-            box.slowdown = max(before, Timing.slowdown())
+            box.seconds = Timing.now() - start
+            box.slowdownAfter = Timing.slowdown()
             done.signal()
         }
         t.stackSize = 16 << 20
         t.start()
         done.wait()
-        return (box.html, box.seconds, box.cpu, box.slowdown)
+        return (box.html, box.seconds, box.cpu, box.slowdown, box.slowdownAfter)
     }
 
     /// Generous: a debug build on a loaded CI runner. Before the fix these
@@ -145,12 +149,12 @@ import Testing
         let r = Self.timedRender(list)
         // 4 MB of input: about 0.7 s in a release build, several in a debug one.
         // The render thread's CPU time, scaled by the slowdown measured on
-        // that thread (see `Timing`), not the wall clock: on a slow macos-26
+        // that thread just before it (see `Timing`), not the wall clock: on a slow macos-26
         // runner the wall clock reached 42 s (run 45258714905). The 30 s
         // budget is unchanged. The wall clock keeps a wide bound against a
         // blow-up; the uncapped renderer took 45 s in a release build.
         let scaled = r.cpu / r.slowdown
-        #expect(scaled < 30, "2 000-deep list: \(scaled) s scaled (\(r.cpu) s CPU, slowdown \(r.slowdown)×, wall \(r.seconds) s)")
+        #expect(scaled < 30, "2 000-deep list: \(scaled) s scaled (\(r.cpu) s CPU, slowdown \(r.slowdown)× before, \(r.slowdownAfter)× after, wall \(r.seconds) s)")
         #expect(r.seconds < 120, "2 000-deep list: \(r.seconds) s wall")
         let uls = r.html.components(separatedBy: "<ul").count - 1
         #expect(uls == MarkdownRenderer.maxNesting + 1, "lists nest \(MarkdownRenderer.maxNesting) deep, then text: \(uls)")
