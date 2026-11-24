@@ -145,12 +145,15 @@ import Testing
         }
         let gaveUp = Box(false)
         let done = DispatchSemaphore(value: 0)
+        // Registration closes before `stop` runs: wait for the callback
+        // itself, not for `isClosed`, before checking what it did.
+        let stopCalled = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
-            reg.exit(on: q, onQueue: false, timeout: 5, stop: { $0.stopped.mutate { $0 += 1 } },
+            reg.exit(on: q, onQueue: false, timeout: 5, stop: { $0.stopped.mutate { $0 += 1 }; stopCalled.signal() },
                      free: { $0.freed.mutate { $0 += 1 } }, giveUp: { gaveUp.mutate { $0 = true } })
             done.signal()
         }
-        for _ in 0..<1000 where !reg.isClosed { usleep(5000) }
+        #expect(stopCalled.wait(timeout: .now() + 5) == .success, "exit asked the registered model to stop")
         #expect(reg.isClosed)
         #expect(early.stopped.value == 1, "asked to stop before the wait")
         #expect(early.freed.value == 0, "nothing freed under the running load")
