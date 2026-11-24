@@ -108,11 +108,13 @@ public enum FrontMatter {
         if depth > maxDepth { return .scalar(rest(lines, &i, above: indent - 1)) }
         if isListItem(first.text) { return list(&lines, &i, indent: first.indent, depth: depth) }
         if keyValue(first.text) != nil { return map(&lines, &i, indent: first.indent, depth: depth) }
-        // Plain text, with its more-indented continuation lines.
+        // Plain text, with its more-indented continuation lines; a flow
+        // map or list on its own (`{title: Owls}` at the root: Codex review
+        // of the 0.5.2 (17) fixes) is read as one.
         i += 1
         var text = String(first.text)
         while let next = at(lines, &i), next.indent > indent { text += " " + next.text; i += 1 }
-        return .scalar(unquote(text))
+        return scalar(text, depth: depth)
     }
 
     /// Every following line indented more than `above`, as text.
@@ -236,8 +238,8 @@ public enum FrontMatter {
         return .scalar(unquote(t))
     }
 
-    /// Splits on commas outside quotes and nested brackets; nil when the
-    /// brackets don't balance.
+    /// Splits on commas outside quotes and nested brackets, a trailing
+    /// comma dropped; nil when the brackets don't balance.
     private static func splitFlow(_ s: Substring) -> [String]? {
         var out: [String] = []
         var cur = ""
@@ -261,7 +263,10 @@ public enum FrontMatter {
         }
         guard nesting == 0, quote == nil else { return nil }
         out.append(cur)
-        return out.map { $0.trimmingCharacters(in: .whitespaces) }
+        var parts = out.map { $0.trimmingCharacters(in: .whitespaces) }
+        // One trailing comma is allowed (`{icon: owl.png,}`), as in YAML.
+        if parts.count > 1, parts.last == "" { parts.removeLast() }
+        return parts
     }
 
     /// A flow map entry's `:` (outside quotes and brackets).

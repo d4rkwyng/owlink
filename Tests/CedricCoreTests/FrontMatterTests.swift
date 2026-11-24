@@ -109,6 +109,29 @@ import Testing
         #expect(!html.contains("{links"))
     }
 
+    /// Codex review of the 0.5.2 (17) fixes, should-fix: a flow map at the
+    /// root, and a trailing comma in a flow collection, are values too.
+    @Test func rootFlowMapsAndTrailingCommas() {
+        #expect(FrontMatter.parse(["{title: Owls}"]) == .map([("title", .scalar("Owls"))]))
+        #expect(FrontMatter.parse(["{title: Owls, tags: [a, b]}"]) == .map([
+            ("title", .scalar("Owls")), ("tags", .list([.scalar("a"), .scalar("b")])),
+        ]))
+        #expect(FrontMatter.parse(["[a, b]"]) == .list([.scalar("a"), .scalar("b")]))
+        #expect(FrontMatter.parse(["hero: {icon: owl.png,}"]) == .map([("hero", .map([("icon", .scalar("owl.png"))]))]))
+        #expect(FrontMatter.parse(["t: [a, b, ]", "m: {a: [x,], b: 1 ,}"]) == .map([
+            ("t", .list([.scalar("a"), .scalar("b")])),
+            ("m", .map([("a", .list([.scalar("x")])), ("b", .scalar("1"))])),
+        ]))
+        // Still text: an empty entry inside, or a lone comma.
+        #expect(FrontMatter.parse(["t: {a: 1,, b: 2}"]) == .map([("t", .scalar("{a: 1,, b: 2}"))]))
+        // Through the renderer: the title in the summary, values in the
+        // table, all escaped.
+        let html = Markdown.render("---\n{title: \"<b>Owls</b>\", hero: {icon: \"<img src=x onerror=1>\",}}\n---\nText\n")
+        #expect(html.contains("<summary>Front matter · &lt;b&gt;Owls&lt;/b&gt;</summary>"), "\(html)")
+        #expect(html.contains("<tr><th>hero</th><td><table class=\"fm-map\"><tbody><tr><th>icon</th><td>&lt;img src=x onerror=1&gt;</td></tr></tbody></table></td></tr>"), "\(html)")
+        #expect(!html.contains("<b>") && !html.contains("<img") && !html.contains("{title"))
+    }
+
     @Test func everythingIsEscaped() {
         let evil = """
         ---
