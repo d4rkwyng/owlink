@@ -154,16 +154,23 @@ public enum OwlChunkedReview {
     /// digit in it, whole ("90 days" and "30 days" differ; "sha256" and
     /// "sha512" too, and "L2" and "L3"). The numbers of its citations
     /// ("line 12", "lines 4–9", "#12", a leading "12:") are where it is,
-    /// not what it says, and are left out.
+    /// not what it says, and are left out. "L12" is kept whole too: it may
+    /// be a term like "L2", so "- L12: x" and "- Line 12: x" are both
+    /// kept (a finding repeated is better than one dropped).
     public static func substance(_ text: String) -> Set<String> {
         let blanked = NSMutableString(string: text)
         let all = NSRange(location: 0, length: blanked.length)
         var cites = OwlCitations.find(text).map(\.range)
         for m in findingCite.matches(in: text, range: all) {
             let number = m.range(at: m.range(at: 1).location == NSNotFound ? 2 : 1)
-            // "L2", "L3": a term, not a line ("L2 regularization").
-            if number.location > 0, let u = UnicodeScalar(blanked.character(at: number.location - 1)),
-               CharacterSet.letters.contains(u) { continue }
+            // "L2", "L3": a term, kept whole ("L2 regularization"), though
+            // "line12" is still a citation.
+            var start = number.location
+            while start > 0, let u = UnicodeScalar(blanked.character(at: start - 1)), CharacterSet.letters.contains(u) {
+                start -= 1
+            }
+            let word = blanked.substring(with: NSRange(location: start, length: number.location - start)).lowercased()
+            if !word.isEmpty, word != "line", word != "lines" { continue }
             cites.append(number)
         }
         for r in cites { blanked.replaceCharacters(in: r, with: String(repeating: " ", count: r.length)) }

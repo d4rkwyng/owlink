@@ -144,6 +144,10 @@ import CedricCore
         #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items)
         let same = "Line 12 enables L2 regularization."
         #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+        // "line12" is still a citation, left out of what a finding says.
+        #expect(OwlChunkedReview.substance("- line12: missing signature.") == OwlChunkedReview.substance("- Line 12: missing signature."))
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: missing signature.", "- line12: missing signature."])
+                == "- Line 12: missing signature.")
     }
 
     @Test func noCapAndVerdicts() {
