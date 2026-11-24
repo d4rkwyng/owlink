@@ -387,4 +387,32 @@ import Testing
         let elsewhere = OwlCitations.filter("Overview.\n- Line 40 through 99\(OwlCitations.flag) and line 31: setup.", allowed: Self.lines1to18)
         #expect(elsewhere.text == "Overview.")
     }
+
+    /// An item dropped by the part's filter takes its indented rows with
+    /// it, even one whose citation the chat runner already flagged:
+    /// "Line 31" was citable from the conversation, "Line 42" was not,
+    /// and the part read neither. 0.5.4's follow-up 7 counted the flagged
+    /// citation as the row's own and left "Line 42" behind, under no item.
+    @Test func aDroppedItemTakesItsFlaggedContinuationWithIt() {
+        let answer = "Overview.\n- Line 31: setup.\n  Line 42: detail."
+        let chat = OwlCitations.filter(answer, allowed: Self.lines1to18.union(IndexSet(integer: 31)))
+        #expect(chat.text == "Overview.\n- Line 31: setup.\n  Line 42\(OwlCitations.flag): detail.")
+        let part = OwlCitations.filter(chat.text, allowed: Self.lines1to18)
+        #expect(part.text == "Overview.", "\(part.text.debugDescription)")
+        #expect(part.dropped == [31...31] && part.flagged.isEmpty)
+        // Unflagged, the same: the indented row is about lines not read.
+        let direct = OwlCitations.filter(answer, allowed: Self.lines1to18)
+        #expect(direct.text == "Overview.", "\(direct.text.debugDescription)")
+        #expect(direct.dropped == [31...31, 42...42])
+        // An indented row citing a line read is not part of what was dropped.
+        let read = OwlCitations.filter("Overview.\n- Line 31: setup.\n  Line 5: detail.", allowed: Self.lines1to18)
+        #expect(read.text == "Overview.\n  Line 5: detail.", "\(read.text.debugDescription)")
+        // The mixed item is still kept, flagged once on its span.
+        let mixed = OwlCitations.filter(OwlCitations.filter("Overview.\n- Line 4 through 99 and line 31: setup.\n  Line 42: detail.",
+                                                            allowed: Self.lines1to18.union(IndexSet(integer: 31))).text,
+                                        allowed: Self.lines1to18)
+        #expect(mixed.text == "Overview.\n- Line 4 through 99\(OwlCitations.flag) and line 31\(OwlCitations.flag): setup.\n  Line 42\(OwlCitations.flag): detail.",
+                "\(mixed.text.debugDescription)")
+        #expect(!mixed.text.contains(OwlCitations.flag + OwlCitations.flag))
+    }
 }

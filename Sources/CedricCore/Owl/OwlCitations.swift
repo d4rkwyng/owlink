@@ -191,7 +191,8 @@ public enum OwlCitations {
 
     /// Keeps `text` to the lines in `allowed`. A list item whose every
     /// citation lies outside `allowed` is removed, with its indented
-    /// continuation lines: it is about text the model never saw. Anything
+    /// continuation lines (those citing no line in `allowed`, a flagged
+    /// citation included): it is about text the model never saw. Anything
     /// else (a paragraph, an item that also cites given lines, an answer
     /// that would be left empty) keeps its words and gets `flag` after
     /// each citation that isn't wholly inside `allowed`. Nothing else in
@@ -243,7 +244,17 @@ public enum OwlCitations {
                 let cites = all.filter { NSLocationInRange($0.range.location, unit) }
                     .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
                 let trimmed = row.trimmingCharacters(in: .whitespaces)
-                if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
+                // An indented row under a dropped item goes with it, unless
+                // it cites a line given: a citation on it already flagged
+                // ("Line 42 (flagged): detail", from an earlier filter) or
+                // one of other lines not given is still about the dropped
+                // item, not a finding of its own.
+                if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.allSatisfy(untouched) {
+                    result.dropped.append(contentsOf: cites.filter {
+                        !marked.contains($0.range.location + unit.location)
+                    }.map(\.lines))
+                    continue
+                }
                 // No doubled blank line where an item was taken out.
                 if dropped, trimmed.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true { continue }
                 if dropped { gaps.append((kept.count, dropStart)) }
