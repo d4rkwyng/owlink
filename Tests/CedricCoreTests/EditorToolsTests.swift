@@ -660,4 +660,99 @@ import Testing
         #expect(!DiskStamp.changed(known: stamp.showing(UInt64(odd.count)), current: DiskStamp.of(url)))
         #expect(stamp.showing(UInt64(odd.count)) == stamp)
     }
+
+    final class Stamps: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [(FileTail.Event, FileTail.Shown)] = []
+        func add(_ e: FileTail.Event, _ s: FileTail.Shown) { lock.lock(); list.append((e, s)); lock.unlock() }
+        var all: [(FileTail.Event, FileTail.Shown)] { lock.lock(); defer { lock.unlock() }; return list }
+    }
+
+    /// Codex 0.5.4 review 3: Follow stamped its tab with the path's stamp
+    /// when a tail event reached the main thread. A same-size file put in
+    /// place after the tail read (an atomic replace) lent the old text its
+    /// identity and date, and ⌘S after stopping wrote the old text over
+    /// it. Each event now carries the stamp the bytes were read at.
+    @Test func anAppendCarriesTheStampItWasReadAt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // The viewer is busy: the event waits.
+        callbacks.suspend()
+        try appendBytes(url, Array("two\n".utf8))
+        tail.poll()
+        _ = tail.isWatching   // read, and queued for the viewer
+        let read = try #require(DiskStamp.of(url))
+        // A same-size file put in its place before the viewer gets to it.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("ONE\nTWO\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        let replaced = try #require(DiskStamp.of(url))
+        #expect(replaced.size == read.size && replaced.identity != read.identity)
+        callbacks.resume()
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .appended("two\n"))
+        #expect(first.1.bytes == 8)
+        #expect(first.1.stamp == read, "the stamp of the file the bytes came from")
+        #expect(DiskStamp.changed(known: first.1.stamp, current: DiskStamp.of(url)),
+                "…so the file put there since is a change: ⌘S asks")
+    }
+
+    /// The same for a reset: the stamp of the file the reset read, not of
+    /// one put there after.
+    @Test func aResetCarriesTheStampItWasReadAt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        callbacks.suspend()
+        let b = dir.appendingPathComponent("b.log"), c = dir.appendingPathComponent("c.log")
+        try Data("bb\n".utf8).write(to: b)
+        #expect(rename(b.path, url.path) == 0)
+        tail.poll()
+        _ = tail.isWatching
+        let read = try #require(DiskStamp.of(url))
+        try Data("cc\n".utf8).write(to: c)
+        #expect(rename(c.path, url.path) == 0)
+        callbacks.resume()
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .reset("bb\n"))
+        #expect(first.1.stamp == read)
+        #expect(DiskStamp.changed(known: first.1.stamp, current: DiskStamp.of(url)))
+    }
+
+    /// Follow's first read: the bytes and the stamp of the file they came
+    /// from, from one descriptor; a FIFO put at the path is refused, not
+    /// waited on.
+    @Test func readStampedReadsOneFile() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        #expect(data == Data("one\n".utf8))
+        #expect(stamp == DiskStamp.of(url))
+        let fifo = dir.appendingPathComponent("p")
+        #expect(mkfifo(fifo.path, 0o600) == 0)
+        #expect(throws: (any Error).self) { try FileTail.readStamped(fifo) }
+        #expect(throws: (any Error).self) { try FileTail.readStamped(dir.appendingPathComponent("gone")) }
+    }
 }

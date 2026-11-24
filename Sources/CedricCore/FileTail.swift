@@ -15,7 +15,7 @@ public final class FileTail: @unchecked Sendable {
     public let encoding: TextEncoding
     private let queue = DispatchQueue(label: "cedric.filetail")
     private let callbackQueue: DispatchQueue
-    private let handler: @Sendable (Event, UInt64?) -> Void
+    private let handler: @Sendable (Event, Shown) -> Void
     // Touched only on `queue`.
     private var source: DispatchSourceFileSystemObject?
     private var retry: DispatchSourceTimer?
@@ -27,26 +27,71 @@ public final class FileTail: @unchecked Sendable {
     /// file's bytes either, until the next faithful reset.
     private var lossy = false
 
+    /// What the text shown after an event stands for.
+    public struct Shown: Sendable, Equatable {
+        /// The file's first `bytes` bytes, byte for byte. Bytes held back
+        /// (half a character, a CR that may start a CRLF) are not counted,
+        /// so a viewer that stamps its tab with this size can't later save
+        /// over them as if it had shown them. Nil: the shown text isn't the
+        /// file's bytes (a reset that couldn't decode, shown as UTF-8 with
+        /// replacements, and the appends after it).
+        public let bytes: UInt64?
+        /// The stamp of the file these bytes were read from, taken from
+        /// the descriptor they were read through, before reading, and
+        /// sized to `bytes` (DiskStamp.showing). Not the path's stamp when
+        /// the event reaches the viewer: a file put in its place since
+        /// (same size, an atomic replace) has another identity and date,
+        /// and stamping with those would let ⌘S write the old text over it.
+        public let stamp: DiskStamp
+    }
+
     /// `offset`: how many bytes of the file the caller already shows.
     public convenience init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
                             handler: @escaping @Sendable (Event) -> Void) {
-        self.init(url: url, encoding: encoding, offset: offset, callbackQueue: callbackQueue) { e, _ in handler(e) }
+        self.init(url: url, encoding: encoding, offset: offset, callbackQueue: callbackQueue, stamped: { e, _ in handler(e) })
     }
 
-    /// `update` gets each event with how many bytes of the file the text
-    /// shown after it stands for, byte for byte: the first `shown` bytes.
-    /// Bytes held back (half a character, a CR that may start a CRLF) are
-    /// not counted, so a viewer that stamps its tab with this size can't
-    /// later save over them as if it had shown them. Nil: the shown text
-    /// isn't the file's bytes (a reset that couldn't decode, shown as
-    /// UTF-8 with replacements).
+    /// `update` gets each event with Shown.bytes.
+    public convenience init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
+                            update: @escaping @Sendable (Event, _ shown: UInt64?) -> Void) {
+        self.init(url: url, encoding: encoding, offset: offset, callbackQueue: callbackQueue, stamped: { e, s in update(e, s.bytes) })
+    }
+
+    /// `stamped` gets each event with what the text shown after it stands
+    /// for: how many of the file's bytes, and the stamp they were read at.
     public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
-                update: @escaping @Sendable (Event, _ shown: UInt64?) -> Void) {
+                stamped: @escaping @Sendable (Event, Shown) -> Void) {
         self.url = url
         self.encoding = encoding
         self.offset = offset
         self.callbackQueue = callbackQueue
-        self.handler = update
+        self.handler = stamped
+    }
+
+    /// The whole file and its stamp, both from one descriptor: the stamp
+    /// is taken (fstat) before the bytes are read, so a file changed or
+    /// put in its place meanwhile never carries the stamp of bytes it
+    /// doesn't hold (a later check sees a change instead). Follow File's
+    /// first read, and every reset.
+    public static func readStamped(_ url: URL) throws -> (Data, DiskStamp) {
+        let (fh, st) = try openRegular(url)
+        defer { try? fh.close() }
+        return (try fh.readToEnd() ?? Data(), DiskStamp(st))
+    }
+
+    /// Opens `url` for reading (without waiting on a FIFO) and stats the
+    /// descriptor: a regular file only.
+    static func openRegular(_ url: URL) throws -> (FileHandle, stat) {
+        let fd = open(url.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw CocoaError.error(.fileReadNoSuchFile, userInfo: [NSFilePathErrorKey: url.path,
+                                                    NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)]) }
+        let fh = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else {
+            try? fh.close()
+            throw CocoaError.error(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        return (fh, st)
     }
 
     deinit { source?.cancel(); retry?.cancel() }
@@ -143,31 +188,37 @@ public final class FileTail: @unchecked Sendable {
     }
 
     private func check() {
-        guard !stopped, let st = Self.fileInfo(url) else { return }
-        if st.inode != inode || st.size < offset {
+        // One descriptor for all of it: its stat (taken before reading:
+        // the stamp each event carries) and the bytes. Stat-ing the path
+        // and then opening it could read a file put there in between as
+        // an append to the one before.
+        guard !stopped, let (fh, st) = try? Self.openRegular(url) else { return }
+        defer { try? fh.close() }
+        let size = UInt64(st.st_size), stamp = DiskStamp(st)
+        if UInt64(st.st_ino) != inode || size < offset {
             // Replaced or truncated: start over.
-            let replaced = st.inode != inode
-            inode = st.inode
+            let replaced = UInt64(st.st_ino) != inode
+            inode = UInt64(st.st_ino)
             if replaced || source == nil { watch() }
-            guard let data = try? Data(contentsOf: url) else { return }
+            guard let read = try? fh.readToEnd() else { return }
+            let data = read ?? Data()
             // The same decode Follow starts with: a character cut in half
             // at the end (the writer still busy) waits for the next append.
             if let (d, used) = Self.decodeWhole(data, as: encoding) {
                 offset = UInt64(used)
                 pending = Data()
-                emit(.reset(d.text), shown: offset)
+                emit(.reset(d.text), shown: offset, stamp)
             } else {
                 offset = UInt64(data.count)
                 pending = Data()
-                emit(.reset(String(decoding: data, as: UTF8.self)), shown: nil)
+                emit(.reset(String(decoding: data, as: UTF8.self)), shown: nil, stamp)
             }
             return
         }
-        guard st.size > offset, let fh = try? FileHandle(forReadingFrom: url) else { return }
-        defer { try? fh.close() }
+        guard size > offset else { return }
         do {
             try fh.seek(toOffset: offset)
-            guard let chunk = try fh.read(upToCount: Int(st.size - offset)), !chunk.isEmpty else { return }
+            guard let chunk = try fh.read(upToCount: Int(size - offset)), !chunk.isEmpty else { return }
             offset += UInt64(chunk.count)
             let bytes = pending + chunk
             pending = Data()
@@ -184,7 +235,7 @@ public final class FileTail: @unchecked Sendable {
                 pending = cr + pending
             }
             guard !s.isEmpty else { return }
-            emit(.appended(TextCodec.normalizeLineEndings(s)), shown: lossy ? nil : offset - UInt64(pending.count))
+            emit(.appended(TextCodec.normalizeLineEndings(s)), shown: lossy ? nil : offset - UInt64(pending.count), stamp)
         } catch {
             return
         }
@@ -211,9 +262,9 @@ public final class FileTail: @unchecked Sendable {
         decodePrefix(data, encoding) { TextCodec.decode($0, as: encoding) }
     }
 
-    private func emit(_ e: Event, shown: UInt64?) {
+    private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp) {
         lossy = shown == nil
-        let h = handler
-        callbackQueue.async { h(e, shown) }
+        let h = handler, s = Shown(bytes: shown, stamp: stamp.showing(shown))
+        callbackQueue.async { h(e, s) }
     }
 }

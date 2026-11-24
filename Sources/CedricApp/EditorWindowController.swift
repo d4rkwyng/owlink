@@ -203,6 +203,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var readOnlyBar: NoticeBar?
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
+    /// Background catch-up reads (reloadIfChangedOnDisk(inBackground:))
+    /// not yet back on the main thread; the checks wait for none.
+    var catchUpReads = 0
     /// A one-off notice in this tab (the closed-tab "not saved" notice).
     var noticeBar: NoticeBar?
     /// View › Context Bar (ContextBar.swift): nil while it is off or the
@@ -1102,7 +1105,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// flags it for the owl's "Reload?"). A file deleted or moved away
     /// shows the "deleted" bar and makes the tab unsaved. Never drops
     /// unsaved edits.
-    func reloadIfChangedOnDisk() {
+    /// `inBackground`: the read and decode happen off the main thread
+    /// (stopping Follow on a big live log) and the text is replaced when
+    /// they're done, if the tab is still clean, not following, and its
+    /// stamp hasn't moved meanwhile; edits made meanwhile get the bar.
+    func reloadIfChangedOnDisk(inBackground: Bool = false) {
         guard tail == nil, let url = doc.fileURL else { return }
         switch DiskStamp.status(known: doc.diskStamp, at: url) {
         case .missing:
@@ -1116,14 +1123,43 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             doc.missingOnDisk = false
         }
         if doc.isDirty {
-            if !doc.changedOnDisk {
-                doc.changedOnDisk = true
-                if owl != nil { OwlHub.shared.activity(in: self) }
-            }
-            showDiskBar()
+            changedUnderEdits()
             return
         }
-        guard let (d, newMod) = try? EditorDocument.read(url, encoding: doc.encoding) else {
+        guard inBackground else {
+            reloadClean(try? EditorDocument.read(url, encoding: doc.encoding), prepared: nil)
+            return
+        }
+        let known = doc.diskStamp, encoding = doc.encoding
+        catchUpReads += 1
+        DispatchQueue.global(qos: .userInitiated).async {
+            let read = try? EditorDocument.read(url, encoding: encoding, shareBytes: true)
+            let prepared = read.flatMap { $0.0.looksBinary ? nil : PreparedText(lineIndex: LineIndex($0.0.text as NSString), fingerprint: nil) }
+            nonisolated(unsafe) let result = read
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.catchUpReads -= 1
+                // Followed again, saved, reloaded or retargeted meanwhile:
+                // this read is no longer the catch-up for this tab.
+                guard self.tail == nil, self.doc.fileURL == url, self.doc.diskStamp == known else { return }
+                if self.doc.isDirty { self.changedUnderEdits(); return }
+                self.reloadClean(result, prepared: prepared)
+            }
+        }
+    }
+
+    /// The file changed under unsaved edits: the bar, never a reload.
+    private func changedUnderEdits() {
+        if !doc.changedOnDisk {
+            doc.changedOnDisk = true
+            if owl != nil { OwlHub.shared.activity(in: self) }
+        }
+        showDiskBar()
+    }
+
+    /// A clean tab takes the file as read (nil: it couldn't be).
+    private func reloadClean(_ read: (DecodedText, DiskStamp?)?, prepared: PreparedText?) {
+        guard let (d, newMod) = read else {
             // Changed into something that can't be read (a link pointed
             // at a folder): say so rather than keep it quiet. The text
             // stays; Reload shows the error, Keep Mine keeps this text.
@@ -1140,7 +1176,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         let sels = panes.map { $0.textView.selectedRange() }
         doc.apply(d)
         doc.noteDisk(newMod)
-        setText(d.text)
+        setText(d.text, prepared: prepared)
         doc.markSaved()
         let len = (textView.string as NSString).length
         for (pane, sel) in zip(panes, sels) { pane.textView.setSelectedRange(NSRange(location: min(sel.location, len), length: 0)) }

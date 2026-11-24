@@ -286,10 +286,11 @@ extension EditorWindowController {
             recheckWriteAccess()
             // The tab's stamp counts only the bytes Follow showed: bytes it
             // held back (half a character, a trailing CR) or never got to
-            // show differ from it. Catch up now (a clean tab reloads; a
-            // file that can't be read shows the "Changed on disk" bar),
-            // and ⌘S asks rather than writing over them.
-            reloadIfChangedOnDisk()
+            // show differ from it, so ⌘S asks rather than writing over
+            // them. Catch up off the main thread (a big live log): a clean
+            // tab reloads when the read is done; a file that can't be read
+            // shows the "Changed on disk" bar.
+            reloadIfChangedOnDisk(inBackground: true)
             return
         }
         guard let url = doc.fileURL else { NSSound.beep(); return }
@@ -301,8 +302,10 @@ extension EditorWindowController {
             a.addButton(withTitle: String(localized: "Cancel"))
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
-        let data: Data
-        do { data = try Data(contentsOf: url) } catch { showError(error); return }
+        // The stamp from the descriptor the bytes are read through, taken
+        // before reading: never that of a file put in its place after.
+        let data: Data, stamp: DiskStamp
+        do { (data, stamp) = try FileTail.readStamped(url) } catch { showError(error); return }
         // The tail's own decode: a UTF-16 character cut in half at the end
         // (the writer still busy) is left for the first append, which
         // starts from `used`. Not text: the tab, its edits and its stamp
@@ -316,7 +319,7 @@ extension EditorWindowController {
         doc.markSaved()
         // Stamped as the bytes shown, not the whole file: a half character
         // left for the first append isn't in this tab's text.
-        doc.noteDisk(DiskStamp.of(url)?.showing(UInt64(used)))
+        doc.noteDisk(stamp.showing(UInt64(used)))
         updateTitle()
         setEditable(false)
         // setText dropped the cards proposed against the editable buffer;
@@ -325,8 +328,8 @@ extension EditorWindowController {
         window?.subtitle = String(localized: "Following")
         scrollToBottom()
         let me = WeakRef(self)
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { e, shown in
-            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { (e: FileTail.Event, shown: FileTail.Shown) in
+            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown.stamp) }
         }
         tail = t
         t.start()
@@ -339,9 +342,10 @@ extension EditorWindowController {
         return clip.bounds.maxY >= textView.frame.maxY - lineHeight
     }
 
-    /// `shown`: how many of the file's bytes the text now stands for
-    /// (FileTail's count); the tab is stamped with that size.
-    func tailEvent(_ e: FileTail.Event, shown: UInt64?) {
+    /// `shown`: the stamp of the bytes the text now stands for, as the
+    /// tail read them (FileTail.Shown.stamp): not the path's stamp now,
+    /// which may be a file put there after the read.
+    func tailEvent(_ e: FileTail.Event, shown: DiskStamp) {
         guard tail != nil, let storage = textView.textStorage else { return }
         let atBottom = isScrolledToBottom
         switch e {
@@ -362,7 +366,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.noteDisk(doc.fileURL.flatMap { DiskStamp.of($0) }?.showing(shown))
+        doc.noteDisk(shown)
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {
