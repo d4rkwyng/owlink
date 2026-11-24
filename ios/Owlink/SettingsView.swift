@@ -66,8 +66,11 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.theme) private var theme = EditorTheme.system.rawValue
     @AppStorage(AppSettings.Key.saveAutomatically) private var saveAutomatically = true
     @AppStorage(AppSettings.Key.openReadOnly) private var openReadOnly = AppSettings.openReadOnlyDefault
-    /// Unset reads as on, as `AppSettings.reopenFilesFromLastSession` does.
-    @AppStorage(AppSettings.Key.reopenFilesFromLastSession) private var reopenFilesFromLastSession = true
+    /// Read as launch reads it (`AppSettings.reopenFilesFromLastSession`,
+    /// the Mac's `SessionReopenPolicy.shouldReopen(in:)`): unset is on, and
+    /// a `-reopenFilesFromLastSession NO` launch argument (a string, which
+    /// an `@AppStorage` Bool read as unset, so on) shows off.
+    @State private var reopenFilesFromLastSession = AppSettings.reopenFilesFromLastSession
     @AppStorage(AppSettings.Key.styleCheck) private var styleCheck = false
     @AppStorage(AppSettings.Key.readableWidthDefault) private var readableWidthDefault = false
     @AppStorage(AppSettings.Key.useProseFont) private var useProseFont = false
@@ -179,12 +182,13 @@ struct SettingsView: View {
                 .onChange(of: openReadOnly) { AppSettings.post() }
 
                 Section {
-                    Toggle(String(localized: "Reopen files from last session"), isOn: $reopenFilesFromLastSession)
+                    Toggle(String(localized: "Reopen files from last session"), isOn: Binding(
+                        get: { reopenFilesFromLastSession },
+                        set: { reopenFilesFromLastSession = AppSettings.setReopenFilesFromLastSession($0, in: AppSettings.defaults) }))
                         .accessibilityIdentifier("settings.reopenFilesFromLastSession")
                 } footer: {
                     Text(String(localized: "On: the document you had open opens again when Owlink starts, if the file is still there; if it’s gone, Owlink shows the document browser. Off: Owlink starts at the document browser. Unsaved text after a crash is offered either way."))
                 }
-                .onChange(of: reopenFilesFromLastSession) { AppSettings.post() }
 
                 Section {
                     Toggle(String(localized: "Use a prose font for Markdown and plain text"), isOn: $useProseFont)

@@ -61,6 +61,21 @@ final class LastOpenDocumentTests: XCTestCase {
         XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d), "unset: on")
     }
 
+    /// Grok 4.7 review (0.5.2 parity, NIT 3): the Settings toggle shows
+    /// what launch reads. An `@AppStorage` Bool read the launch argument's
+    /// string as unset (on) while launch read it as off.
+    func testSettingsToggleReadsAsLaunchDoes() {
+        let d = defaults()
+        d.set("NO", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertNil(d.object(forKey: AppSettings.Key.reopenFilesFromLastSession) as? Bool, "what @AppStorage saw: unset, so on")
+        XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
+        XCTAssertEqual(AppSettings.reopenFilesFromLastSession(in: d), SessionReopenPolicy.shouldReopen(in: d))
+        XCTAssertTrue(AppSettings.setReopenFilesFromLastSession(true, in: d))
+        XCTAssertTrue(SessionReopenPolicy.shouldReopen(in: d))
+        XCTAssertFalse(AppSettings.setReopenFilesFromLastSession(false, in: d))
+        XCTAssertFalse(SessionReopenPolicy.shouldReopen(in: d))
+    }
+
     // MARK: Store
 
     func testRememberedFileResolvesAndReads() throws {

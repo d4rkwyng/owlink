@@ -262,6 +262,17 @@ enum AppSettings {
         SessionReopenPolicy.shouldReopen(in: defaults)
     }
 
+    /// The Settings toggle's write: stores `on`, then returns what launch
+    /// will read (`reopenFilesFromLastSession(in:)`), which the toggle
+    /// shows. A launch argument outranks the stored value, so under
+    /// `-reopenFilesFromLastSession NO` the toggle stays off, as launch does.
+    @discardableResult
+    static func setReopenFilesFromLastSession(_ on: Bool, in defaults: UserDefaults) -> Bool {
+        defaults.set(on, forKey: Key.reopenFilesFromLastSession)
+        post()
+        return reopenFilesFromLastSession(in: defaults)
+    }
+
     static var theme: EditorTheme {
         get { defaults.string(forKey: Key.theme).flatMap(EditorTheme.init(rawValue:)) ?? .system }
         set { defaults.set(newValue.rawValue, forKey: Key.theme); post() }
