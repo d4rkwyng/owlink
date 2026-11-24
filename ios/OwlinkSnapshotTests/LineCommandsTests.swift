@@ -591,7 +591,13 @@ final class LineCommandsTests: XCTestCase {
         let spinner = try XCTUnwrap(descendants(sheet.view).compactMap { $0 as? UIActivityIndicatorView }.first)
         XCTAssertTrue(spinner.isAnimating)
         XCTAssertFalse(try XCTUnwrap(sheet.navigationItem.rightBarButtonItem).isEnabled)
-        try await Task.sleep(for: .milliseconds(700))
+        // Wait for the 500 ms filter to finish rather than a fixed sleep: under a
+        // loaded three-device gate run the main actor can be late by seconds.
+        // The spinner must still stop, just not within a fixed 700 ms.
+        let deadline = Date().addingTimeInterval(10)
+        while spinner.isAnimating && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         XCTAssertFalse(spinner.isAnimating)
 
         let active = editor.makeLineFilter(keep: false)
@@ -600,9 +606,15 @@ final class LineCommandsTests: XCTestCase {
         let input = try XCTUnwrap(descendants(active.view).compactMap { $0 as? UITextField }.first)
         input.text = "missing"
         _ = active.textFieldShouldReturn(input)
-        try await Task.sleep(for: .milliseconds(500))
-        let labels = descendants(editor.view).compactMap { $0 as? UILabel }
-        XCTAssertTrue(labels.contains { $0.accessibilityIdentifier == "editor.toast" && $0.text == String(localized: "No lines matched or removed.") })
+        func noMatchToastShown() -> Bool {
+            descendants(editor.view).compactMap { $0 as? UILabel }
+                .contains { $0.accessibilityIdentifier == "editor.toast" && $0.text == String(localized: "No lines matched or removed.") }
+        }
+        let toastDeadline = Date().addingTimeInterval(10)
+        while !noMatchToastShown() && Date() < toastDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(noMatchToastShown())
         XCTAssertEqual(editor.textView.text, "one\ntwo")
     }
 }
