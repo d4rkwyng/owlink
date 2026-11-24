@@ -77,6 +77,7 @@ extension DevChecks {
             }
         }
         var second: EditorWindowController?
+        var linker: EditorWindowController?
         run([
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
@@ -140,11 +141,15 @@ extension DevChecks {
             { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
             sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
             waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (a slow close-time read)"),
+            // Codex b18 round 1, should-fix 2: the page shows the old state
+            // while the read is out (the render didn't wait for it).
+            expectState("true", "while the slow read is out, the reopened block shows the old state (open)"),
             untilState(tab, "false", "a close-time read that comes back late sets the reopened block closed", timeout: 5),
             sync { expect(!PreviewController.frontMatterExpanded, "the late read's closing is kept as the preference") },
             { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
             sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
             waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again (a slow close-time read)"),
+            expectState("false", "while the slow read is out, the reopened block shows the old state (closed)"),
             untilState(tab, "true", "a close-time read that comes back late sets the reopened block open", timeout: 5),
             sync { expect(PreviewController.frontMatterExpanded, "the late read's opening is kept as the preference") },
             sync { PreviewController.closeReadDelayForChecks = 0 },
@@ -174,6 +179,100 @@ extension DevChecks {
                 poll()
             },
             until("the slow close-time read still keeps the closed block", timeout: 4) { !PreviewController.frontMatterExpanded },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 1, must-fix 1: a change recorded in another
+            // tab while this tab's slow read is out stays the preference,
+            // and the read still sets this document's reopened block.
+            sync { focus(tab); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens (unrelated tab)"),
+            expectState("false", "the preview opens with the block closed (unrelated tab)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (unrelated tab)"),
+            expectState("false", "while the read is out, the reopened block is still closed (unrelated tab)"),
+            { next in
+                guard let second else { next(); return }
+                previewJS(second, "document.querySelector('details.frontmatter').open = false; 1") { _ in
+                    before = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                    second.renderPreview()
+                    waitForSwap(second, "the other tab renders", since: { before })(next)
+                }
+            },
+            untilState(tab, "true", "a change in another tab doesn't stop the late read setting this document's block", timeout: 5),
+            sync { expect(!PreviewController.frontMatterExpanded, "the other tab's newer change stays the preference") },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Must-fix 2: closed, reopened and closed again before the
+            // first read comes back, then reopened: the first read (the
+            // only one that saw the change) still sets the block.
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens (two closes)"),
+            expectState("false", "the block starts closed (two closes)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (two closes)"),
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens a second time (two closes)"),
+            expectState("false", "while the first read is out, the block is still closed (two closes)"),
+            untilState(tab, "true", "a second close before the first read lands doesn't drop the reader's change", timeout: 5),
+            until("and it is kept as the preference (two closes)", timeout: 3) { PreviewController.frontMatterExpanded },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Must-fix 4: the reader clicks the block twice in the reopened
+            // preview before the late read comes back: their choice stands.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (double toggle)"),
+            expectState("true", "while the read is out, the reopened block is still open (double toggle)"),
+            { next in previewJS(tab, "const s = document.querySelector('details.frontmatter > summary'); s.click(); s.click(); 1") { _ in next() } },
+            expectState("true", "two clicks leave the block open"),
+            until("the late read comes back (double toggle)", timeout: 5) { !PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            expectState("true", "a late read doesn't undo the reader's two clicks"),
+            sync { PreviewController.closeReadDelayForChecks = 0; focus(tab); tab.togglePreview() },
+            until("closing keeps the reader's last choice (open) as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            // Must-fix 3: a read belongs to the page the preview shows. The
+            // linked barn.md's state, read as A's preview closes while it
+            // shows barn, isn't set on A's reopened page; A's own read isn't
+            // set on barn shown in A's reopened preview.
+            sync {
+                linker = app.open(write("linker.md", "---\ntitle: Linker\n---\n# Linker\n\nSee [Barn](barn.md).\n"))
+                if let l = linker { sized(l); focus(l); if !l.previewVisible { l.togglePreview() } }
+            },
+            { next in
+                guard let l = linker else { expect(false, "the linking document opens"); next(); return }
+                waitForPreview(l, contains: "See Barn", "the linking document's preview")(next)
+            },
+            { next in expectState("true", "the linking page opens the block from the preference", in: linker)(next) },
+            { next in
+                guard let l = linker else { next(); return }
+                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
+                    waitForPreview(l, contains: "Pale", "the preview shows the linked page")(next)
+                }
+            },
+            { next in expectState("true", "the linked page opens the block from the preference", in: linker)(next) },
+            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the preview shows the linking page")(next) },
+            { next in expectState("true", "while the linked page's read is out, the linking page's block is open", in: linker)(next) },
+            until("the linked page's late read is kept as the preference", timeout: 5) { !PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            { next in expectState("true", "the linked page's late read isn't set on the linking document's page", in: linker)(next) },
+            sync { PreviewController.closeReadDelayForChecks = 0; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "the linking page again")(next) },
+            { next in expectState("false", "the linking page opens closed from the preference", in: linker)(next) },
+            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 2.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the linking page")(next) },
+            { next in expectState("false", "while its read is out, the linking page's block is still closed", in: linker)(next) },
+            { next in
+                guard let l = linker else { next(); return }
+                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
+                    waitForPreview(l, contains: "Pale", "the reopened preview follows the link")(next)
+                }
+            },
+            { next in expectState("false", "the linked page opens closed from the preference", in: linker)(next) },
+            until("the linking page's late read is kept as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            { next in expectState("false", "the linking page's late read isn't set on the linked page its preview shows", in: linker)(next) },
             sync { PreviewController.closeReadDelayForChecks = 0 },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }

@@ -1729,7 +1729,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         let start = DispatchTime.now()
         pane.applyPalette(palette)
         previewWindow?.updateTitle()
-        // Close-time front matter reads find this document's live previews by it.
+        // The key of the live document's page (a linked page shown in the
+        // preview has its own: its path); front matter reads are kept per page.
         (pane.renderer as? PreviewController)?.documentKey = doc.fileURL?.standardizedFileURL.path ?? "untitled-\(ObjectIdentifier(self).hashValue)"
         // `string` is a copy (the renderers work on it off the main thread).
         pane.renderer.render(text: textView.string, language: doc.language, palette: palette,
