@@ -117,4 +117,100 @@ import Testing
     @Test func theExitWaitIsShortButNotZero() {
         #expect(LlamaModel.exitWait > 0 && LlamaModel.exitWait <= 10)
     }
+
+    /// A model for `ExitRegistry`, counting what exit did to it.
+    final class ExitFake: @unchecked Sendable {
+        let stopped = Box(0), freed = Box(0)
+    }
+
+    /// `ExitRegistry.exit` is the whole of the atexit hook
+    /// (`LlamaModel.freeAllNow` passes llama.cpp's queue, `exitWait` and
+    /// `_exit`). A load still running on the queue when exit begins
+    /// finishes after it: it is refused registration (and frees its model
+    /// itself), and the models registered before are stopped first and
+    /// freed on the queue. Before, the set was read before the wait, so
+    /// that load registered and stayed alive for ggml's teardown.
+    @Test func exitClosesRegistrationAndFreesOnTheQueue() {
+        let reg = ExitRegistry<ExitFake>()
+        let q = DispatchQueue(label: "cedric.test.exit-final")
+        let early = ExitFake(), late = ExitFake()
+        #expect(reg.register(early))
+        let loading = DispatchSemaphore(value: 0)
+        let lateRegistered = Box<Bool?>(nil)
+        q.async {
+            loading.wait()   // the load under way
+            let ok = reg.register(late)
+            lateRegistered.mutate { $0 = ok }
+            if !ok { late.freed.mutate { $0 += 1 } }   // as LlamaRuntime.load does
+        }
+        let gaveUp = Box(false)
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            reg.exit(on: q, onQueue: false, timeout: 5, stop: { $0.stopped.mutate { $0 += 1 } },
+                     free: { $0.freed.mutate { $0 += 1 } }, giveUp: { gaveUp.mutate { $0 = true } })
+            done.signal()
+        }
+        for _ in 0..<1000 where !reg.isClosed { usleep(5000) }
+        #expect(reg.isClosed)
+        #expect(early.stopped.value == 1, "asked to stop before the wait")
+        #expect(early.freed.value == 0, "nothing freed under the running load")
+        loading.signal()
+        #expect(done.wait(timeout: .now() + 5) == .success)
+        #expect(lateRegistered.value == false, "no registration once exit began")
+        #expect(late.freed.value == 1)
+        #expect(early.freed.value == 1)
+        #expect(!gaveUp.value)
+    }
+
+    /// Nothing registered still waits for the queue: a load there may end
+    /// and free its model before exit carries on. Before, an empty set
+    /// returned at once.
+    @Test func exitWithNothingRegisteredStillWaitsForTheQueue() {
+        let reg = ExitRegistry<ExitFake>()
+        let q = DispatchQueue(label: "cedric.test.exit-empty")
+        let hung = DispatchSemaphore(value: 0)
+        q.async { hung.wait() }
+        let gaveUp = Box(false)
+        reg.exit(on: q, onQueue: false, timeout: 0.2, stop: { _ in }, free: { _ in }, giveUp: { gaveUp.mutate { $0 = true } })
+        #expect(gaveUp.value, "waited for the busy queue, then gave up")
+        hung.signal()
+        q.sync {}
+    }
+
+    /// A hung decode: the registered model is stopped, the wait ends at
+    /// its limit and exit gives up (the hook's `_exit`), nothing freed
+    /// under the decode.
+    @Test func exitGivesUpBehindAHungDecode() {
+        let reg = ExitRegistry<ExitFake>()
+        let q = DispatchQueue(label: "cedric.test.exit-hung")
+        let m = ExitFake()
+        #expect(reg.register(m))
+        let hung = DispatchSemaphore(value: 0)
+        q.async { hung.wait() }
+        let gaveUp = Box(false)
+        let t0 = Date()
+        reg.exit(on: q, onQueue: false, timeout: 0.2, stop: { $0.stopped.mutate { $0 += 1 } },
+                 free: { $0.freed.mutate { $0 += 1 } }, giveUp: { gaveUp.mutate { $0 = true } })
+        #expect(gaveUp.value)
+        #expect(Date().timeIntervalSince(t0) < 4)
+        #expect(m.stopped.value == 1)
+        #expect(m.freed.value == 0)
+        hung.signal()
+        q.sync {}
+    }
+
+    /// Exit from llama.cpp's own queue frees there and then (no wait on itself).
+    @Test func exitOnTheQueueFreesInline() {
+        let reg = ExitRegistry<ExitFake>()
+        let q = DispatchQueue(label: "cedric.test.exit-inline")
+        let m = ExitFake()
+        #expect(reg.register(m))
+        let gaveUp = Box(false)
+        q.sync {
+            reg.exit(on: q, onQueue: true, timeout: 0.2, stop: { _ in }, free: { $0.freed.mutate { $0 += 1 } },
+                     giveUp: { gaveUp.mutate { $0 = true } })
+        }
+        #expect(m.freed.value == 1)
+        #expect(!gaveUp.value)
+    }
 }
