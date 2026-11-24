@@ -351,19 +351,32 @@ final class OwlinkUITests: XCTestCase {
         return item
     }
 
-    /// The open menu's topmost list (a submenu is shown over its parent),
-    /// if it is open and its rows run past the part of it on screen; nil if
-    /// it fits.
-    private func scrollingMenuList(_ app: XCUIApplication) -> XCUIElement? {
-        let lists = app.collectionViews.allElementsBoundByIndex
-        guard let list = lists.last, list.exists, let shot = try? list.snapshot() else { return nil }
+    /// The open menu's own list (activeMenuList), if it is open and its
+    /// rows run past the part of it on screen; nil if it fits, or if no
+    /// menu is open. A list that can't be read fails the test.
+    private func scrollingMenuList(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement? {
+        guard let list = activeMenuList(app) else { return nil }
+        // A snapshot that fails (the list going, XCUITest busy) is tried
+        // again; one that never comes is a failure, not a list that fits.
+        var snapshot: XCUIElementSnapshot?
+        for _ in 0..<3 where snapshot == nil {
+            snapshot = try? list.snapshot()
+            if snapshot == nil { sleep(1) }
+        }
+        guard let shot = snapshot else {
+            XCTFail("couldn't read the open menu's list", file: file, line: line)
+            return nil
+        }
         var rows: [CGRect] = []
         func walk(_ e: XCUIElementSnapshot) {
             if e.elementType == .cell { rows.append(e.frame) }
             e.children.forEach(walk)
         }
         walk(shot)
-        guard let top = rows.map(\.minY).min(), let bottom = rows.map(\.maxY).max() else { return nil }
+        guard let top = rows.map(\.minY).min(), let bottom = rows.map(\.maxY).max() else {
+            XCTFail("the open menu's list has no rows", file: file, line: line)
+            return nil
+        }
         // The list's own frame runs past the screen (an iPhone's ••• menu:
         // y 62 to 936 on an 874-point screen), so the rows are measured
         // against the part of it in the window.
@@ -372,11 +385,29 @@ final class OwlinkUITests: XCTestCase {
         return top < shown.minY - 1 || bottom > shown.maxY + 1 ? list : nil
     }
 
+    /// The open menu's own list: of the app's collection views, the menu's
+    /// (not the share sheet's activity list, which can stay in the tree
+    /// offscreen after the sheet, nor any other list), on screen, and the
+    /// last of those opened (a submenu over its parent on an iPhone,
+    /// beside it on an iPad). Nil if no menu is open.
+    private func activeMenuList(_ app: XCUIApplication) -> XCUIElement? {
+        let window = app.windows.firstMatch.frame
+        let menus = app.collectionViews.allElementsBoundByIndex.filter { list in
+            guard list.exists, list.identifier != "activityCollectionView" else { return false }
+            let frame = list.frame
+            guard !frame.isEmpty, window.isEmpty || frame.intersects(window) else { return false }
+            // A menu's list holds menu rows (cells), none of the share sheet's.
+            return list.cells.count > 0 && list.cells.matching(identifier: "shareCell").count == 0
+        }
+        return menus.last
+    }
+
     /// Looks at every row of the open menu: once if it fits, else at each
     /// step of a scroll through it, and back to the top. Only a list that
     /// scrolls is swiped, and only while it is still open.
     private func readOpenMenu(_ app: XCUIApplication, _ what: String, _ look: () -> Void) {
         look()
+        XCTAssertNotNil(activeMenuList(app), "\(what): no menu open to read")
         guard let list = scrollingMenuList(app) else { return }
         var swipes = 0
         while swipes < 7, list.exists {
