@@ -403,6 +403,15 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
     }
 
+    /// The preview is closing: the front matter block as the reader left
+    /// it is kept (Codex review of the 0.5.2 (17) fixes: opened, then
+    /// closed with no edit or refresh between, the change was lost). The
+    /// same read in the app's own world; the read holds this controller
+    /// (and its web view) until it comes back.
+    func keepFrontMatterState() {
+        readFrontMatter { [self] _ in withExtendedLifetime(self) {} }
+    }
+
     /// Keeps `read` as the preference when it is the reader's change on
     /// the page still shown (with page JavaScript off: with it on, the
     /// page's own script could have changed it).

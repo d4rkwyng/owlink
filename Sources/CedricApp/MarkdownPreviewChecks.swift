@@ -112,6 +112,14 @@ extension DevChecks {
             waitForSwap(tab, "an edit renders", since: { before }),
             expectState("false", "a closed block stays closed through an edit"),
             sync { expect(!PreviewController.frontMatterExpanded, "closing it is kept as the preference") },
+            // Codex review of the 0.5.2 (17) fixes, should-fix: opened,
+            // then the preview closed with no edit or refresh between.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview() },
+            until("closing the preview keeps the opened block as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            sync { tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens again"),
+            expectState("true", "the reopened preview has the block open"),
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }

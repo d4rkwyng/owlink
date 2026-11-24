@@ -1167,6 +1167,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         primaryPane.observers.forEach { NotificationCenter.default.removeObserver($0) }
         primaryPane.observers = []
         previewTimer?.invalidate()
+        preview?.keepFrontMatterState()
         if let pw = previewWindow { previewWindow = nil; pw.closeWithTab() }
         owl?.detach()
         sniffTimer?.invalidate()
@@ -1621,6 +1622,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     func closePreview() {
         previewTimer?.invalidate()
+        // The front matter block as the reader left it, before it goes.
+        preview?.keepFrontMatterState()
         if let pw = previewWindow {
             previewWindow = nil
             pw.closeReleasingPane()
@@ -1670,6 +1673,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     /// The user closed the detached window: the preview is closed.
     func previewWindowClosedByUser() {
+        preview?.keepFrontMatterState()
         previewWindow = nil
         previewPane = nil
         previewTimer?.invalidate()
