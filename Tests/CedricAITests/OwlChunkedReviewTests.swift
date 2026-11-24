@@ -57,6 +57,16 @@ import CedricCore
         return OwlDocumentSnapshot(text: text, generation: 1, selection: NSRange(location: caret, length: 0), language: "python")
     }
 
+    /// UTF-16 units a call sends (what `contextBudget` limits).
+    static func size(_ messages: [OwlChatMessage]) -> Int {
+        messages.reduce(0) { total, m in
+            switch m {
+            case .system(let t), .user(let t), .assistant(let t): return total + (t as NSString).length
+            default: return total
+            }
+        }
+    }
+
     static func request(_ s: OwlDocumentSnapshot, action: OwlQuickAction?, question: String = "What does this script do?") -> OwlChatRequest {
         OwlChatRequest(question: question, action: action,
                        context: OwlChatContext.reviewPart(s, first: 1, last: s.countedLines),
@@ -67,7 +77,7 @@ import CedricCore
         let s = Self.snapshot(lines: 100)
         let budget = 1_000
         let plan = OwlChunkedReview.plan(s, budget: budget)
-        #expect(plan.parts.count > 1 && plan.isComplete && plan.uncappedCount == plan.parts.count)
+        #expect(plan.parts.count > 1 && plan.isComplete)
         var covered = IndexSet()
         for part in plan.parts {
             #expect((part.numbered as NSString).length <= budget)
@@ -78,7 +88,7 @@ import CedricCore
             #expect(a.last - b.first + 1 == OwlChunkedReview.overlapLines)
         }
         #expect(covered.contains(integersIn: 1...s.countedLines))
-        #expect(OwlChunkedReview.maxChunks == 8 && OwlChunkedReview.overlapLines == 2)
+        #expect(OwlChunkedReview.overlapLines == 2)
         let long = OwlDocumentSnapshot(text: String(repeating: "x", count: 300) + "\ny", generation: 1)
         let oversize = OwlChunkedReview.plan(long, budget: 50)
         #expect(oversize.parts.first?.last == 1 && oversize.parts.first?.fits == false && !oversize.isComplete)
@@ -96,14 +106,15 @@ import CedricCore
         #expect(sameLine.contains("pipes curl to sh") && sameLine.contains("also writes /etc/hosts"))
     }
 
-    @Test func capAndVerdicts() {
+    @Test func noCapAndVerdicts() {
         let s = Self.snapshot(lines: 500)
         let plan = OwlChunkedReview.plan(s, budget: 400)
-        #expect(plan.uncappedCount > OwlChunkedReview.maxChunks)
-        #expect(plan.parts.count == OwlChunkedReview.maxChunks && !plan.isComplete)
+        // Every part is planned (0.5.2 kept a window of 8 around the caret).
+        #expect(plan.parts.count > 8 && plan.isComplete)
         #expect(plan.parts.contains { $0.first <= 132 && $0.last >= 132 })
+        #expect(plan.parts.first?.first == 1 && plan.parts.last?.last == 500)
         var covered = IndexSet()
-        for part in plan.parts { covered.insert(integersIn: part.first...part.last) }
+        for part in plan.parts.prefix(8) { covered.insert(integersIn: part.first...part.last) }
         #expect(OwlChunkedReview.forcedVerdict(scanHasHigh: false, scanTruncated: false, covered: covered, totalLines: 500) == .truncated)
         let all = IndexSet(integersIn: 1...500)
         #expect(OwlChunkedReview.forcedVerdict(scanHasHigh: false, scanTruncated: false, covered: all, totalLines: 500) == nil)
@@ -162,10 +173,12 @@ import CedricCore
 
     @Test func scopeAndActionExclusions() {
         let s = Self.snapshot()
-        for action in [OwlQuickAction.rewrite, .addComments, .explainLine, .summarise] {
+        // Summarise reads the whole document in parts now (0.5.2 trimmed it to fit).
+        for action in [OwlQuickAction.rewrite, .addComments, .explainLine] {
             #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: action), engine: Engine()) == nil)
         }
         #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: nil, question: "Please rewrite this file"), engine: Engine()) == nil)
+        #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: .summarise), engine: Engine()) != nil)
         for scope in [OwlChatScope.visible, .selection] {
             let selected = OwlDocumentSnapshot(text: s.text, generation: 1, selection: NSRange(location: 0, length: 10), language: "python")
             let context = OwlChatContext.build(selected, scope: scope, budget: 200)!
@@ -175,17 +188,22 @@ import CedricCore
         }
     }
 
-    @Test func largeSummariesFallBackWithoutPartLabelsWhenCombineDoesNotFit() async throws {
+    @Test func largeSummariesAreCombinedInRoundsWithoutPartLabels() async throws {
         let engine = Engine(reply: String(repeating: "summary ", count: 800))
         let req = Self.request(Self.snapshot(), action: .explain)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == plan.parts.count)
+        // Notes too long for one combine call are merged in groups first,
+        // then combined: one answer, never the parts stacked.
+        #expect(result.error == nil && !result.stopped)
+        #expect(result.reduceCalls > 1 && engine.calls == plan.parts.count + result.reduceCalls)
         #expect(result.outcome.answer.contains("summary"))
-        #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == plan.parts.count)
+        #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == 1)
+        #expect(result.outcome.sections.count == plan.parts.count)
         #expect(!result.outcome.answer.contains("Part 1 (lines"))
         #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
+        for messages in engine.messages { #expect(Self.size(messages) <= engine.contextBudget) }
     }
 
     @Test func chunkedScriptVerdictRespectsScan() async throws {
@@ -199,27 +217,29 @@ import CedricCore
         #expect(!result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
     }
 
-    @Test func cappedScriptReviewReportsCoverageAndForcedVerdict() async throws {
+    @Test func longScriptReviewCoversEveryLineWithoutForcingTheVerdict() async throws {
         let engine = Engine(budget: 3_000)
         let req = Self.request(Self.snapshot(lines: 500), action: .scriptSafety)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-        #expect(plan.parts.count == 8 && plan.uncappedCount > 8 && !plan.isComplete)
+        #expect(plan.parts.count > 8 && plan.isComplete)
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == 8)
-        #expect(result.outcome.answer.contains("Reviewed lines \(plan.parts.first!.first)–\(plan.parts.last!.last) of 500; the rest was not reviewed."))
-        #expect(result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
+        #expect(engine.calls == plan.parts.count)
+        #expect(!result.outcome.answer.contains("rest was not reviewed"))
+        #expect(!result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
+        #expect(result.outcome.answer.contains("Line 10"))
     }
 
-    @Test func cappedExplanationCombinesAndKeepsCoverageNote() async throws {
+    @Test func longExplanationCoversEveryLineAndCombines() async throws {
         let engine = Engine(budget: 3_000, reply: "A brief part.")
         let req = Self.request(Self.snapshot(lines: 1_000), action: .explain)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-        #expect(!plan.isComplete && plan.parts.count == 8)
+        #expect(plan.isComplete && plan.parts.count > 8)
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == 9)
-        #expect(result.outcome.answer.contains("rest was not reviewed"))
+        #expect(engine.calls == plan.parts.count + result.reduceCalls && result.reduceCalls >= 1)
+        #expect(!result.outcome.answer.contains("rest was not reviewed"))
+        #expect(result.outcome.answer == "A brief part.")
     }
 
     @Test func scriptPartsReceiveOnlyTheirScanFindings() async throws {
@@ -284,7 +304,7 @@ import CedricCore
         for action in [OwlQuickAction?.some(.scriptSafety), nil] {
             let req = Self.request(s, action: action, question: action == nil ? "What does this script do?" : "Check this script for risks.")
             let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-            #expect(plan.parts.count > 1 && plan.parts.count <= 8 && plan.isComplete && plan.uncappedCount <= 8)
+            #expect(plan.parts.count > 1 && plan.isComplete)
             for part in plan.parts {
                 var r = req
                 r.context = OwlChatContext.reviewPart(s, first: part.first, last: part.last)

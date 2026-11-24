@@ -172,3 +172,120 @@ import CedricCore
         #expect(throws: BuiltInError.cancelled) { try firstResult.get() }
     }
 }
+
+/// Cancel and a new question reach the whole-document combine step
+/// (every combine call, group merges included): it stops at once, and
+/// no half-written or late combined answer is published as finished.
+@MainActor
+@Suite struct OwlReduceCancelTests {
+    /// Part calls answer at once. A combine call streams "PARTIAL SUMMARY",
+    /// waits to be cancelled, then (`ignoresCancel`) still returns a
+    /// finished-looking answer, or throws.
+    final class HangsOnReduce: OwlChatEngine, @unchecked Sendable {
+        let contextBudget: Int
+        let ignoresCancel: Bool
+        let reduceStarted = Box(0)
+        let sawCancel = Box(false)
+        let calls = Box(0)
+        let groupMerges = Box(0)
+        let partReply: String
+        init(budget: Int = 5_000, ignoresCancel: Bool = false, partReply: String = "- Line 2: a note.") {
+            contextBudget = budget; self.ignoresCancel = ignoresCancel; self.partReply = partReply
+        }
+        var title: String { "HangsOnReduce" }
+        var scoreKey: String { "hangs-on-reduce" }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            calls.mutate { $0 += 1 }
+            guard case .user(let user)? = messages.last,
+                  user.contains(OwlChunkedReviewRunner.notesLabel) || user.contains(OwlChunkedReviewRunner.groupNotesLabel)
+            else { return .answer(partReply) }
+            reduceStarted.mutate { $0 += 1 }
+            if user.contains(OwlChunkedReviewRunner.groupNotesLabel) { groupMerges.mutate { $0 += 1 } }
+            onText("PARTIAL SUMMARY ")
+            while !Task.isCancelled { try? await Task.sleep(nanoseconds: 2_000_000) }
+            sawCancel.mutate { $0 = true }
+            if ignoresCancel { return .answer("FINISHED SUMMARY of the whole document.") }
+            throw CancellationError()
+        }
+    }
+
+    static func doc(_ n: Int = 263) -> OwlChatRequest {
+        let text = (1...n).map { "line-\($0) " + String(repeating: "x", count: 30) }.joined(separator: "\n")
+        let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "t.txt", language: "plain")
+        return OwlChatRequest(question: "What is this file about?", action: nil,
+                              context: OwlChatContext.reviewPart(s, first: 1, last: s.countedLines),
+                              snapshot: s, useTools: false, prose: true)
+    }
+
+    @Test(arguments: [false, true])
+    func cancelDuringTheCombineStepStopsAndPublishesNoSummary(ignoresCancel: Bool) async throws {
+        let engine = HangsOnReduce(ignoresCancel: ignoresCancel)
+        let req = Self.doc()
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let task = Task {
+            await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, describeError: { "\($0)" }) { _, _ in }
+        }
+        #expect(await eventually { engine.reduceStarted.value == 1 })
+        let callsAtCancel = engine.calls.value
+        task.cancel()
+        let result = await task.value
+        #expect(engine.sawCancel.value)
+        #expect(result.stopped && result.error == nil)
+        #expect(engine.calls.value == callsAtCancel, "nothing runs after the cancelled combine call")
+        let answer = result.outcome.answer
+        #expect(!answer.contains("PARTIAL SUMMARY") && !answer.contains("FINISHED SUMMARY"))
+        #expect(answer.contains("not combined") && answer.hasSuffix("Stopped."))
+        // What was read stays, as the notes below.
+        #expect(result.outcome.sections.count == plan.parts.count)
+    }
+
+    @Test func cancelDuringAGroupMergeStopsBeforeTheFinalCall() async throws {
+        // Long notes on a tight budget: the notes are merged in groups first.
+        let engine = HangsOnReduce(budget: 3_000, partReply: (1...12).map { "- Line \($0): " + String(repeating: "n", count: 120) }
+            .joined(separator: "\n"))
+        let req = Self.doc(400)
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        let task = Task {
+            await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, describeError: { "\($0)" }) { _, _ in }
+        }
+        #expect(await eventually { engine.reduceStarted.value == 1 })
+        task.cancel()
+        let result = await task.value
+        #expect(engine.groupMerges.value == 1, "the call cancelled was a group merge")
+        #expect(result.stopped && engine.reduceStarted.value == 1, "no later merge and no final call")
+        #expect(!result.outcome.answer.contains("PARTIAL SUMMARY"))
+    }
+
+    /// The panel's chunked path in miniature (OwlChatPanel.ask): a new
+    /// question cancels the combine call in flight, and the abandoned
+    /// run's result never reaches the transcript.
+    @Test func aNewQuestionCancelsTheCombineStep() async throws {
+        let life = OwlAskLifecycle()
+        let answers = Box<[String]>([])
+        let engine = HangsOnReduce(ignoresCancel: true)
+        let req = Self.doc()
+        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
+        life.start { ticket in
+            let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine, describeError: { "\($0)" }) { _, _ in }
+            guard life.isCurrent(ticket) else { return }
+            answers.mutate { $0.append(result.outcome.answer) }
+            life.finished(ticket)
+        }
+        #expect(await eventually { engine.reduceStarted.value == 1 })
+        let fake = FakeChatEngine(delay: 0.001, pieces: 2)
+        let second = OwlAskCancelTests().request("Which rows look wrong?")
+        life.start { ticket in
+            let o = try? await OwlChatRunner.run(second, engine: fake) { _ in }
+            guard life.isCurrent(ticket) else { return }
+            answers.mutate { $0.append(o?.answer ?? "") }
+            life.finished(ticket)
+        }
+        #expect(life.cancelledCount == 1)
+        #expect(await eventually { engine.sawCancel.value }, "the combine call was cancelled")
+        #expect(await eventually { @MainActor in !life.isRunning })
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(answers.value.count == 1)
+        #expect(answers.value.allSatisfy { !$0.contains("SUMMARY") && !$0.contains("Stopped.") })
+    }
+}

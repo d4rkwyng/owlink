@@ -417,6 +417,25 @@ public struct OwlChatRequest: Sendable {
         return note + "."
     }
 
+    /// The lines an answer to this request may cite: those it was sent,
+    /// those a tool read, the digest showed or the offline checks and scan
+    /// name, and any the question itself names. nil (no filter) when a
+    /// whole-document search or outline tool ran (it lists lines from
+    /// anywhere) or for an edit (its proposal is checked on its own).
+    public func citableLines(linesRead: IndexSet = IndexSet(), digest: Digest? = nil, checks: String? = nil,
+                             looks: Set<OwlToolName> = []) -> IndexSet? {
+        guard looks.isEmpty, action?.proposesEdit != true, snapshot.countedLines > 0 else { return nil }
+        var s = IndexSet(integersIn: context.firstLine...max(context.firstLine, context.lastLine))
+        s.formUnion(linesRead)
+        if let digest {
+            s.formUnion(digest.lines)
+            s.formUnion(OwlCitations.lines(in: digest.text))
+        }
+        for text in [checks, scan, question] { if let text { s.formUnion(OwlCitations.lines(in: text)) } }
+        if let scanFindings { for f in scanFindings { s.insert(f.line) } }
+        return s
+    }
+
     /// How the answer's "safe" claims are rewritten (`ScriptVerdict.clamp`,
     /// and `ScriptVerdictStream` while it streams), or nil for none.
     /// `.verdict` (every claim, the whole line) for the script check and
@@ -472,6 +491,9 @@ public struct OwlChatOutcome: Sendable, Equatable {
     public var rounds: Int
     /// The coverage note `answer` starts with (`OwlChatRequest.coverageNote`), if any.
     public var coverageNote: String? = nil
+    /// A whole-document answer's per-part notes (`OwlChunkedReviewRunner`),
+    /// shown collapsed below `answer`.
+    public var sections: [OwlChatSection] = []
 
     /// The model's own words: `answer` without the coverage note.
     public var modelAnswer: String {
@@ -582,6 +604,12 @@ public enum OwlChatRunner {
         // Nothing is applied until the user presses Apply: "Fixed …" and
         // "I changed …" are reworded as proposals (`OwlProposalWording`).
         shown = OwlProposalWording.guardClaims(shown, proposals: proposals.count)
+        // Only lines it was given may be cited: "lines 19–20" from a model
+        // shown 1–18 is dropped or marked (`OwlCitations`).
+        if let allowed = req.citableLines(linesRead: toolbox.linesRead, digest: digest, checks: checks,
+                                          looks: toolbox.wholeDocumentLooks) {
+            shown = OwlCitations.filter(shown, allowed: allowed).text
+        }
         // The coverage note shown while it streamed stays with the answer;
         // an engine that wrote nothing through onText still gets it.
         var said: String?
