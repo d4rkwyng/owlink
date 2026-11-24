@@ -15,10 +15,6 @@ public struct FakeChatEngine: OwlChatEngine {
     /// a model talked into "Verdict: safe to run" by the script itself).
     public var scriptAnswer: String?
 
-    /// What the spelling pick answers (OwlSpellingPicker); nil: the first
-    /// suggestion, as a JSON string.
-    public var spellingAnswer: String?
-
     public init(delay: TimeInterval = 0.05, pieces: Int = 8, scriptAnswer: String? = nil) {
         self.delay = delay; self.pieces = pieces; self.scriptAnswer = scriptAnswer
     }
@@ -42,13 +38,6 @@ public struct FakeChatEngine: OwlChatEngine {
             }
             try await Task.sleep(nanoseconds: UInt64(delay * 1e9))
             return .answer(OwlJSON.object(["issues": .array(issues)]).jsonString)
-        }
-        // The spelling pick: one suggestion (or the scripted answer).
-        if case .system(let sys)? = messages.first, sys.hasPrefix(OwlSpellingChoice.task) {
-            let user = messages.compactMap { m -> String? in if case .user(let s) = m { return s }; return nil }.last ?? ""
-            let first = user.components(separatedBy: "Suggestions: ").last?.components(separatedBy: ", ").first ?? ""
-            try await Task.sleep(nanoseconds: UInt64(delay * 1e9))
-            return .answer(spellingAnswer ?? first)
         }
         let names = Set(tools.map(\.name))
         let question = messages.compactMap { m -> String? in if case .user(let s) = m { return s }; return nil }
