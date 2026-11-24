@@ -297,7 +297,8 @@ final class OwlinkUITests: XCTestCase {
         let marker = "hoot roundtrip"
         XCTAssertFalse(original.contains(marker))
         let barEdit = app.navigationBars.buttons["editor.edit"]
-        XCTAssertTrue(barEdit.waitForExistence(timeout: 5), "read mode: no Edit / Done button")
+        if !barEdit.waitForExistence(timeout: 5) { print("ROUNDTRIP-TREE\n\(app.navigationBars.firstMatch.debugDescription)") }
+        XCTAssertTrue(barEdit.exists, "read mode: no Edit / Done button")
         var folded: [String: Bool] = [:]
 
         /// Closes the open ••• menu by a tap beside it, left of the text

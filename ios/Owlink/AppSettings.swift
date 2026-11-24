@@ -252,7 +252,10 @@ enum AppSettings {
     }
 
     static var openReadOnly: Bool {
-        get { defaults.object(forKey: Key.openReadOnly) as? Bool ?? openReadOnlyDefault }
+        // bool(forKey:) once set: a value given as text (a launch argument,
+        // "-ios.openReadOnly YES", is the string "YES") counts too; `as?
+        // Bool` read it as unset, the idiom's default.
+        get { defaults.object(forKey: Key.openReadOnly) == nil ? openReadOnlyDefault : defaults.bool(forKey: Key.openReadOnly) }
         set { defaults.set(newValue, forKey: Key.openReadOnly); post() }
     }
 
