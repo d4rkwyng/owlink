@@ -616,15 +616,31 @@ public struct ServerChatEngine: OwlChatEngine {
     public let client: LocalModelClient
     public let model: String
     public let kind: LocalAISettings.Backend
+    /// What the server says about the model's context window.
+    let contexts: ServerContextCache
 
     public init(client: LocalModelClient, model: String, kind: LocalAISettings.Backend) {
-        self.client = client; self.model = model; self.kind = kind
+        self.init(client: client, model: model, kind: kind, contexts: .shared)
+    }
+
+    init(client: LocalModelClient, model: String, kind: LocalAISettings.Backend, contexts: ServerContextCache) {
+        self.client = client; self.model = model; self.kind = kind; self.contexts = contexts
     }
 
     public var title: String { "\(LocalAIOwlBridge.shortTitle(kind)) · \(HintSource.shortModelName(model))" }
     public var scoreKey: String { "\(kind.rawValue):\(model)" }
-    /// Servers usually have 32k+ context; cap requests while allowing a whole file when it fits.
-    public var contextBudget: Int { 32_000 }
+    /// 32 000 units, or less when LM Studio or Ollama says the model runs
+    /// with a smaller context (`ContextWindow.serverBudget`): read from the
+    /// cache without waiting; a stale entry is refreshed in the background.
+    public var contextBudget: Int {
+        ContextWindow.serverBudget(contextTokens: contexts.current(client: client, model: model, kind: kind)?.tokens)
+    }
+
+    /// Asks the server for the model's context, waiting a few seconds at
+    /// most; never fails (the engine keeps the cap when nothing is known).
+    public func discoverContext() async {
+        _ = await contexts.refresh(client: client, model: model, kind: kind)
+    }
     public var usesServer: Bool { true }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
@@ -949,9 +965,17 @@ public enum OwlChatEngines {
             // A slow model may read a long prompt before its first token:
             // a longer wait for the first byte than a hint check gets.
             let client = LocalModelClient(baseURL: settings.baseURL, timeout: max(settings.timeout, 120), session: session)
-            if let m = settings.model, !m.isEmpty { return ServerChatEngine(client: client, model: m, kind: settings.backend) }
-            guard let models = try? await client.listModels(), let pick = ModelPicker.pickSmallQwen(models) else { return nil }
-            return ServerChatEngine(client: client, model: pick.id, kind: settings.backend)
+            let model: String
+            if let m = settings.model, !m.isEmpty {
+                model = m
+            } else {
+                guard let models = try? await client.listModels(), let pick = ModelPicker.pickSmallQwen(models) else { return nil }
+                model = pick.id
+            }
+            let engine = ServerChatEngine(client: client, model: model, kind: settings.backend)
+            // Before the first question: the server's context, if it says (3 s at most).
+            await engine.discoverContext()
+            return engine
         }
     }
 }

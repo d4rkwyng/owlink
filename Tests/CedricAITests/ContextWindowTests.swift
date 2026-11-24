@@ -12,6 +12,15 @@ import Testing
         #expect(ContextWindow.budgetUnits(contextTokens: 1_024) == 0)
         #expect(ContextWindow.budgetUnits(contextTokens: 600) == 0, "never negative")
     }
+
+    @Test func serverBudgetIsTheCapUnlessTheWindowIsSmaller() {
+        #expect(ContextWindow.serverBudget(contextTokens: nil) == 32_000, "unknown: as before")
+        #expect(ContextWindow.serverBudget(contextTokens: 4_096) == 4_608)
+        #expect(ContextWindow.serverBudget(contextTokens: 16_384) == 23_040)
+        #expect(ContextWindow.serverBudget(contextTokens: 22_357) == 31_999)
+        #expect(ContextWindow.serverBudget(contextTokens: 22_358) == 32_000)
+        #expect(ContextWindow.serverBudget(contextTokens: 131_072) == 32_000, "never above the cap")
+    }
 }
 
 @Suite struct BuiltInContextTests {

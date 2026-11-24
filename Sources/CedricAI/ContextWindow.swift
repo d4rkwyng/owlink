@@ -18,6 +18,19 @@ public enum ContextWindow {
         max(0, contextTokens - replyReserveTokens) * 3 / 2
     }
 
+    // MARK: Servers
+
+    /// The most a server request gets, whatever the server's window.
+    public static let serverCap = 32_000
+
+    /// The server engine's budget: the cap, or less when the server's
+    /// window is known to be smaller. Unknown (an OpenAI-compatible server
+    /// that says nothing): the cap, as before 0.5.3.
+    public static func serverBudget(contextTokens: Int?) -> Int {
+        guard let contextTokens else { return serverCap }
+        return min(serverCap, budgetUnits(contextTokens: contextTokens))
+    }
+
     // MARK: Built-in (llama.cpp)
 
     /// n_ctx choices for the built-in engine, largest first; the last is
