@@ -106,11 +106,6 @@ public enum PreviewLinkAction: Equatable, Sendable {
     /// A Markdown or HTML file inside the document's folder: shown in the
     /// preview (same renderer, same strict page policy); never launched.
     case openInPreview(URL)
-    #if os(iOS)
-    /// iOS only, until the iOS preview takes 0.5.2 S1: an http or https
-    /// page, shown in the iOS preview's isolated web view.
-    case openWebInPreview(URL)
-    #endif
     /// http, https or mailto: ask first, showing the whole URL, then hand it
     /// to the system. A web page never loads inside the preview (0.5.2 S1),
     /// where the JavaScript and Network settings could not apply to it.
@@ -132,10 +127,6 @@ public enum PreviewLinkAction: Equatable, Sendable {
                                      fileManager fm: FileManager = .default) -> PreviewLinkAction {
         let action = action(for: url, folder: folder, isText: isText, fileManager: fm)
         switch action {
-        #if os(iOS)
-        case .confirmExternal(let u) where !command && u.scheme?.lowercased() != "mailto":
-            return .openWebInPreview(u)
-        #endif
         case .openInCedric(let u) where !command:
             let language = LanguageDetector.language(forFileName: u.lastPathComponent)
             return language == .markdown || language == .html ? .openInPreview(u) : action

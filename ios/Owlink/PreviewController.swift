@@ -28,15 +28,14 @@ import CedricCore
 /// Links browse inside the preview, with app-kept history (Back, Forward,
 /// This Document): a Markdown or HTML file the link rules allow
 /// (`PreviewLinkAction.previewAction`, `PreviewFiles.linkTarget`) renders
-/// here the same way, under the same policy; an http(s) page opens in a
-/// separate, isolated web view (`browserConfiguration`: its own process
-/// pool, nothing stored, no scripts, handlers or `cedric-doc:`). Nothing a
-/// link names is launched; leaving the app (Open in Browser, mailto, a
-/// ⌘-click) asks first and shows the whole URL.
+/// here the same way, under the same policy. A web page never loads in the
+/// preview (Mac 0.5.2 S1): a tap on a web or mail link asks first ("Open
+/// this link?", naming the real site: `ExternalLinkText`), and only then
+/// does the system open it. Nothing a link names is launched, and the page
+/// itself can't go anywhere (`PreviewNavigation`: no redirect, refresh,
+/// form or frame loads another page).
 final class PreviewController: UIViewController, WKNavigationDelegate, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
     private(set) var web: WKWebView!
-    /// http(s) pages a link leads to: isolated from `web` (see `browserConfiguration`).
-    private(set) var browser: WKWebView!
     private(set) var csv: CSVPreviewController?
     private var showingCSV = false
     private let queue = DispatchQueue(label: "owlink.preview", qos: .userInitiated)
@@ -100,15 +99,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         web.frame = container.bounds
         web.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         container.addSubview(web)
-        browser = WKWebView(frame: .zero, configuration: Self.browserConfiguration())
-        browser.navigationDelegate = self
-        browser.allowsBackForwardNavigationGestures = false
-        browser.allowsLinkPreview = false
-        browser.accessibilityIdentifier = "preview.browser"
-        browser.frame = container.bounds
-        browser.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        browser.isHidden = true
-        container.addSubview(browser)
         setUpHeader(in: container)
         setUpNavBar(in: container)
         setUpNotice(in: container)
@@ -186,7 +176,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         loadViewIfNeeded()
         home = (markdown, palette, documentURL)
         guard isHome else { return }
-        browser.isHidden = true
         render(.markdown(markdown), palette: palette, document: documentURL, rootOverride: nil, keepPlace: true)
     }
 
@@ -228,8 +217,8 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             vault?.prepareIndex()
             var body: String
             switch source {
-            // Web links keep their address (a tap opens the isolated
-            // browser); nothing else remote is kept.
+            // Web links keep their address (a tap asks, then the system
+            // opens it); nothing else remote is kept.
             case .markdown(let markdown): body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: .preview(vault: vault)))
             case .html(let html): body = HTMLScrub.noScriptNoRemoteKeepingLinks(html)
             }
@@ -301,8 +290,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         csvPalette = palette
         web.isHidden = true
         // A CSV has no links to browse: back to the document, history cleared.
-        browser.stopLoading()
-        browser.isHidden = true
         history = [.home]
         historyIndex = 0
         homeFraction = nil
@@ -334,7 +321,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     var activeScrollView: UIScrollView {
         if showingCSV { return csv?.table ?? web.scrollView }
-        return webURL != nil ? browser.scrollView : web.scrollView
+        return web.scrollView
     }
 
     // MARK: Scroll
@@ -382,14 +369,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === browser {
-            // Keep the entry at the page actually shown (after redirects).
-            if case .web = history[historyIndex], let url = webView.url, Self.isWebURL(url) {
-                history[historyIndex] = .web(url)
-                updateNav()
-            }
-            return
-        }
         guard webView === web else { return }
         pageLoadEnded(navigation)
         loaded = true
@@ -549,12 +528,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { false }
 
-    static func withoutFragment(_ u: URL) -> String {
-        var c = URLComponents(url: u, resolvingAgainstBaseURL: false)
-        c?.fragment = nil
-        return c?.string ?? u.absoluteString
-    }
-
     // MARK: Folder access
 
     /// Asks for the document's folder (or one above it, a site's root).
@@ -574,40 +547,68 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     // MARK: Links
 
     /// Links in the document's page (security audit H2: nothing a link
-    /// names is launched). The grant link asks for the folder; a link
-    /// within the page scrolls it; anything else is decided by
-    /// `handleLink`. The page's own loads are ours (`cedric-doc:`, or
-    /// about:blank for an untitled document); nothing else navigates it.
-    /// The isolated browser follows `browserDecision`.
+    /// names is launched; 0.5.2 S1: a web page never loads here). The grant
+    /// link asks for the folder; a link to a place in the page scrolls it
+    /// without navigating; any other click is decided by `handleLink`. The
+    /// page's own load is ours (`cedric-doc:`, or about:blank for an
+    /// untitled document); nothing else navigates it (`pagePolicy`).
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        if webView === browser {
-            switch Self.browserDecision(url: action.request.url, type: action.navigationType,
-                                        mainFrame: action.targetFrame?.isMainFrame, command: Self.command(action),
-                                        method: action.request.httpMethod) {
-            case .allow: decisionHandler(.allow)
-            case .cancel: decisionHandler(.cancel)
-            case .push(let url): decisionHandler(.cancel); push(.web(url))
-            case .confirm(let url): decisionHandler(.cancel); confirmOpen(url)
-            }
-            return
-        }
         guard webView === web else { decisionHandler(.cancel); return }
+        let mainFrame = action.targetFrame?.isMainFrame
         if action.navigationType == .linkActivated, let url = action.request.url {
-            if url.absoluteString == Self.grantURL {
-                decisionHandler(.cancel)
+            decisionHandler(.cancel)
+            if url.absoluteString == Self.grantURL, mainFrame == true {
                 askForFolder()
                 return
             }
-            // A link within the page (`#part`) is cancelled too: `handleLink`
-            // scrolls to it by exact id, else the heading slug.
-            decisionHandler(.cancel)
-            handleLink(url, command: Self.command(action))
+            linkActivated(url, mainFrame: mainFrame, command: Self.command(action))
             return
         }
-        let allowed = action.targetFrame?.isMainFrame != false
-            && Self.localLoadAllowed(action.request.url, type: action.navigationType, expected: expectedPageURL)
+        let policy = Self.pagePolicy(url: action.request.url, type: action.navigationType, mainFrame: mainFrame,
+                                     page: webView.url, expected: expectedPageURL)
+        decisionHandler(policy == .allowPage ? .allow : .cancel)
+    }
+
+    /// A navigation response the policy above let through must still be
+    /// the preview's own page in the main frame, never a web page (a second
+    /// line, failing closed, as on the Mac).
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
+        let allowed = webView === web && PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame)
         decisionHandler(allowed ? .allow : .cancel)
+    }
+
+    /// What the local preview does with a navigation: the shared
+    /// `PreviewNavigation.decide` (the Mac's policy: a click in the main
+    /// frame on a real `#place` of the page shown scrolls; any other click
+    /// is routed; only the page being loaded, in the main frame, loads;
+    /// `about:` only as exactly about:blank), and on top of it iOS's own
+    /// check that a page load is an `.other` load of exactly the render's
+    /// page with its `?r=` (`localLoadAllowed(_:type:expected:)`).
+    static func pagePolicy(url: URL?, type: WKNavigationType, mainFrame: Bool?, page: URL?, expected: URL?) -> PreviewNavigation {
+        let decision = PreviewNavigation.decide(url: url, linkClick: type == .linkActivated, mainFrame: mainFrame, page: page,
+                                                expectedPage: expected, loadingShell: expected != nil)
+        if decision == .allowPage, !localLoadAllowed(url, type: type, expected: expected) { return .cancel }
+        return decision
+    }
+
+    /// A clicked link (WebKit's navigation already cancelled): a place in
+    /// the page shown scrolls there in the app's own content world, with
+    /// no document load; anything else goes to `handleLink`. Returns what
+    /// was decided (for tests).
+    @discardableResult
+    func linkActivated(_ url: URL, mainFrame: Bool?, command: Bool) -> PreviewNavigation {
+        let decision = Self.pagePolicy(url: url, type: .linkActivated, mainFrame: mainFrame, page: web.url, expected: expectedPageURL)
+        switch decision {
+        case .scrollInPage:
+            if let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment) }
+        case .route:
+            handleLink(url, command: command)
+        case .allowPage, .cancel:
+            break
+        }
+        return decision
     }
 
     /// The local page's own loads: the first load of a render, nothing a
@@ -639,17 +640,13 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     /// The page last served to the local preview (for tests and checks).
     var servedPageHTML: String? { files.pageHTML }
 
-    /// A clicked link in the document's page. A `cedric-doc:` link counts
-    /// only as the file `PreviewFiles.linkTarget` confines it to (the
-    /// document's folder, a granted folder, the vault or the site root);
-    /// a `file:` link is refused; other URLs go by scheme
-    /// (`PreviewLinkAction.previewAction`).
+    /// A clicked link that isn't a place in the page shown
+    /// (`linkActivated`). A `cedric-doc:` link counts only as the file
+    /// `PreviewFiles.linkTarget` confines it to (the document's folder, a
+    /// granted folder, the vault or the site root); a `file:` link is
+    /// refused; other URLs go by scheme (`PreviewLinkAction.previewAction`):
+    /// web and mail links ask first (`confirmOpen`).
     func handleLink(_ url: URL, command: Bool) {
-        // A link within the page shown: it stays (no history step).
-        if url.fragment != nil, let page = web.url, Self.withoutFragment(url) == Self.withoutFragment(page) {
-            if let fragment = PreviewAnchor.fragment(of: url) { scroll(toAnchor: fragment) }
-            return
-        }
         let scheme = url.scheme?.lowercased() ?? ""
         let routed: URL
         if scheme == PreviewFolder.scheme {
@@ -673,8 +670,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         case .openInPreview(let file):
             // The file is the path alone (`linkTarget`): carry the clicked link's `#fragment`.
             if let root { push(.local(file, root, PreviewAnchor.fragment(of: url))) }
-        case .openWebInPreview(let web):
-            push(.web(web))
         case .openInCedric(let file):
             if let onOpenFile {
                 onOpenFile(file)
@@ -702,54 +697,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         return language == .markdown || language == .html
     }
 
-    // MARK: Isolated browser
-
-    /// The web view http(s) links open in: a new process pool (not the
-    /// local preview's), nothing stored, no user scripts or message
-    /// handlers, no `cedric-doc:` handler. Page JavaScript stays at
-    /// WebKit's default (real web pages); the app adds nothing to it.
-    static func browserConfiguration() -> WKWebViewConfiguration {
-        let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()
-        config.processPool = WKProcessPool()
-        config.userContentController = WKUserContentController()
-        return config
-    }
-
-    enum BrowserDecision: Equatable {
-        case allow, cancel
-        /// A followed link: through the app's history.
-        case push(URL)
-        /// ⌘-click: ask to open it outside the app.
-        case confirm(URL)
-    }
-
-    static func isWebURL(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return false }
-        return !(url.host?.isEmpty ?? true)
-    }
-
-    /// The isolated browser's policy: http(s) with a host only (never
-    /// `file:`, `cedric-doc:`, `javascript:` or another scheme); no new
-    /// windows; a followed link or a GET form in the page goes through the
-    /// app's history; the page's own load (and its redirects) and its
-    /// sub-frames load; anything else is cancelled.
-    static func browserDecision(url: URL?, type: WKNavigationType, mainFrame: Bool?, command: Bool,
-                                method: String?) -> BrowserDecision {
-        guard let url, isWebURL(url) else { return .cancel }
-        guard let mainFrame else { return .cancel }
-        if type == .linkActivated {
-            if command { return .confirm(url) }
-            return mainFrame ? .push(url) : .allow
-        }
-        if !mainFrame { return .allow }
-        switch type {
-        case .other, .reload: return .allow
-        case .formSubmitted where (method ?? "GET").uppercased() == "GET": return .push(url)
-        default: return .cancel
-        }
-    }
-
     /// The render's own load is over: no further `.other` load is the
     /// page's (Review of 2887f40, Grok NIT: a missed refresh could reload
     /// the scrubbed page). A load the app starts sets it again.
@@ -760,12 +707,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        if webView === web { pageLoadEnded(navigation); return }
-        guard webView === browser else { return }
-        let ns = error as NSError
-        if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCancelled { return }
-        if ns.domain == "WebKitErrorDomain", ns.code == 102 { return } // a load the policy stopped
-        notice(String(localized: "The web page could not be loaded."))
+        if webView === web { pageLoadEnded(navigation) }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -774,23 +716,19 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     // MARK: History
 
-    /// What the preview shows: the open document, a linked local page
-    /// (its file, and the root it may read in), or a web page.
+    /// What the preview shows: the open document, or a linked local page
+    /// (its file, and the root it may read in). Never a web page.
     enum Entry: Equatable {
         case home
         /// A linked document, the root it may read in, and the heading
         /// (`#fragment`) to scroll to once it has loaded.
         case local(URL, URL, String?)
-        case web(URL)
     }
     private(set) var history: [Entry] = [.home]
     private(set) var historyIndex = 0
-    /// Web pages load (tests turn it off: no network).
-    var loadsWeb = true
     var isHome: Bool { history[historyIndex] == .home }
     var canGoBack: Bool { historyIndex > 0 }
     var canGoForward: Bool { historyIndex + 1 < history.count }
-    var webURL: URL? { if case .web(let url) = history[historyIndex] { return url }; return nil }
     /// Called when the history or the page shown changes.
     var onNavigationChange: (() -> Void)?
 
@@ -830,11 +768,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     private func displayEntry(keepPlace: Bool) {
         loadViewIfNeeded()
-        browser.stopLoading()
         pendingAnchor = nil
         switch history[historyIndex] {
         case .home:
-            browser.isHidden = true
             web.isHidden = false
             if !keepPlace, let f = homeFraction { pendingFraction = f }
             homeFraction = nil
@@ -842,59 +778,64 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
                 render(.markdown(home.markdown), palette: home.palette, document: home.document, rootOverride: nil, keepPlace: keepPlace)
             }
         case .local(let file, let root, let fragment):
-            browser.isHidden = true
             web.isHidden = false
             // The same rules again (the file may have changed since the
             // click), checked and read by the same symlink-free path, so a
             // link swapped in between can't point the read outside `root`
-            // (as on the Mac). A symlink is judged by its target's name too.
-            let target = PreviewFolder.resolved(file)
-            guard case .openInPreview = PreviewLinkAction.previewAction(for: target, folder: root, command: false, isText: Self.opensInOwlink),
-                  let data = try? Data(contentsOf: target), let text = TextCodec.decode(data)?.text else {
+            // (as on the Mac). That checked path is the page's: a symlink is
+            // judged by its target's name, and the target's kind (Markdown
+            // or HTML) and folder (images, links) are the page's (Mac
+            // 391aefd, PreviewLinkAction.previewDocument).
+            guard let checked = PreviewLinkAction.previewDocument(at: file, root: root, isText: Self.opensInOwlink),
+                  let text = TextCodec.decode(checked.data)?.text else {
                 notice(String(localized: "Could not read the preview document."))
                 break
             }
             if !keepPlace { pendingFraction = 0 }
-            let html = LanguageDetector.language(forFileName: file.lastPathComponent) == .html
-            render(html ? .html(text) : .markdown(text), palette: home?.palette ?? csvPalette, document: file,
+            let html = LanguageDetector.language(forFileName: checked.file.lastPathComponent) == .html
+            render(html ? .html(text) : .markdown(text), palette: home?.palette ?? csvPalette, document: checked.file,
                    rootOverride: root, keepPlace: keepPlace)
             // Scrolled to once this render's page has loaded (also on Back,
             // Forward and a folder-grant refresh), ahead of the place above.
             pendingAnchor = fragment.map { ($0, generation) }
-        case .web(let url):
-            generation += 1 // drop a local render still on its way
-            web.stopLoading()
-            web.isHidden = true
-            browser.isHidden = false
-            if loadsWeb, Self.isWebURL(url) { browser.load(URLRequest(url: url)) }
         }
         updateNav()
     }
 
-    // MARK: Open in Browser
+    // MARK: Link prompt
 
     /// Opens a URL outside the app (after the person confirms).
     var openExternal: @MainActor (URL) -> Void = { UIApplication.shared.open($0) }
     /// The confirmation on screen (or waiting for a window), and its URL.
     private(set) var linkPrompt: UIAlertController?
     private var promptURL: URL?
+    /// Links dropped because a prompt was already showing (for tests).
+    private(set) var droppedPrompts = 0
 
-    /// Open in Browser: the web page shown, after confirming.
-    func openInBrowser() {
-        if let url = webURL { confirmOpen(url) }
-    }
-
-    /// Asks before anything leaves the app, showing the whole URL (hidden
-    /// and direction-changing characters made visible).
+    /// Asks before a web or mail link leaves the app (Mac 0.5.2 S1): the
+    /// site on its own line (a non-ASCII name as its punycode, flagged; a
+    /// user name before the `@` called out), then the URL, hidden and
+    /// direction-changing characters made visible (`ExternalLinkText`, the
+    /// Mac's wording). Cancel is the preferred action (Return answers it).
+    /// One at a time: a link tapped while a prompt shows is dropped, so
+    /// prompts can't stack. (The Mac's rule that a declined page asks no
+    /// more applies only while page JavaScript is on, which it never is
+    /// here: only the person can tap.)
     func confirmOpen(_ url: URL) {
-        let a = UIAlertController(title: String(localized: "Open this link?"),
-                                  message: PromptText.visible(url.absoluteString), preferredStyle: .alert)
+        if let shown = linkPrompt, shown.presentingViewController != nil {
+            droppedPrompts += 1
+            return
+        }
+        let a = UIAlertController(title: ExternalLinkText.promptTitle(for: url),
+                                  message: ExternalLinkText(url).promptMessage, preferredStyle: .alert)
         a.addAction(UIAlertAction(title: String(localized: "Open"), style: .default) { [weak self] _ in
             self?.finishPrompt(open: true)
         })
-        a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { [weak self] _ in
+        let cancel = UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { [weak self] _ in
             self?.finishPrompt(open: false)
-        })
+        }
+        a.addAction(cancel)
+        a.preferredAction = cancel
         a.view.accessibilityIdentifier = "preview.openLinkPrompt"
         linkPrompt = a
         promptURL = url
@@ -909,7 +850,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         if open, let url { openExternal(url) }
     }
 
-    // MARK: Navigation bar (Back, Forward, This Document, Open in Browser)
+    // MARK: Navigation bar (Back, Forward, This Document)
 
     /// Leading top corner, once a link has been followed (also in a
     /// detached preview, where the trailing header is hidden).
@@ -917,7 +858,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
     private let backButton = UIButton(configuration: .gray())
     private let forwardButton = UIButton(configuration: .gray())
     private let homeButton = UIButton(configuration: .gray())
-    private let browserButton = UIButton(configuration: .gray())
 
     private func setUpNavBar(in container: UIView) {
         navBar.axis = .horizontal
@@ -927,7 +867,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
             (backButton, "chevron.backward", "preview.nav.back", String(localized: "Back"), nil),
             (forwardButton, "chevron.forward", "preview.nav.forward", String(localized: "Forward"), nil),
             (homeButton, "house", "preview.nav.home", String(localized: "This Document"), String(localized: "Return to this document")),
-            (browserButton, "safari", "preview.nav.openInBrowser", String(localized: "Open in Browser"), String(localized: "Asks first, showing the whole address.")),
         ]
         for (b, symbol, id, label, hint) in buttons {
             var c = b.configuration ?? .gray()
@@ -948,7 +887,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         backButton.addAction(UIAction { [weak self] _ in self?.goBack() }, for: .primaryActionTriggered)
         forwardButton.addAction(UIAction { [weak self] _ in self?.goForward() }, for: .primaryActionTriggered)
         homeButton.addAction(UIAction { [weak self] _ in self?.goHome() }, for: .primaryActionTriggered)
-        browserButton.addAction(UIAction { [weak self] _ in self?.openInBrowser() }, for: .primaryActionTriggered)
         container.addSubview(navBar)
         let g = container.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
@@ -967,7 +905,6 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         backButton.isEnabled = canGoBack
         forwardButton.isEnabled = canGoForward
         homeButton.isEnabled = !isHome
-        browserButton.isHidden = webURL == nil
         navBar.isHidden = showingCSV || history.count < 2
         onNavigationChange?()
     }

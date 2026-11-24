@@ -3,9 +3,10 @@ import UIKit
 import WebKit
 import CedricCore
 
-/// In-preview link navigation: the isolated browser's configuration and
-/// policy, the local preview's policy, app-kept history, and Open in
-/// Browser asking first (security audit H2: nothing is launched).
+/// In-preview link navigation: the local preview's policy (the shared
+/// `PreviewNavigation` plus iOS's page check), app-kept history, and web
+/// links asking first, never loading in the preview (security audit H2:
+/// nothing is launched; Mac 0.5.2 S1: no web page in the preview).
 @MainActor
 final class PreviewNavigationTests: XCTestCase {
     private var windows: [UIWindow] = []
@@ -41,57 +42,81 @@ final class PreviewNavigationTests: XCTestCase {
         return (root, root.appendingPathComponent("doc.md"))
     }
 
+    /// Every web view in `view`'s tree.
+    private func webViews(in view: UIView) -> [WKWebView] {
+        (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap { webViews(in: $0) }
+    }
+
+    /// The first view in `view`'s tree with `identifier`.
+    private func find(_ identifier: String, in view: UIView) -> UIView? {
+        if view.accessibilityIdentifier == identifier { return view }
+        return view.subviews.lazy.compactMap { self.find(identifier, in: $0) }.first
+    }
+
     private func link(_ relative: String, in folder: URL) throws -> URL {
         let page = try XCTUnwrap(PreviewFolder.pageURL(for: folder.standardizedFileURL))
         return try XCTUnwrap(URL(string: relative, relativeTo: page)?.absoluteURL)
     }
 
-    // MARK: Isolation
+    // MARK: One web view
 
-    func testBrowserConfigurationIsIsolated() {
-        let config = PreviewController.browserConfiguration()
-        XCTAssertFalse(config.websiteDataStore.isPersistent)
-        XCTAssertTrue(config.userContentController.userScripts.isEmpty)
-        XCTAssertNil(config.urlSchemeHandler(forURLScheme: PreviewFolder.scheme))
-        XCTAssertNil(config.urlSchemeHandler(forURLScheme: "cedric-doc"))
-        XCTAssertTrue(PreviewController.browserConfiguration().processPool !== config.processPool, "a new pool each time")
-
+    /// 0.5.2 S1: the isolated browser is gone. The preview holds one web
+    /// view, the local one, with its strict policy; there is no second
+    /// view a web page could load in, and no Open in Browser button.
+    /// (Replaces testBrowserConfigurationIsIsolated, which checked that
+    /// second view's isolation.)
+    func testThePreviewHasOnlyTheLocalWebView() {
         let preview = PreviewController()
         preview.loadViewIfNeeded()
-        let browser = preview.browser.configuration, local = preview.web.configuration
-        XCTAssertTrue(browser.processPool !== local.processPool, "not the local preview's process pool")
-        XCTAssertTrue(browser.userContentController !== local.userContentController)
-        XCTAssertFalse(browser.websiteDataStore.isPersistent)
-        XCTAssertTrue(browser.userContentController.userScripts.isEmpty)
-        XCTAssertNil(browser.urlSchemeHandler(forURLScheme: "cedric-doc"))
-        XCTAssertFalse(preview.browser.allowsBackForwardNavigationGestures)
-        XCTAssertFalse(preview.browser.allowsLinkPreview)
-        // The local preview keeps its own policy.
+        let all = webViews(in: preview.view)
+        XCTAssertEqual(all.count, 1, "one web view")
+        XCTAssertTrue(all.first === preview.web)
+        XCTAssertNil(find("preview.browser", in: preview.view), "no isolated browser")
+        XCTAssertNil(find("preview.nav.openInBrowser", in: preview.view), "no Open in Browser")
+        XCTAssertNotNil(find("preview.nav.back", in: preview.view))
+        let local = preview.web.configuration
         XCTAssertFalse(local.defaultWebpagePreferences.allowsContentJavaScript)
         XCTAssertFalse(local.websiteDataStore.isPersistent)
         XCTAssertNotNil(local.urlSchemeHandler(forURLScheme: PreviewFolder.scheme))
         XCTAssertTrue(local.userContentController.userScripts.isEmpty)
-        XCTAssertTrue(preview.browser.isHidden)
+        XCTAssertFalse(preview.web.allowsLinkPreview)
     }
 
-    func testIsolatedViewHasNoAppBridge() async throws {
-        let probe = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480), configuration: PreviewController.browserConfiguration())
-        let waiter = LoadWaiter()
-        probe.navigationDelegate = waiter
-        probe.loadHTMLString("<html><body>isolated</body></html>", baseURL: nil)
-        try await waiter.wait()
-        let handler = try await evaluate(probe, "typeof window.webkit?.messageHandlers?.cedricScroll")
-        XCTAssertEqual(handler as? String, "undefined", "no Cedric bridge in the isolated web view")
-        let body = try await evaluate(probe, "document.body.textContent")
-        XCTAssertEqual(body as? String, "isolated")
-    }
+    /// A web link tapped in the served page asks and loads nothing: the
+    /// preview stays on its page, with no history step. A load the page
+    /// starts by itself to a web page (a refresh, a redirect, `location`)
+    /// is cancelled by the policy. (Replaces testIsolatedViewHasNoAppBridge:
+    /// there is no isolated view left to hold a bridge.)
+    func testWebLinksNeverLoadInThePreview() async throws {
+        let (_, doc) = try tree()
+        let preview = PreviewController()
+        host(preview)
+        var external: [URL] = []
+        preview.openExternal = { external.append($0) }
+        preview.documentURL = doc
+        preview.show(markdown: "# Home\n\n[site](https://example.com/owlink)", palette: EditorPalettes.light)
+        try await waitFor("loaded") { preview.web.url != nil && preview.web.url == preview.pageURL && !preview.web.isLoading }
+        let page = try XCTUnwrap(preview.web.url)
+        let web = try XCTUnwrap(URL(string: "https://example.com/owlink"))
 
-    private func evaluate(_ web: WKWebView, _ js: String) async throws -> Any? {
-        try await withCheckedThrowingContinuation { (c: CheckedContinuation<Any?, Error>) in
-            web.evaluateJavaScript(js) { value, error in
-                if let error { c.resume(throwing: error) } else { c.resume(returning: value) }
-            }
-        }
+        XCTAssertEqual(preview.linkActivated(web, mainFrame: true, command: false), .route)
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(web))
+        let prompt = try XCTUnwrap(preview.linkPrompt)
+        XCTAssertTrue(preview.presentedViewController === prompt, "it asks")
+        XCTAssertTrue(preview.isHome)
+        XCTAssertEqual(preview.history.count, 1, "no history step")
+        XCTAssertEqual(preview.web.url, page)
+        XCTAssertTrue(external.isEmpty, "nothing opens before Open")
+        preview.finishPrompt(open: false)
+        prompt.dismiss(animated: false)
+
+        // The page itself (or WebKit) loading a web page: cancelled.
+        preview.web.load(URLRequest(url: web))
+        try await Task.sleep(nanoseconds: 500_000_000)
+        try await waitFor("settled") { !preview.web.isLoading }
+        XCTAssertEqual(preview.web.url, page, "the web page did not load")
+        XCTAssertEqual(webViews(in: preview.view).count, 1)
+        XCTAssertTrue(external.isEmpty)
     }
 
     func testLocalPageKeepsStrictCSP() {
@@ -103,13 +128,12 @@ final class PreviewNavigationTests: XCTestCase {
     }
 
     /// A web link in the document stays a link in the served page (a tap
-    /// reaches `handleLink`: the isolated browser, Open in Browser asks
-    /// first); a remote image or stylesheet is still dropped.
+    /// reaches `handleLink`, which asks first); a remote image or
+    /// stylesheet is still dropped.
     func testServedPageKeepsWebLinksButNoRemoteLoads() async throws {
         let (_, doc) = try tree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "[site](https://example.com/owlink) ![t](https://tracker.example/p.gif)\n\n<link rel=stylesheet href=\"https://t.example/c.css\">\n",
                      palette: EditorPalettes.light)
@@ -130,7 +154,6 @@ final class PreviewNavigationTests: XCTestCase {
         try fm.createSymbolicLink(at: root.appendingPathComponent("alias.md"), withDestinationURL: root.appendingPathComponent("notes.txt"))
         try fm.createSymbolicLink(at: root.appendingPathComponent("good.md"), withDestinationURL: root.appendingPathComponent("other.md"))
         let preview = PreviewController()
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "x", palette: EditorPalettes.light)
         preview.push(.local(root.appendingPathComponent("good.md"), root, nil))
@@ -141,6 +164,33 @@ final class PreviewNavigationTests: XCTestCase {
                        "a .md symlink to a .txt is judged by the .txt")
     }
 
+    /// The checked path is the page's (Mac 391aefd): a `.md` link to an
+    /// HTML file in a subfolder shows as HTML (the target's kind), from
+    /// that subfolder (the target's folder: its images and links resolve
+    /// there), not as Markdown from the link's folder.
+    func testLinkedDocumentTakesItsKindAndFolderFromTheCheckedPath() async throws {
+        let (root, doc) = try tree()
+        let fm = FileManager.default
+        let sub = root.appendingPathComponent("sub", isDirectory: true)
+        try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+        try "<h1>Real</h1>\n# not a heading in HTML".write(to: sub.appendingPathComponent("real.html"), atomically: true, encoding: .utf8)
+        try fm.createSymbolicLink(at: root.appendingPathComponent("alias.md"), withDestinationURL: sub.appendingPathComponent("real.html"))
+        let preview = PreviewController()
+        host(preview)
+        preview.documentURL = doc
+        preview.show(markdown: "x", palette: EditorPalettes.light)
+        preview.push(.local(root.appendingPathComponent("alias.md"), root, nil))
+        try await waitFor("linked page") { preview.servedPageHTML?.contains("Real") == true }
+        XCTAssertNil(preview.lastNotice)
+        let page = try XCTUnwrap(preview.servedPageHTML)
+        XCTAssertTrue(page.hasPrefix("<meta http-equiv=\"Content-Security-Policy\""), "shown as HTML (htmlPage), not as Markdown")
+        XCTAssertTrue(page.contains("# not a heading in HTML"), "the HTML text is not rendered as Markdown")
+        let expected = try XCTUnwrap(PreviewFolder.pageURL(for: PreviewFolder.resolved(sub)))
+        var shown = try XCTUnwrap(URLComponents(url: try XCTUnwrap(preview.pageURL), resolvingAgainstBaseURL: false))
+        shown.query = nil
+        XCTAssertEqual(shown.url, expected, "from the target's folder")
+    }
+
     /// No page JavaScript or network for the local preview, whatever the
     /// way a page got there: a link, Back, Forward, This Document, or the
     /// document re-rendered after a change on disk (Mac 92f1c7e, 4c5bbfe:
@@ -149,7 +199,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try tree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         func check(_ step: String) async throws {
             try await waitFor("\(step) served") { preview.servedPageHTML != nil }
@@ -179,35 +228,72 @@ final class PreviewNavigationTests: XCTestCase {
 
     // MARK: Policies
 
-    func testIsolatedPolicyCancelsLocalAndOtherSchemes() throws {
-        let types: [WKNavigationType] = [.linkActivated, .other, .formSubmitted, .reload, .backForward]
-        for s in ["file:///etc/passwd", "cedric-doc://doc/tmp/a.md", "javascript:alert(1)", "https:///nohost",
-                  "ftp://h/x", "smb://h/share", "data:text/html,x", "about:blank", "mailto:a@example.com", "x-owlink://open"] {
-            let url = try XCTUnwrap(URL(string: s))
-            for type in types {
+    /// The local page's policy (`pagePolicy`: the shared
+    /// `PreviewNavigation.decide` and iOS's page check). Replaces the
+    /// isolated browser's policy test: no navigation the page or WebKit
+    /// starts loads anything but the render's own page, whatever the
+    /// scheme, type or frame; a click is only ever routed (to
+    /// `handleLink`, which asks for web links) or scrolled in the page.
+    func testPagePolicyLoadsOnlyItsPageAndRoutesClicks() throws {
+        do {
+            let page = try XCTUnwrap(PreviewFolder.pageURL(for: URL(fileURLWithPath: "/tmp/x")))
+            var renderParts = try XCTUnwrap(URLComponents(url: page, resolvingAgainstBaseURL: false))
+            renderParts.queryItems = [URLQueryItem(name: "r", value: "7")]
+            let shown = try XCTUnwrap(renderParts.url)
+            let loads: [WKNavigationType] = [.other, .formSubmitted, .reload, .backForward, .formResubmitted]
+            for s in ["https://example.com/a?b=1", "http://example.com/", "file:///etc/passwd", "cedric-doc://doc/tmp/a.md",
+                      "javascript:alert(1)", "https:///nohost", "ftp://h/x", "smb://h/share", "data:text/html,x",
+                      "about:blankevil", "about:srcdoc", "mailto:a@example.com", "x-owlink://open"] {
+                let url = try XCTUnwrap(URL(string: s))
                 for frame in [true, false, nil] as [Bool?] {
-                    XCTAssertEqual(PreviewController.browserDecision(url: url, type: type, mainFrame: frame, command: false, method: "GET"),
-                                   .cancel, "\(s) \(type.rawValue) \(String(describing: frame))")
+                    for type in loads {
+                        for expected in [nil, shown, url] as [URL?] {
+                            XCTAssertEqual(PreviewController.pagePolicy(url: url, type: type, mainFrame: frame, page: shown, expected: expected),
+                                           .cancel, "\(s) \(type.rawValue) \(String(describing: frame)) expecting \(expected?.absoluteString ?? "nothing")")
+                        }
+                    }
+                    XCTAssertEqual(PreviewController.pagePolicy(url: url, type: .linkActivated, mainFrame: frame, page: shown, expected: shown),
+                                   .route, "a click on \(s) is routed, never loaded")
                 }
             }
+            XCTAssertEqual(PreviewController.pagePolicy(url: nil, type: .other, mainFrame: true, page: nil, expected: shown), .cancel)
+            XCTAssertEqual(PreviewController.pagePolicy(url: nil, type: .linkActivated, mainFrame: true, page: nil, expected: nil), .cancel)
+
+            // The render's own page: in the main frame, while it is being loaded, as an `.other` load.
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .other, mainFrame: true, page: nil, expected: shown), .allowPage)
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .other, mainFrame: false, page: nil, expected: shown), .cancel, "a frame")
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .other, mainFrame: nil, page: nil, expected: shown), .cancel, "a new window")
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .reload, mainFrame: true, page: nil, expected: shown), .cancel, "iOS: .other only")
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .other, mainFrame: true, page: shown, expected: nil), .cancel, "loaded: no reload")
+            let blank = try XCTUnwrap(URL(string: "about:blank"))
+            XCTAssertEqual(PreviewController.pagePolicy(url: blank, type: .other, mainFrame: true, page: nil, expected: blank), .allowPage)
+            XCTAssertEqual(PreviewController.pagePolicy(url: try XCTUnwrap(URL(string: "about:blankevil")), type: .other, mainFrame: true,
+                                                        page: nil, expected: try XCTUnwrap(URL(string: "about:blankevil"))),
+                           .cancel, "about: only as exactly about:blank")
+
+            // In-page anchors: the main frame and a real `#` on the page shown.
+            let anchor = try XCTUnwrap(URL(string: shown.absoluteString + "#part"))
+            XCTAssertEqual(PreviewController.pagePolicy(url: anchor, type: .linkActivated, mainFrame: true, page: shown, expected: nil), .scrollInPage)
+            XCTAssertEqual(PreviewController.pagePolicy(url: anchor, type: .linkActivated, mainFrame: false, page: shown, expected: nil), .route, "a frame")
+            XCTAssertEqual(PreviewController.pagePolicy(url: anchor, type: .linkActivated, mainFrame: nil, page: shown, expected: nil), .route, "a new window")
+            XCTAssertEqual(PreviewController.pagePolicy(url: anchor, type: .other, mainFrame: true, page: shown, expected: nil), .cancel, "not a click")
+            let escaped = try XCTUnwrap(URL(string: shown.absoluteString + "%23part"))
+            XCTAssertEqual(PreviewController.pagePolicy(url: escaped, type: .linkActivated, mainFrame: true, page: shown, expected: nil), .route, "%23 is not a #")
+            XCTAssertEqual(PreviewController.pagePolicy(url: shown, type: .linkActivated, mainFrame: true, page: shown, expected: nil), .route, "no #")
+            let other = try XCTUnwrap(URL(string: "other.md#part", relativeTo: shown)?.absoluteURL)
+            XCTAssertEqual(PreviewController.pagePolicy(url: other, type: .linkActivated, mainFrame: true, page: shown, expected: nil), .route, "another file")
+            let blankAnchor = try XCTUnwrap(URL(string: "about:blank#part"))
+            XCTAssertEqual(PreviewController.pagePolicy(url: blankAnchor, type: .linkActivated, mainFrame: true, page: blank, expected: nil), .scrollInPage)
+            XCTAssertEqual(PreviewController.pagePolicy(url: try XCTUnwrap(URL(string: "about:blankevil#part")), type: .linkActivated,
+                                                        mainFrame: true, page: blank, expected: nil), .route)
         }
-        XCTAssertEqual(PreviewController.browserDecision(url: nil, type: .other, mainFrame: true, command: false, method: nil), .cancel)
-        let web = try XCTUnwrap(URL(string: "https://example.com/a?b=1"))
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .linkActivated, mainFrame: true, command: false, method: "GET"), .push(web))
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .linkActivated, mainFrame: true, command: true, method: "GET"), .confirm(web))
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .linkActivated, mainFrame: nil, command: false, method: "GET"), .cancel, "no new windows")
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .other, mainFrame: nil, command: false, method: "GET"), .cancel)
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .other, mainFrame: true, command: false, method: "GET"), .allow, "our load")
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .other, mainFrame: false, command: false, method: "GET"), .allow, "a sub-frame")
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .formSubmitted, mainFrame: true, command: false, method: "GET"), .push(web))
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .formSubmitted, mainFrame: true, command: false, method: "POST"), .cancel)
-        XCTAssertEqual(PreviewController.browserDecision(url: web, type: .backForward, mainFrame: true, command: false, method: "GET"), .cancel)
 
         // The local preview loads only its own pages.
         let page = try XCTUnwrap(PreviewFolder.pageURL(for: URL(fileURLWithPath: "/tmp/x")))
         XCTAssertTrue(PreviewController.localLoadAllowed(page, type: .other))
         XCTAssertTrue(PreviewController.localLoadAllowed(URL(string: "about:blank"), type: .other))
         XCTAssertFalse(PreviewController.localLoadAllowed(page, type: .formSubmitted))
+        let web = try XCTUnwrap(URL(string: "https://example.com/a?b=1"))
         XCTAssertFalse(PreviewController.localLoadAllowed(web, type: .other))
         XCTAssertFalse(PreviewController.localLoadAllowed(URL(fileURLWithPath: "/etc/hosts"), type: .other))
         XCTAssertFalse(PreviewController.localLoadAllowed(URL(string: "javascript:alert(1)"), type: .other))
@@ -243,7 +329,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try tree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         func shown(_ step: String, _ text: String) async throws {
             try await waitFor("\(step) served") { preview.servedPageHTML?.contains(text) == true }
@@ -276,7 +361,6 @@ final class PreviewNavigationTests: XCTestCase {
     func testLinksBrowseWithHistory() throws {
         let (root, doc) = try tree()
         let preview = PreviewController()
-        preview.loadsWeb = false
         var opened: [URL] = []
         preview.onOpenFile = { opened.append($0) }
         var external: [URL] = []
@@ -297,7 +381,7 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertFalse(preview.canGoForward)
         XCTAssertTrue(preview.navBarVisible)
         XCTAssertFalse(preview.web.isHidden)
-        XCTAssertTrue(preview.browser.isHidden)
+        XCTAssertTrue(preview.activeScrollView === preview.web.scrollView, "the page shows in the local web view")
         guard case .local(let file, _, let fragment) = preview.history[preview.historyIndex] else { return XCTFail("a local entry") }
         XCTAssertEqual(file.lastPathComponent, "other.md")
         XCTAssertNil(fragment, "no fragment in the link, none on the entry")
@@ -354,20 +438,20 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertTrue(external.isEmpty, "nothing left the app")
         XCTAssertNil(preview.linkPrompt)
 
-        // A web link opens in the isolated view, not the system browser.
+        // A web link never loads in the preview (0.5.2 S1): it asks, and
+        // nothing navigates or opens until Open.
         let web = try XCTUnwrap(URL(string: "https://example.com/a?b=1"))
         preview.handleLink(web, command: false)
-        XCTAssertEqual(preview.lastLinkAction, .openWebInPreview(web))
-        XCTAssertEqual(preview.webURL, web)
-        XCTAssertFalse(preview.browser.isHidden)
-        XCTAssertTrue(preview.web.isHidden)
-        XCTAssertTrue(preview.activeScrollView === preview.browser.scrollView)
-        XCTAssertTrue(external.isEmpty)
-        XCTAssertNil(preview.linkPrompt, "browsing asks nothing and opens nothing")
-        preview.goBack()
-        XCTAssertNil(preview.webURL)
-        XCTAssertTrue(preview.browser.isHidden)
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(web))
+        XCTAssertEqual(preview.history.count, count, "no history step")
         XCTAssertTrue(preview.isHome)
+        XCTAssertFalse(preview.web.isHidden)
+        XCTAssertTrue(preview.activeScrollView === preview.web.scrollView)
+        XCTAssertTrue(external.isEmpty)
+        XCTAssertNotNil(preview.linkPrompt, "it asks")
+        preview.finishPrompt(open: false)
+        XCTAssertTrue(external.isEmpty, "Cancel opens nothing")
+        XCTAssertNil(preview.linkPrompt)
     }
 
     // MARK: Heading fragments
@@ -432,7 +516,6 @@ final class PreviewNavigationTests: XCTestCase {
     func testLinksKeepTheirHeadingFragment() throws {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "x", palette: EditorPalettes.light)
         preview.handleLink(try link("other.md#part", in: root), command: false)
@@ -457,7 +540,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "[l](long.md#the-part)", palette: EditorPalettes.light)
 
@@ -507,7 +589,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "x", palette: EditorPalettes.light)
 
@@ -538,7 +619,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "x", palette: EditorPalettes.light)
         var n = preview.anchorScrolls
@@ -551,7 +631,8 @@ final class PreviewNavigationTests: XCTestCase {
             let s = preview.web.scrollView
             s.setContentOffset(CGPoint(x: 0, y: -s.adjustedContentInset.top), animated: false)
             n = preview.anchorScrolls
-            preview.handleLink(try XCTUnwrap(URL(string: href, relativeTo: page)?.absoluteURL), command: false)
+            XCTAssertEqual(preview.linkActivated(try XCTUnwrap(URL(string: href, relativeTo: page)?.absoluteURL), mainFrame: true, command: false),
+                           .scrollInPage, href)
             try await waitFor("same-page \(href)") { preview.anchorScrolls > n }
             XCTAssertEqual(preview.history.count, count, "\(href): no history step")
             XCTAssertEqual(preview.historyIndex, index)
@@ -561,6 +642,17 @@ final class PreviewNavigationTests: XCTestCase {
             try await assertHeadingAtTop(preview, id: id, href)
         }
         XCTAssertNil(preview.lastNotice, "nothing refused")
+
+        // Only from the main frame, and only with a real `#` (Mac 89f23a0):
+        // a frame's click, or `%23`, doesn't scroll the page.
+        n = preview.anchorScrolls
+        let part = try XCTUnwrap(URL(string: "#part", relativeTo: page)?.absoluteURL)
+        XCTAssertEqual(preview.linkActivated(part, mainFrame: false, command: false), .route)
+        XCTAssertEqual(preview.linkActivated(try XCTUnwrap(URL(string: page.absoluteString + "%23part")), mainFrame: true, command: false), .route)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(preview.anchorScrolls, n, "no scroll")
+        XCTAssertEqual(preview.history.count, count, "no history step")
+        XCTAssertEqual(preview.web.url, page, "nothing navigated")
     }
 
     func testWikilinkToAHeadingCarriesItsSlug() async throws {
@@ -577,7 +669,6 @@ final class PreviewNavigationTests: XCTestCase {
         // Following it in the preview opens the note at the heading.
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "[[long#The Part]]", palette: EditorPalettes.light)
         let n = preview.anchorScrolls
@@ -595,7 +686,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         let filler = (1...60).map { "Paragraph \($0)." }.joined(separator: "\n\n")
         preview.show(markdown: "# Home\n\n\(filler)\n\n## Below\n\nHere.\n\n\(filler)\n", palette: EditorPalettes.light)
@@ -607,7 +697,7 @@ final class PreviewNavigationTests: XCTestCase {
         XCTAssertEqual(preview.anchorClearance, 0)
         let home = try XCTUnwrap(preview.web.url)
         var n = preview.anchorScrolls
-        preview.handleLink(try XCTUnwrap(URL(string: "#below", relativeTo: home)?.absoluteURL), command: false)
+        preview.linkActivated(try XCTUnwrap(URL(string: "#below", relativeTo: home)?.absoluteURL), mainFrame: true, command: false)
         try await waitForAnchor(preview, after: n)
         XCTAssertEqual(preview.lastAnchor?.found, true)
         try await assertHeadingAtTop(preview, id: "below", "(no bar)")
@@ -628,7 +718,7 @@ final class PreviewNavigationTests: XCTestCase {
         // An in-page link on that page, bar still up: below it too.
         let page = try XCTUnwrap(preview.web.url)
         n = preview.anchorScrolls
-        preview.handleLink(try XCTUnwrap(URL(string: "#part", relativeTo: page)?.absoluteURL), command: false)
+        preview.linkActivated(try XCTUnwrap(URL(string: "#part", relativeTo: page)?.absoluteURL), mainFrame: true, command: false)
         try await waitForAnchor(preview, after: n)
         XCTAssertEqual(preview.lastAnchor?.found, true)
         try await assertHeadingAtTop(preview, id: "part", "(in-page, bar)")
@@ -640,7 +730,6 @@ final class PreviewNavigationTests: XCTestCase {
         let (root, doc) = try anchorTree()
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         preview.documentURL = doc
         preview.show(markdown: "x", palette: EditorPalettes.light)
         let n = preview.anchorScrolls
@@ -662,49 +751,73 @@ final class PreviewNavigationTests: XCTestCase {
         } catch {
             // The page world cannot run script: nothing there to see a bridge.
         }
-        let browser = preview.browser.configuration
-        XCTAssertTrue(browser.userContentController.userScripts.isEmpty)
-        XCTAssertNil(browser.urlSchemeHandler(forURLScheme: PreviewFolder.scheme))
-        XCTAssertFalse(browser.websiteDataStore.isPersistent)
-        XCTAssertTrue(browser.processPool !== local.processPool)
+        // No second web view (the isolated browser is gone, 0.5.2 S1).
+        XCTAssertEqual(webViews(in: preview.view).count, 1)
     }
 
-    // MARK: Open in Browser
+    // MARK: Link prompt
 
-    func testOpenInBrowserAsksFirstWithTheWholeURL() throws {
+    /// A web or mail link asks first, as on the Mac (0.5.2 S1): the site on
+    /// its own line, then the URL; Cancel is the preferred action; only
+    /// Open opens. Replaces testOpenInBrowserAsksFirstWithTheWholeURL (the
+    /// Open in Browser button is gone): the message was the URL alone, now
+    /// it is "Site: host" then the URL (`ExternalLinkText.promptMessage`).
+    func testWebLinkAsksFirstNamingTheSite() throws {
         let preview = PreviewController()
         host(preview)
-        preview.loadsWeb = false
         var external: [URL] = []
         preview.openExternal = { external.append($0) }
+        XCTAssertNil(find("preview.nav.openInBrowser", in: preview.view), "no Open in Browser")
         let web = try XCTUnwrap(URL(string: "https://example.com/a?b=1"))
-        preview.openInBrowser()
-        XCTAssertNil(preview.linkPrompt, "nothing to open on the document")
-
-        preview.push(.web(web))
-        XCTAssertEqual(preview.webURL, web)
-        XCTAssertTrue(external.isEmpty)
-        preview.openInBrowser()
+        preview.handleLink(web, command: false)
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(web))
         let prompt = try XCTUnwrap(preview.linkPrompt)
         XCTAssertTrue(preview.presentedViewController === prompt)
         XCTAssertEqual(prompt.title, "Open this link?")
-        XCTAssertEqual(prompt.message, "https://example.com/a?b=1")
+        XCTAssertEqual(prompt.message, "Site: example.com\n\nhttps://example.com/a?b=1")
         XCTAssertEqual(prompt.actions.map(\.title), ["Open", "Cancel"])
+        XCTAssertEqual(prompt.preferredAction?.title, "Cancel", "Cancel is the default")
+        XCTAssertEqual(prompt.preferredAction?.style, .cancel)
+        XCTAssertTrue(external.isEmpty, "nothing opens before an answer")
+
+        // One prompt at a time: another link while it shows is dropped.
+        let second = try XCTUnwrap(URL(string: "https://second.example/"))
+        preview.handleLink(second, command: false)
+        XCTAssertEqual(preview.droppedPrompts, 1)
+        XCTAssertTrue(preview.linkPrompt === prompt && preview.presentedViewController === prompt)
         preview.finishPrompt(open: false) // what Cancel calls
         prompt.dismiss(animated: false)
         XCTAssertTrue(external.isEmpty, "Cancel opens nothing")
         XCTAssertNil(preview.linkPrompt)
 
-        preview.openInBrowser()
+        // ⌘-tap asks the same way; Open opens the URL it showed.
+        preview.handleLink(web, command: true)
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(web))
         XCTAssertNotNil(preview.linkPrompt)
         preview.finishPrompt(open: true) // what Open calls
         preview.presentedViewController?.dismiss(animated: false)
         XCTAssertEqual(external, [web])
 
-        // Hidden characters in a URL are shown, not acted on; mailto asks too.
+        // A user name dressed as a site, and a look-alike non-ASCII host.
+        func ask(_ s: String) throws -> String {
+            preview.handleLink(try XCTUnwrap(URL(string: s)), command: false)
+            let message = try XCTUnwrap(preview.linkPrompt?.message, s)
+            preview.finishPrompt(open: false)
+            preview.presentedViewController?.dismiss(animated: false)
+            return message
+        }
+        let dressed = try ask("https://www.apple.com%2Fsignin@evil.example/")
+        XCTAssertTrue(dressed.hasPrefix("Site: evil.example\n\n"), dressed)
+        XCTAssertTrue(dressed.contains("user name (“www.apple.com/signin”), not the site. This link goes to evil.example."), dressed)
+        let homograph = try ask("https://аpple.com/signin")
+        XCTAssertTrue(homograph.hasPrefix("Site: xn--"), homograph)
+        XCTAssertTrue(homograph.contains("not plain ASCII") && homograph.contains("“аpple.com”"), homograph)
+
+        // Mail asks too.
         let mail = try XCTUnwrap(URL(string: "mailto:a@example.com"))
         preview.handleLink(mail, command: false)
         XCTAssertEqual(preview.lastLinkAction, .confirmExternal(mail))
+        XCTAssertEqual(preview.linkPrompt?.title, "Write an email?")
         XCTAssertEqual(preview.linkPrompt?.message, "mailto:a@example.com")
         preview.finishPrompt(open: false)
         preview.presentedViewController?.dismiss(animated: false)
@@ -721,7 +834,6 @@ final class PreviewNavigationTests: XCTestCase {
         host(nav)
         viewer.show(DetachedPreviews.Snapshot(url: doc, markdown: "[o](other.md)", palette: EditorPalettes.light))
         let preview = viewer.preview
-        preview.loadsWeb = false
         XCTAssertTrue(preview.isHome)
         preview.handleLink(try link("other.md", in: root), command: false)
         XCTAssertFalse(preview.isHome)
@@ -746,7 +858,6 @@ final class PreviewNavigationTests: XCTestCase {
         host(UINavigationController(rootViewController: viewer))
         viewer.show(DetachedPreviews.Snapshot(url: doc, markdown: "[n](notes.txt)", palette: EditorPalettes.light))
         let preview = viewer.preview
-        preview.loadsWeb = false
         XCTAssertNotNil(preview.onOpenFile)
 
         preview.handleLink(try link("notes.txt", in: root), command: false)

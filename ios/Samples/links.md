@@ -1,6 +1,6 @@
 # Links
 
-Owlink's preview follows links inside the app. A web link opens in the preview's own isolated browser; Open in Browser asks first and shows the whole address.
+Owlink's preview follows links to your own notes inside the app. A web page never opens in the preview: a tap on a web link asks first, naming the site, and only then opens it in your browser.
 
 [The Owlink site](https://example.com/owlink)
 

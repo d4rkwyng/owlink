@@ -85,8 +85,10 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
     }
 
-    /// A web link in the preview opens in the isolated browser; Open in
-    /// Browser asks first with the whole address. The prompt is captured
+    /// A web link in the preview asks first (Mac 0.5.2 S1): the tap itself
+    /// brings up the prompt, which names the site on its own line and then
+    /// shows the whole address; the page never loads in the preview and
+    /// there is no Open in Browser button any more. The prompt is captured
     /// as a screenshot attachment and then cancelled (never opened).
     func testWebLinkOpenInBrowserAsksFirst() throws {
         let app = launch("links.md", fresh: true)
@@ -108,13 +110,15 @@ final class OwlinkUITests: XCTestCase {
         let link = web.links["The Owlink site"].firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 10), "no web link in the preview")
         link.tap()
-        let open = app.buttons["preview.nav.openInBrowser"]
-        XCTAssertTrue(open.waitForExistence(timeout: 10), "no Open in Browser button")
-        open.tap()
         let alert = app.alerts.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 5), "no prompt")
+        XCTAssertTrue(alert.waitForExistence(timeout: 5), "the tap didn't ask")
         XCTAssertTrue(alert.staticTexts["Open this link?"].exists)
-        XCTAssertTrue(alert.staticTexts["https://example.com/owlink"].exists, "the whole address")
+        let site = alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Site: example.com")).firstMatch
+        XCTAssertTrue(site.exists, "the site on its own line")
+        let address = alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "https://example.com/owlink")).firstMatch
+        XCTAssertTrue(address.exists, "the whole address")
+        XCTAssertTrue(alert.buttons["Cancel"].exists && alert.buttons["Open"].exists)
+        XCTAssertFalse(app.buttons["preview.nav.openInBrowser"].exists, "no Open in Browser button")
         sleep(1) // the alert's appearance animation
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = "preview-external-link-prompt"
@@ -123,6 +127,8 @@ final class OwlinkUITests: XCTestCase {
         alert.buttons["Cancel"].tap()
         XCTAssertFalse(alert.waitForExistence(timeout: 1) && alert.exists, "the prompt stayed")
         XCTAssertEqual(app.state, .runningForeground, "nothing was opened outside the app")
+        XCTAssertTrue(link.exists, "the preview still shows the document: the web page did not load in it")
+        XCTAssertFalse(app.buttons["preview.nav.back"].exists, "no history step: the Back bar stays hidden")
     }
 
     func testFindNavigatorOpens() throws {

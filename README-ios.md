@@ -145,11 +145,14 @@ Details for both are under What it does below.
   Links browse in the preview (attached and detached), with **Back**,
   **Forward** and **This Document**: a Markdown or HTML file the link
   rules allow renders there under the same policy (JavaScript off, strict
-  CSP); http(s) opens in an isolated preview web view (own process pool,
-  nothing stored, no app scripts, handlers or `cedric-doc:`); other text
-  files open in the editor; a linked file is checked and read by its
-  resolved path. **Open in Browser** asks first, showing the
-  full URL; mailto and `⌘`-click ask too. Nothing a link names is launched.
+  CSP); other text files open in the editor; a linked file is checked and
+  read by its resolved path, which also gives its kind and folder. A web
+  page never loads in the preview (0.5.2): a tap (or `⌘`-tap) on a web or
+  mail link asks first, naming the site on its own line (a non-ASCII name
+  as its punycode, flagged; a user name before the `@` called out), with
+  Cancel as the default, and only Open hands it to the system. Redirects,
+  refreshes, forms and frames can't load another page. Nothing a link
+  names is launched.
   A link with a heading fragment (`other.md#part`, `page.html#sec`,
   `[[other#Part]]`) opens that document in the preview at the heading, and
   Back / Forward return to it.
