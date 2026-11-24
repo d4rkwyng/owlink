@@ -375,6 +375,37 @@ import Testing
         #expect(events.all.last == .appended("after\n"))
     }
 
+    /// A followed UTF-16 log replaced by one cut mid-character (odd size,
+    /// the writer still busy): the reset shows the whole characters and
+    /// keeps the half for the next append. TextCodec refuses odd UTF-16
+    /// (it dropped the last byte), so the reset holds it back itself.
+    @Test func aUTF16ResetCutMidCharacterKeepsTheHalf() async throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let start = Data([0xFF, 0xFE]) + "start\n".data(using: .utf16LittleEndian)!
+        try start.write(to: url)
+        let events = Events()
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(start.count), callbackQueue: DispatchQueue(label: "t")) { events.add($0) }
+        tail.start()
+        defer { tail.stop() }
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        // Replaced (a new file renamed over it): BOM, "ab", half of "c".
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00, 0x63]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        await waitFor(events, count: 1)
+        #expect(events.all.first == .reset("ab"))
+        let fh = try FileHandle(forWritingTo: url)
+        try fh.seekToEnd()
+        try fh.write(contentsOf: Data([0x00, 0x64, 0x00]))
+        try fh.close()
+        await waitFor(events, count: 2)
+        #expect(Self.shown(events.all) == "abcd")
+    }
+
     /// 0.2.1 review M5: closing a followed tab stops its tail (EditorWindowController.windowWillClose);
     /// a stopped tail, or one freed without `stop`, holds no descriptor or timer.
     @Test func stopLeavesNoDescriptor() async throws {

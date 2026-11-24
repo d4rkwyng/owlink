@@ -137,7 +137,15 @@ public final class FileTail: @unchecked Sendable {
             guard let data = try? Data(contentsOf: url) else { return }
             offset = UInt64(data.count)
             pending = Data()
-            let text = TextCodec.decode(data, as: encoding)?.text ?? String(decoding: data, as: UTF8.self)
+            // UTF-16 cut mid-character (odd size, the writer still busy):
+            // hold the half back for the next append, which TextCodec's
+            // refusal of odd UTF-16 would otherwise turn into UTF-8 noise.
+            var whole = data
+            if encoding == .utf16LE || encoding == .utf16BE, whole.count % 2 != 0 {
+                pending = whole.suffix(1)
+                whole = whole.dropLast()
+            }
+            let text = TextCodec.decode(whole, as: encoding)?.text ?? String(decoding: whole, as: UTF8.self)
             emit(.reset(text))
             return
         }

@@ -25,6 +25,29 @@ import Testing
         #expect(TextCodec.decode(be)?.text == "ça va")
     }
 
+    /// UTF-16 with an odd byte count (a BOM, then a half code unit at the
+    /// end) isn't text in that encoding: Foundation decoded it without the
+    /// last byte and ⌘S dropped it (ff fe 61 00 62 → ff fe 61 00). It is
+    /// refused, as a lone surrogate is, detected or chosen.
+    @Test func utf16WithAnOddByteCountIsRefused() {
+        #expect(TextCodec.decode(Data([0xFF, 0xFE, 0x61, 0x00, 0x62])) == nil)
+        #expect(TextCodec.decode(Data([0xFE, 0xFF, 0x00, 0x61, 0x00])) == nil)
+        #expect(TextCodec.decode(Data([0xFF, 0xFE, 0x61])) == nil)
+        #expect(TextCodec.decode(Data([0x61, 0x00, 0x62]), as: .utf16LE) == nil)
+        #expect(TextCodec.decode(Data([0x00, 0x61, 0x00]), as: .utf16BE) == nil)
+        // A lone surrogate, the case it matches.
+        #expect(TextCodec.decode(Data([0xFF, 0xFE, 0x00, 0xD8, 0x61, 0x00])) == nil)
+        // Even counts still open, and their bytes round-trip.
+        let even = Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00])
+        let d = TextCodec.decode(even)
+        #expect(d?.text == "ab")
+        #expect(d?.encoding == .utf16LE)
+        #expect(TextCodec.encode("ab", encoding: .utf16LE, lineEnding: .lf) == even)
+        #expect(TextCodec.decode(Data([0xFF, 0xFE]))?.text == "")
+        // Reopened as another encoding the bytes are text again.
+        #expect(TextCodec.decode(Data([0xFF, 0xFE, 0x61, 0x00, 0x62]), as: .latin1)?.text.unicodeScalars.count == 5)
+    }
+
     @Test func utf16WithoutBOMBySniffing() {
         let le = "plain ascii text\n".data(using: .utf16LittleEndian)!
         #expect(TextCodec.detectEncoding(le) == .utf16LE)

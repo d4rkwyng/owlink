@@ -189,10 +189,14 @@ public enum TextCodec {
 
     /// Decodes `data` (as `encoding`, or the detected one) and normalises
     /// its line endings. Nil if the bytes aren't valid in that encoding.
+    /// UTF-16 with an odd number of bytes after the BOM (a truncated
+    /// download) is nil too, as a lone surrogate is: Foundation decoded it
+    /// without the last byte, so ⌘S dropped that byte with no notice.
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil) -> DecodedText? {
         var enc = encoding ?? detectEncoding(data)
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
+        if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
         var decoded = String(data: body, encoding: enc.foundation)
         // A guessed 8-bit encoding that can't decode a byte past the sample
         // (0x81 in Windows-1252): Latin-1 decodes any bytes.
