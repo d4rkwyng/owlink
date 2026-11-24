@@ -542,8 +542,22 @@ What Cedric does now:
   macOS 26.6.2 that crashed in layout within a second of opening
   (`-[NSCountableTextLocation compare:]` raising from
   `_NSTextLayoutFragmentStorage` under `estimatedSizeForLastTextContainer`;
-  macOS 27 was fine). `Scripts/bigfile-check.sh` opens a generated 55 MiB
-  log (`CEDRIC_CHECK=bigfile`).
+  macOS 27 was fine). Not chunking short-line logs fixed the open, but one
+  long line anywhere still turns chunks on, and then every short line goes
+  through the override again: a 55 MiB log with a pasted 30,000-character
+  line crashed the same way. The cause was the override itself, not the
+  mix of TextKit's paragraphs and ours: enumerating forwards from the end
+  of the text it handed out the last line (an element lying before the
+  location asked from), where NSTextContentStorage hands out nothing, and
+  `estimatedSizeForLastTextContainer` asks from exactly there; backwards
+  from nil it also handed out the last line, where TextKit's hands out
+  nothing. Now, with all lines short, the override's elements and returned
+  locations are TextKit's own from every offset, both ways
+  (`Scripts/chunks-check.sh`, no app: also walks chunked lines across
+  edits and lays out a pasted long line in a 60,000-line text). Chunk
+  separators are `\r\n` when the line ends so, as TextKit's.
+  `Scripts/bigfile-check.sh` opens a generated 55 MiB log
+  (`CEDRIC_CHECK=bigfile`) and pastes a 30,000-character line into it.
   Chunk size, measured: 500 → 31 ms per keystroke (too many elements),
   1,000 → 6–10 ms, 2,048 → 6.5 ms, 4,096 → 6.7 ms, 8,192 → 7.6 ms.
   Wrapping stays as the user set it: chunked, wrapped and unwrapped cost
@@ -552,10 +566,15 @@ What Cedric does now:
   longer than 20,000 characters (from the table above: well under a frame
   on slower Macs) or the document is longer than 25,000,000 UTF-16 units
   (`LargeDocument.sizeThreshold`).
-  Checked before the text reaches TextKit on open, reload and restore, and
+  Checked before the text reaches TextKit on open and restore, and
   after each edit for the edited lines only (a long paste turns it on; the
-  pause takes effect for that same edit, the chunks a run-loop turn later).
-  Typing a line short again doesn't turn it off; a new text does. It
+  pause takes effect for that same edit, the chunks a run-loop turn later;
+  the queued step bails if the text was replaced meanwhile, and rechecks
+  the whole text if it was edited again). Typing a line short again
+  doesn't turn it off; a new text does. File › Revert to Saved and Reload
+  on the changed-on-disk bar replace the text as one undoable edit, so
+  they recheck all of it a turn later (`largeModeReplacingAll`): large
+  mode, and chunks, follow the file on disk, not just its first line. It
   shows a slim bar ("Very long lines: colouring, spell check and the owl
   are paused for speed. [Turn On Anyway]"), pauses colouring
   (`SyntaxColorizer.paused`, including the whole-document recolour), spell
