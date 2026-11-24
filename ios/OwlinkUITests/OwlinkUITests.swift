@@ -42,14 +42,29 @@ final class OwlinkUITests: XCTestCase {
         return web
     }
 
+    /// Leaves read mode (an iPhone opens files read-only): Edit must be
+    /// on the bar itself there, not collapsed into the ••• menu behind
+    /// disabled Undo/Redo (0.5.2 (17): a 402-pt iPhone hid it).
+    private func beginEditing(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let edit = app.navigationBars.buttons["editor.edit"]
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertTrue(edit.waitForExistence(timeout: 5) && edit.isHittable,
+                          "a file opened read-only: no Edit on the iPhone's bar", file: file, line: line)
+        }
+        if edit.exists, edit.label == "Edit" {
+            edit.tap()
+            let editing = NSPredicate(format: "label == 'Done'")
+            wait(for: [XCTNSPredicateExpectation(predicate: editing, object: edit)], timeout: 5)
+        }
+    }
+
     func testOpenEditSaveReopen() throws {
         var app = launch("sample.swift", fresh: true)
         var tv = editor(app)
         XCTAssertTrue((tv.value as? String ?? "").contains("struct Owl"))
         XCTAssertTrue(app.buttons["editor.language"].label.contains("Swift"))
         // Opened read-only on iPhone (the default): Edit first.
-        let edit = app.buttons["editor.edit"]
-        if edit.exists, edit.label == "Edit" { edit.tap() }
+        beginEditing(app)
         tv.tap()
         tv.typeText("\n// typed by the UI test\n")
         XCTAssertTrue((tv.value as? String ?? "").contains("typed by the UI test"))
@@ -70,18 +85,24 @@ final class OwlinkUITests: XCTestCase {
         let tv = editor(app)
         let hide = app.buttons["editor.hideKeyboard"]
         XCTAssertFalse(hide.exists && hide.isHittable)
+        // Opened read-only on iPhone: a tap alone brings up no keyboard.
+        beginEditing(app)
         tv.tap()
         XCTAssertTrue(hide.waitForExistence(timeout: 5), "no hide-keyboard button while editing")
         XCTAssertEqual(hide.label, "Hide Keyboard")
         hide.tap()
         let gone = NSPredicate { _, _ in !app.keyboards.firstMatch.exists }
         wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 5)
+        XCTAssertFalse(hide.exists && hide.isHittable, "the hide-keyboard button stayed after the keyboard went")
     }
 
     func testOwlHintFixesTrailingSpaces() throws {
         let app = launch("sample.swift", fresh: true)
         let tv = editor(app)
         XCTAssertTrue((tv.value as? String ?? "").contains("struct Owl {   "))
+        // Opened read-only on iPhone: Fix it changes the text only once
+        // editing (in read mode it says "Tap Edit to change the text.").
+        beginEditing(app)
         // The owl in the corner shows a badge; tapping him opens his bubble.
         let owl = app.descendants(matching: .any)["owl.sprite"]
         XCTAssertTrue(owl.waitForExistence(timeout: 10), "no owl")
@@ -137,11 +158,22 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertFalse(app.buttons["preview.nav.back"].exists, "no history step: the Back bar stays hidden")
     }
 
+    /// Find: the magnifying glass in the bar, or on a narrow iPhone bar
+    /// (where Edit takes the room) its item in the ••• menu.
     func testFindNavigatorOpens() throws {
         let app = launch("sample.swift", fresh: true)
         _ = editor(app)
-        app.buttons["editor.find"].tap()
-        let field = app.textFields.matching(NSPredicate(format: "placeholderValue CONTAINS[c] 'Search' OR placeholderValue CONTAINS[c] 'Find'")).firstMatch
+        let find = app.navigationBars.buttons["editor.find"]
+        if find.waitForExistence(timeout: 2) { find.tap() } else {
+            app.navigationBars.buttons["More"].firstMatch.tap()
+            let item = app.collectionViews.buttons["Find"].firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "no Find in the bar or the ••• menu")
+            item.tap()
+        }
+        // The system find navigator's field (a search field, not a text field).
+        let field = app.descendants(matching: .any).matching(NSPredicate(
+            format: "(elementType == %d OR elementType == %d) AND (placeholderValue CONTAINS[c] 'Search' OR placeholderValue CONTAINS[c] 'Find')",
+            XCUIElement.ElementType.searchField.rawValue, XCUIElement.ElementType.textField.rawValue)).firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5), "find navigator didn't open")
         field.typeText("hoot")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'of'")).firstMatch.waitForExistence(timeout: 5))
