@@ -259,6 +259,19 @@ final class OwlinkUITests: XCTestCase {
         app.typeKey(",", modifierFlags: .command)
     }
 
+    /// A lone Shift press: no command, no text. On the iOS 27.2 iPad
+    /// simulators a ⌘-chord XCUITest synthesizes is dropped until the
+    /// launch has had a plain key event: with nothing before it, ⌘, didn't
+    /// open Settings (no sheet anywhere), a second ⌘, didn't either, and
+    /// typing in an earlier launch didn't help; after one Shift press ⌘,
+    /// opened Settings with no sheet, after Ask Cedric's sheet closed and
+    /// over the sheet (same app build; gate-ipad-mini and gate-ipad-pro-13,
+    /// 2026-11-24). A real keyboard sends ⌘'s own key-down first.
+    private func primeHardwareKeyboard(_ app: XCUIApplication) {
+        app.typeKey(XCUIKeyboardKey.shift.rawValue, modifierFlags: [])
+        sleep(1)
+    }
+
     private func settingsShown(_ app: XCUIApplication) -> Bool {
         app.descendants(matching: .any)["settings.font"].waitForExistence(timeout: 8)
     }
@@ -678,7 +691,6 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(inPreview.isEmpty, "accessibility audit issues in the preview: \(inPreview)")
     }
 
-
     // MARK: ⌘, from the hardware keyboard (iPad, 0.5.2 (16) findings)
 
     /// ⌘, opens Owlink's Settings as a real key event: right after the •••
@@ -690,6 +702,7 @@ final class OwlinkUITests: XCTestCase {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        primeHardwareKeyboard(app)
         func expectSettings(_ state: String, askStays: Bool = false) {
             commandComma(app)
             XCTAssertEqual(app.state, .runningForeground, "\(state): ⌘, left Owlink (the system Settings app)")
@@ -714,6 +727,49 @@ final class OwlinkUITests: XCTestCase {
         closeAskWithDone(app)
         expectSettings("right after Ask Cedric's sheet closed")
         assertBackReturnsToFiles(app, "after ⌘, in every state")
+    }
+
+    /// ⌘, as the first shortcut of a launch, right after a sheet closed:
+    /// Ask Cedric's sheet opens from the ••• menu and closes with Done,
+    /// then ⌘, is the first key command the app gets. Twice, each in a new
+    /// launch, so it is never only the simulator session's first launch.
+    func testCommandCommaFirstInALaunchAfterAskSheetClosed() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        for launchNumber in 1...2 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2) // the simulator hands synthesized keys to the app once it has settled
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            closeAskWithDone(app)
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, left Owlink")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, first after Ask Cedric's sheet closed didn't open Settings")
+            closeSettings(app)
+            app.terminate()
+        }
+    }
+
+    /// ⌘, as the first shortcut of a launch, over Ask Cedric's sheet (the
+    /// case that failed on launches after the first in a simulator session;
+    /// testCommandCommaOpensSettingsOnIPad presses ⌘, earlier in its launch).
+    func testCommandCommaFirstInALaunchOverAskSheet() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        for launchNumber in 1...2 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2)
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, left Owlink")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, first over Ask Cedric's sheet didn't open Settings")
+            closeSettings(app)
+            XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
+            app.terminate()
+        }
     }
 
     // MARK: Focus Preview listed once (0.5.2 (16) findings)
