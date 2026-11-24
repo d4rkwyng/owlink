@@ -8,7 +8,7 @@ extension AppDelegate {
     /// takes back (so it needs no "are you sure?").
     @objc func revertToSaved(_ sender: Any?) {
         guard let t = currentTab, t.doc.fileURL != nil else { NSSound.beep(); return }
-        t.reloadFromDisk()
+        guard t.reloadFromDisk() else { return }
         t.textView.undoManager?.setActionName(String(localized: "Revert to Saved"))
     }
 

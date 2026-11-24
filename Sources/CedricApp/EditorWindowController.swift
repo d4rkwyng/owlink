@@ -1125,20 +1125,27 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     /// The owl's "Reload?": replaces the text with the file on disk as one
-    /// undoable edit (unlike `setText`, which clears undo).
-    func reloadFromDisk() {
-        guard let url = doc.fileURL, let storage = textView.textStorage else { return }
+    /// undoable edit (unlike `setText`, which clears undo). A read-only
+    /// file's tab takes it too and stays read-only. Saved state and the
+    /// Changed on disk bar change only once the text is replaced: a refused
+    /// replacement leaves the unsaved edits unsaved, and returns false.
+    @discardableResult
+    func reloadFromDisk() -> Bool {
+        guard let url = doc.fileURL, let storage = textView.textStorage else { return false }
         do {
             let (d, mod) = try EditorDocument.read(url, encoding: doc.encoding)
             let all = NSRange(location: 0, length: storage.length)
             textView.breakUndoCoalescing()
-            if textView.shouldChangeText(in: all, replacementString: d.text) {
+            let replaced = replacingFromDisk { () -> Bool in
+                guard textView.shouldChangeText(in: all, replacementString: d.text) else { return false }
                 largeModeReplacingAll {
                     storage.replaceCharacters(in: all, with: NSAttributedString(string: d.text, attributes: baseAttributes()))
                     textView.didChangeText()
                 }
                 textView.undoManager?.setActionName(String(localized: "Reload"))
+                return true
             }
+            guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
             doc.fileModified = mod
             doc.markSaved()
@@ -1148,8 +1155,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             updateTitle()
             updateStatus()
             onChange?(self)
+            return true
         } catch {
             showError(error)
+            return false
         }
     }
 

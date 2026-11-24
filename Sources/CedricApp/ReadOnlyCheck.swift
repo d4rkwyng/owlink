@@ -7,8 +7,10 @@ import CedricCore
 /// the mode alone; Cedric's Apply says read-only. chmod 644 while open
 /// (seen when the window becomes key): a normal tab that saves. chmod
 /// 444 again: read-only again; Allow Editing takes typing, but ⌘S still
-/// won't write over it and Apply stays off. A Finder-locked file is
-/// read-only too.
+/// won't write over it and Apply stays off. Reload (the Changed on disk
+/// bar) and Revert to Saved on a dirty tab whose file went 0444 take the
+/// file's text, stay read-only and undo back to the unsaved edits. A
+/// Finder-locked file is read-only too.
 extension DevChecks {
     static func readOnlyCheck(_ name: String, _ app: AppDelegate) -> Bool {
         guard name == "readonly" else { return false }
@@ -24,6 +26,9 @@ extension DevChecks {
         let proposal = try? OwlEditProposal.anchored(find: "Try editing it.", replace: "Editing this file is not permitted.", in: snap).get()
         func applyState() -> OwlEditProposal.ApplyState? { proposal.map { tab.chatPanel().state(of: $0) } }
         func dismissSheet() { if let w = tab.window, let s = w.attachedSheet { w.endSheet(s, returnCode: .alertSecondButtonReturn) } }
+        let reload = write("ro/reload.md", "disk one\n")
+        let mine = "disk one mine\n", theirs = "disk two, longer\n"
+        var reloadTab: EditorWindowController?
         func becomeKey() { tab.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: tab.window)) }
         run([
             sync {
@@ -87,6 +92,71 @@ extension DevChecks {
                 expect(bytes(file) == original + "x" && mode(file) == 0o444, "…and never writes over it", bytes(file))
             },
             snapshot("readonly.png"),
+            sync {
+                // Reload / Revert on a tab whose file turned read-only (0444)
+                // and changed on disk while it had unsaved edits: the buffer
+                // takes the file's text (Undo brings the edits back), the
+                // tab stays read-only, and nothing unsaved is marked saved.
+                // Before the fix the read-only view refused the replacement
+                // but the tab was still marked saved with the old text.
+                reloadTab = app.open(reload)
+                guard let r = reloadTab else { expect(false, "opened reload.md"); return }
+                sized(r)
+                focus(r)
+                r.textView.setSelectedRange(NSRange(location: 8, length: 0))
+                type(" mine")
+                expect(r.text == mine && r.doc.isDirty, "reload: unsaved edits typed", r.text)
+            },
+            sync {
+                // Its own run-loop turn: Undo groups by event.
+                guard let r = reloadTab else { return }
+                rewriteElsewhere(reload, theirs)
+                chmod(reload.path, 0o444)
+                r.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: r.window))
+                expect(r.fileReadOnly == .permissions && !r.textView.isEditable, "…chmod 444 while dirty: read-only")
+                expect(r.diskBar?.isHidden == false && r.text == mine && r.doc.isDirty, "…the Changed on disk bar, edits kept",
+                       r.diskBar?.label.stringValue ?? "no bar")
+            },
+            sync {
+                guard let r = reloadTab else { return }
+                // The bar's Reload.
+                r.diskBar?.button("Reload")?.performClick(nil)
+                expect(r.text == theirs, "Reload on a read-only tab takes the file's text", r.text)
+                expect(!(r.text == mine && !r.doc.isDirty), "…never the unsaved text marked saved", r.text)
+                expect(!r.doc.isDirty && r.diskBar?.isHidden == true, "…saved, and the bar goes",
+                       "dirty \(r.doc.isDirty) bar \(String(describing: r.diskBar?.isHidden))")
+                expect(r.fileReadOnly == .permissions && !r.textView.isEditable, "…and the tab stays read-only")
+            },
+            sync {
+                guard let r = reloadTab else { return }
+                r.textView.undoManager?.undo()
+            },
+            sync {
+                // Undo's dirty state catches up on the next turn (storageEdited).
+                guard let r = reloadTab else { return }
+                expect(r.text == mine && r.doc.isDirty, "…Undo brings the unsaved edits back, unsaved", r.text)
+                expect(!r.textView.isEditable, "…still read-only after Undo")
+                key("x")
+                expect(r.text == mine, "…typing is still refused", r.text)
+            },
+            sync {
+                guard let r = reloadTab else { return }
+                // File › Revert to Saved, the same way.
+                app.revertToSaved(nil)
+                expect(r.text == theirs && !r.doc.isDirty, "Revert to Saved on a read-only tab takes the file's text", r.text)
+                expect(!r.textView.isEditable && r.fileReadOnly == .permissions, "…and stays read-only")
+            },
+            sync {
+                guard let r = reloadTab else { return }
+                r.textView.undoManager?.undo()
+            },
+            sync {
+                guard let r = reloadTab else { return }
+                expect(r.text == mine && r.doc.isDirty, "…Undo brings the edits back, unsaved", r.text)
+                app.revertToSaved(nil)
+                expect(bytes(reload) == theirs && mode(reload) == 0o444, "…the file is untouched", bytes(reload))
+                chmod(reload.path, 0o644)
+            },
             sync {
                 // Locked in the Finder (uchg), mode 0644.
                 guard chflags(locked.path, UInt32(UF_IMMUTABLE)) == 0 else { expect(false, "chflags uchg"); return }
