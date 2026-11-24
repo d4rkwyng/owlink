@@ -56,6 +56,10 @@ import Testing
         let url = dir.appendingPathComponent("inplace.md")
         let original = Data(repeating: UInt8(ascii: "o"), count: 80_000)
         try original.write(to: url)
+        // Opened a while ago, as a tab's file is: a write and restore
+        // within DiskStamp's 1 ms tolerance of creating it would look
+        // like no change at all.
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: url.path)
         #expect(chmod(dir.path, 0o555) == 0)
         let opened = try #require(DiskStamp.of(url))
         var failed = false
