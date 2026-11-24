@@ -717,10 +717,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
             return
         }
-        // Which stay when a vertical bar (iPhone Duo) runs out of room.
+        // Which stay when the bar runs out of room (an iPhone's, a vertical
+        // iPhone Duo's): Edit / Done, Find and Save. Undo and Redo give way
+        // first (to the ••• menu): with them equal, a 402-pt iPhone kept
+        // the two (disabled in read mode) and hid Edit, so a file opened
+        // read-only showed no way to edit it.
         if #available(iOS 27.0, *) {
             items.forEach { $0.visibilityPriority = .standard }
-            for i in [find, undoItem, redoItem, saveItem, editItem] { i.visibilityPriority = .high }
+            undoItem.visibilityPriority = .standard
+            redoItem.visibilityPriority = .standard
+            for i in [find, saveItem] { i.visibilityPriority = .high }
+            // Edit / Done above all: the way out of read mode (iPhone's default).
+            editItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.high.rawValue + 1)
         }
         // Undo and Redo first (leading), then Save, Find, Preview, and
         // Edit / Done at the trailing end.
