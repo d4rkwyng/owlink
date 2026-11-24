@@ -923,7 +923,7 @@ extension RulesHintProvider {
         }
         if facts.mixedLineEndings {
             hint(Self.mixedEndingsID, .explain, String(localized: "This file mixes line endings."),
-                 String(localized: "Saving writes them all as \(facts.lineEnding.displayName). Change that from the status bar."), nil, nil)
+                 String(localized: "Saving keeps each line’s own ending (mostly \(facts.lineEnding.displayName)). To use one kind, pick it from the status bar."), nil, nil)
         }
     }
 }

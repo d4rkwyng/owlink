@@ -174,7 +174,13 @@ Encoding…** on the bar, or **Format › Reopen with Encoding…** (⌥⇧⌘R)
 lists the encodings to read the file as again; **Keep** takes the guess
 as right. Either way the bar goes and "(guessed)" with it.
 
-Mixed line endings are shown as such and written as one kind on save.
+Mixed line endings (some LF, some CRLF or CR) are shown as such: the
+status bar says **LF (mixed)** (the most common kind) and a bar says
+"This file has mixed line endings (mostly LF)." Saving keeps each line's
+own ending, byte for byte, however you edit; a line you add gets the most
+common kind. **Convert to LF** on the bar (one undo step), or picking a
+line ending from the status bar or **Format › Line Endings**, writes them
+all as that kind from the next save; **Keep Mixed** just hides the bar.
 A file that looks binary (a NUL byte, or many control characters, in
 its first 8 KB; never UTF-16) opens with a bar, "This looks like a
 binary file", and nothing shown: **Open Anyway** shows it as text,

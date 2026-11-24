@@ -65,6 +65,10 @@ public struct SessionTab: Codable, Equatable, Sendable {
     /// The encoding was Owlink's guess (not valid UTF-8) and the user
     /// hadn't kept it or picked one. Only `true` is stored.
     public var encodingGuessed: Bool?
+    /// The file mixed line endings and saving kept each one (LineBreaks):
+    /// a tab restored from its buffer reads them from the file again.
+    /// Only `true` is stored.
+    public var mixedLineEndings: Bool?
 
     /// View › Writing Mode's switches for this tab (nil: both off, and in
     /// sessions saved before 0.4.0).

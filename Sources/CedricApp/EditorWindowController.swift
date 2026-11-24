@@ -201,10 +201,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var readOnlyEditingAllowed = false
     /// Its bar, built when first needed.
     var readOnlyBar: NoticeBar?
-    /// "This file isn’t valid UTF-8…" (FileNotices.swift).
+    /// "This file isn’t valid UTF-8…" and "mixed line endings" (FileNotices.swift).
     var encodingBar: NoticeBar?
-    /// Keep was chosen: the bar stays away for this tab.
+    var lineEndingBar: NoticeBar?
+    /// Keep / Keep Mixed was chosen: the bar stays away for this tab.
     var encodingNoticeKept = false
+    var lineEndingNoticeKept = false
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// Background catch-up reads (reloadIfChangedOnDisk(inBackground:))
@@ -517,7 +519,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         gitState?.scheduleRefresh()
         // Opening or reloading is not writing: this count is the baseline.
         armDailyBaseline()
-        // Not valid UTF-8: say so (FileNotices.swift).
+        // Not valid UTF-8, or mixed line endings: say so (FileNotices.swift).
         refreshFileNotices()
     }
 
@@ -1014,32 +1016,36 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         convertLineEndings(to: le)
     }
 
+    /// Picked (status bar, Format › Line Endings, the mixed bar's
+    /// Convert): every break is written as `le` from the next save on.
     func convertLineEndings(to le: LineEnding) {
         guard le != doc.lineEnding || doc.mixedLineEndings else { return }
         doc.lineEnding = le
         doc.mixedLineEndings = false
+        doc.lineBreaks = nil
         markConverted()
     }
 
-    /// The owl's "Use LF" on a shell script with CRLF: the same change as
-    /// the status bar's, as one undo step.
+    /// The owl's "Use LF" on a shell script with CRLF, and the mixed bar's
+    /// Convert: the same change as the status bar's, as one undo step.
     func convertLineEndingsWithUndo(to le: LineEnding) {
-        let old = (doc.lineEnding, doc.mixedLineEndings)
+        let old = (doc.lineEnding, doc.mixedLineEndings, doc.lineBreaks)
         guard le != old.0 || old.1 else { return }
         convertLineEndings(to: le)
-        registerLineEndingUndo(back: old.0, mixed: old.1)
+        registerLineEndingUndo(back: old.0, mixed: old.1, breaks: old.2)
     }
 
-    private func registerLineEndingUndo(back le: LineEnding, mixed: Bool) {
+    private func registerLineEndingUndo(back le: LineEnding, mixed: Bool, breaks: LineBreaks?) {
         guard let um = textView.undoManager else { return }
         um.registerUndo(withTarget: self) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let now = (self.doc.lineEnding, self.doc.mixedLineEndings)
+                let now = (self.doc.lineEnding, self.doc.mixedLineEndings, self.doc.lineBreaks)
                 self.doc.lineEnding = le
                 self.doc.mixedLineEndings = mixed
+                self.doc.lineBreaks = breaks
                 self.markConverted()
-                self.registerLineEndingUndo(back: now.0, mixed: now.1)
+                self.registerLineEndingUndo(back: now.0, mixed: now.1, breaks: now.2)
             }
         }
         um.setActionName(String(localized: "Line Endings"))
@@ -1050,6 +1056,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         doc.noteFormatChange()
         updateTitle()
         updateStatus()
+        refreshFileNotices()
         onChange?(self)
     }
 
@@ -1104,6 +1111,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         for pane in panes { pane.textView.breakUndoCoalescing() }
         if doc.languageChoice.saved(fileName: url.lastPathComponent, content: textView.string) { languageChanged() }
         hideDiskBar()
+        // A save that left the file uniform: no mixed bar.
+        refreshFileNotices()
         // Save As to a writable file: a normal tab from here on.
         recheckWriteAccess()
         (NSApp.delegate as? AppDelegate)?.noteRecent(url)
@@ -1291,7 +1300,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         panel.nameFieldStringValue = String(localized: "\(base) copy") + (ext.isEmpty ? ".txt" : "." + ext)
         panel.directoryURL = doc.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let data = TextCodec.encode(textView.string, encoding: doc.encoding, lineEnding: doc.lineEnding) else {
+        guard let data = doc.encoded(textView.string)?.data else {
             showError(NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Couldn’t encode the copy.")]))
             return
         }

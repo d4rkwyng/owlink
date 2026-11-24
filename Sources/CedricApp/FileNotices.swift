@@ -1,21 +1,27 @@
 import AppKit
 import CedricCore
 
-/// Something about a file Owlink can't settle on its own, said in a slim
+/// Two things about a file Owlink can't settle on its own, said in a slim
 /// bar like the read-only one (never a sheet; the text stays editable):
 ///
 /// - Not valid UTF-8: Owlink read it as an 8-bit encoding it guessed
 ///   (TextCodec.guessEightBit). The bar says so and offers Reopen with
 ///   Encoding… (the same picker as Format › Reopen with Encoding…, ⌥⇧⌘R)
 ///   and Keep. The status bar says "Latin-1 (guessed)" until one is chosen.
+/// - Mixed line endings: the bar says which kind is most common and
+///   offers Convert to it (one undo step, applied on save) or Keep Mixed.
+///   Saving keeps each line's own ending (LineBreaks) until a line ending
+///   is picked, here or from the status bar.
 ///
-/// The bar doesn't read the file again: it comes from what decoding
-/// already found (DecodedText.encodingGuessed).
+/// Neither bar reads the file again: both come from what decoding already
+/// found (DecodedText.encodingGuessed, .lineBreaks).
 extension EditorWindowController {
     static var encodingNoticeKeep: String { String(localized: "Keep") }
     static var reopenWithEncodingTitle: String { String(localized: "Reopen with Encoding…") }
+    static var lineEndingNoticeKeep: String { String(localized: "Keep Mixed") }
+    static func convertLineEndingsTitle(_ le: LineEnding) -> String { String(localized: "Convert to \(le.displayName)") }
 
-    /// Shows, updates or hides the bars for the tab's state now.
+    /// Shows, updates or hides both bars for the tab's state now.
     func refreshFileNotices() {
         var held = false
         if case .held = binary { held = true }
@@ -31,6 +37,17 @@ extension EditorWindowController {
             bar.setAccessibilityLabel(bar.label.stringValue)
         } else {
             encodingBar?.isHidden = true
+        }
+        if doc.mixedLineEndings, doc.lineBreaks != nil, !lineEndingNoticeKept, !quiet {
+            let bar = noticeBar(\.lineEndingBar, symbol: "arrow.turn.down.left")
+            let le = doc.lineEnding
+            bar.show(String(localized: "This file has mixed line endings (mostly \(le.displayName))."), buttons: [
+                (Self.convertLineEndingsTitle(le), { [weak self] in self?.convertLineEndingsWithUndo(to: le) }),
+                (Self.lineEndingNoticeKeep, { [weak self] in self?.keepMixedLineEndings() }),
+            ])
+            bar.setAccessibilityLabel(bar.label.stringValue)
+        } else {
+            lineEndingBar?.isHidden = true
         }
     }
 
@@ -49,6 +66,12 @@ extension EditorWindowController {
         refreshFileNotices()
         updateStatus()
         onChange?(self)
+    }
+
+    /// Keep Mixed: the bar goes; saving keeps each line's ending, as before.
+    func keepMixedLineEndings() {
+        lineEndingNoticeKept = true
+        refreshFileNotices()
     }
 
     // MARK: Reopen with Encoding…

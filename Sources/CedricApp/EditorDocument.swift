@@ -16,7 +16,13 @@ final class EditorDocument {
     var untitledName: String
     var encoding: TextEncoding = .utf8
     var lineEnding: LineEnding = .lf
+    /// The file mixes line endings (`lineEnding` is the most common).
+    /// While `lineBreaks` is kept, a save writes each break as it was.
     var mixedLineEndings = false
+    /// A mixed file's own line breaks (LineBreaks): a save writes each
+    /// line's break back as it was, until a line ending is picked
+    /// (`convertLineEndings`), which drops them.
+    var lineBreaks: LineBreaks?
     /// The encoding is Owlink's guess (not valid UTF-8: an 8-bit one),
     /// until the user keeps it or picks one (the encoding bar).
     var encodingGuessed = false
@@ -176,24 +182,46 @@ final class EditorDocument {
     func apply(_ d: DecodedText) {
         lineEnding = d.lineEnding
         mixedLineEndings = d.mixedLineEndings
+        lineBreaks = d.mixedLineEndings ? d.lineBreaks : nil
         // Read again in the encoding it guessed (a reload): still a guess.
         encodingGuessed = d.encodingGuessed || (encodingGuessed && d.encoding == encoding)
         encoding = d.encoding
     }
 
-    /// A tab restored from the session (or ⇧⌘T): still a guess if it was one.
+    /// A tab restored from the session (or ⇧⌘T): still a guess if it was
+    /// one, and, restored from an unsaved buffer, a mixed file's own breaks
+    /// read from the file again (as it is now: the next save matches the
+    /// buffer's lines to it).
     func restoreFormat(_ st: SessionTab, fromBuffer: Bool) {
         if st.encodingGuessed == true, st.encoding == encoding { encodingGuessed = true }
+        if fromBuffer, st.mixedLineEndings == true, let url = fileURL,
+           let (d, _) = try? Self.read(url, encoding: st.encoding), d.mixedLineEndings, let breaks = d.lineBreaks {
+            mixedLineEndings = true
+            lineBreaks = breaks
+            lineEnding = d.lineEnding
+        }
     }
 
     /// The session's record of this document's format guesses (SessionTab).
     func noteFormat(in st: inout SessionTab) {
         st.encodingGuessed = encodingGuessed ? true : nil
+        st.mixedLineEndings = mixedLineEndings && lineBreaks != nil ? true : nil
+    }
+
+    /// `text` as this document saves it: its encoding, and its line
+    /// ending, or each line's own when they are mixed (`lineBreaks`).
+    /// Nil if a character can't be represented in the encoding.
+    func encoded(_ text: String) -> (data: Data, saved: LineBreaks.Saved?)? {
+        if mixedLineEndings, let lineBreaks {
+            let saved = lineBreaks.write(text)
+            return TextCodec.encode(saved.output, encoding: encoding, lineEnding: .lf).map { ($0, saved) }
+        }
+        return TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding).map { ($0, nil) }
     }
 
     /// Writes `text` to `url` in this document's encoding and line ending.
     func write(_ text: String, to url: URL) throws {
-        guard let data = TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding) else {
+        guard let (data, saved) = encoded(text) else {
             throw NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 String(localized: "Some characters can’t be saved as \(encoding.displayName). Choose UTF-8 from the encoding menu in the status bar and save again.")])
         }
@@ -205,7 +233,15 @@ final class EditorDocument {
         noteDisk(stamp)
         lastSavedStamp = stamp
         failedSaveStamp = nil
-        mixedLineEndings = false
+        // Kept mixed: what was written is the next save's starting point.
+        if let saved {
+            mixedLineEndings = saved.mixed
+            lineBreaks = saved.mixed ? saved.breaks : nil
+            lineEnding = saved.dominant
+        } else {
+            mixedLineEndings = false
+            lineBreaks = nil
+        }
         markSaved()
     }
 }

@@ -78,13 +78,17 @@ public struct DecodedText: Sendable {
     public var text: String
     public var encoding: TextEncoding
     public var lineEnding: LineEnding
-    /// The file mixed line endings; saving writes them all as `lineEnding`.
+    /// The file mixed line endings (`lineEnding` is the most common).
     public var mixedLineEndings: Bool
     /// The bytes look like a binary file (`TextCodec.looksBinary`).
     public var looksBinary = false
     /// Not valid UTF-8, no BOM and not UTF-16: `encoding` is a guess at
     /// an 8-bit one (`guessEightBit`). Never when an encoding was asked for.
     public var encodingGuessed = false
+    /// Mixed line endings only: which line break was which on disk, so a
+    /// save writes each back as it was (LineBreaks). Made in the same pass
+    /// that turns CR and CRLF into LF, not a pass of its own.
+    public var lineBreaks: LineBreaks?
 }
 
 public enum TextCodec {
@@ -339,8 +343,11 @@ public enum TextCodec {
         }
         guard let raw = decoded else { return nil }
         let (ending, mixed) = detectLineEnding(raw)
-        return DecodedText(text: normalizeLineEndings(raw), encoding: enc, lineEnding: ending, mixedLineEndings: mixed,
-                           looksBinary: looksBinary(data), encodingGuessed: guessed)
+        var breaks: [Int]? = mixed ? [] : nil
+        let text = normalizeLineEndings(raw, recording: &breaks)
+        return DecodedText(text: text, encoding: enc, lineEnding: ending, mixedLineEndings: mixed,
+                           looksBinary: looksBinary(data), encodingGuessed: guessed,
+                           lineBreaks: breaks.map { LineBreaks(text: text, crBreaks: $0, dominant: ending) })
     }
 
     /// UTF-8 `body` (no BOM) as text, from one scan (`scan`, when the
@@ -351,6 +358,8 @@ public enum TextCodec {
         guard scan.valid else { return nil }
         let (ending, mixed) = lineEnding(lf: scan.lf, crlf: scan.crlf, cr: scan.cr)
         let text: String
+        // Mixed: where each CR and CRLF went, as lfOnly writes it.
+        var breaks: [Int]? = mixed ? [] : nil
         if scan.crlf + scan.cr == 0 {
             if shareBytes, scan.ascii, !binary, body.count >= sharedBytesMinimum, let shared = sharedASCII(body) {
                 text = shared
@@ -362,17 +371,19 @@ public enum TextCodec {
                 let length = raw.count - scan.crlf
                 if scan.ascii, !binary, length >= sharedBytesMinimum,
                    let buffer = malloc(max(1, length))?.assumingMemoryBound(to: UInt8.self) {
-                    let written = lfOnly(raw, into: buffer)
+                    let written = lfOnly(raw, into: buffer, recording: &breaks)
                     if let s = NSString(bytesNoCopy: buffer, length: written, encoding: String.Encoding.ascii.rawValue,
                                         deallocator: { p, _ in free(p) }) {
                         return s as String
                     }
                     free(buffer)
+                    breaks = mixed ? [] : nil
                 }
-                return String(unsafeUninitializedCapacity: length) { lfOnly(raw, into: $0.baseAddress!) }
+                return String(unsafeUninitializedCapacity: length) { lfOnly(raw, into: $0.baseAddress!, recording: &breaks) }
             }
         }
-        return DecodedText(text: text, encoding: encoding, lineEnding: ending, mixedLineEndings: mixed, looksBinary: binary)
+        return DecodedText(text: text, encoding: encoding, lineEnding: ending, mixedLineEndings: mixed, looksBinary: binary,
+                           lineBreaks: breaks.map { LineBreaks(text: text, crBreaks: $0, dominant: ending) })
     }
 
     /// All-ASCII `data` as a string that reads its bytes in place (kept
@@ -389,8 +400,14 @@ public enum TextCodec {
 
     /// Copies `raw` into `out` with CRLF and lone CR as LF (as replacing
     /// "\r\n" then "\r" did); returns the bytes written. `out` has room
-    /// for `raw.count` bytes less one per CRLF.
+    /// for `raw.count` bytes less one per CRLF. With `recording`, each LF
+    /// written for a CR or CRLF is noted there (LineBreaks.crBreaks).
     static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>) -> Int {
+        var none: [Int]?
+        return lfOnly(raw, into: out, recording: &none)
+    }
+
+    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>, recording: inout [Int]?) -> Int {
         guard let base = raw.baseAddress else { return 0 }
         let n = raw.count
         let b = base.assumingMemoryBound(to: UInt8.self)
@@ -403,8 +420,10 @@ public enum TextCodec {
             i += run
             guard i < n else { break }
             out[o] = 10
+            let crlf = i + 1 < n && b[i + 1] == 10
+            recording?.append(o << 1 | (crlf ? 1 : 0))
             o += 1
-            i += (i + 1 < n && b[i + 1] == 10) ? 2 : 1
+            i += crlf ? 2 : 1
         }
         return o
     }
@@ -419,11 +438,16 @@ public enum TextCodec {
 
     /// CRLF and CR → LF.
     public static func normalizeLineEndings(_ text: String) -> String {
+        var none: [Int]?
+        return normalizeLineEndings(text, recording: &none)
+    }
+
+    static func normalizeLineEndings(_ text: String, recording: inout [Int]?) -> String {
         var copy = text
         return copy.withUTF8 { b -> String in
             let raw = UnsafeRawBufferPointer(b)
             guard let base = raw.baseAddress, memchr(base, 13, raw.count) != nil else { return text }
-            return String(unsafeUninitializedCapacity: raw.count) { lfOnly(raw, into: $0.baseAddress!) }
+            return String(unsafeUninitializedCapacity: raw.count) { lfOnly(raw, into: $0.baseAddress!, recording: &recording) }
         }
     }
 
