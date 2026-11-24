@@ -298,9 +298,10 @@ public enum OwlChunkedReviewRunner {
     /// after it, with its continuation rows, and the verdict is the most
     /// cautious of the parts' and the answer's own. A cited finding is kept
     /// only by a passage that cites one of its lines and says everything it
-    /// says: every content word ("Line 12 starts the setup" and "Line 12
-    /// downloads signed code" don't keep "Line 12: downloads unsigned
-    /// code"), a negation if it has one, and none it lacks in a sentence
+    /// says: every content word and every number ("Line 12 starts the
+    /// setup" and "Line 12 downloads signed code" don't keep "Line 12:
+    /// downloads unsigned code"; "expires after 90 days" doesn't keep
+    /// "expires after 30 days"), a negation if it has one, and none it lacks in a sentence
     /// citing its line ("Line 12 doesn't download unsigned code"). An
     /// uncited one is kept by the answer saying all of it. A finding
     /// repeated is better than one dropped.
@@ -357,24 +358,8 @@ public enum OwlChunkedReviewRunner {
         return groups.map { $0.joined(separator: "\n") }
     }
 
-    private static let filler: Set<String> = [
-        "line", "lines", "this", "that", "with", "from", "which", "there", "their", "then", "than", "have", "does",
-        "will", "into", "these", "those", "also", "when", "where", "here", "what", "were", "been", "being", "about",
-        "some", "more", "very", "should", "could", "would", "uses", "used", "using", "high", "medium", "critical",
-        "severity", "issue", "issues", "problem", "problems", "finding", "findings", "note", "notes", "first",
-        "just", "really", "actually", "again", "still",
-    ]
-
-    private static let negations: Set<String> = [
-        "not", "no", "nor", "never", "none", "nothing", "without", "cannot", "neither", "nowhere",
-    ]
-
-    /// Whether `text` says no ("not", "never", "without", "doesn't").
-    static func negates(_ text: String) -> Bool {
-        let lower = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
-        if lower.contains("n't") { return true }
-        return lower.split { !$0.isLetter }.contains { negations.contains(String($0)) }
-    }
+    /// Whether `text` says no (`OwlChunkedReview.negates`).
+    static func negates(_ text: String) -> Bool { OwlChunkedReview.negates(text) }
 
     /// `text`'s sentences, roughly: cut after ".", "!", "?" or ";" before a
     /// space, and at blank rows. A sentence may run across rows.
@@ -383,32 +368,33 @@ public enum OwlChunkedReviewRunner {
             .split(separator: "\u{0}").map(String.init)
     }
 
-    /// What a finding says, roughly: its words of four letters or more,
-    /// not line numbers or filler, cut to five letters ("downloads" and
-    /// "download" match; "signed" and "unsigned" don't).
-    static func substance(_ text: String) -> Set<String> {
-        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap { word -> String? in
-            guard word.count >= 4, !word.allSatisfy(\.isNumber), !filler.contains(String(word)) else { return nil }
-            return String(word.prefix(5))
-        })
-    }
+    /// What a finding says, numbers included (`OwlChunkedReview.substance`).
+    static func substance(_ text: String) -> Set<String> { OwlChunkedReview.substance(text) }
 
     /// `text` in pieces that each fit, cut at row breaks where it can (a
-    /// row longer than a piece, at characters, `splitLine`), and never so
-    /// that a piece vouches for a line the whole text didn't: a break
-    /// inside a citation ("Line 4 through" / "9999 (not among the lines
-    /// read)") is no place to cut. Nil when it can't be done.
+    /// row longer than a piece, at characters, `splitLine`), and never
+    /// inside a citation or between a citation and its flag
+    /// (`OwlCitations.uncuttable`): "Line 4 through" / "18 describes the
+    /// setup" would leave a piece citing line 4 alone, and "Line 999" /
+    /// " (not among the lines read)" one vouching for line 999. Nor so
+    /// that a piece vouches for a line the whole text didn't. Nil when it
+    /// can't be done.
     static func splitNote(_ text: String, fits: (String) -> Bool) -> [String]? {
         if fits(text) { return [text] }
         let vouched = OwlCitations.evidence(in: text)
+        let noCut = OwlCitations.uncuttable(in: text)
         let rows = text.components(separatedBy: "\n")
-        // Rows held together where a break between them would give either
-        // side evidence the whole text doesn't.
+        // Rows held together where a break between them falls inside a
+        // citation or would give either side evidence the whole text doesn't.
         var units: [String] = []
+        var offset = 0
         for i in rows.indices {
-            let safe = i > 0 && OwlCitations.evidence(in: rows[..<i].joined(separator: "\n"))
-                .union(OwlCitations.evidence(in: rows[i...].joined(separator: "\n"))).isSubset(of: vouched)
+            let newline = offset - 1
+            let safe = i > 0 && !noCut.contains(newline) && !noCut.contains(newline + 1)
+                && OwlCitations.evidence(in: rows[..<i].joined(separator: "\n"))
+                    .union(OwlCitations.evidence(in: rows[i...].joined(separator: "\n"))).isSubset(of: vouched)
             if i > 0, !safe { units[units.count - 1] += "\n" + rows[i] } else { units.append(rows[i]) }
+            offset += (rows[i] as NSString).length + 1
         }
         var out: [String] = []
         var current = ""
@@ -427,8 +413,13 @@ public enum OwlChunkedReviewRunner {
         return out
     }
 
+    /// `line` cut at characters into pieces that each fit: at a space where
+    /// it can, never inside a citation or before its flag, and never so
+    /// that a piece vouches for a line `vouched` doesn't. Nil when it can't
+    /// be done (a citation with its flag longer than a piece).
     static func splitLine(_ line: String, fits: (String) -> Bool, vouched: IndexSet? = nil) -> [String]? {
         let vouched = vouched ?? OwlCitations.evidence(in: line)
+        let noCut = OwlCitations.uncuttable(in: line)
         var out: [String] = []
         var rest = Substring(line)
         while !rest.isEmpty {
@@ -442,8 +433,10 @@ public enum OwlChunkedReviewRunner {
             guard n > 0 else { return nil }
             let chars = Array(rest.prefix(n))
             func safe(_ k: Int) -> Bool {
-                OwlCitations.evidence(in: String(rest.prefix(k)))
-                    .union(OwlCitations.evidence(in: String(rest.dropFirst(k)))).isSubset(of: vouched)
+                let at = line.utf16.distance(from: line.startIndex, to: rest.index(rest.startIndex, offsetBy: k))
+                return !noCut.contains(at)
+                    && OwlCitations.evidence(in: String(rest.prefix(k)))
+                        .union(OwlCitations.evidence(in: String(rest.dropFirst(k)))).isSubset(of: vouched)
             }
             let ends = stride(from: n, to: 0, by: -1)
             guard let cut = ends.first(where: { chars[$0 - 1].isWhitespace && safe($0) }) ?? ends.first(where: safe) else {

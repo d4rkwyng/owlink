@@ -74,21 +74,37 @@ public enum OwlChunkedReview {
                                    truncated: scanTruncated || !covered.contains(integersIn: 1...totalLines))
     }
 
-    /// Keep each cited finding once, without manufacturing citations.
+    private static let findingCite = try! NSRegularExpression(pattern:
+        #"(?i)\b(?:lines?\s*|l\.?\s*|#)(\d+)\b|^\s*(?:[-*]\s*)?(?:\*\*)?\[?(\d+)(?:\]|\||:)"#)
+
+    /// Keep each cited finding once, without manufacturing citations. A
+    /// finding from a later part is left out only when every line it cites
+    /// was cited by an earlier part and an earlier finding on one of those
+    /// lines already says everything it says (`substance`, numbers
+    /// included, and a "not" if it has one): "missing signature" and
+    /// "missing checksum" on line 40 are two findings, not one.
     public static func mergeFindings(_ answers: [String]) -> String {
-        let regex = try! NSRegularExpression(pattern: #"(?i)\b(?:lines?\s*|l\.?\s*|#)(\d+)\b|^\s*(?:[-*]\s*)?(?:\*\*)?\[?(\d+)(?:\]|\||:)"#)
+        let regex = findingCite
         var seen = Set<Int>()
+        var earlier: [(lines: Set<Int>, words: Set<String>, negated: Bool)] = []
         var output: [String] = []
         for answer in answers {
             var group: [String] = []
             var cited: [Int] = []
+            var thisAnswer: [(lines: Set<Int>, words: Set<String>, negated: Bool)] = []
             func flush() {
                 guard !group.isEmpty else { return }
+                let text = group.joined(separator: "\n")
+                let lines = Set(cited)
+                let words = substance(text)
+                let negated = negates(text)
                 // Dedupe only against earlier answers, so two distinct findings
                 // on the same line in one part are both kept.
-                if cited.isEmpty || !cited.allSatisfy({ seen.contains($0) }) {
-                    output.append(group.joined(separator: "\n"))
+                let repeated = !lines.isEmpty && lines.isSubset(of: seen) && earlier.contains {
+                    !$0.lines.isDisjoint(with: lines) && words.isSubset(of: $0.words) && $0.negated == negated
                 }
+                if !repeated { output.append(text) }
+                thisAnswer.append((lines, words, negated))
                 group = []
                 cited = []
             }
@@ -108,7 +124,49 @@ public enum OwlChunkedReview {
             }
             flush()
             seen.formUnion(newlySeen)
+            earlier += thisAnswer
         }
         return output.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static let filler: Set<String> = [
+        "line", "lines", "this", "that", "with", "from", "which", "there", "their", "then", "than", "have", "does",
+        "will", "into", "these", "those", "also", "when", "where", "here", "what", "were", "been", "being", "about",
+        "some", "more", "very", "should", "could", "would", "uses", "used", "using", "high", "medium", "critical",
+        "severity", "issue", "issues", "problem", "problems", "finding", "findings", "note", "notes", "first",
+        "just", "really", "actually", "again", "still",
+    ]
+
+    private static let negations: Set<String> = [
+        "not", "no", "nor", "never", "none", "nothing", "without", "cannot", "neither", "nowhere",
+    ]
+
+    /// Whether `text` says no ("not", "never", "without", "doesn't").
+    public static func negates(_ text: String) -> Bool {
+        let lower = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        if lower.contains("n't") { return true }
+        return lower.split { !$0.isLetter }.contains { negations.contains(String($0)) }
+    }
+
+    /// What a finding says, roughly: its words of four letters or more, not
+    /// filler, cut to five letters ("downloads" and "download" match;
+    /// "signed" and "unsigned" don't), and every number or word with a
+    /// digit in it, whole ("90 days" and "30 days" differ; "sha256" and
+    /// "sha512" too). The numbers of its citations ("line 12", "lines
+    /// 4–9", "#12", a leading "12:") are where it is, not what it says,
+    /// and are left out.
+    public static func substance(_ text: String) -> Set<String> {
+        let blanked = NSMutableString(string: text)
+        let all = NSRange(location: 0, length: blanked.length)
+        var cites = OwlCitations.find(text).map(\.range)
+        for m in findingCite.matches(in: text, range: all) {
+            cites.append(m.range(at: m.range(at: 1).location == NSNotFound ? 2 : 1))
+        }
+        for r in cites { blanked.replaceCharacters(in: r, with: String(repeating: " ", count: r.length)) }
+        return Set((blanked as String).lowercased().split { !$0.isLetter && !$0.isNumber }.compactMap { word -> String? in
+            if word.contains(where: \.isNumber) { return String(word) }
+            guard word.count >= 4, !filler.contains(String(word)) else { return nil }
+            return String(word.prefix(5))
+        })
     }
 }

@@ -95,15 +95,33 @@ import CedricCore
     }
 
     @Test func findingDeduplicationPreservesLineNumbers() {
-        let merged = OwlChunkedReview.mergeFindings(["- Line 12: High: first.\n- Line 13: Medium: distinct.",
-                                                     "- Line 12: Low: duplicate.\n  Duplicate detail.\n- Line 98: High: another."])
-        #expect(merged.contains("Line 12: High: first"))
-        #expect(!merged.localizedCaseInsensitiveContains("duplicate"))
+        // A later part's finding is a duplicate when it says what an earlier
+        // one on its line said (here, in other case and severity).
+        let merged = OwlChunkedReview.mergeFindings(["- Line 12: High: pipes curl to sh.\n- Line 13: Medium: distinct.",
+                                                     "- Line 12: Low: Pipes curl to sh.\n  Pipes curl to sh.\n- Line 98: High: another."])
+        #expect(merged.contains("Line 12: High: pipes curl to sh"))
+        #expect(!merged.contains("Low") && !merged.contains("Pipes"))
         #expect(merged.contains("Line 13") && merged.contains("Line 98"))
-        let alternate = OwlChunkedReview.mergeFindings(["- 12: First", "- Line 12: Duplicate", "98| Other"])
-        #expect(alternate.contains("- 12: First") && !alternate.contains("Duplicate") && alternate.contains("98| Other"))
+        let alternate = OwlChunkedReview.mergeFindings(["- 12: Pipes curl to sh", "- Line 12: pipes curl to sh", "98| Other"])
+        #expect(alternate.contains("- 12: Pipes curl to sh") && !alternate.contains("- Line 12") && alternate.contains("98| Other"))
         let sameLine = OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.\n- Line 12: also writes /etc/hosts."])
         #expect(sameLine.contains("pipes curl to sh") && sameLine.contains("also writes /etc/hosts"))
+    }
+
+    /// Two parts each finding something different on the same line: both
+    /// are kept. 0.5.3's follow-up kept only the first, by line number.
+    @Test func distinctFindingsOnOneLineFromTwoPartsAreBothKept() {
+        let merged = OwlChunkedReview.mergeFindings(["- Line 40: missing signature.", "- Line 40: missing checksum."])
+        #expect(merged == "- Line 40: missing signature.\n- Line 40: missing checksum.")
+        // A different number, or a "not", is a different finding too.
+        let days = OwlChunkedReview.mergeFindings(["- Line 12: token expires after 90 days.",
+                                                   "- Line 12: token expires after 30 days."])
+        #expect(days.contains("90 days") && days.contains("30 days"))
+        let negated = OwlChunkedReview.mergeFindings(["- Line 7: checks the checksum.", "- Line 7: never checks the checksum."])
+        #expect(negated.contains("never"))
+        // The same finding again (in fewer words) is still left out.
+        let same = OwlChunkedReview.mergeFindings(["- Line 40: missing signature on the download.", "- Line 40: missing signature."])
+        #expect(same == "- Line 40: missing signature on the download.")
     }
 
     @Test func noCapAndVerdicts() {

@@ -241,14 +241,19 @@ import CedricCore
     @Test func anOversizedLineIsCutOnlyWhereNoCitationGainsEvidence() {
         let flagged = "Line 999\(OwlCitations.flag)"
         let line = "Line 4 says " + String(repeating: "\(flagged) again, ", count: 20)
-        for limit in 20...60 {
+        // A piece holds at least one whole flagged citation (35 characters).
+        for limit in 35...70 {
             let pieces = OwlChunkedReviewRunner.splitLine(line, fits: { ($0 as NSString).length <= limit })
             guard let got = pieces else { Issue.record("no split at limit \(limit)"); continue }
             #expect(got.joined() == line, "limit \(limit)")
             for p in got {
                 #expect(OwlCitations.evidence(in: p).isSubset(of: IndexSet(integer: 4)), "limit \(limit): \(p)")
+                // Never "Line" / "999 (not among …)" or "Line 999" / " (not among …)".
+                #expect(!p.hasSuffix("Line ") && !p.hasSuffix("999") && !p.hasPrefix(" ("), "limit \(limit): \(p)")
             }
         }
+        // Shorter than that, no piece can hold one whole: no split, not a cut inside it.
+        #expect(OwlChunkedReviewRunner.splitLine(line, fits: { ($0 as NSString).length <= 30 }) == nil)
     }
 
     @Test func notesThatNeverShortenFailHonestlyAndKeepTheNotes() async throws {
@@ -441,6 +446,53 @@ import CedricCore
         // Cut at rows where it's safe: "Line 4 through" stays with "9999".
         let got = OwlChunkedReviewRunner.splitNote(note, fits: { ($0 as NSString).length <= 70 })
         #expect(got == ["Overview of the part.", "Line 4 through\n9999\(OwlCitations.flag)| quoted text.\nThe end."])
+    }
+
+    /// "Line 4 through" / "18 describes the setup": cut there, the first
+    /// piece cites line 4 alone, a citation the whole note never made (its
+    /// evidence, {4}, is inside 4–18, so 0.5.3's follow-up allowed the cut).
+    @Test func aNoteIsNeverCutInsideACitationEvenWhereEvidenceShrinks() {
+        let flagged = "Line 999\(OwlCitations.flag)"
+        for text in ["Line 4 through\n18 describes the setup.", "Line 4 through 18 describes the setup.",
+                     "Lines 4 and\n9 describe the setup.", "Overview.\nLine 4 -\r\n18 describes it.",
+                     "Overview. \(flagged) describes it."] {
+            let whole = OwlCitations.find(text).map(\.lines)
+            for limit in 1...(text as NSString).length {
+                guard let pieces = OwlChunkedReviewRunner.splitNote(text, fits: { ($0 as NSString).length <= limit }) else {
+                    continue
+                }
+                for p in pieces {
+                    // Each citation a piece reads is one of the note's, whole.
+                    for c in OwlCitations.find(p) {
+                        #expect(whole.contains(c.lines), "limit \(limit): \(p.debugDescription)")
+                    }
+                    // A flagged citation keeps its flag.
+                    #expect(!p.hasSuffix("999") && !p.hasPrefix(" ("), "limit \(limit): \(p.debugDescription)")
+                }
+            }
+        }
+        // The citation's own row stays whole; the rest of the note is cut as before.
+        let got = OwlChunkedReviewRunner.splitNote("Line 4 through\n18 describes the setup.", fits: { ($0 as NSString).length <= 30 })
+        #expect(got == ["Line 4 through\n18 describes ", "the setup."])
+        let rows = OwlChunkedReviewRunner.splitNote("Overview.\nLine 4 through\n18 describes it.\nThe end.",
+                                                    fits: { ($0 as NSString).length <= 31 })
+        #expect(rows == ["Overview.", "Line 4 through\n18 describes it.", "The end."])
+    }
+
+    /// "Line 12: the token expires after 90 days" doesn't keep "Line 12:
+    /// the token expires after 30 days": the number is what it says.
+    @Test func aFindingWhoseNumberTheAnswerChangesIsStillKept() {
+        let items = "- Line 12: the token expires after 30 days."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        let changed = "Line 12: the token expires after 90 days."
+        let kept = OwlChunkedReviewRunner.keepFindings(changed, findings)
+        #expect(kept.hasPrefix(changed) && kept.hasSuffix(items))
+        // The same number, in other words, keeps it; the line numbers cited aren't content.
+        let same = "Lines 12–13: after 30 days the token expires."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+        let uncited = "- Retries 3 times before giving up."
+        let u = OwlChunkedReviewRunner.Findings(text: uncited, items: uncited, verdict: nil)
+        #expect(OwlChunkedReviewRunner.keepFindings("It retries 5 times before giving up.", u).hasSuffix(uncited))
     }
 
     @Test func checkForRisksKeepsTheMostCautiousVerdictThroughSynthesis() async throws {
