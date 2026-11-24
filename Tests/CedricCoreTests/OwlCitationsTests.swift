@@ -316,4 +316,51 @@ import Testing
         #expect(md.contains("**Lines 1–40:** Notes A") && md.contains("**Lines 39–80:** Notes B"))
         #expect(md.range(of: "One answer.")!.lowerBound < md.range(of: "Notes A")!.lowerBound)
     }
+
+    /// A list marker alone on a row, after a citation held across rows
+    /// ("lines 3 and" / " - " / "99:"), stays with the next row: `filter`
+    /// reads " - " / "99:" as citing line 99, and so must the stream.
+    /// 0.5.4's follow-up 5 released at the dash's row end, forgot the
+    /// marker, and showed "99:" unflagged.
+    @Test func aStreamKeepsAListMarkerRowAfterAHeldCitation() {
+        for answer in ["Line 4 -See lines 3 and\r\n - \n99:", "Line 4 -See lines 3 and\n - \n99: x", "See lines 3 and\n*\n99: setup."] {
+            let f = OwlCitations.filter(answer, allowed: Self.lines1to18)
+            #expect(f.text.contains("99\(OwlCitations.flag):"), "\(answer.debugDescription) → \(f.text.debugDescription)")
+            for size in [1, 2, 3, 5, answer.count] {
+                let (before, all) = Self.streamed(answer, size: size, allowed: Self.lines1to18)
+                for c in OwlCitations.find(before) where !Self.lines1to18.contains(integersIn: c.lines) {
+                    #expect((before as NSString).substring(from: NSMaxRange(c.range)).hasPrefix(OwlCitations.flag),
+                            "\(size): \(before.debugDescription)")
+                }
+                #expect(all.contains("99\(OwlCitations.flag):"), "\(size): \(all.debugDescription)")
+                #expect(all == f.text, "\(size): \(all.debugDescription) vs \(f.text.debugDescription)")
+            }
+        }
+    }
+
+    /// Filtering twice flags once: the chat runner flags "Line 999" and
+    /// the whole-document runner filters its answer again. 0.5.4's
+    /// follow-up 5 put a second flag after it.
+    @Test func filteringTwiceFlagsOnce() {
+        for answer in ["Line 999 describes setup.", "Overview.\n- Line 999 and line 2: setup.\nLine 31, line 4 too.",
+                       "- 4\n–31: setup", "Line 4 through\n9999 describes the setup."] {
+            let once = OwlCitations.filter(answer, allowed: Self.lines1to18)
+            #expect(once.changed, "\(answer.debugDescription)")
+            for allowed in [Self.lines1to18, IndexSet(integersIn: 1...4)] {
+                let twice = OwlCitations.filter(once.text, allowed: allowed)
+                #expect(twice.text.components(separatedBy: OwlCitations.flag).count
+                        == once.text.components(separatedBy: OwlCitations.flag).count + twice.flagged.count,
+                        "\(once.text.debugDescription) → \(twice.text.debugDescription)")
+                #expect(!twice.text.contains(OwlCitations.flag + OwlCitations.flag), "\(twice.text.debugDescription)")
+            }
+            #expect(OwlCitations.filter(once.text, allowed: Self.lines1to18) == OwlCitations.Filtered(text: once.text, dropped: [], flagged: []))
+        }
+        #expect(OwlCitations.filter("Line 999 describes setup.", allowed: Self.lines1to18).text
+                == "Line 999\(OwlCitations.flag) describes setup.")
+        // A stream fed text already flagged doesn't flag it again either.
+        let flagged = "Line 999\(OwlCitations.flag) describes setup."
+        for size in [1, 4, flagged.count] {
+            #expect(Self.streamed(flagged, size: size, allowed: Self.lines1to18).all == flagged)
+        }
+    }
 }

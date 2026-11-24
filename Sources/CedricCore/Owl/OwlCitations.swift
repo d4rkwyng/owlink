@@ -137,6 +137,16 @@ public enum OwlCitations {
         return s
     }
 
+    /// Where the citations in `text` already followed by `flag` start.
+    private static func flaggedAlready(_ text: String) -> Set<Int> {
+        let ns = text as NSString
+        let flagLength = (flag as NSString).length
+        return Set(find(text).filter {
+            let end = NSMaxRange($0.range)
+            return end + flagLength <= ns.length && ns.substring(with: NSRange(location: end, length: flagLength)) == flag
+        }.map(\.range.location))
+    }
+
     /// Where `text` must not be cut (UTF-16 offsets: a cut at `p` falls
     /// between `p - 1` and `p`): inside a citation, from its "line" or
     /// "lines" to its last number, from a quoted line's or listed
@@ -190,7 +200,10 @@ public enum OwlCitations {
         var result = Filtered(text: text, dropped: [], flagged: [])
         let all = find(text)
         guard !all.isEmpty else { return result }
-        func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) }
+        let marked = flaggedAlready(text)
+        // A citation already flagged (an answer filtered twice) is left as
+        // it is: never flagged again.
+        func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) && !marked.contains(c.range.location) }
         func untouched(_ c: Cite) -> Bool { !c.lines.contains { allowed.contains($0) } }
         // Rows, joined where a citation runs across the break between them
         // ("Line 4 through" / "9999"): a citation is checked whole, never
@@ -225,7 +238,7 @@ public enum OwlCitations {
             result = Filtered(text: text, dropped: [], flagged: [])
             for (index, unit) in units.enumerated() {
                 let row = ns.substring(with: unit)
-                let cites = all.filter { NSLocationInRange($0.range.location, unit) }
+                let cites = all.filter { NSLocationInRange($0.range.location, unit) && !marked.contains($0.range.location) }
                     .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
                 let trimmed = row.trimmingCharacters(in: .whitespaces)
                 if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
@@ -319,7 +332,7 @@ public enum OwlCitations {
                     continue
                 }
                 held.append(ch)
-                if ch.isNewline ? !(continuesOnNextRow() || itemRunsOn()) : (!ch.isLetter && listEnded()) {
+                if ch.isNewline ? !(continuesOnNextRow() || itemRunsOn()) : (!ch.isLetter && !flagComing() && listEnded()) {
                     out += release(allowed)
                 }
             }
@@ -331,6 +344,16 @@ public enum OwlCitations {
             guard !held.isEmpty else { return "" }
             guard let allowed else { defer { held = "" }; return held }
             return release(allowed)
+        }
+
+        /// Whether what follows the last number in `held` is the start of
+        /// `flag`: text already checked (a section filtered before) keeps
+        /// its flag, and is not flagged again, only if the whole flag is
+        /// read with its citation.
+        private func flagComing() -> Bool {
+            guard let lastDigit = held.lastIndex(where: { $0.isASCII && $0.isNumber }) else { return false }
+            let after = held[held.index(after: lastDigit)...]
+            return after.count < OwlCitations.flag.count && OwlCitations.flag.hasPrefix(after)
         }
 
         /// A word after the last number in `held` that can't continue a list.
@@ -396,8 +419,11 @@ public enum OwlCitations {
                 : OwlCitations.flagOnly(held, allowed: allowed).text
             // A row ended outside a citation starts afresh. Rows a citation
             // ran across stay, so the next check still reads it whole and
-            // what was shown of them stays a prefix of what it gives.
-            if held.last?.isNewline ?? false {
+            // what was shown of them stays a prefix of what it gives. So
+            // does a row that is only a list marker ("lines 3 and" / " - "
+            // / "99: x"): the item's number may come on the next row, and
+            // `filter` reads "- " / "99:" as citing line 99.
+            if held.last?.isNewline ?? false, !Self.markerPending(raw + held) {
                 raw = ""; shown = ""
             } else {
                 raw += held; shown += out
@@ -415,7 +441,8 @@ public enum OwlCitations {
     }
 
     private static func flagOnly(_ text: String, allowed: IndexSet) -> Filtered {
-        let bad = find(text).filter { !allowed.contains(integersIn: $0.lines) }
+        let marked = flaggedAlready(text)
+        let bad = find(text).filter { !allowed.contains(integersIn: $0.lines) && !marked.contains($0.range.location) }
         let ns = NSMutableString(string: text)
         for c in bad.reversed() { ns.insert(flag, at: NSMaxRange(c.range)) }
         return Filtered(text: ns as String, dropped: [], flagged: bad.map(\.lines))
