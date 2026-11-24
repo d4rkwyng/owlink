@@ -45,6 +45,20 @@ final class LastOpenDocumentTests: XCTestCase {
 
     func testKeyIsSharedWithTheMac() {
         XCTAssertEqual(AppSettings.Key.reopenFilesFromLastSession, "reopenFilesFromLastSession")
+        XCTAssertEqual(AppSettings.Key.reopenFilesFromLastSession, SessionReopenPolicy.key)
+    }
+
+    /// A launch argument (`-reopenFilesFromLastSession NO`) arrives as a
+    /// string: it counts, as on the Mac (ccdb2d8). Before, `as? Bool` read
+    /// it as unset, so reopen stayed on.
+    func testLaunchArgumentStringsCount() {
+        let d = defaults()
+        d.set("NO", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
+        d.set("YES", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d))
+        d.removeObject(forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d), "unset: on")
     }
 
     // MARK: Store

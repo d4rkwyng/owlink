@@ -248,16 +248,18 @@ enum AppSettings {
     }
 
     /// Settings › "Reopen files from last session": the last open document
-    /// opens again at launch. iOS has no "Close windows when quitting"
-    /// setting, so until explicitly set it is on. Never `bool(forKey:)`:
-    /// a missing key must read as unset, not as off.
+    /// opens again at launch. On unless Owlink's own preference says off,
+    /// as on the Mac since 0.5.2 (ccdb2d8); a missing key reads as unset,
+    /// not as off. Read with the Mac's `SessionReopenPolicy`, so a
+    /// `-reopenFilesFromLastSession NO` launch argument (a string, which
+    /// `as? Bool` read as unset) turns it off too.
     static var reopenFilesFromLastSession: Bool {
         get { reopenFilesFromLastSession(in: defaults) }
         set { defaults.set(newValue, forKey: Key.reopenFilesFromLastSession); post() }
     }
 
     static func reopenFilesFromLastSession(in defaults: UserDefaults) -> Bool {
-        SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: Key.reopenFilesFromLastSession) as? Bool)
+        SessionReopenPolicy.shouldReopen(in: defaults)
     }
 
     static var theme: EditorTheme {
