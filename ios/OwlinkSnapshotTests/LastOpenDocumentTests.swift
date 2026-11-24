@@ -36,7 +36,7 @@ final class LastOpenDocumentTests: XCTestCase {
         let d = defaults()
         XCTAssertNil(d.object(forKey: AppSettings.Key.reopenFilesFromLastSession))
         XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d))
-        XCTAssertTrue(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: nil))
+        XCTAssertTrue(SessionReopenPolicy.shouldReopen(explicit: nil))
         d.set(false, forKey: AppSettings.Key.reopenFilesFromLastSession)
         XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
         d.set(true, forKey: AppSettings.Key.reopenFilesFromLastSession)

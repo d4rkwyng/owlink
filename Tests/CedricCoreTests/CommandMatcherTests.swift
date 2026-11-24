@@ -117,16 +117,19 @@ import Testing
 
     @Test func rankingFourHundredItemsIsFast() {
         let list = (0..<400).map { C(id: "\($0)", title: "Command number \($0) Something", path: "Menu \($0 % 9) › Submenu") }
-        // The palette's first keystroke: prepare the index, then rank. Best of 5, so a
-        // test run sharing the machine with other suites doesn't fail it; a release
-        // build takes well under a millisecond, a debug build a few.
-        var best = Double.infinity
-        for q in ["c", "co", "com", "cmd 12", "sub 3"] {
-            let start = Date()
+        // The palette's first keystroke: prepare the index, then rank. A release
+        // build takes well under a millisecond, a debug build a few. Best of 5
+        // in this thread's CPU time, scaled by how slow the machine is right
+        // now (see `Timing`), with a wide wall-clock bound against a blow-up.
+        let queries = ["c", "co", "com", "cmd 12", "sub 3"]
+        var k = 0
+        let r = Timing.best(of: queries.count) {
+            let q = queries[k]
+            k += 1
             let index = CommandIndex(list)
             #expect(!index.rank(query: q).isEmpty, "\(q)")
-            best = min(best, Date().timeIntervalSince(start))
         }
-        #expect(best < 0.15, "\(best)")
+        #expect(r.scaled < 0.15, "\(r.description)")
+        #expect(r.wall < 3, "\(r.description)")
     }
 }

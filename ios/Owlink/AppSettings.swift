@@ -257,8 +257,7 @@ enum AppSettings {
     }
 
     static func reopenFilesFromLastSession(in defaults: UserDefaults) -> Bool {
-        SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: Key.reopenFilesFromLastSession) as? Bool,
-                                         systemKeepsWindows: nil)
+        SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: Key.reopenFilesFromLastSession) as? Bool)
     }
 
     static var theme: EditorTheme {

@@ -105,7 +105,7 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option])
                 expect(tab.previewVisible, "⌥⌘P shows the preview")
-                let want: [PreviewBarItem] = [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+                let want: [PreviewBarItem] = [.back, .forward, .home, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
                 expect(bar?.state.items == want, "Markdown: the bar has its controls", "\(bar?.state.items ?? [])")
                 for item in want {
                     guard let v = bar?.view(item) else { expect(false, "bar \(item)", "no view"); continue }
@@ -137,7 +137,7 @@ extension DevChecks {
                 let view = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
                 let preview = view?.items.first { $0.title == "Preview" }?.submenu
                 let titles = preview?.items.map(\.title).filter { !$0.isEmpty } ?? []
-                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Open in Browser", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
+                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
                         "Restore File Order", "Export as HTML…", "Export as PDF…", "Allow JavaScript in Preview",
                         "Allow Network in Preview"].allSatisfy(titles.contains), "View › Preview lists the bar's actions", "\(titles)")
                 @MainActor func enabled(_ sel: Selector) -> Bool { menuItem(action: sel).map { app.validateMenuItem($0) } ?? false }
@@ -353,18 +353,6 @@ extension DevChecks {
             },
             waitForPreview(tab, contains: "Paragraph 60", "the preview shows the document"),
             { next in
-                let probe = WKWebView(frame: .zero, configuration: PreviewController.browserConfiguration())
-                probe.loadHTMLString("<html><body>isolated</body></html>", baseURL: nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    probe.evaluateJavaScript("typeof window.webkit?.messageHandlers?.cedricScroll") { value, error in
-                        MainActor.assumeIsolated {
-                            expect(error == nil && value as? String == "undefined", "isolated web configuration has no Cedric bridge", "\(value ?? "nil") \(String(describing: error))")
-                            next()
-                        }
-                    }
-                }
-            },
-            { next in
                 previewJS(tab, "typeof window.__cedricPatch + ',' + typeof window.__cedricScrollTo") { v in
                     expect(v as? String == "function,function", "Cedric's script runs in its own world with page JavaScript off", "\(v ?? "nil")")
                     next()
@@ -500,7 +488,8 @@ extension DevChecks {
             },
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
-            // revealed, other schemes ignored, the web isolated in preview.
+            // revealed, other schemes ignored, a web link asks and never
+            // loads in the preview (S1).
             { next in
                 let tabsBefore = app.tabs.count
                 PreviewLinkLog.revealed = []
@@ -544,25 +533,21 @@ extension DevChecks {
                                         expect(tab.noticeBar?.isHidden == false, "with a note in the tab")
                                         click("x-apple.systempreferences:com.apple.Security") {
                                             expect(action() == .ignore("x-apple.systempreferences"), "other schemes are ignored")
+                                            let page = tab.preview?.webView.url
                                             click("https://example.com/a?b=1") {
-                                                let web = tab.preview?.browserView
-                                                expect(action() == .openWebInPreview(URL(string: "https://example.com/a?b=1")!),
-                                                       "a web link opens in the isolated preview")
-                                                expect(web?.isHidden == false && tab.previewBarEnables(.openInBrowser), "web view and Open in Browser are available")
-                                                expect(web?.configuration.websiteDataStore.isPersistent == false
-                                                       && web?.configuration.userContentController.userScripts.isEmpty == true
-                                                       && web?.configuration.urlSchemeHandler(forURLScheme: "cedric-doc") == nil,
-                                                       "web view has a non-persistent store, no scripts and no document scheme")
+                                                let web = URL(string: "https://example.com/a?b=1")!
+                                                expect(action() == .confirmExternal(web), "a web link asks first (S1)", "\(String(describing: action()))")
+                                                expect(tab.preview?.isHome == true && tab.preview?.webView.url == page && page?.scheme == "cedric-doc",
+                                                       "and the preview does not navigate to it", "\(tab.preview?.webView.url?.absoluteString ?? "nil")")
                                                 expect(tab.preview?.csp.contains("script-src 'none'") == true,
                                                        "local preview retains its strict CSP")
-                                                expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
-                                                tab.previewBarAction(.openInBrowser)
+                                                expect(PreviewLinkLog.opened.isEmpty, "nothing opens before the answer")
                                                 let sheet = tab.previewPane?.window?.attachedSheet
                                                 let shown = sheet.flatMap { s in
                                                     s.contentView.flatMap { allViews($0) }?
                                                         .compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ") }
                                                 expect(shown?.contains("https://example.com/a?b=1") == true,
-                                                       "Open in Browser asks first, showing the whole URL", shown ?? "no sheet")
+                                                       "the prompt shows the whole URL", shown ?? "no sheet")
                                                 if let sheet, let cancel = allViews(sheet.contentView!).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) {
                                                     cancel.performClick(nil)
                                                 }
@@ -647,6 +632,68 @@ extension DevChecks {
     /// ⌘-click) scrolls the live document in place; `other.md#part`, a
     /// heading-text fragment, a `[[other#Part]]` wikilink and `page.html#sec`
     /// open in the preview at that heading, and Back/Forward come back to it.
+    /// How `webPrompt` answers: the Cancel button, or the Return or Escape key.
+    enum PromptAnswer { case cancelButton, returnKey, escapeKey }
+
+    /// Waits (up to 3 s) for the external-link prompt on the tab's preview,
+    /// expects it to show `url` whole with Cancel as the default button
+    /// (Return) and Open with no key, and answers Cancel (by button or key).
+    static func webPrompt(_ tab: EditorWindowController, _ url: String, _ name: String,
+                          answer: PromptAnswer = .cancelButton, contains: [String] = []) -> (@escaping () -> Void) -> Void {
+        { next in
+            @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
+            let window = tab.previewPane?.window ?? tab.window
+            let deadline = Date().addingTimeInterval(3)
+            @MainActor func poll() {
+                guard let sheet = window?.attachedSheet else {
+                    if Date() < deadline { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } }; return }
+                    expect(false, name, "no prompt")
+                    next(); return
+                }
+                let views = sheet.contentView.map(allViews) ?? []
+                let shown = views.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
+                expect(shown.contains("Open this link?") && shown.contains(url) && contains.allSatisfy(shown.contains), name, shown)
+                let buttons = views.compactMap { $0 as? NSButton }
+                // NSAlert hands Return to the window's default button cell.
+                let defaultTitle = (sheet.defaultButtonCell as? NSButtonCell)?.title
+                let keys = buttons.filter { !$0.title.isEmpty }.map { "\($0.title)=\($0.keyEquivalent.unicodeScalars.map { String($0.value, radix: 16) })" }
+                expect(defaultTitle == "Cancel" && buttons.first { $0.title == "Open" }?.keyEquivalent == "",
+                       "Cancel is the prompt's default button (Return); Open has no key",
+                       "default \(defaultTitle ?? "none"); " + keys.joined(separator: " "))
+                let openedBefore = PreviewLinkLog.opened.count
+                func key(_ chars: String, _ code: UInt16) -> NSEvent? {
+                    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                     windowNumber: sheet.windowNumber, context: nil, characters: chars,
+                                     charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+                }
+                switch answer {
+                case .cancelButton: buttons.first { $0.title == "Cancel" }?.performClick(nil)
+                case .returnKey:
+                    // A key Return reaches the default button only in the key
+                    // window; when Owlink isn't the active app, press the
+                    // default button instead (what Return does) and say so.
+                    if sheet.isKeyWindow, let e = key("\r", 36) { NSApp.postEvent(e, atStart: false) }
+                    else {
+                        print("check: note: the prompt isn't the key window (Owlink not active): Return pressed as the default button")
+                        sheet.defaultButtonCell?.performClick(nil)
+                    }
+                case .escapeKey: if let e = key("\u{1b}", 53) { NSApp.postEvent(e, atStart: false) }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    MainActor.assumeIsolated {
+                        if answer != .cancelButton {
+                            expect(window?.attachedSheet == nil && PreviewLinkLog.opened.count == openedBefore,
+                                   answer == .returnKey ? "Return answers Cancel: nothing opens" : "Escape answers Cancel: nothing opens",
+                                   "sheet \(window?.attachedSheet != nil) opened \(PreviewLinkLog.opened.map(\.absoluteString))")
+                        }
+                        next()
+                    }
+                }
+            }
+            poll()
+        }
+    }
+
     static func previewAnchorCheck(_ app: AppDelegate) {
         var filler = ""
         for k in 1...40 { filler += "Filler paragraph \(k) with enough words in it to take up a line or two of the preview.\n\n" }
@@ -654,10 +701,22 @@ extension DevChecks {
         var html = "<!doctype html><html><body><h1>Page</h1>"
         for k in 1...40 { html += "<p>html filler \(k), a line or two of words to fill the page out.</p>" }
         html += "<h2 id=\"sec\">Sec</h2><p>the html section</p>"
+        // S1: a meta refresh to a web page must not load it in the preview.
+        html += "<meta http-equiv=\"refresh\" content=\"0;url=https://example.invalid/refresh\">"
         for k in 1...40 { html += "<p>more html \(k)</p>" }
         _ = write("anchors/page.html", html + "</body></html>")
-        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec)"
-        src += " [jump](#unique-section) [jump text](#Unique%20Section)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
+        // A symbolic link to a document in a subfolder: the page's relative
+        // image loads from the folder the file is really in.
+        _ = write("anchors/real/doc.md", "# Real\n\nthe real doc ![dot](dot.png)\n")
+        try? Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")!
+            .write(to: dir.appendingPathComponent("anchors/real/dot.png"))
+        try? FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("anchors/alias.md").path, withDestinationPath: "real/doc.md")
+        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec) [alias](alias.md)"
+        src += " [jump](#unique-section) [jump text](#Unique%20Section)"
+        // S1: web links, plain and target=_blank.
+        src += " [web](https://example.invalid/s1?q=1) <a href=\"https://example.invalid/blank\" target=\"_blank\">blank web</a>"
+        // A user name dressed as a site: the prompt names the real one.
+        src += " [spoof](https://www.apple.com%2Fsignin@evil.example/)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
         let tab = app.open(write("anchors/notes.md", src))!
         sized(tab)
         let tabs = app.tabs.count
@@ -678,6 +737,15 @@ extension DevChecks {
         }
         let toTop: (@escaping () -> Void) -> Void = { next in
             previewJS(tab, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in next() }
+        }
+        var livePage: URL?
+        var promptsBefore = 0, droppedBefore = 0
+        var blank: EditorWindowController?
+        // S1: the preview stays on the live document; no web page, no tab, nothing opened.
+        @MainActor func stayed(_ name: String) {
+            expect(p()?.isHome == true && p()?.webView.url == livePage && livePage?.scheme == "cedric-doc" && noTab()
+                   && PreviewLinkLog.opened.isEmpty && p()?.webView.isLoading == false,
+                   name, "\(p()?.webView.url?.absoluteString ?? "nil") loading \(p()?.webView.isLoading ?? false)")
         }
         let home: (@escaping () -> Void) -> Void = { next in
             tab.previewBarAction(.home)
@@ -720,6 +788,100 @@ extension DevChecks {
                     }
                 }
             },
+            // S1: with page JavaScript and Network on, a web link still never
+            // loads in the preview: a click asks (whole URL), Cancel opens
+            // nothing; script, forms and new windows go nowhere.
+            sync { livePage = p()?.webView.url; PreviewLinkLog.opened = [] },
+            click("web"),
+            webPrompt(tab, "https://example.invalid/s1?q=1", "a plain click on a web link asks first, showing the whole URL"),
+            sync {
+                expect(p()?.lastLinkAction == .confirmExternal(URL(string: "https://example.invalid/s1?q=1")!), "routed as an external link",
+                       "\(String(describing: p()?.lastLinkAction))")
+                stayed("the preview did not load the web page; Cancel opened nothing")
+            },
+            // Page script clicking the declined link over and over: no prompt comes back.
+            { next in
+                promptsBefore = LinkPrompt.shown
+                pageJS(tab, "const w = [...document.querySelectorAll('a')].find(a => a.textContent === 'web'); for (let i = 0; i < 5; i++) w.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 1,
+                       "with JavaScript on, script re-clicking a declined web link doesn't ask again",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                promptsBefore = LinkPrompt.shown
+                droppedBefore = LinkPrompt.dropped
+            },
+            // Another web link from the same page load: dropped too (a script
+            // can't loop the prompt by changing the URL).
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 2,
+                       "after a Cancel with JavaScript on, another web link from the same page load doesn't ask either",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
+            },
+            // A new page load asks again.
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown"),
+            sync { livePage = p()?.webView.url; promptsBefore = LinkPrompt.shown; droppedBefore = LinkPrompt.dropped },
+            // Another web link, clicked three times at once by script: one prompt, never stacked.
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); b.click(); b.click(); 1") { _ in next() }
+            },
+            webPrompt(tab, "https://example.invalid/blank", "after a reload, a target=_blank web link asks again", answer: .returnKey),
+            sync {
+                expect(LinkPrompt.shown == promptsBefore + 1 && LinkPrompt.dropped >= droppedBefore + 1, "one prompt at a time: the repeats are dropped, not stacked",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(LinkPrompt.dropped - droppedBefore)")
+                stayed("and the preview did not load it either")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
+            },
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page again", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
+            sync { livePage = p()?.webView.url },
+            click("spoof"),
+            webPrompt(tab, "https://www.apple.com%2Fsignin@evil.example/",
+                      "a click asks again on the next load; a user name before @ is called out and the real site shown on its own line",
+                      answer: .escapeKey, contains: ["Site: evil.example", "user name (“www.apple.com/signin”)", "This link goes to evil.example."]),
+            sync { stayed("Escape opened nothing") },
+            { next in pageJS(tab, "location.href = 'https://example.invalid/script'; 1") { _ in next() } },
+            { next in
+                pageJS(tab, "window.open('https://example.invalid/popup'); const f = document.createElement('form'); f.action = 'https://example.invalid/form'; f.method = 'get'; document.body.appendChild(f); f.submit(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                stayed("page script's location =, window.open and a form submit don't leave the document")
+                expect((tab.previewPane?.window ?? tab.window)?.attachedSheet == nil, "and ask nothing (only a click asks)")
+            },
+            waitForPreview(tab, contains: "jump text", "the live document is still shown"),
             // Another document's heading.
             click("other part"),
             waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
@@ -769,7 +931,72 @@ extension DevChecks {
             waitForAnchor(tab, id: "sec", "page.html#sec opens in the preview at the element",
                           when: { p()?.isHome == false && p()?.navigationTitle == "page.html" && noTab() }),
             sync { expect(onSource() && PreviewLinkLog.revealed.isEmpty && PreviewLinkLog.opened.isEmpty, "nothing revealed or opened outside the preview") },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() } },
+            sync {
+                let url = p()?.webView.url
+                expect(p()?.navigationTitle == "page.html" && url?.scheme == "cedric-doc" && url?.absoluteString.hasSuffix("/anchors/") == true
+                       && p()?.webView.isLoading == false,
+                       "page.html's meta refresh to a web page does not load it (S1)", url?.absoluteString ?? "nil")
+            },
             home,
+            click("alias"),
+            waitForPreview(tab, contains: "the real doc", "a symbolic link to a document opens in the preview"),
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    previewJS(tab, "location.href + '|' + [...document.images].filter(i => i.complete && i.naturalWidth > 0).length") { v in
+                        let parts = (v as? String ?? "").split(separator: "|").map(String.init)
+                        expect(parts.count == 2 && parts[0].hasSuffix("/anchors/real/") && parts[1] == "1",
+                               "its page is based in the linked file's own folder, and its relative image loads", "\(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            home,
+            // An untitled document's preview is at about:blank (security read
+            // NIT 1): a click on #far, or an href written about:blank%23far
+            // (what macOS 15 hands over for #far), scrolls in place; WebKit's
+            // navigation is cancelled, so the page never leaves about:blank.
+            sync {
+                app.newTab(nil)
+                guard let t = app.tabs.last else { return }
+                blank = t
+                sized(t)
+                t.setText("# Blank\n\n[far](#far-away) <a href=\"about:blank%23far-away\">lit</a>\n\n" + filler + "## Far Away\n\nthe far section\n\n" + filler)
+                t.setLanguage(.markdown)
+                focus(t)
+                if !t.previewVisible { t.togglePreview() }
+            },
+            { next in if let b = blank { waitForPreview(b, contains: "the far section", "an untitled document's preview shows it")(next) } else { expect(false, "untitled tab"); next() } },
+        ] + ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
+            { next in
+                guard let b = blank else { next(); return }
+                expect(b.preview?.webView.url?.absoluteString == "about:blank", "\(text): the page is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
+                previewJS(b, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in
+                    previewJS(b, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === '\(text)'); if (!a) return 'no link'; a.click(); return a.getAttribute('href') })()") { v in
+                        print("check: note: clicked \(text) → \(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            { next in
+                guard let b = blank else { next(); return }
+                waitForAnchor(b, id: "far-away", "on about:blank, a click on \(text) scrolls the page (not routed)",
+                              when: { b.preview?.isHome == true && b.preview?.lastAnchor?.found == true })(next)
+            },
+            { next in
+                guard let b = blank else { next(); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    let url = b.preview?.webView.url?.absoluteString ?? "nil"
+                    expect(url == "about:blank" && b.preview?.lastLinkAction == nil && b.preview?.isHome == true && b.preview?.webView.isLoading == false,
+                           "and WebKit never navigated: the page is still about:blank, nothing routed",
+                           "\(url) action \(String(describing: b.preview?.lastLinkAction))")
+                    previewJS(b, "document.body.innerText.includes('the far section') + ''") { v in
+                        expect(v as? String == "true", "and still shows the document", "\(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+        ] } + [
             sync { for t in app.tabs { t.doc.markSaved() } },
         ])
     }

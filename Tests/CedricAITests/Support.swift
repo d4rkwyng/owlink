@@ -14,6 +14,11 @@ final class StubServer: @unchecked Sendable {
         /// Sent after `body`, one every `every` seconds (a slow stream).
         var chunks: [Data] = []
         var every: TimeInterval = 0
+        /// Virtual time (the client's `streamClock`): `delay` and `every`
+        /// advance this clock instead of being slept, so only the
+        /// client's logic, not how busy the runner is, decides whether a
+        /// deadline passes. See `StreamClock`.
+        var clock: StreamClock? = nil
     }
     typealias Handler = @Sendable (URLRequest, Data?) -> Response
 
@@ -82,6 +87,10 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
         // At .high, like the timing tests (`.timely`, OffPool.swift): the
         // stub's own clock must not wait behind other tests' CPU work, or a
         // dribble looks like a stall.
+        if let clock = response.clock {
+            work = Task(priority: .high) { await Self.play(response, on: clock, request: request, box: box) }
+            return
+        }
         work = Task(priority: .high) {
             if response.delay > 0 {
                 do { try await Task.sleep(nanoseconds: UInt64(response.delay * 1e9)) } catch { return }
@@ -100,6 +109,66 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     }
 
     override func stopLoading() { work?.cancel() }
+
+    /// `response` on virtual time, in step with the client:
+    /// - the headers wait until the client's deadline loop has read the
+    ///   clock (it is running);
+    /// - each chunk but the last waits until the client has read it (the
+    ///   watch was touched at the chunk's virtual time), so the stub never
+    ///   runs ahead of a stalled reader and makes a gap the client never saw;
+    /// - before the last chunk, the deadline loop reads the clock once more,
+    ///   at the full virtual length of the answer: a deadline that passed
+    ///   (first byte, or an idle limit a chunk didn't reset) is seen there,
+    ///   whatever the real timing, and ends the stream with `.timedOut`.
+    /// Any of those reads that doesn't come in time (30 s for the deadline
+    /// loop, 10 s for a touch; both far above a runner's stalls) fails the
+    /// load at once with `URLError(.resourceUnavailable)`. The stub never
+    /// plays on out of step, so virtual time can't jump past a deadline
+    /// the client hasn't seen, and a reader that doesn't start its deadline
+    /// loop or doesn't touch on some kind of chunk fails in seconds.
+    private static func play(_ response: StubServer.Response, on clock: StreamClock,
+                             request: URLRequest, box: UncheckedRef<StubProtocol>) async {
+        let proto = box.value
+        let started = await clock.wait(atMost: 30) { $0.deadlineReads > 0 }
+        if Task.isCancelled { return }
+        guard started else { return fail(proto, "the deadline loop never read the clock") }
+        clock.advance(response.delay)
+        let http = HTTPURLResponse(url: request.url!, statusCode: response.status,
+                                   httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
+        proto.client?.urlProtocol(proto, didReceive: http, cacheStoragePolicy: .notAllowed)
+        if !response.body.isEmpty { proto.client?.urlProtocol(proto, didLoad: response.body) }
+        for (i, chunk) in response.chunks.enumerated() {
+            // Real time only to keep chunks apart: 20 ms > the 10 ms in
+            // which `StreamWatch` takes bytes as one chunk.
+            do { try await Task.sleep(nanoseconds: 20_000_000) } catch { return }
+            clock.advance(response.every)
+            let last = i == response.chunks.count - 1
+            if last {
+                let seen = clock.deadlineReads
+                let sampled = await clock.wait(atMost: 30) { $0.deadlineReads > seen }
+                if Task.isCancelled { return }
+                // The deadline loop never saw the final time: the last
+                // chunk is withheld and the load fails, so the test
+                // can't pass without that check having run.
+                guard sampled else { return fail(proto, "the deadline loop didn't read the clock before the last chunk") }
+            }
+            let touched = clock.touchReads
+            proto.client?.urlProtocol(proto, didLoad: chunk)
+            if !last {
+                // Not touched: fail here rather than advance the clock past
+                // a gap the reader never saw.
+                let read = await clock.wait(atMost: 10) { $0.touchReads > touched }
+                if Task.isCancelled { return }
+                guard read else { return fail(proto, "chunk \(i) was never read (no touch)") }
+            }
+        }
+        proto.client?.urlProtocolDidFinishLoading(proto)
+    }
+
+    private static func fail(_ proto: StubProtocol, _ why: String) {
+        proto.client?.urlProtocol(proto, didFailWithError: URLError(.resourceUnavailable, userInfo: [
+            NSLocalizedDescriptionKey: "stub: \(why)"]))
+    }
 
     private static func drain(_ stream: InputStream) -> Data {
         stream.open(); defer { stream.close() }
@@ -163,6 +232,52 @@ final class FakeClock: OwlClock, @unchecked Sendable {
     }
 }
 
+/// Virtual time for a streamed answer (`LocalModelClient.streamClock`),
+/// moved only by the stub (`StubServer.Response.clock`): a runner stalled
+/// for seconds can't turn a 0.2 s gap into a missed deadline.
+///
+/// Who reads it tells the stub what the client has done. The first reader
+/// is `StreamWatch.init` (the calling task); the next is the client's
+/// deadline loop (`remaining()`, which runs before any byte exists: the
+/// stub holds the headers until then); any other task is the one reading
+/// the bytes, touching the watch on a chunk.
+final class StreamClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var t: TimeInterval = 1_000
+    private var tasks: [Int] = []          // in first-read order
+    private var counts: [Int] = [0, 0, 0]  // reads by: creator, deadline loop, byte reader
+
+    /// For `streamClock`.
+    var read: @Sendable () -> TimeInterval { { [self] in self.readNow() } }
+
+    private func readNow() -> TimeInterval {
+        let id = withUnsafeCurrentTask { $0?.hashValue } ?? 0
+        return lock.withLock {
+            if !tasks.contains(id) { tasks.append(id) }
+            counts[min(2, tasks.firstIndex(of: id)!)] += 1
+            return t
+        }
+    }
+
+    /// Now, without counting as a read.
+    var now: TimeInterval { lock.withLock { t } }
+    var deadlineReads: Int { lock.withLock { counts[1] } }
+    var touchReads: Int { lock.withLock { counts[2] } }
+
+    func advance(_ dt: TimeInterval) { lock.withLock { t += dt } }
+
+    /// Polls (real time) until `cond` holds, the task is cancelled, or
+    /// `atMost` seconds pass; whether `cond` held.
+    func wait(atMost: TimeInterval, _ cond: (StreamClock) -> Bool) async -> Bool {
+        let end = Date().addingTimeInterval(atMost)
+        while !cond(self) {
+            if Task.isCancelled || Date() > end { return false }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return true
+    }
+}
+
 final class FakePower: PowerSource, @unchecked Sendable {
     private let lock = NSLock()
     private var state = PowerState.mains
@@ -206,11 +321,12 @@ final class Box<T>: @unchecked Sendable {
     func mutate(_ f: (inout T) -> Void) { lock.withLock { f(&_value) } }
 }
 
-/// Polls `cond` (real time) until true or ~8 s pass. It returns as soon as
-/// `cond` holds, so the window only matters when a busy CI runner stalls
-/// the work for seconds (2 s ran out in runs 44451577951, 44453003629).
-func eventually(_ cond: @Sendable () async -> Bool) async -> Bool {
-    for _ in 0..<1_600 {
+/// Polls `cond` (real time) until true or ~`seconds` pass (8 by default).
+/// It returns as soon as `cond` holds, so the window only matters when a
+/// busy CI runner stalls the work for seconds (2 s ran out in runs
+/// 44451577951, 44453003629).
+func eventually(seconds: Double = 8, _ cond: @Sendable () async -> Bool) async -> Bool {
+    for _ in 0..<Int(seconds * 200) {
         if await cond() { return true }
         try? await Task.sleep(nanoseconds: 5_000_000)
     }

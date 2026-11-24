@@ -43,12 +43,48 @@ func tempDir() -> URL {
         #expect(open == [buffered, existing, untitled])
     }
 
-    @Test func reopenPolicyUsesExplicitPreferenceBeforeSystemSetting() {
-        #expect(SessionReopenPolicy.shouldReopen(explicit: true, systemKeepsWindows: false))
-        #expect(!SessionReopenPolicy.shouldReopen(explicit: false, systemKeepsWindows: true))
-        #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: true))
-        #expect(!SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: false))
-        #expect(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: nil))
+    @Test func reopenPolicyIsOnUnlessOwlinksOwnPreferenceSaysOff() {
+        #expect(SessionReopenPolicy.shouldReopen(explicit: true))
+        #expect(!SessionReopenPolicy.shouldReopen(explicit: false))
+        #expect(SessionReopenPolicy.shouldReopen(explicit: nil), "unset: on")
+    }
+
+    /// 0.5.2: macOS's global NSQuitAlwaysKeepsWindows = false no longer
+    /// turns reopen off (Fable 5.2 should-fix), and a launch argument
+    /// string `-reopenFilesFromLastSession NO` counts (Fable NIT).
+    @Test func reopenPreferenceIgnoresTheSystemQuitSettingAndReadsStrings() {
+        let (d, name) = TestDefaults.make("cedric-tests-")
+        defer { d.removePersistentDomain(forName: name); TestDefaults.remove(name) }
+        d.set(false, forKey: "NSQuitAlwaysKeepsWindows")
+        #expect(SessionReopenPolicy.explicitPreference(in: d) == nil)
+        #expect(SessionReopenPolicy.shouldReopen(in: d), "the system's quit setting doesn't turn it off")
+        d.set("NO", forKey: SessionReopenPolicy.key)
+        #expect(SessionReopenPolicy.explicitPreference(in: d) == false, "a launch argument is a string")
+        #expect(!SessionReopenPolicy.shouldReopen(in: d))
+        d.set("YES", forKey: SessionReopenPolicy.key)
+        #expect(SessionReopenPolicy.shouldReopen(in: d))
+        d.set(false, forKey: SessionReopenPolicy.key)
+        #expect(!SessionReopenPolicy.shouldReopen(in: d))
+    }
+
+    @Test func reopenOffStillReopensUnsavedTextAndParksTheRest() {
+        let clean = SessionTab(path: "/open/readme.txt")
+        let draft = SessionTab(path: "/open/draft.txt", hasBuffer: true)
+        let untitled = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        let other = SessionTab(path: "/open/other.txt")
+        let windows = [SessionWindow(tabs: [clean, draft, untitled], selectedTab: 2, frame: "f"),
+                       SessionWindow(tabs: [other], selectedTab: 0)]
+        let on = SessionReopenPolicy.plan(windows, reopen: true)
+        #expect(on.windows == windows && on.park.isEmpty)
+        let off = SessionReopenPolicy.plan(windows, reopen: false)
+        #expect(off.windows.count == 1, "a window with nothing unsaved doesn't come back")
+        #expect(off.windows.first?.tabs == [draft, untitled])
+        #expect(off.windows.first?.selectedTab == 1, "the selected tab stays selected")
+        #expect(off.windows.first?.frame == "f")
+        #expect(off.park == [clean, other], "files go to Reopen Closed Tab")
+        #expect(!off.park.contains { $0.hasBuffer }, "unsaved text is never parked")
+        let unselected = SessionReopenPolicy.plan([SessionWindow(tabs: [clean, draft], selectedTab: 0)], reopen: false)
+        #expect(unselected.windows.first?.selectedTab == 0)
     }
 
     @Test func policyOffParksOpenTabsOntoTheClosedListAndKeepsBuffers() {

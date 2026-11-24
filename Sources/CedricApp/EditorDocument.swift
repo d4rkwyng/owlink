@@ -31,9 +31,15 @@ final class EditorDocument {
     var diskStamp: DiskStamp { DiskStamp(modified: fileModified, size: fileSize) }
     func noteDisk(_ s: DiskStamp?) { fileModified = s?.modified; fileSize = s?.size }
 
-    /// Edits since open; compared with the count at the last save.
+    /// Edits since open (a generation: grammar results, owl proposals
+    /// and session buffer writes compare it). Unsaved is `edited`'s call.
     private(set) var changeCount = 0
-    private var savedChangeCount = 0
+    /// Unsaved edits: the text against the text at the last save or open,
+    /// plus format changes and session/missing buffers (EditedState).
+    private var edited = EditedState()
+    /// The tab's text (its storage, not a copy), set by its window
+    /// controller: what a save, open or clean reload remembers.
+    var currentText: (() -> NSString?)?
     /// The change count the session store last saved a buffer for: set
     /// only once that write has succeeded (hot close trusts it to skip
     /// its own write).
@@ -42,7 +48,7 @@ final class EditorDocument {
     /// next timed save doesn't queue the same text again; -1 if none.
     var sessionWritingCount = -1
 
-    var isDirty: Bool { changeCount != savedChangeCount }
+    var isDirty: Bool { edited.isDirty }
     /// When the document last went from saved to unsaved (the owl's "Save a copy?").
     private(set) var unsavedSince: Date?
     /// The file changed on disk while the tab had unsaved edits (clean tabs just reload).
@@ -64,10 +70,17 @@ final class EditorDocument {
 
     var displayName: String { fileURL?.lastPathComponent ?? untitledName }
 
+    /// The text changed (typing, paste, a tool, undo, redo): unsaved
+    /// unless it is the saved text again.
     func noteChange() {
-        if !isDirty { unsavedSince = Date() }
         changeCount += 1
-        if !isDirty { unsavedSince = nil }
+        updateEdited { $0.textChanged(to: currentText?()) }
+    }
+
+    /// Encoding or line endings changed: unsaved until written, whatever the text.
+    func noteFormatChange() {
+        changeCount += 1
+        updateEdited { $0.noteFormatChange() }
     }
 
     /// The whole buffer was replaced (`setText`: disk reload, encoding
@@ -75,14 +88,30 @@ final class EditorDocument {
     /// proposal cannot match the new text by its stored offset. A clean
     /// document stays clean: this is not a user edit.
     func noteBufferReplacement() {
-        let dirty = isDirty
         changeCount = OwlBufferReplacement.generation(after: changeCount)
-        if !dirty { savedChangeCount = changeCount; unsavedSince = nil }
+        rebaseIfClean()
     }
 
-    func markSaved() { savedChangeCount = changeCount; unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
+    /// The text was set without an edit (open, reload): when clean, it is
+    /// what undo has to come back to.
+    func rebaseIfClean() {
+        if !isDirty { edited.saved(currentText?()) }
+    }
+
+    func markSaved() { edited.saved(currentText?()); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
     /// Restored from a session buffer: unsaved by definition.
-    func markDirtyFromSession() { changeCount = savedChangeCount + 1; unsavedSince = unsavedSince ?? Date() }
+    func markDirtyFromSession() {
+        changeCount += 1
+        updateEdited { $0.forceDirty() }
+    }
+
+    /// Applies `change` and keeps `unsavedSince` in step with the flag.
+    private func updateEdited(_ change: (inout EditedState) -> Void) {
+        let was = isDirty
+        change(&edited)
+        if !was, isDirty { unsavedSince = unsavedSince ?? Date() }
+        if was, !isDirty { unsavedSince = nil }
+    }
 
     enum LoadError: Error, LocalizedError {
         case unreadable(URL, Error)

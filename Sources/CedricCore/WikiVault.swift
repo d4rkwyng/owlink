@@ -3,8 +3,9 @@ import Foundation
 /// Resolves Obsidian `[[wikilinks]]` and `![[embeds]]` for the preview, as
 /// Obsidian does: by file name anywhere under the vault, the shortest path
 /// winning, `.md` implied for notes. The vault is the opened folder, else
-/// the nearest folder above the document holding `.obsidian/`, else the
-/// document's own folder. Files only; the name index is built once per
+/// the nearest folder above the document holding `.obsidian/` (within the
+/// bounds `mayBeVaultRoot` sets: never the home folder, a folder above it,
+/// `/`, a top-level folder or a volume root), else the document's own folder. Files only; the name index is built once per
 /// `refreshSeconds` (bounded: `maxEntries` entries, `maxDepth` levels,
 /// dot folders and `node_modules` skipped).
 public final class WikiVault: @unchecked Sendable {
@@ -21,40 +22,79 @@ public final class WikiVault: @unchecked Sendable {
     private var index: [String: [URL]] = [:]
     private var attachmentFolder: URL?
     private var built: Date?
+    /// How many folder levels the name index reads: `maxDepth`, or 1 (the
+    /// root's own files) when the root is only the document's folder and
+    /// that folder may not be a vault root (a note saved straight in `~`
+    /// or at a disk's root): bare names then don't search the whole home
+    /// folder or disk.
+    public let indexDepth: Int
 
-    public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default) {
+    public init(documentFolder: URL, openedRoot: URL? = nil, fileManager: FileManager = .default, home: URL? = nil) {
         self.fm = fileManager
         self.documentFolder = documentFolder.standardizedFileURL
         let folder = documentFolder.standardizedFileURL
         let opened = openedRoot?.standardizedFileURL
         let validRoot = opened.flatMap { Self.contains(folder, in: $0) ? $0 : nil }
-        self.root = (validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager) ?? folder).standardizedFileURL
+        let found = validRoot ?? Self.obsidianRoot(above: folder, fileManager: fileManager, home: home)
+        self.root = (found ?? folder).standardizedFileURL
+        let confined = found == nil && !Self.mayBeVaultRoot(folder, home: home ?? URL(fileURLWithPath: NSHomeDirectory()))
+        self.indexDepth = confined ? 1 : Self.maxDepth
     }
 
     /// The vault root to pass as `openedRoot` when the app may read only
     /// `granted` (iOS: a folder the person picked): the Obsidian vault
-    /// (`.obsidian/` at or above `folder`) when it lies inside the grant, so
-    /// its `.obsidian/app.json` (attachmentFolderPath) is read and names
-    /// resolve in that vault rather than across every vault the grant holds;
-    /// otherwise the grant itself (a vault above it can't be read).
-    public static func vaultRoot(for folder: URL, granted: URL?, fileManager fm: FileManager = .default) -> URL? {
+    /// (`.obsidian/` at or above `folder`, within `obsidianRoot`'s bounds)
+    /// when it lies inside the grant, so its `.obsidian/app.json`
+    /// (attachmentFolderPath) is read and names resolve in that vault
+    /// rather than across every vault the grant holds; otherwise the grant
+    /// itself (a vault above it can't be read).
+    public static func vaultRoot(for folder: URL, granted: URL?, fileManager fm: FileManager = .default, home: URL? = nil) -> URL? {
         guard let granted else { return nil }
         let folder = folder.standardizedFileURL
         guard contains(folder, in: granted) else { return granted }
-        if let vault = obsidianRoot(above: folder, fileManager: fm), contains(vault, in: granted) { return vault }
+        if let vault = obsidianRoot(above: folder, fileManager: fm, home: home), contains(vault, in: granted) { return vault }
         return granted
     }
 
-    /// The nearest folder at or above `folder` that holds `.obsidian/`.
-    public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default) -> URL? {
+    /// The nearest folder at or above `folder` that holds `.obsidian/`, as
+    /// long as it may be a vault root (`mayBeVaultRoot`). The walk stops at
+    /// the first folder that may not: a stray `~/.obsidian` or one at a
+    /// disk's root never widens the vault to the whole home folder or disk.
+    /// (An opened folder still wins over this walk, whatever it is.)
+    public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default, home: URL? = nil) -> URL? {
+        let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
         var dir = folder.standardizedFileURL
         for _ in 0..<PreviewRoot.maxLevels {
-            guard dir.pathComponents.count >= 3 else { return nil }
+            guard mayBeVaultRoot(dir, home: home) else { return nil }
             var isDir: ObjCBool = false
             if fm.fileExists(atPath: dir.appendingPathComponent(".obsidian").path, isDirectory: &isDir), isDir.boolValue { return dir }
             dir = dir.deletingLastPathComponent()
         }
         return nil
+    }
+
+    /// Whether `dir` may be found as a vault root by the `.obsidian` walk:
+    /// not `/` or a top-level folder (`/Users`, `/Volumes`), not a volume
+    /// root (`/Volumes/<disk>` or any mount point), and not the home folder
+    /// or a folder holding it (`/Users`, …). Every rule applies to the path
+    /// both as written and with symbolic links resolved, so a link to
+    /// `/System/Volumes/Data` or a disk is refused like the volume itself.
+    public static func mayBeVaultRoot(_ dir: URL, home: URL) -> Bool {
+        let d = dir.standardizedFileURL
+        let candidates = [d, d.resolvingSymlinksInPath()]
+        let homes = [home.standardizedFileURL, home.standardizedFileURL.resolvingSymlinksInPath()]
+        for c in candidates {
+            let comps = c.pathComponents
+            if comps.count < 3 { return false }
+            if comps.count == 3, comps[1] == "Volumes" { return false }
+            for h in homes {
+                let hp = h.pathComponents
+                if hp.count >= comps.count, Array(hp.prefix(comps.count)) == comps { return false }
+            }
+            // A fresh URL per candidate: resource values are cached on the URL.
+            if let v = try? URL(fileURLWithPath: c.path).resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
+        }
+        return true
     }
 
     /// A `[[target]]`'s parts: the file part and the `#Heading` or `#^block` part.
@@ -141,7 +181,7 @@ public final class WikiVault: @unchecked Sendable {
     private func currentIndex() -> ([String: [URL]], URL?) {
         lock.lock(); defer { lock.unlock() }
         if let built, Date().timeIntervalSince(built) < Self.refreshSeconds { return (index, attachmentFolder) }
-        index = Self.buildIndex(root, fm)
+        index = Self.buildIndex(root, fm, depth: indexDepth)
         attachmentFolder = nil
         let config = root.appendingPathComponent(".obsidian/app.json")
         if Self.contains(config, in: root),
@@ -180,7 +220,7 @@ public final class WikiVault: @unchecked Sendable {
         return Date().timeIntervalSince(built) < Self.refreshSeconds
     }
 
-    static func buildIndex(_ root: URL, _ fm: FileManager) -> [String: [URL]] {
+    static func buildIndex(_ root: URL, _ fm: FileManager, depth maxDepth: Int = WikiVault.maxDepth) -> [String: [URL]] {
         var idx: [String: [URL]] = [:]
         var count = 0
         var queue: [(URL, Int)] = [(root, 0)]

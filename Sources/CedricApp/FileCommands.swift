@@ -27,7 +27,8 @@ extension AppDelegate {
     var hasUnsavedTabs: Bool { tabs.contains { $0.doc.isDirty } }
 
     /// Closes every tab in the front window. On a quit-causing last window,
-    /// the session is saved while those tabs are still open (when reopen is on).
+    /// the session is saved while those tabs are still open (reopen on or
+    /// off; with it off, launch reopens only the unsaved ones).
     @objc func closeWindow(_ sender: Any?) {
         guard let w = currentTab?.window else { return }
         closeDocumentWindows(in: w)
