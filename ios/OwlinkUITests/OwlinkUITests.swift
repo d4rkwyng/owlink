@@ -146,4 +146,33 @@ final class OwlinkUITests: XCTestCase {
         field.typeText("hoot")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'of'")).firstMatch.waitForExistence(timeout: 5))
     }
+    /// The editor's ••• menu (the system overflow) and its Preview submenu
+    /// for a Markdown document, saved as screenshot attachments (named for
+    /// the device: iphone-menu, ipad-menu-preview-submenu, …). "Focus
+    /// Preview" is in the Preview submenu only, never in the main list.
+    func testOverflowMenuScreenshots() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        let device = UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone"
+        func shoot(_ name: String) {
+            sleep(1) // the menu's appearance animation
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "\(device)-\(name)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        let more = app.navigationBars.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 10), "no ••• button")
+        more.tap()
+        shoot("menu")
+        let preview = app.collectionViews.buttons["Preview"].firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "no Preview submenu in the ••• menu")
+        let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
+        XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
+        preview.tap()
+        let focus = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
+        XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
+        XCTAssertEqual(focus.count, 1, "Focus Preview more than once in the Preview submenu")
+        shoot("menu-preview-submenu")
+    }
 }

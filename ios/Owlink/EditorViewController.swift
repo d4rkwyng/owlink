@@ -221,9 +221,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         self?.textView.undoManager?.redo()
     }
     /// Save, in the bar while "Save automatically" is off.
-    private lazy var saveItem = barItem(String(localized: "Save"), "square.and.arrow.down", "editor.save") { [weak self] in
-        self?.saveDocument()
-    }
+    private lazy var saveItem: UIBarButtonItem = {
+        let i = barItem(String(localized: "Save"), "square.and.arrow.down", "editor.save") { [weak self] in
+            self?.saveDocument()
+        }
+        // Save is in the ••• menu's file group already.
+        i.menuRepresentation = Self.notInOverflowMenu
+        return i
+    }()
     /// Unsaved text from a crash, for this document.
     enum Recovery {
         /// Ask Restore / Discard when the editor appears.
@@ -680,6 +685,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             p.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
                 done(self?.previewMenuItems() ?? [])
             }])
+            // Collapsed into the ••• menu (a narrow bar), the eye would add
+            // its own Preview submenu there; the menu has one already.
+            p.menuRepresentation = Self.notInOverflowMenu
             items.append(p)
             let f = UIBarButtonItem(image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"), primaryAction: UIAction { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -687,6 +695,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             f.title = String(localized: "Focus Preview")
             f.accessibilityLabel = String(localized: "Focus Preview")
             f.accessibilityIdentifier = "editor.focusPreview"
+            // Not again in the ••• menu: Focus Preview is in its Preview submenu.
+            f.menuRepresentation = Self.notInOverflowMenu
             items.append(f)
         }
         if focusOn {
@@ -789,22 +799,43 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, fixTyposAction(), ask, check]
-        if let checkScript = checkScriptAction() { first.append(checkScript) }
-        if hasEditorPreview {
-            let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
-                self?.toggleFocusPreview()
-            }
-            focus.accessibilityIdentifier = "editor.menu.focusPreview"
-            first.insert(focus, at: 0)
-            // Stays in this menu whatever the bar has room for (the bar's
-            // own Focus Preview button drops off a narrow iPhone bar).
-            if let detach = detachPreviewAction() { first.insert(detach, at: 1) }
-        }
-        if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
-        return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
+        // View and preview; file; find, marks and navigation; then the rest.
+        var viewGroup: [UIMenuElement] = []
+        if let preview = previewSubmenu() { viewGroup.append(preview) }
+        viewGroup += [wrap, invisibles, readable]
+        let fileGroup: [UIMenuElement] = [save, print, exportHTML, exportPDF]
+        let findGroup: [UIMenuElement] = [replace] + markActions() + [goTo, quickly, todos]
+        var tools: [UIMenuElement] = [statistics, fixTyposAction(), ask, check]
+        if let checkScript = checkScriptAction() { tools.append(checkScript) }
+        if UIApplication.shared.supportsMultipleScenes { tools.append(Self.newWindowAction()) }
+        return [UIMenu(options: .displayInline, children: viewGroup), UIMenu(options: .displayInline, children: fileGroup),
+                UIMenu(options: .displayInline, children: findGroup), UIMenu(options: .displayInline, children: tools),
+                UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
                 writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu(),
                 UIMenu(options: .displayInline, children: [settings])]
+    }
+
+    /// What a bar button shows when the bar runs out of room and it
+    /// collapses into the ••• menu: nothing (an empty inline group), for
+    /// the buttons whose commands the ••• menu lists itself.
+    static var notInOverflowMenu: UIMenuElement { UIMenu(options: .displayInline, children: []) }
+
+    /// The ••• menu's Preview submenu: the preview modes side by side, on
+    /// every width (the bar's eye and Focus Preview buttons may or may not
+    /// fit, and never add themselves to the menu). Nil without a preview.
+    private func previewSubmenu() -> UIMenu? {
+        guard hasEditorPreview else { return nil }
+        let toggle = UIAction(title: String(localized: "Preview"), image: UIImage(systemName: "eye"),
+                              state: previewOn ? .on : .off) { [weak self] _ in
+            self?.togglePreview()
+        }
+        toggle.accessibilityIdentifier = "editor.menu.preview"
+        let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
+            self?.toggleFocusPreview()
+        }
+        focus.accessibilityIdentifier = "editor.menu.focusPreview"
+        let children: [UIMenuElement] = [toggle, focus] + [detachPreviewAction()].compactMap { $0 }
+        return UIMenu(title: String(localized: "Preview"), image: UIImage(systemName: previewOn ? "eye.fill" : "eye"), children: children)
     }
 
     /// The preview button's long-press menu.
@@ -827,7 +858,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     /// The overflow menu in Focus Preview: back to the text, the text size.
-    private func focusMenuItems() -> [UIMenuElement] {
+    func focusMenuItems() -> [UIMenuElement] {
         let back = UIAction(title: String(localized: "Exit Focus Preview"), image: UIImage(systemName: "arrow.down.right.and.arrow.up.left")) { [weak self] _ in
             self?.exitFocusPreview()
         }
