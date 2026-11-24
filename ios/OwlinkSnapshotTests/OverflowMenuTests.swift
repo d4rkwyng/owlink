@@ -210,34 +210,48 @@ final class OverflowMenuTests: XCTestCase {
     /// layout and document: with no bar button collapsed into it, and with
     /// every set of buttons a narrow bar may collapse by their priorities
     /// (BarCollapse), Undo and Redo included: once one of Undo, Redo and
-    /// Edit / Done has gone, one row of the three, first.
+    /// Edit / Done has gone, one row of the three, first. Before iOS 27
+    /// (no priorities, modelled on any runtime) any set may go, in any
+    /// order: each of the three collapsed is its own row, first.
     func testTopLevelOrderPerLayout() {
-        defer { WindowSupport.overrideForTests = nil }
-        for layout in Self.layouts {
-            for ext in ["md", "txt"] {
-                let name = "\(layout.name) \(ext)"
-                let editor = editor(layout, ext)
-                let preview = ext == "md" ? "Preview ›" : "View ›"
-                let want = [["Save", "Share & Export ›"], ["Find ›", preview, "Ask Cedric"], ["More ›", "Settings"]]
-                XCTAssertEqual(topGroups(editor.moreMenuItems()), want, "\(name), none collapsed")
-                XCTAssertEqual(topGroups(editor.moreMenuItems()).flatMap { $0 }.first, "Save", "\(name): Save first")
-                let bar = Array((editor.navigationItem.rightBarButtonItems ?? []).reversed())
-                let editTitle = bar.first { $0.accessibilityIdentifier == "editor.edit" }?.title
-                let historyRow = (["Undo", "Redo"] + [editTitle].compactMap { $0 }).joined(separator: " | ")
-                let sets = BarCollapse.collapseSets(bar)
-                XCTAssertGreaterThan(sets.count, 2, "\(name): the bar's priorities give no order to collapse in")
-                for set in sets {
-                    let gone = set.compactMap(\.accessibilityIdentifier)
-                    let history = gone.contains { ["editor.undo", "editor.redo", "editor.edit"].contains($0) }
-                    let lead = history ? [historyRow] : []
-                    let collapsed = narrowMenu(editor, set).children
-                    XCTAssertEqual(topGroups(collapsed), lead.map { [$0] } + want, "\(name), collapsed \(gone)")
-                    let rows = topGroups(collapsed).flatMap { $0 }
-                    XCTAssertEqual(Array(rows.prefix(lead.count + 1)), lead + ["Save"], "\(name), collapsed \(gone): Save first (after the history row)")
-                    assertNoDuplicates(narrowMenu(editor, set), "\(name), collapsed \(gone)")
+        defer { WindowSupport.overrideForTests = nil; EditorViewController.barPrioritiesOverrideForTests = nil }
+        for priorities in BarCollapse.priorityPaths {
+            EditorViewController.barPrioritiesOverrideForTests = priorities
+            for layout in Self.layouts {
+                for ext in ["md", "txt"] {
+                    let name = "\(layout.name) \(ext), priorities \(priorities)"
+                    let editor = editor(layout, ext)
+                    let preview = ext == "md" ? "Preview ›" : "View ›"
+                    let want = [["Save", "Share & Export ›"], ["Find ›", preview, "Ask Cedric"], ["More ›", "Settings"]]
+                    XCTAssertEqual(topGroups(editor.moreMenuItems()), want, "\(name), none collapsed")
+                    XCTAssertEqual(topGroups(editor.moreMenuItems()).flatMap { $0 }.first, "Save", "\(name): Save first")
+                    let bar = Array((editor.navigationItem.rightBarButtonItems ?? []).reversed())
+                    let editTitle = bar.first { $0.accessibilityIdentifier == "editor.edit" }?.title
+                    let historyRow = (["Undo", "Redo"] + [editTitle].compactMap { $0 }).joined(separator: " | ")
+                    let sets = BarCollapse.collapseSets(bar)
+                    if priorities {
+                        XCTAssertGreaterThan(sets.count, 2, "\(name): the bar's priorities give no order to collapse in")
+                    } else {
+                        XCTAssertEqual(sets.count, 1 << bar.count, "\(name): without priorities any set may collapse")
+                    }
+                    for set in sets {
+                        let gone = set.compactMap(\.accessibilityIdentifier)
+                        let historyGone = set.filter { ["editor.undo", "editor.redo", "editor.edit"].contains($0.accessibilityIdentifier ?? "") }
+                        let lead: [String]
+                        if priorities {
+                            lead = historyGone.isEmpty ? [] : [historyRow]
+                        } else {
+                            lead = historyGone.map { $0.title ?? "?" }
+                        }
+                        let collapsed = narrowMenu(editor, set).children
+                        XCTAssertEqual(topGroups(collapsed), lead.map { [$0] } + want, "\(name), collapsed \(gone)")
+                        let rows = topGroups(collapsed).flatMap { $0 }
+                        XCTAssertEqual(Array(rows.prefix(lead.count + 1)), lead + ["Save"], "\(name), collapsed \(gone): Save first (after the history rows)")
+                        assertNoDuplicates(narrowMenu(editor, set), "\(name), collapsed \(gone)")
+                    }
+                    assertNoDuplicates(overflowMenu(editor, collapsed: true), "\(name), every button collapsed")
+                    assertNoDuplicates(overflowMenu(editor, collapsed: false), "\(name), none collapsed")
                 }
-                assertNoDuplicates(overflowMenu(editor, collapsed: true), "\(name), every button collapsed")
-                assertNoDuplicates(overflowMenu(editor, collapsed: false), "\(name), none collapsed")
             }
         }
     }

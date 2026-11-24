@@ -727,8 +727,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // read-only showed no way to edit it. Collapsed, the two are one
         // row of the menu (historyMenuRow, Undo's), with Edit / Done in it
         // too: Redo never goes before Undo, nor Edit before both, so the
-        // row is there whenever one of them has gone.
-        if #available(iOS 27.0, *) {
+        // row is there whenever one of them has gone. Before iOS 27 there
+        // are no priorities: UIKit may collapse any of them in any order,
+        // so each keeps its own entry (updateHistoryMenuRow).
+        if Self.barPrioritiesInForce, #available(iOS 27.0, *) {
             items.forEach { $0.visibilityPriority = .standard }
             undoItem.visibilityPriority = .standard
             redoItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.standard.rawValue + 1)
@@ -860,6 +862,20 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// collapses into the ••• menu: nothing (an empty inline group), for
     /// the buttons whose commands the ••• menu lists itself.
     static var notInOverflowMenu: UIMenuElement { UIMenu(options: .displayInline, children: []) }
+
+    /// Whether the bar's visibility priorities (iOS 27) order what a narrow
+    /// bar collapses: Undo first, then Redo, Edit / Done last. Only then
+    /// can Undo's collapsed row carry Redo and Edit (historyMenuRow); before
+    /// iOS 27 UIKit collapses the bar's buttons in an order of its own, so
+    /// each keeps its own entry. The one place this is decided; tests set
+    /// `barPrioritiesOverrideForTests` to run either path on any runtime.
+    static var barPrioritiesInForce: Bool {
+        if let forced = barPrioritiesOverrideForTests { return forced }
+        if #available(iOS 27.0, *) { return true }
+        return false
+    }
+    /// Tests only: nil follows the runtime (barPrioritiesInForce).
+    static var barPrioritiesOverrideForTests: Bool?
 
     /// The ••• menu's Preview submenu: the preview modes side by side, on
     /// every width (the bar's eye and Focus Preview buttons may or may not
@@ -4188,16 +4204,35 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// a 402-pt iPhone showed nine rows, Undo and Redo a row each). Undo's
     /// button carries the row; Redo's and Edit's add nothing: by priority
     /// they collapse only after Undo's, so the row is there when they go.
+    /// Without the priorities (before iOS 27: barPrioritiesInForce) any of
+    /// the three may go alone, first: each is then its own entry, so none
+    /// is ever collapsed out of reach.
     private func updateHistoryMenuRow() {
-        undoItem.menuRepresentation = historyMenuRow()
-        redoItem.menuRepresentation = Self.notInOverflowMenu
-        editItem.menuRepresentation = Self.notInOverflowMenu
+        if Self.barPrioritiesInForce {
+            undoItem.menuRepresentation = historyMenuRow()
+            redoItem.menuRepresentation = Self.notInOverflowMenu
+            editItem.menuRepresentation = Self.notInOverflowMenu
+        } else {
+            let h = historyActions()
+            undoItem.menuRepresentation = h.undo
+            redoItem.menuRepresentation = h.redo
+            editItem.menuRepresentation = h.edit ?? Self.notInOverflowMenu
+        }
     }
 
     /// Undo, Redo (and Edit / Done, in read mode's use) as one row of small
     /// items (as the edit menu's Cut / Copy / Paste), enabled as the bar's
     /// buttons are.
     func historyMenuRow() -> UIMenu {
+        let h = historyActions()
+        let row = UIMenu(options: .displayInline, children: [h.undo, h.redo] + (h.edit.map { [$0] } ?? []))
+        row.preferredElementSize = .small
+        return row
+    }
+
+    /// Undo, Redo and Edit / Done (nil: read mode not in use) as menu
+    /// actions, enabled as the bar's buttons are.
+    private func historyActions() -> (undo: UIAction, redo: UIAction, edit: UIAction?) {
         let undo = UIAction(title: String(localized: "Undo"), image: UIImage(systemName: "arrow.uturn.backward"),
                             attributes: undoItem.isEnabled ? [] : .disabled) { [weak self] _ in
             self?.textView.undoManager?.undo()
@@ -4208,7 +4243,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self?.textView.undoManager?.redo()
         }
         redo.accessibilityIdentifier = "editor.menu.redo"
-        var children: [UIMenuElement] = [undo, redo]
         let edit: (title: String, symbol: String)?
         switch editGate.button {
         case .none: edit = nil
@@ -4222,11 +4256,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 self?.toggleEditing()
             }
             a.accessibilityIdentifier = "editor.menu.edit"
-            children.append(a)
+            return (undo, redo, a)
         }
-        let row = UIMenu(options: .displayInline, children: children)
-        row.preferredElementSize = .small
-        return row
+        return (undo, redo, nil)
     }
 
     /// Sets one reason the text is read-only, and the text view to match.

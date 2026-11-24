@@ -14,15 +14,27 @@ enum BarCollapse {
     /// Every set of bar buttons UIKit may collapse, by visibility priority:
     /// a button goes only once every button of a lower priority has gone
     /// (buttons of one priority in any order), from none to all of them.
-    static func collapseSets(_ items: [UIBarButtonItem]) -> [[UIBarButtonItem]] {
-        guard #available(iOS 27.0, *) else { return [[], items] }
+    /// Without priorities in force (before iOS 27, or the editor's
+    /// barPrioritiesInForce off) any set, in any order: every subset.
+    static func collapseSets(_ items: [UIBarButtonItem],
+                             prioritiesInForce: Bool = EditorViewController.barPrioritiesInForce) -> [[UIBarButtonItem]] {
         var sets: [[UIBarButtonItem]] = []
         for mask in 0..<(1 << items.count) {
             let set = items.indices.filter { mask & (1 << $0) != 0 }
             let kept = items.indices.filter { mask & (1 << $0) == 0 }
-            let closed = set.allSatisfy { i in kept.allSatisfy { items[$0].visibilityPriority.rawValue >= items[i].visibilityPriority.rawValue } }
+            var closed = true
+            if prioritiesInForce, #available(iOS 27.0, *) {
+                closed = set.allSatisfy { i in kept.allSatisfy { items[$0].visibilityPriority.rawValue >= items[i].visibilityPriority.rawValue } }
+            }
             if closed { sets.append(set.map { items[$0] }) }
         }
         return sets
+    }
+
+    /// The paths to check on this runtime: without priorities (iOS 17–26's,
+    /// modelled on any runtime) and, on iOS 27, with them.
+    static var priorityPaths: [Bool] {
+        if #available(iOS 27.0, *) { return [false, true] }
+        return [false]
     }
 }

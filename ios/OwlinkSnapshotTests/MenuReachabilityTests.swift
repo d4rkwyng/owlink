@@ -243,16 +243,28 @@ final class MenuReachabilityTests: XCTestCase {
     /// their priorities, whatever the width: 375, 402, 440 pt or a split).
     /// Eight at most: the eighth is the one row the history buttons make,
     /// first (Undo, Redo, and Edit / Done on an iPhone in read mode).
+    /// Before iOS 27 (no priorities, modelled on any runtime: Codex b18
+    /// re-check 2) UIKit may collapse any set: each of Undo, Redo and Edit
+    /// collapsed is its own row, so none is ever out of reach.
     func testTopLevelHasAtMostSevenRows() {
-        for sc in Self.sizeClasses {
-            for ext in Self.documents {
-                let editor = editor(sc, ext)
-                let none = topLevelRows(editor.moreMenuItems())
-                XCTAssertLessThanOrEqual(none.count, 7, "\(key(sc, ext)), none collapsed: \(none.count) rows: \(none)")
-                let sets = collapseSets(editor)
-                XCTAssertGreaterThan(sets.count, 2, "\(key(sc, ext)): the bar's priorities give no order to collapse in")
-                for set in sets {
-                    assertRowBudget(editor, collapsed: set, "\(key(sc, ext)), collapsed \(set.compactMap(\.accessibilityIdentifier))")
+        defer { EditorViewController.barPrioritiesOverrideForTests = nil }
+        for priorities in BarCollapse.priorityPaths {
+            EditorViewController.barPrioritiesOverrideForTests = priorities
+            for sc in Self.sizeClasses {
+                for ext in Self.documents {
+                    let editor = editor(sc, ext)
+                    let name = "\(key(sc, ext)), priorities \(priorities)"
+                    let none = topLevelRows(editor.moreMenuItems())
+                    XCTAssertLessThanOrEqual(none.count, 7, "\(name), none collapsed: \(none.count) rows: \(none)")
+                    let sets = collapseSets(editor)
+                    if priorities {
+                        XCTAssertGreaterThan(sets.count, 2, "\(name): the bar's priorities give no order to collapse in")
+                    } else {
+                        XCTAssertEqual(sets.count, 1 << barItems(editor).count, "\(name): without priorities any set may collapse")
+                    }
+                    for set in sets {
+                        assertRowBudget(editor, collapsed: set, priorities: priorities, "\(name), collapsed \(set.compactMap(\.accessibilityIdentifier))")
+                    }
                 }
             }
         }
@@ -260,18 +272,34 @@ final class MenuReachabilityTests: XCTestCase {
 
     /// The row budget with `collapsed` in the ••• menu: seven rows, eight
     /// at most, the eighth the history row (Undo and Redo side by side,
-    /// with Edit / Done), first; and every collapsed button's command still
-    /// in the menu, by touch.
-    private func assertRowBudget(_ editor: EditorViewController, collapsed: [UIBarButtonItem], _ name: String, file: StaticString = #filePath, line: UInt = #line) {
+    /// with Edit / Done), first. Without priorities: seven rows plus one
+    /// for each of Undo, Redo and Edit collapsed, each a row of its own,
+    /// first. Either way every collapsed button's command still in the
+    /// menu, by touch, enabled as the button is.
+    private func assertRowBudget(_ editor: EditorViewController, collapsed: [UIBarButtonItem], priorities: Bool, _ name: String, file: StaticString = #filePath, line: UInt = #line) {
         let rows = topLevelRows(collapsed.map(overflowRepresentation) + editor.moreMenuItems())
         let history = rows.filter { $0.contains("Undo") || $0.contains("Redo") || ["Edit", "Done", "Read Only"].contains($0) }
-        XCTAssertLessThanOrEqual(history.count, 1, "\(name): Undo, Redo and Edit take \(history.count) rows: \(rows)", file: file, line: line)
-        XCTAssertLessThanOrEqual(rows.count, history.isEmpty ? 7 : 8, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
-        if !history.isEmpty { XCTAssertEqual(rows.first, history.first, "\(name): the history row not first: \(rows)", file: file, line: line) }
-        let menu = Set(titles(UIMenu(children: collapsed.map(overflowRepresentation) + editor.moreMenuItems())))
-        for item in collapsed where ["editor.undo", "editor.redo", "editor.edit"].contains(item.accessibilityIdentifier ?? "") {
-            let title = item.title ?? item.accessibilityLabel ?? "?"
-            XCTAssertTrue(menu.contains(title), "\(name): \(title) collapsed and not in the ••• menu: \(rows)", file: file, line: line)
+        let gone = collapsed.filter { ["editor.undo", "editor.redo", "editor.edit"].contains($0.accessibilityIdentifier ?? "") }
+        if priorities {
+            XCTAssertLessThanOrEqual(history.count, 1, "\(name): Undo, Redo and Edit take \(history.count) rows: \(rows)", file: file, line: line)
+            XCTAssertLessThanOrEqual(rows.count, history.isEmpty ? 7 : 8, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
+        } else {
+            XCTAssertEqual(history.count, gone.count, "\(name): one row for each of Undo, Redo and Edit collapsed: \(rows)", file: file, line: line)
+            XCTAssertLessThanOrEqual(rows.count, 7 + gone.count, "\(name): \(rows.count) rows: \(rows)", file: file, line: line)
         }
+        XCTAssertEqual(Array(rows.prefix(history.count)), history, "\(name): the history rows not first: \(rows)", file: file, line: line)
+        let menu = UIMenu(children: collapsed.map(overflowRepresentation) + editor.moreMenuItems())
+        let titled = Set(titles(menu))
+        for item in gone {
+            let title = item.title ?? item.accessibilityLabel ?? "?"
+            XCTAssertTrue(titled.contains(title), "\(name): \(title) collapsed and not in the ••• menu: \(rows)", file: file, line: line)
+            let action = allActions(menu).first { $0.title == title }
+            XCTAssertEqual(action.map { !$0.attributes.contains(.disabled) }, item.isEnabled, "\(name): \(title) in the ••• menu not enabled as its button is", file: file, line: line)
+        }
+    }
+
+    private func allActions(_ element: UIMenuElement) -> [UIAction] {
+        if let menu = element as? UIMenu { return menu.children.flatMap(allActions) }
+        return (element as? UIAction).map { [$0] } ?? []
     }
 }
