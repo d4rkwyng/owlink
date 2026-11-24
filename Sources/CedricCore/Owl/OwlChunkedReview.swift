@@ -157,11 +157,12 @@ public enum OwlChunkedReview {
                 let text = group.joined(separator: "\n")
                 let lines = Set(cited)
                 let words = substanceInOrder(text)
+                let claimed = claim(text)
                 let negated = negates(text)
                 // Dedupe only against earlier answers, so two distinct findings
                 // on the same line in one part are both kept.
                 let repeated = !lines.isEmpty && lines.isSubset(of: seen) && earlier.contains {
-                    !$0.lines.isDisjoint(with: lines) && says(words, in: $0.words) && $0.negated == negated
+                    !$0.lines.isDisjoint(with: lines) && says(claimed, in: $0.words) && $0.negated == negated
                 }
                 if !repeated { output.append(text) }
                 thisAnswer.append((lines, words, negated))
@@ -223,6 +224,19 @@ public enum OwlChunkedReview {
 
     /// `substance`, in the order the text says it.
     public static func substanceInOrder(_ text: String) -> [String] {
+        let lower = withoutCitations(text).lowercased()
+        let ns = lower as NSString
+        return token.matches(in: lower, range: NSRange(location: 0, length: ns.length)).compactMap { m -> String? in
+            let word = ns.substring(with: m.range)
+            if word.contains(where: \.isNumber) { return word }
+            guard word.count >= 4, !filler.contains(word) else { return nil }
+            return String(word.prefix(5))
+        }
+    }
+
+    /// `text` with its citations' numbers ("line 12", "lines 4–9", "#12",
+    /// a leading "12:") blanked out, its length kept.
+    private static func withoutCitations(_ text: String) -> String {
         let blanked = NSMutableString(string: text)
         let all = NSRange(location: 0, length: blanked.length)
         var cites = OwlCitations.find(text).map(\.range)
@@ -239,14 +253,7 @@ public enum OwlChunkedReview {
             cites.append(number)
         }
         for r in cites { blanked.replaceCharacters(in: r, with: String(repeating: " ", count: r.length)) }
-        let lower = (blanked as String).lowercased()
-        let ns = lower as NSString
-        return token.matches(in: lower, range: NSRange(location: 0, length: ns.length)).compactMap { m -> String? in
-            let word = ns.substring(with: m.range)
-            if word.contains(where: \.isNumber) { return word }
-            guard word.count >= 4, !filler.contains(word) else { return nil }
-            return String(word.prefix(5))
-        }
+        return blanked as String
     }
 
     // A word, or a number with its decimal point or thousands comma
@@ -262,28 +269,55 @@ public enum OwlChunkedReview {
     /// finding is kept (a finding repeated is better than one dropped).
     /// Every word counts, a word said again included: "client trusts
     /// server and server trusts client" says more than "client trusts
-    /// server". Only a finding that is one claim said over, whole ("Pipes
-    /// curl to sh. Pipes curl to sh."), is read as that claim once.
+    /// server", and "worker retries 3 times, then worker retries 3
+    /// times" more than "worker retries 3 times". `finding` is read whole;
+    /// a finding that is one sentence said over is read once by `claim`.
     public static func says(_ finding: [String], in passage: [String]) -> Bool {
         var rest = passage[...]
-        for word in once(finding) {
+        for word in finding {
             guard let at = rest.firstIndex(of: word) else { return false }
             rest = rest[rest.index(after: at)...]
         }
         return true
     }
 
-    /// `words` as the shortest run it is a whole repeat of ("pipes curl
-    /// pipes curl" is "pipes curl" twice); otherwise `words` itself.
-    static func once(_ words: [String]) -> [String] {
-        let n = words.count
-        guard n > 1 else { return words }
-        for length in 1...(n / 2) where n % length == 0 {
-            let unit = words[0..<length]
-            if stride(from: length, to: n, by: length).allSatisfy({ words[$0..<($0 + length)] == unit }) {
-                return Array(unit)
-            }
+    /// What a finding claims (`substanceInOrder`), for `says`: the
+    /// substance of its one sentence when it is that sentence said over,
+    /// word for word ("Pipes curl to sh. Pipes curl to sh."; a severity
+    /// label such as "Low:" and the citations aside), otherwise all it
+    /// says, every word in order. Only whole sentences, every word of
+    /// them, filler included, are compared: "Worker retries 3 times, then
+    /// worker retries 3 times" and "Worker retries 3 times. Then worker
+    /// retries 3 times." are two retry phases, not one said twice.
+    public static func claim(_ text: String) -> [String] {
+        let ns = text as NSString
+        var pieces: [String] = []
+        var start = 0
+        for m in sentenceEnd.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            pieces.append(ns.substring(with: NSRange(location: start, length: m.range.location - start)))
+            start = NSMaxRange(m.range)
         }
-        return words
+        pieces.append(ns.substring(from: start))
+        let sentences = pieces.map { piece -> (text: String, words: [String]) in
+            let lower = withoutCitations(piece).lowercased()
+            let unlabelled = severityLabel.stringByReplacingMatches(
+                in: lower, range: NSRange(location: 0, length: (lower as NSString).length), withTemplate: "")
+            let u = unlabelled as NSString
+            let words = token.matches(in: unlabelled, range: NSRange(location: 0, length: u.length)).map { u.substring(with: $0.range) }
+            return (piece, words)
+        }.filter { !$0.words.isEmpty }
+        if sentences.count > 1, sentences.allSatisfy({ $0.words == sentences[0].words }) {
+            return substanceInOrder(sentences[0].text)
+        }
+        return substanceInOrder(text)
     }
+
+    // The end of a sentence: ".", "!" or "?" before a space or the end
+    // ("1.25" is one number), or a row break.
+    private static let sentenceEnd = try! NSRegularExpression(pattern: #"[.!?]+(?=\s|$)\s*|\n\s*"#)
+
+    // What comes before what a finding says: its marker, a citation's
+    // "Line" (its number is blanked), a severity label ("- Line 12: Low: …").
+    private static let severityLabel = try! NSRegularExpression(pattern:
+        #"^[^\p{L}\p{N}]*(?:lines?\b[^\p{L}\p{N}]*)?(?:(?:low|medium|high|critical|info|warning)[^\p{L}\p{N}]*?:)?"#)
 }

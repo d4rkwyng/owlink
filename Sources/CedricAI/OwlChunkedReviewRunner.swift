@@ -318,7 +318,7 @@ public enum OwlChunkedReviewRunner {
         let answerNegates = negates(text)
         var missing: [String] = []
         for finding in findingGroups(findings.items) {
-            let words = substanceInOrder(finding)
+            let words = OwlChunkedReview.claim(finding)
             let lines = OwlCitations.lines(in: finding)
             let negated = negates(finding)
             let kept = lines.isEmpty

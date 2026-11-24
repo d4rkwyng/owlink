@@ -171,8 +171,34 @@ import CedricCore
         // A finding that is one claim said over is still that claim once.
         #expect(OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.", "- Line 12: Pipes curl to sh. Pipes curl to sh."])
                 == "- Line 12: pipes curl to sh.")
-        #expect(OwlChunkedReview.says(["pipes", "curl", "pipes", "curl"], in: ["pipes", "curl"]))
+        #expect(OwlChunkedReview.claim("- Line 12: Low: Pipes curl to sh.\n  Pipes curl to sh.") == ["pipes", "curl"])
+        #expect(!OwlChunkedReview.says(["pipes", "curl", "pipes", "curl"], in: ["pipes", "curl"]))
         #expect(!OwlChunkedReview.says(["clien", "trust", "serve", "serve", "trust", "clien"], in: ["clien", "trust", "serve"]))
+    }
+
+    /// A claim said twice over, with a word between ("then") that isn't
+    /// counted, is two claims: "Worker retries 3 times, then worker
+    /// retries 3 times" says more than "Worker retries 3 times", in
+    /// merging and in the combined answer. 0.5.4's follow-up 7 read any
+    /// finding that was a run said over as that run once.
+    @Test func aFindingThatSaysAClaimTwiceIsNotThatClaimOnce() {
+        let one = "- Line 7: Worker retries 3 times."
+        for both in ["- Line 7: Worker retries 3 times, then worker retries 3 times.",
+                     "- Line 7: Worker retries 3 times. Then worker retries 3 times."] {
+            #expect(OwlChunkedReview.mergeFindings([one, both]) == one + "\n" + both, "\(both)")
+            #expect(OwlChunkedReview.mergeFindings([both, one]) == both, "\(both)")
+            let findings = OwlChunkedReviewRunner.Findings(text: both, items: both, verdict: nil)
+            for answer in ["Line 7: Worker retries 3 times.", "Line 7: the worker retries 3 times on failure."] {
+                #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + both, "\(answer)")
+            }
+            let restated = "Line 7: the worker retries 3 times, and then the worker retries 3 times again."
+            #expect(OwlChunkedReviewRunner.keepFindings(restated, findings) == restated, "\(both)")
+        }
+        // One claim said over whole is still that claim once.
+        let pipes = "- Line 12: Pipes curl to sh. Pipes curl to sh."
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.", pipes]) == "- Line 12: pipes curl to sh.")
+        let findings = OwlChunkedReviewRunner.Findings(text: pipes, items: pipes, verdict: nil)
+        #expect(OwlChunkedReviewRunner.keepFindings("Line 12 pipes curl to sh.", findings) == "Line 12 pipes curl to sh.")
     }
 
     /// "L2" and "L3" are what a finding says, not digits to strip: "Line
