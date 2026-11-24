@@ -70,4 +70,60 @@ import Testing
         try FileManager.default.removeItem(at: u)
         #expect(DiskStamp.status(known: known, at: u) == .missing)
     }
+
+    /// A file opened through a symbolic link (a chain of two here, as for
+    /// dotfiles linked into a repo) is stamped by its target, the file a
+    /// save writes: before 0.5.4's QA the stamp was the link's own, so
+    /// another app rewriting the target was never seen and ⌘S wrote over it.
+    @Test func aStampThroughALinkSeesTheTargetChange() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("cedric-stamp-link-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("target.md")
+        try Data("target v1".utf8).write(to: target)
+        try fm.setAttributes([.modificationDate: t], ofItemAtPath: target.path)
+        let hop = dir.appendingPathComponent("hop.md"), link = dir.appendingPathComponent("link.md")
+        try fm.createSymbolicLink(atPath: hop.path, withDestinationPath: "target.md")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "hop.md")
+
+        let known = try #require(DiskStamp.of(link))
+        #expect(known == DiskStamp.of(target), "the link's stamp is the target's")
+        #expect(known.size == 9)
+        #expect(DiskStamp.status(known: known, at: link) == .same)
+
+        // Another app rewrites the target (the links aren't touched).
+        try Data("target v3 written by another app".utf8).write(to: target)
+        try fm.setAttributes([.modificationDate: t.addingTimeInterval(5)], ofItemAtPath: target.path)
+        #expect(DiskStamp.changed(known: known, current: DiskStamp.of(link)))
+        #expect(DiskStamp.status(known: known, at: link) == .changed)
+    }
+
+    /// The link pointed at another file while the tab is open: ⌘S would
+    /// write that file, so it is a change (before, the retarget went
+    /// unseen and the tab's text replaced the other file). A link left
+    /// pointing nowhere is a missing file, not a change.
+    @Test func aRetargetedLinkIsAChangeAndADanglingOneIsMissing() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("cedric-stamp-retarget-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        let real = dir.appendingPathComponent("real.md"), other = dir.appendingPathComponent("other.md")
+        try Data("real file".utf8).write(to: real)
+        try fm.setAttributes([.modificationDate: t], ofItemAtPath: real.path)
+        try Data("other file, older".utf8).write(to: other)
+        try fm.setAttributes([.modificationDate: t.addingTimeInterval(-3600)], ofItemAtPath: other.path)
+        let link = dir.appendingPathComponent("a.md")
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "real.md")
+        let known = try #require(DiskStamp.of(link))
+
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "other.md")
+        #expect(DiskStamp.status(known: known, at: link) == .changed)
+
+        try fm.removeItem(at: link)
+        try fm.createSymbolicLink(atPath: link.path, withDestinationPath: "gone.md")
+        #expect(DiskStamp.of(link) == nil)
+        #expect(DiskStamp.status(known: known, at: link) == .missing)
+    }
 }

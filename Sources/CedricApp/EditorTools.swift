@@ -302,7 +302,7 @@ extension EditorWindowController {
             setText(d.text)
         }
         doc.markSaved()
-        doc.fileModified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        doc.fileModified = DiskStamp.of(url)?.modified
         updateTitle()
         setEditable(false)
         // setText already dropped cards when the buffer was replaced. If the
@@ -347,7 +347,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.fileModified = doc.fileURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        doc.fileModified = doc.fileURL.flatMap { DiskStamp.of($0)?.modified }
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {

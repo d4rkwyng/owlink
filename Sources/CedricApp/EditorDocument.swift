@@ -137,7 +137,7 @@ final class EditorDocument {
             throw LoadError.unreadable(url, error)
         }
         guard let decoded = TextCodec.decode(data, as: encoding) else { throw LoadError.notText(url) }
-        let mod = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        let mod = DiskStamp.of(url)?.modified
         return (decoded, mod)
     }
 

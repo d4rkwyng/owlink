@@ -16,8 +16,15 @@ public struct DiskStamp: Equatable, Sendable {
     /// The file's stamp now; nil if it can't be read (gone, no access).
     /// A fresh URL each time: URL caches resource values, so asking the
     /// document's own URL again can return the date from before a write.
+    ///
+    /// Through a symbolic link this is the stamp of the file a save would
+    /// write (its target, SafePaths.writeTarget, as DocumentWrite uses):
+    /// Foundation reports the link's own date and size, so before 0.5.4's
+    /// QA another app rewriting the target, or the link being pointed at
+    /// another file, was never seen and ⌘S wrote over it. A link whose
+    /// target has gone has no stamp (the file is missing).
     public static func of(_ url: URL) -> DiskStamp? {
-        let fresh = URL(fileURLWithPath: url.path)
+        let fresh = URL(fileURLWithPath: SafePaths.writeTarget(for: url).path)
         guard let v = try? fresh.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else { return nil }
         return DiskStamp(modified: v.contentModificationDate, size: v.fileSize)
     }
