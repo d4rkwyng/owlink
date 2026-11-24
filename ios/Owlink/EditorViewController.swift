@@ -823,7 +823,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // and Edit / Done (read mode, on an iPhone) side by side. Eight
         // rows at most, whatever the bar's width.
         let share = UIAction(title: String(localized: "Share…"), image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
-            self?.shareDocumentCopy()
+            self?.shareFromMenu()
         }
         share.accessibilityIdentifier = "editor.menu.share"
         let findNow = UIAction(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
@@ -3627,14 +3627,55 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// document's file); the snapshot tests read it.
     private(set) var sharedCopyItems: [URL] = []
 
+    /// How Share… puts its sheet up: presents it (tests stand in for a
+    /// presentation UIKit refuses).
+    var presentShareSheet: (_ presenter: UIViewController, _ sheet: UIViewController) -> Void = { presenter, sheet in
+        presenter.present(sheet, animated: true)
+    }
+
+    /// Share… from the ••• menu. The menu's action runs while the menu is
+    /// still on screen, closing; a sheet presented then can be refused
+    /// (b18 review). So the sheet waits for the menu to be gone and the
+    /// editor free (checked every 50 ms, two seconds at most), then goes
+    /// up as Share… does: its own checks decide, and leave no copy.
+    func shareFromMenu() {
+        afterMenuCloses { [weak self] in self?.shareDocumentCopy() }
+    }
+
+    private func afterMenuCloses(tries: Int = 40, _ work: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            let presenter = sheetPresenter()
+            let busy = menuShowing() || presenter.transitionCoordinator != nil
+                || presenter.isBeingPresented || presenter.isBeingDismissed
+            if busy, tries > 0 { afterMenuCloses(tries: tries - 1, work) } else { work() }
+        }
+    }
+
+    /// A menu (the ••• menu, a submenu) is up, or on its way out, in the
+    /// editor's window scene. UIKit hands out no menu state: its
+    /// container view is looked for by name.
+    private func menuShowing() -> Bool {
+        let windows = view.window?.windowScene?.windows ?? [view.window].compactMap { $0 }
+        func shows(_ v: UIView) -> Bool {
+            if v.isHidden || v.alpha < 0.01 { return false }
+            if NSStringFromClass(type(of: v)).contains("ContextMenuContainer") { return true }
+            return v.subviews.contains(where: shows)
+        }
+        return windows.contains { !$0.isHidden && shows($0) }
+    }
+
     /// Share…: a copy of the document as it is now (unsaved edits too), as
     /// a file named like the document, in the share sheet (as Notes' Send a
-    /// Copy). Byte for byte what Save would write (encoding, BOM, each
-    /// line's ending); the copy is removed when the sheet is done, and
-    /// none is made when the sheet can't be shown now.
+    /// Copy), in a popover from the ••• button on an iPad. Byte for byte
+    /// what Save would write (encoding, BOM, each line's ending). The copy
+    /// is removed when the sheet is done, and when the sheet goes without
+    /// saying so (UIKit refused it, or it was dismissed without its
+    /// handler): its handler holds the copy (ShareCopy), so the copy goes
+    /// with the sheet. None is made when the sheet can't be shown now.
     @objc func shareDocumentCopy() {
         // UIKit refuses a sheet while another is up or going, or off
-        // screen; the sheet's handler would never run to remove the copy.
+        // screen.
         let presenter = sheetPresenter()
         guard view.window != nil, presenter.viewIfLoaded?.window != nil, presenter.presentedViewController == nil,
               !presenter.isBeingDismissed, !presenter.isBeingPresented else { return }
@@ -3647,15 +3688,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         do {
             let data = try document.serialized(textView.text ?? "").data
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let copy = ShareCopy(directory: directory)
             let url = directory.appendingPathComponent(document.displayName)
             try data.write(to: url, options: .atomic)
             let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-            activity.completionWithItemsHandler = { _, _, _, _ in try? manager.removeItem(at: directory) }
+            activity.completionWithItemsHandler = { _, _, _, _ in copy.remove() }
             activity.view.accessibilityIdentifier = "editor.shareSheet"
             if let popover = activity.popoverPresentationController {
-                if let button = overflowButton() {
-                    popover.sourceView = button
-                    popover.sourceRect = button.bounds
+                if let more = navigationItem.overflowPresentationSource {
+                    popover.sourceItem = more
                 } else {
                     popover.sourceView = view
                     popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
@@ -3663,27 +3704,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 }
             }
             sharedCopyItems = [url]
-            presenter.present(activity, animated: true)
+            presentShareSheet(presenter, activity)
         } catch {
             try? manager.removeItem(at: directory)
             showExportError(error)
         }
-    }
-
-    /// The system's ••• button in the navigation bar, if it is there to
-    /// anchor a popover to (UIKit doesn't hand it out: found by its label).
-    private func overflowButton() -> UIView? {
-        guard let bar = navigationController?.navigationBar, bar.window != nil else { return nil }
-        let labels: Set<String> = ["More", String(localized: "More")]
-        func find(_ v: UIView) -> UIView? {
-            if v is UIControl || v.isAccessibilityElement, let label = v.accessibilityLabel, labels.contains(label),
-               !v.isHidden, v.alpha > 0, !v.bounds.isEmpty {
-                return v
-            }
-            for s in v.subviews { if let found = find(s) { return found } }
-            return nil
-        }
-        return find(bar)
     }
 
     private func showExportError(_ error: Error) {
@@ -4792,3 +4817,13 @@ final class EditorDocumentTextView: UITextView {
     }
 }
 
+/// Share…'s copy of the document (a folder in Caches), held by the share
+/// sheet's handler: removed when the sheet is done with it, and when the
+/// sheet is let go without that (refused by UIKit, dismissed without its
+/// handler): never left behind.
+final class ShareCopy {
+    let directory: URL
+    init(directory: URL) { self.directory = directory }
+    func remove() { try? FileManager.default.removeItem(at: directory) }
+    deinit { remove() }
+}

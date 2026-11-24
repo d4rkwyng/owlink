@@ -345,6 +345,83 @@ final class OverflowMenuTests: XCTestCase {
         XCTAssertEqual(shareCopies().subtracting(before2), [], "off screen: a copy is left in Caches")
     }
 
+    // MARK: Share… from the ••• menu (b18 review)
+
+    private func waitFor(_ seconds: Double, _ done: () -> Bool) {
+        let end = Date().addingTimeInterval(seconds)
+        while !done(), Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+    }
+
+    private func shareAction(_ editor: EditorViewController) throws -> UIAction {
+        try XCTUnwrap(actions(editor.moreMenuItems()).first { $0.accessibilityIdentifier == "editor.menu.share" })
+    }
+
+    /// Share… chosen in the ••• menu: nothing is written or presented from
+    /// the menu's callback (the menu is still closing then); the sheet
+    /// comes up after, from the ••• button (a popover on an iPad). Let go
+    /// without its handler running (dismissed by the app, not by an
+    /// activity), it takes its copy with it.
+    func testShareFromMenuPresentsAfterTheMenuFromMore() throws {
+        let editor = editor(Self.layouts[1], "md")
+        defer { WindowSupport.overrideForTests = nil }
+        let before = shareCopies()
+        try shareAction(editor).performWithSender(nil, target: nil)
+        XCTAssertEqual(editor.sharedCopyItems, [], "Share… wrote its copy from the menu's callback")
+        XCTAssertNil(editor.presentedViewController, "Share… presented from the menu's callback")
+        waitFor(10) { editor.navigationController?.presentedViewController is UIActivityViewController }
+        let file = try XCTUnwrap(editor.sharedCopyItems.first, "no copy made")
+        try autoreleasepool {
+            let activity = try XCTUnwrap(editor.navigationController?.presentedViewController as? UIActivityViewController, "no share sheet")
+            if let popover = activity.popoverPresentationController, let more = editor.navigationItem.overflowPresentationSource {
+                XCTAssertTrue(popover.sourceItem === more, "the share popover isn't anchored to the ••• button")
+            }
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                XCTAssertNotNil(editor.navigationItem.overflowPresentationSource, "no ••• button to anchor to")
+                XCTAssertNotNil(activity.popoverPresentationController?.sourceItem, "the share popover has no anchor")
+            }
+            XCTAssertTrue(FileManager.default.fileExists(atPath: file.path), "the copy is gone while the sheet is up")
+            activity.dismiss(animated: false)
+        }
+        waitFor(5) { !FileManager.default.fileExists(atPath: file.path) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "the copy stays after the sheet was dismissed")
+        XCTAssertEqual(shareCopies().subtracting(before), [], "a copy is left in Caches")
+    }
+
+    /// Share… chosen in the ••• menu, and UIKit refuses the sheet (it never
+    /// comes up, its handler never runs): no copy is left behind.
+    func testShareFromMenuRefusedLeavesNoCopy() throws {
+        let editor = editor(Self.layouts[0], "txt")
+        defer { WindowSupport.overrideForTests = nil }
+        var offered = 0
+        editor.presentShareSheet = { _, _ in offered += 1 } // refused: not presented
+        let before = shareCopies()
+        try shareAction(editor).performWithSender(nil, target: nil)
+        waitFor(5) { offered > 0 }
+        XCTAssertEqual(offered, 1, "Share… never got to present its sheet")
+        let file = try XCTUnwrap(editor.sharedCopyItems.first, "no copy made")
+        waitFor(5) { !FileManager.default.fileExists(atPath: file.path) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "a refused share sheet left its copy")
+        XCTAssertEqual(shareCopies().subtracting(before), [], "a copy is left in Caches")
+        XCTAssertNil(editor.presentedViewController)
+    }
+
+    /// Share… chosen in the ••• menu just as an alert comes up: the sheet
+    /// isn't shown over it, and no copy is left behind.
+    func testShareFromMenuWithAnAlertUpLeavesNoCopy() throws {
+        let editor = editor(Self.layouts[0], "txt")
+        defer { WindowSupport.overrideForTests = nil }
+        let before = shareCopies()
+        try shareAction(editor).performWithSender(nil, target: nil)
+        let alert = UIAlertController(title: "Owls", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        editor.present(alert, animated: false)
+        RunLoop.main.run(until: Date().addingTimeInterval(3))
+        XCTAssertFalse(editor.navigationController?.presentedViewController is UIActivityViewController, "the share sheet over the alert")
+        waitFor(5) { shareCopies().subtracting(before).isEmpty }
+        XCTAssertEqual(shareCopies().subtracting(before), [], "alert up: a copy is left in Caches")
+        editor.dismiss(animated: false)
+    }
+
     /// Without a preview (plain text) the view toggles take Preview's
     /// place at the top, as View ›; no title twice, collapsed or not, on
     /// any width (an iPad in a split is compact too).
