@@ -80,10 +80,13 @@ final class OwlHub {
         ai.documentClosed(tab.doc.id)
     }
 
+    /// A context waiting for the feed timer is dropped (over the cap).
+    func dropPendingFeed(_ id: UUID) { aiPending[id] = nil }
+
     private func feedAI(_ tab: EditorWindowController) {
-        // Automatic checks off (Intel's default): nothing is fed, no context
-        // is built, except while an asked-for check runs for this tab (an
-        // edit cancels it).
+        // Automatic checks off (Intel's default), or the document over the
+        // auto-review cap: nothing is fed, no context is built, except
+        // while an asked-for check runs for this tab (an edit cancels it).
         guard ai.isActive, ai.wantsContext(for: tab.doc.id), !ai.isPaused, enabled, tab.owl != nil, !tab.owlIdleForSpeed else { return }
         aiPending[tab.doc.id] = WeakTab(tab: tab)
         guard aiFeedTimer?.isValid != true else { return }
@@ -134,12 +137,14 @@ final class OwlHub {
 
     /// "Ask AI Now" in the owl's popover: one AI check of what's in view,
     /// whatever the schedule (the only way the AI is asked when automatic
-    /// checks are off). Not in large mode.
+    /// checks are off). Not in large mode. Over the auto-review cap only
+    /// once the user confirmed (`confirmAskingCedric`).
     var canAskAI: Bool { enabled && ai.canCheckNow }
 
     @discardableResult
     func askAI(in tab: EditorWindowController) -> Bool {
         guard canAskAI, tab.owl != nil, !tab.owlIdleForSpeed else { return false }
+        guard !tab.autoReviewCapped || tab.autoReviewAskConfirmed else { return false }
         return ai.checkNow(tab.owlContextWindow().context)
     }
 

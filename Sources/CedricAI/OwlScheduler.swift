@@ -7,6 +7,11 @@ import CedricCore
 ///   document has been open and untouched for `minIdle` (10 s in the app);
 /// - never for a document marked large (`setLargeDocument`): its text
 ///   isn't sent and, for the built-in engine, no model is loaded;
+/// - never on its own for a document over the auto-review cap
+///   (`setAutoReviewCapped`, `AutoReviewCap`: 100 KB or 2,000 lines): no
+///   timer is armed for it, so no model is loaded because it was opened,
+///   saved or left idle. `checkNow` (the user asking, after the app's
+///   confirmation) still works;
 /// - never when the text has fewer than `HintPrompt.minimumHintCharacters`
 ///   non-whitespace characters: an empty document has nothing to check,
 ///   and asking invents a problem;
@@ -60,6 +65,8 @@ public actor OwlScheduler {
         /// Empty, or under `HintPrompt.minimumHintCharacters` non-whitespace
         /// characters: never asked, by any engine.
         case tooShort
+        /// Over `AutoReviewCap`: never asked on its own; `checkNow` only.
+        case autoReviewCapped
     }
 
     public enum Outcome: Sendable, Equatable {
@@ -92,6 +99,8 @@ public actor OwlScheduler {
     var docs: [UUID: Doc] = [:]
     /// Documents in large mode: ignored until unmarked.
     public private(set) var largeDocuments: Set<UUID> = []
+    /// Documents over the auto-review cap: no timer, only `checkNow`.
+    public private(set) var autoReviewCapped: Set<UUID> = []
     public private(set) var appActive = true
     /// How many requests were started, for tests and the budget log.
     public private(set) var requestCount = 0
@@ -119,6 +128,21 @@ public actor OwlScheduler {
         let now = clock.now
         let id = context.documentID
         if largeDocuments.contains(id) { return }
+        if autoReviewCapped.contains(id) {
+            // Never armed. Only an asked-for check's context is kept up to
+            // date, so an edit still cancels it.
+            guard var doc = docs[id] else { return }
+            if context.editGeneration != doc.context.editGeneration {
+                doc.lastEdit = now
+                doc.inflight?.cancel()
+                doc.inflight = nil
+            }
+            doc.context = context
+            doc.timer?.cancel()
+            doc.timer = nil
+            docs[id] = doc
+            return
+        }
         if var doc = docs[id] {
             let isEdit = context.editGeneration != doc.context.editGeneration
             doc.context = context
@@ -149,12 +173,30 @@ public actor OwlScheduler {
         }
     }
 
+    /// Over the auto-review cap (`AutoReviewCap`) or back under it. Going
+    /// over (on open, or an edit made it so, which cancels a check anyway)
+    /// forgets the document, cancelling its timer and anything in flight,
+    /// as for large mode. Back under: its next context is a fresh open.
+    public func setAutoReviewCapped(_ id: UUID, _ capped: Bool) {
+        if capped {
+            guard !autoReviewCapped.contains(id) else { return }
+            docs[id]?.timer?.cancel()
+            docs[id]?.inflight?.cancel()
+            docs[id] = nil
+            autoReviewCapped.insert(id)
+        } else {
+            guard autoReviewCapped.remove(id) != nil else { return }
+            if docs[id]?.inflight == nil { docs[id]?.timer?.cancel(); docs[id] = nil }
+        }
+    }
+
     /// From NSApplication didBecomeActive / didResignActive. Going inactive
     /// cancels everything in flight; coming back re-arms the timers.
     public func setAppActive(_ active: Bool) {
         appActive = active
         for id in docs.keys {
             if active {
+                if autoReviewCapped.contains(id) { continue }
                 if docs[id]?.askedGeneration != docs[id]?.context.editGeneration {
                     arm(id, after: config.pauseDelay)
                 }
@@ -172,6 +214,7 @@ public actor OwlScheduler {
 
     public func documentClosed(_ id: UUID) {
         largeDocuments.remove(id)
+        autoReviewCapped.remove(id)
         docs[id]?.timer?.cancel()
         docs[id]?.inflight?.cancel()
         docs[id] = nil
@@ -186,7 +229,7 @@ public actor OwlScheduler {
         for id in Array(docs.keys) {
             docs[id]?.timer?.cancel()
             docs[id]?.timer = nil
-            guard config.automatic, let doc = docs[id], doc.inflight == nil else { continue }
+            guard config.automatic, !autoReviewCapped.contains(id), let doc = docs[id], doc.inflight == nil else { continue }
             guard doc.askedGeneration != doc.context.editGeneration else { continue }
             arm(id, after: remainingWait(doc, now))
         }
@@ -200,8 +243,10 @@ public actor OwlScheduler {
 
     /// Asked for (the user clicked "Ask AI Now"): starts a request for
     /// `context` now, whatever the typing pause, the interval, the power
-    /// state or `minIdle` say. Still never for a large document or one
-    /// with almost no text, and an edit still cancels it. False when it
+    /// state or `minIdle` say, and also for a document over the
+    /// auto-review cap (the app confirms with the user first). Still never
+    /// for a large document or one with almost no text, and an edit still
+    /// cancels it. False when it
     /// didn't start (large, too short, or a request for this generation
     /// is already running).
     @discardableResult
@@ -228,6 +273,7 @@ public actor OwlScheduler {
     /// the power source, so tests drive it with fakes.
     public func gate(for id: UUID) -> Gate {
         if largeDocuments.contains(id) { return .largeDocument }
+        if autoReviewCapped.contains(id) { return .autoReviewCapped }
         guard let doc = docs[id] else { return .unknownDocument }
         if !HintPrompt.hasEnoughText(doc.context.text) { return .tooShort }
         let now = clock.now
@@ -254,7 +300,7 @@ public actor OwlScheduler {
     private func arm(_ id: UUID, after delay: TimeInterval) {
         docs[id]?.timer?.cancel()
         docs[id]?.timer = nil
-        guard config.automatic else { return }   // asked for only
+        guard config.automatic, !autoReviewCapped.contains(id) else { return }   // asked for only
         let clock = self.clock
         docs[id]?.timer = Task { [weak self] in
             do { try await clock.sleep(seconds: delay) } catch { return }
@@ -271,7 +317,7 @@ public actor OwlScheduler {
         case .fire: start(id)
         case .typing(let r), .throttled(let r): arm(id, after: r)
         case .power: arm(id, after: config.minInterval)   // re-check the battery later
-        case .inactive, .alreadyAsked, .busy, .unknownDocument, .largeDocument, .tooShort: break
+        case .inactive, .alreadyAsked, .busy, .unknownDocument, .largeDocument, .tooShort, .autoReviewCapped: break
         }
         return g
     }

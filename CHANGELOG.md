@@ -4,6 +4,14 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- **Recent hints can be opened again.** Under “Recent hints” in Cedric’s popover, click an entry (or Tab to it and press Return or Space) to show that hint again in his bubble, with Fix it and Show Me if the text it was about is still there. If the text has changed, or the hint was about a file you have since closed, you still see its title and detail. VoiceOver reads each entry as a button with its time, title and detail.
+
+### Changed
+- **Cedric doesn’t review large files on his own.** In a file over 100 KB or 2,000 lines, Cedric no longer checks with the AI on open, save or a pause in typing, and doesn’t pop up typo or grammar hints by himself, so opening a big log never loads a model. His popover says auto-review is off for the file, with its size. Ask Cedric, Ask AI Now, Check Script for Risks and Check Grammar with Cedric still work: the first time you ask about such a file, Cedric names its size and asks you to confirm, with Cancel as the default. His rules hints, which only read the part of the file you are looking at, carry on. The limits are fixed: 100 KB covers almost any source file, note or Markdown document, and 2,000 lines catches dense logs that are smaller than that. Large-file mode (25 MB, or a line over 20,000 characters) is unchanged, and Turn On Anyway there doesn’t turn automatic review back on.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security

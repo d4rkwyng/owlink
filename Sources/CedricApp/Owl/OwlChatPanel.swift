@@ -670,7 +670,13 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run
     /// it" after a high finding or a partial review.
     func checkScriptSafety() {
-        guard !running, let tab, let id = docID else { return }
+        guard !running, let tab, docID != nil else { return }
+        // Over the auto-review cap: only once the user confirmed.
+        guard !tab.autoReviewCapped || tab.autoReviewAskConfirmed else {
+            tab.confirmAskingCedric(over: panel) { [weak self] in self?.checkScriptSafety() }
+            return
+        }
+        guard let id = docID else { return }
         let text = tab.textView.string
         let language = tab.doc.language
         discardProposal(nil)
@@ -728,6 +734,16 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
              scan: String? = nil, scanHasHigh: Bool = false, scanTruncated: Bool = false, showQuestion: Bool = true,
              inline: Bool = false) {
         guard !running, let tab, let id = docID else { return }
+        // Over the auto-review cap: asked for, so it may run, once the
+        // user has confirmed (the size, and that auto-review is off). The
+        // whole-file chunked review starts only from here.
+        guard !tab.autoReviewCapped || tab.autoReviewAskConfirmed else {
+            tab.confirmAskingCedric(over: panel) { [weak self] in
+                self?.ask(question: question, action: action, selection: selection, scope: forced, scan: scan,
+                          scanHasHigh: scanHasHigh, scanTruncated: scanTruncated, showQuestion: showQuestion, inline: inline)
+            }
+            return
+        }
         discardProposal(nil)
         forcedVerdict = nil
         verdictStream = nil
@@ -1302,9 +1318,12 @@ extension EditorWindowController {
 
     func checkScriptSafety() {
         guard canCheckScriptSafety else { NSSound.beep(); return }
-        let p = chatPanel()
-        p.show()
-        p.checkScriptSafety()
+        confirmAskingCedric { [weak self] in
+            guard let self else { return }
+            let p = self.chatPanel()
+            p.show()
+            p.checkScriptSafety()
+        }
     }
 }
 
@@ -1313,7 +1332,7 @@ extension EditorWindowController {
     var canCheckGrammarWithAI: Bool { grammar.mayCheckWithAI }
     func checkGrammarWithAI() {
         guard canCheckGrammarWithAI else { NSSound.beep(); return }
-        grammar.checkWithAI(userAsked: true)
+        confirmAskingCedric { [weak self] in self?.grammar.checkWithAI(userAsked: true) }
     }
 }
 

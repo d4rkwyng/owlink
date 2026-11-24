@@ -181,6 +181,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var largeOverride = false
     /// An edit made the document large; applied on the next turn.
     var largePending = false
+    /// Over the auto-review cap (AutoReviewCapMode.swift): Cedric does
+    /// nothing on his own for this document. Not large mode.
+    var autoReviewCapReason: AutoReviewCap.Reason?
+    /// The user confirmed asking Cedric about this capped document (until
+    /// its text is replaced: open, reload, restore).
+    var autoReviewAskConfirmed = false
     var isLargeDocument: Bool { largeReason != nil }
     let largeBar = LargeDocumentBar()
     /// A file that looks binary (BinaryFile.swift): nil for text.
@@ -436,6 +442,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         storage.endEditing()
         PerfTrace.mark("set_text_storage")
         lineIndex = LineIndex(storage.string as NSString)
+        updateAutoReviewCap(newText: true)
         fences.invalidateAll()
         folding?.reset()
         PerfTrace.mark("line_index")
@@ -597,6 +604,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         updateStatus()
         schedulePreview()
         outlineTextChanged()
+        // Before the owl hears of the edit: a paste may take it over the cap.
+        updateAutoReviewCap(newText: false)
         if let owl {
             owl.noteTyping()
             OwlHub.shared.activity(in: self)

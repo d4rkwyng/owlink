@@ -62,9 +62,10 @@ final class EditorSpelling {
         minInterval: DevEnvironment.values["CEDRIC_TYPO_INTERVAL"].flatMap(Double.init) ?? 600,
         typingPause: 3)
 
-    /// Whether the typo offer may look at this tab at all (cheap, no text read).
+    /// Whether the typo offer may look at this tab at all (cheap, no text
+    /// read). Never over the auto-review cap: the offer is automatic.
     var mayOffer: Bool {
-        guard let tab, tab.owl != nil, !tab.extrasPaused, SpellScope.isProse(tab.doc.language), checksThisDocument,
+        guard let tab, tab.owl != nil, !tab.extrasPaused, !tab.autoReviewCapped, SpellScope.isProse(tab.doc.language), checksThisDocument,
               Settings.shared.checkSpellingWhileTyping else { return false }
         return true
     }

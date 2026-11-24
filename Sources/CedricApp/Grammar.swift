@@ -258,8 +258,9 @@ final class EditorGrammar {
         NotificationCenter.default.post(name: .cedricGrammarChecked, object: tab)
         if prose { offerHint(userAsked: false) }
         // Automatic AI grammar only where automatic AI checks are on (never
-        // on Intel by default), at most once per the AI's interval.
-        if prose, Settings.shared.owlChat, OwlHub.shared.ai.isActive, OwlHub.shared.ai.isAutomatic,
+        // on Intel by default), at most once per the AI's interval, and
+        // never over the auto-review cap.
+        if prose, !tab.autoReviewCapped, Settings.shared.owlChat, OwlHub.shared.ai.isActive, OwlHub.shared.ai.isAutomatic,
            Date().timeIntervalSince(lastAIPass ?? .distantPast) >= AIStore.load().minInterval {
             checkWithAI(userAsked: false)
         }
@@ -331,10 +332,12 @@ final class EditorGrammar {
     }
 
     /// The owl's bubble for the issue nearest after the caret in view, if
-    /// the rate limit and the user's choices allow.
+    /// the rate limit and the user's choices allow. Over the auto-review
+    /// cap only when asked (the popover's Grammar Hint).
     @discardableResult
     func offerHint(userAsked: Bool) -> Bool {
         guard let tab, let owl = tab.owl, !tab.owlIdleForSpeed, owl.bubble == nil, userAsked || !owl.chatBusy else { return false }
+        guard userAsked || !tab.autoReviewCapped else { return false }
         let hub = OwlHub.shared
         guard userAsked || (!hintsOffHere && !hub.coordinator.isQuiet && !hub.coordinator.never.contains(GrammarMap.globalID)) else { return false }
         // The owl's typing pause (3 s, CEDRIC_OWL_PAUSE in checks): never while typing.
@@ -361,7 +364,7 @@ final class EditorGrammar {
             userAsked || hub.coordinator.isEligible(GrammarMap.hint(i, textStart: 0), documentID: tab.doc.id)
         }) else { return false }
         let hint = GrammarMap.hint(issue, textStart: ctx.textStart)
-        hub.coordinator.markShown(hint, documentID: tab.doc.id)
+        hub.coordinator.markShown(hint, documentID: tab.doc.id, context: ctx)
         Self.policy.noteShown(Date())
         owl.present(hint, context: ctx)
         return true

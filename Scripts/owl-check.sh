@@ -9,8 +9,12 @@
 # log that gets none, an email typed key by key); and,
 # with a fake AI and automatic checks off (Intel's default), checks that
 # typing never asks the AI and "Ask AI Now" does; and that files opened
-# while Ask Cedric is key never become tabs of the panel. Snapshots go to the
-# directory given (default: a temp dir) for a look.
+# while Ask Cedric is key never become tabs of the panel. Recent hints in
+# the popover show a hint again (OwlHistoryCapCheck.swift), and a log over
+# the auto-review cap is never checked on its own: a quiet note, and Ask AI
+# Now only after a confirmation. Snapshots go to the directory given
+# (default: a temp dir) for a look; CEDRIC_OWL_CHECK_SHOTS=dir also copies
+# the recent-hint and cap snapshots there.
 #
 #   Scripts/owl-check.sh [out-dir]
 set -euo pipefail
@@ -125,6 +129,19 @@ CEDRIC_SESSION_DIR="$WORK/session-grammar-ai" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESS
 CEDRIC_OPEN="$WORK/letter.txt" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_CHAT=1 CEDRIC_GRAMMAR_FAKE=1 CEDRIC_GRAMMAR_PAUSE=0.3 \
 CEDRIC_AI=1 CEDRIC_AI_FAKE=0.3 CEDRIC_AI_AUTO=0 CEDRIC_AI_DEFAULTS="$SUITE" \
 CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/grammar-ai" CEDRIC_OWL_CHECK_CHAT=grammar "$BIN" || status=1
+# Recent hints, selectable (OwlHistoryCapCheck.runHistory): a doubled word,
+# shown again from the popover by a click, then by Return once stale.
+printf 'Fix the the bug.\n' > "$WORK/history.txt"
+CEDRIC_SESSION_DIR="$WORK/session-history" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/history.txt" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/history" CEDRIC_OWL_CHECK_HISTORY=1 "$BIN" || status=1
+# The auto-review cap (OwlHistoryCapCheck.runCap): a 6,132-line log of
+# about 730 KB, like the one that froze a Mac, with automatic AI checks on.
+awk 'BEGIN { for (i = 1; i <= 6132; i++) printf "[2026-11-20 03:%02d:%02d] [INFO] [agent] pwnagotchi: channel %2d, %4d aps, waiting for handshakes on wlan0mon %06d ......\n", (i/60)%60, i%60, i%14, i%977, i }' > "$WORK/pwnagotchi.log"
+CEDRIC_SESSION_DIR="$WORK/session-cap" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/pwnagotchi.log" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_SOURCE=rulesAndAI CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_AI=1 CEDRIC_AI_FAKE=0.3 CEDRIC_AI_AUTO=1 CEDRIC_AI_PAUSE=0.2 CEDRIC_AI_MIN_IDLE=0.2 CEDRIC_AI_INTERVAL=0.2 \
+CEDRIC_AI_DEFAULTS="$SUITE" CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/cap" CEDRIC_OWL_CHECK_CAP=1 "$BIN" || status=1
 defaults delete "$SUITE" >/dev/null 2>&1 || true
 rm -f "$HOME/Library/Preferences/$SUITE.plist"
 echo "owl-check: snapshots in $OUT"

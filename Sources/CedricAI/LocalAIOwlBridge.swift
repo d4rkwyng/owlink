@@ -55,6 +55,9 @@ public final class LocalAIOwlBridge {
     private var paused = false
     /// Documents in large mode, kept across scheduler rebuilds.
     public private(set) var largeDocuments: Set<UUID> = []
+    /// Documents over the auto-review cap (`AutoReviewCap`), kept across
+    /// scheduler rebuilds: never checked on their own, only when asked.
+    public private(set) var autoReviewCapped: Set<UUID> = []
 
     public init(registry: OwlProviderRegistry,
                 clock: any OwlClock = SystemClock(), power: any PowerSource = SystemPowerSource(),
@@ -130,6 +133,8 @@ public final class LocalAIOwlBridge {
         scheduler = sched
         let large = largeDocuments
         if !large.isEmpty { Task { for id in large { await sched.setLargeDocument(id, true) } } }
+        let capped = autoReviewCapped
+        if !capped.isEmpty { Task { for id in capped { await sched.setAutoReviewCapped(id, true) } } }
         providerName = provider.name
         engineTitle = Self.shortTitle(new.backend)
         registry.register(ScheduledAIEntry(name: provider.name), isAI: true)
@@ -146,11 +151,13 @@ public final class LocalAIOwlBridge {
 
     /// One line for the owl's tooltip and popover, e.g. "Last checked 12 s
     /// ago · Apple Intelligence · no suggestions"; nil while the AI is off.
-    public func statusLine(now: Date = Date()) -> String? {
+    /// `autoReviewCapped`: about a document over the auto-review cap, which
+    /// is only checked when asked, whatever the automatic setting.
+    public func statusLine(now: Date = Date(), autoReviewCapped: Bool = false) -> String? {
         guard let engine = engineTitle, scheduler != nil else { return nil }
         if paused { return "\(engine) · paused" }
         guard let last = lastCheck else {
-            return isAutomatic ? "\(engine) · waiting for a pause in typing" : "\(engine) · checks only when you ask"
+            return isAutomatic && !autoReviewCapped ? "\(engine) · waiting for a pause in typing" : "\(engine) · checks only when you ask"
         }
         return Self.statusLine(engine: engine, outcome: last.outcome, age: now.timeIntervalSince(last.date))
     }
@@ -226,8 +233,13 @@ public final class LocalAIOwlBridge {
 
     /// Whether the editor should pass this document's edits and scrolls
     /// on: always with automatic checks, else only while an asked-for
-    /// check runs for it.
-    public func wantsContext(for id: UUID) -> Bool { isAutomatic || asked.contains(id) }
+    /// check runs for it. A document over the auto-review cap only while
+    /// an asked-for check runs: opening, saving or leaving it idle never
+    /// arms a check (or loads a model) for it.
+    public func wantsContext(for id: UUID) -> Bool {
+        if asked.contains(id) { return true }
+        return isAutomatic && !autoReviewCapped.contains(id)
+    }
 
     /// Documents with an asked-for check started and not yet finished
     /// (set at once by `checkNow`, before the scheduler's onStart arrives).
@@ -238,7 +250,9 @@ public final class LocalAIOwlBridge {
 
     /// The user asked: one request for `context` now (never for a large
     /// document, and never when the text is empty or under
-    /// `HintPrompt.minimumHintCharacters` non-whitespace characters).
+    /// `HintPrompt.minimumHintCharacters` non-whitespace characters). A
+    /// document over the auto-review cap may be asked: the app confirms
+    /// with the user before calling this.
     /// False when nothing was started.
     @discardableResult
     public func checkNow(_ context: OwlContext) -> Bool {
@@ -272,8 +286,24 @@ public final class LocalAIOwlBridge {
         Task { await s.setLargeDocument(id, large) }
     }
 
+    /// Over the auto-review cap or back under it (`AutoReviewCap`): while
+    /// over, nothing is checked on its own and contexts are not passed on
+    /// (except during an asked-for check, so an edit cancels it).
+    public func setAutoReviewCapped(_ id: UUID, _ capped: Bool) {
+        if capped {
+            guard autoReviewCapped.insert(id).inserted else { return }
+        } else {
+            guard autoReviewCapped.remove(id) != nil else { return }
+        }
+        guard let s = scheduler else { return }
+        Task { await s.setAutoReviewCapped(id, capped) }
+    }
+
+    public func isAutoReviewCapped(_ id: UUID) -> Bool { autoReviewCapped.contains(id) }
+
     public func documentClosed(_ id: UUID) {
         largeDocuments.remove(id)
+        autoReviewCapped.remove(id)
         guard let s = scheduler else { return }
         Task { await s.documentClosed(id) }
     }
