@@ -31,15 +31,20 @@ public enum OwlCitations {
     /// Put after a citation of a line the model was not given.
     public static let flag = String(localized: " (not among the lines read)")
 
-    // "line 12", "lines 3-5", "lines 3 to 5", "lines 3, 7 and 9-11". A
-    // listed number after the first must end the list or a clause ("line
+    // "line 12", "lines 3-5", "lines 3 to 5", "lines 3, 7 and 9-11",
+    // "lines 3 and 31 describe". A number joined by "and" or "&" is always
+    // listed; one after a bare comma must end the list or a clause ("line
     // 5, 2026 changed" and "line 3, 100 items" cite only 5 and 3).
     private static let listed = try! NSRegularExpression(pattern:
-        #"(?i)\blines?\s+(\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?:\s*(?:,\s*and|,|and|&)\s*\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?=\s*(?:[,.;:)]|and\b|&|$)))*)\b"#,
+        #"(?i)\blines?\s+(\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?:\s*(?:,\s*and|and|&)\s*\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?\b|\s*,\s*\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?=\s*(?:[,.;:)]|and\b|&|$)))*)\b"#,
         options: [.anchorsMatchLines])
     private static let number = try! NSRegularExpression(pattern: #"(?i)(\d+)(?:\s*(?:[-–—]|to|through)\s*(\d+))?"#)
     // A quoted numbered line: "31| text".
     private static let quoted = try! NSRegularExpression(pattern: #"^\s*(?:[-*•]\s*)?(\d+)\|"#, options: [.anchorsMatchLines])
+    // A finding listed by its line: "- 31: text", "- 12-14: text" (a list
+    // item only, and a colon then a space: not a time like "12:30").
+    private static let item = try! NSRegularExpression(pattern: #"^\s*[-*•]\s*(\d+)(?:\s*[-–—]\s*(\d+))?:(?=\s|$)"#,
+                                                       options: [.anchorsMatchLines])
 
     /// Every citation in `text`, in order.
     public static func find(_ text: String) -> [Cite] {
@@ -60,6 +65,11 @@ public enum OwlCitations {
         for m in quoted.matches(in: text, range: all) {
             if let c = make(m.range(at: 1), NSRange(location: NSNotFound, length: 0), whole: m.range(at: 1)) { out.append(c) }
         }
+        for m in item.matches(in: text, range: all) {
+            let whole = NSRange(location: m.range(at: 1).location,
+                                length: NSMaxRange(m.range(at: m.range(at: 2).location == NSNotFound ? 1 : 2)) - m.range(at: 1).location)
+            if let c = make(m.range(at: 1), m.range(at: 2), whole: whole) { out.append(c) }
+        }
         return out.sorted { $0.range.location < $1.range.location }
     }
 
@@ -67,6 +77,32 @@ public enum OwlCitations {
     public static func lines(in text: String) -> IndexSet {
         var s = IndexSet()
         for c in find(text) where c.lines.lowerBound >= 1 { s.insert(integersIn: c.lines) }
+        return s
+    }
+
+    /// The lines `text` vouches for: every citation in it except those
+    /// already marked with `flag` (a note that cites a line it wasn't given
+    /// is no evidence for that line).
+    public static func evidence(in text: String) -> IndexSet {
+        let ns = text as NSString
+        var s = IndexSet()
+        for c in find(text) where c.lines.lowerBound >= 1 {
+            let end = NSMaxRange(c.range)
+            let flagged = end + (flag as NSString).length <= ns.length
+                && ns.substring(with: NSRange(location: end, length: (flag as NSString).length)) == flag
+            if !flagged { s.insert(integersIn: c.lines) }
+        }
+        return s
+    }
+
+    /// The line numbers of quoted numbered lines ("12| text") in a tool's
+    /// result: the lines a search or outline actually showed.
+    public static func quotedLines(in text: String) -> IndexSet {
+        let ns = text as NSString
+        var s = IndexSet()
+        for m in quoted.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            if let n = Int(ns.substring(with: m.range(at: 1))), n >= 1 { s.insert(n) }
+        }
         return s
     }
 

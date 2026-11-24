@@ -48,6 +48,24 @@ import Testing
         #expect(OwlCitations.filter("Nothing cited here.", allowed: IndexSet()).changed == false)
     }
 
+    @Test func numbersJoinedByAndAndListedFindingsAreRead() {
+        // "and" lists the next number whatever follows it.
+        #expect(OwlCitations.find("Lines 3 and 31 describe the walk.").map(\.lines) == [3...3, 31...31])
+        #expect(OwlCitations.find("Lines 3 & 31-33 describe it.").map(\.lines) == [3...3, 31...33])
+        let f = OwlCitations.filter("Lines 3 and 31 describe the walk.", allowed: Self.lines1to18)
+        #expect(f.text == "Lines 3 and 31\(OwlCitations.flag) describe the walk.")
+        // A finding listed by its line number.
+        #expect(OwlCitations.find("- 31: an unchecked download\n* 12-14: eval of input").map(\.lines) == [31...31, 12...14])
+        let items = OwlCitations.filter("- 12: First\n- 31: Second", allowed: Self.lines1to18)
+        #expect(items.text == "- 12: First" && items.dropped == [31...31])
+        // Still not citations: L2, a date after a comma, a time in a list item.
+        #expect(OwlCitations.find("L2 regularization. - 12:30 standup").isEmpty)
+        #expect(OwlCitations.find("On line 5, 2026 changed it.").map(\.lines) == [5...5])
+        // A flagged citation is no evidence for its line.
+        #expect(OwlCitations.evidence(in: "Line 4 and line 31\(OwlCitations.flag) differ.") == IndexSet(integer: 4))
+        #expect(OwlCitations.quotedLines(in: "12| a match\n40| another\n(3 more lines match)") == IndexSet([12, 40]))
+    }
+
     @Test func ordinaryProseIsNeverCutOnlyFlagged() {
         // Selection 40–60; paragraphs (not list items) about other lines keep their words.
         let allowed = IndexSet(integersIn: 40...60)
