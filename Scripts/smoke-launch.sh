@@ -41,8 +41,8 @@
 #   5. No new crash report (.ips or .crash) anywhere under
 #      ~/Library/Logs/DiagnosticReports or /Library/Logs/DiagnosticReports
 #      (Retired/ included) whose name starts with Cedric, CedricApp,
-#      Owlink, llama, or any executable, bundle or framework name in the
-#      zip. New = a file name not in a listing taken before the first run
+#      Owlink, or any app-like bundle or Contents/MacOS executable name in
+#      the zip (not a framework's: those crash under the host's name). New = a file name not in a listing taken before the first run
 #      (by name, not mtime: ReportCrash touches old reports and moves some
 #      into Retired/); an empty listing (a clean runner) works too. It
 #      waits up to 10 s for ReportCrash after the app exits. The script
@@ -169,10 +169,13 @@ ENV_CLEAN=(env)
 for v in $(env | sed -n 's/^\(CEDRIC_[A-Z_]*\)=.*/\1/p'); do ENV_CLEAN+=(-u "$v"); done
 ENV_CLEAN+=(CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1)
 
-# Every name a crash report from this zip could carry: the owl's and the
-# app's names, each bundle's CFBundleExecutable and CFBundleName, every
-# file in a Contents/MacOS folder, and every framework in the app.
-NAMES=(Cedric CedricApp Owlink llama)
+# Every process name a crash report from this zip could carry: the owl's
+# and the app's names, each app-like bundle's (*/Contents/Info.plist)
+# CFBundleExecutable and CFBundleName, and every file in a Contents/MacOS
+# folder. Not framework names: a crash inside llama.framework is reported
+# under the process that loaded it (Cedric), and a bare "llama" would
+# also match another program's llama-*.ips (llama-server, llama-cli).
+NAMES=(Cedric CedricApp Owlink)
 while IFS= read -r n; do [ -n "$n" ] && NAMES+=("$n"); done < <(
     {
         find "$APP" -name Info.plist -path '*/Contents/Info.plist' -type f -print0 | while IFS= read -r -d '' pl; do
@@ -180,7 +183,6 @@ while IFS= read -r n; do [ -n "$n" ] && NAMES+=("$n"); done < <(
             plutil -extract CFBundleName raw -o - "$pl" 2>/dev/null || true
         done
         find "$APP" -path '*/Contents/MacOS/*' -type f -exec basename {} \;
-        find "$APP" -name '*.framework' -type d -exec basename {} .framework \;
     } | sort -u)
 echo "crash-report names: $(printf '%s\n' "${NAMES[@]}" | sort -u | paste -sd ' ' -)"
 REPORT_DIRS=("$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports)
