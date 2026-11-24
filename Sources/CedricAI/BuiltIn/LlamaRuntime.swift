@@ -93,15 +93,35 @@ public struct LlamaRuntime: BuiltInRuntime {
 
 /// Set when a load is given up on. llama.cpp polls it from its loader
 /// thread (progress callback) and from graph compute (abort callback).
+/// The abort callback also asks the request running now (`current`):
+/// a cancelled question stops its prefill or decode between graph nodes,
+/// not only between batches.
 final class LlamaLoadStop: @unchecked Sendable {
     private let lock = NSLock()
     private var flag = false
+    private var current: LlamaRequestStop?
     var isSet: Bool { lock.withLock { flag } }
     func set() { lock.withLock { flag = true } }
+    /// The request whose cancel aborts a decode now (nil between requests).
+    func begin(_ request: LlamaRequestStop?) { lock.withLock { current = request } }
+    /// What the context's abort callback answers.
+    var shouldAbort: Bool { lock.withLock { flag || (current?.isSet ?? false) } }
     var pointer: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
     static func from(_ p: UnsafeMutableRawPointer?) -> LlamaLoadStop? {
         p.map { Unmanaged<LlamaLoadStop>.fromOpaque($0).takeUnretainedValue() }
     }
+}
+
+/// One generate call's cancel. Each request has its own, so a new request
+/// starting can never clear an older one's cancel (0.5.2 had one flag per
+/// model, reset by every `generate`: a question cancelled while it waited
+/// or prefilled ran on to its end once the next request, the owl's or the
+/// user's, began, and the next question waited behind it).
+final class LlamaRequestStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var isSet: Bool { lock.withLock { flag } }
+    func set() { lock.withLock { flag = true } }
 }
 
 /// A loaded GGUF model plus one context. Every llama.cpp call happens on
@@ -117,8 +137,6 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     private var context: OpaquePointer?
     private let vocab: OpaquePointer?
     private let template: String?
-    private let cancelLock = NSLock()
-    private var cancelFlag = false
 
     /// What the KV cache holds (sequence 0), token by token: the last
     /// request's prompt and the tokens decoded after it. nil when unknown
@@ -156,10 +174,12 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         var cp = L.llama_context_default_params!()
         cp.n_ctx = UInt32(LlamaRuntime.contextTokens)
         cp.n_batch = UInt32(LlamaRuntime.batchTokens)
-        // True aborts a decode: only ever after the watchdog gave up on
-        // this load. Backends check it between graph nodes (best effort on
+        // True aborts a decode: after the watchdog gave up on this load,
+        // or (below) the running request was cancelled. Backends check it between graph nodes (best effort on
         // Metal: a command buffer already on the GPU runs to its end).
-        cp.abort_callback = { data in LlamaLoadStop.from(data)?.isSet ?? false }
+        // Also true once the running request is cancelled (Stop, a new
+        // question, the panel closed): its prefill stops mid-batch.
+        cp.abort_callback = { data in LlamaLoadStop.from(data)?.shouldAbort ?? false }
         cp.abort_callback_data = stop.pointer
         #if arch(x86_64)
         let threads = Int32(max(1, Self.physicalCores()))
@@ -233,7 +253,7 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     /// Frees every loaded model synchronously (exit, app termination).
     static func freeAllNow() {
         let models = liveLock.withLock { Array(live.values) }
-        for m in models { m.cancelLock.withLock { m.cancelFlag = true } }
+        for m in models { m.stop.set() }
         let free = { for m in models { m.freeOnQueue() } }
         if DispatchQueue.getSpecific(key: queueKey) != nil { free() } else { queue.sync(execute: free) }
     }
@@ -249,23 +269,34 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     }
 
     private func generate(_ request: GenerationRequest, stream: (@Sendable (String) -> Void)?) async throws -> GenerationResult {
-        cancelLock.withLock { cancelFlag = false }
+        // This request's own cancel: set by its task's cancellation, read
+        // by `run` between tokens and batches and by llama.cpp's abort
+        // callback inside a decode. Never cleared by a later request.
+        let cancel = LlamaRequestStop()
+        if Task.isCancelled { throw BuiltInError.cancelled }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 Self.queue.async { [self] in
-                    do { cont.resume(returning: try run(request, stream: stream)) } catch { cont.resume(throwing: error) }
+                    // Cancelled while it waited for the queue: never starts.
+                    guard !cancel.isSet else { cont.resume(throwing: BuiltInError.cancelled); return }
+                    stop.begin(cancel)
+                    defer { stop.begin(nil) }
+                    do { cont.resume(returning: try run(request, cancel: cancel, stream: stream)) } catch {
+                        // An aborted decode returns an error code: it is the cancel.
+                        cont.resume(throwing: cancel.isSet ? BuiltInError.cancelled : error)
+                    }
                 }
             }
         } onCancel: {
-            cancelLock.withLock { cancelFlag = true }
+            cancel.set()
         }
     }
 
-    private var isCancelled: Bool { cancelLock.withLock { cancelFlag } }
-
     // MARK: On `queue`
 
-    private func run(_ request: GenerationRequest, stream: (@Sendable (String) -> Void)? = nil) throws -> GenerationResult {
+    private func run(_ request: GenerationRequest, cancel: LlamaRequestStop,
+                     stream: (@Sendable (String) -> Void)? = nil) throws -> GenerationResult {
+        var isCancelled: Bool { cancel.isSet || stop.isSet }
         guard let context, let vocab else { throw BuiltInError.notInstalled }
         let prompt = formatChat(request.conversation)
         var tokens = tokenize(prompt)
