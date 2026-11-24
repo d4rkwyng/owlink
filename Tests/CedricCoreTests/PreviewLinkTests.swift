@@ -480,6 +480,27 @@ import Testing
         #expect(m.url.count == ExternalLinkText.maxURL && m.url.hasPrefix("mailto:a@example.com") && m.url.contains("…"))
     }
 
+    // Grok 4.7 review (0.5.2 parity, SHOULD-FIX 1): a long mailto keeps
+    // its address, through "?", whole; only the query is cut, so the cut
+    // can't hide the recipient's domain behind an attacker-chosen tail.
+    @Test func aLongMailtoKeepsTheAddressWhole() {
+        let address = "mailto:support@" + String(repeating: "a", count: 70) + ".evil.example,"
+            + String(repeating: "x", count: 60) + "support@apple.com"
+        let m = text(address + "?subject=" + String(repeating: "s", count: 300) + "&body=end")
+        #expect(m.url.hasPrefix(address + "?"), "\(m.url)")
+        #expect(m.url.contains(".evil.example") && m.url.contains("…") && m.url.hasSuffix("body=end"), "\(m.url)")
+        #expect(m.url.count == address.count + 24, "the query gets at least 24: \(m.url.count)")
+        // Under the limit: the query keeps what the address leaves.
+        let short = "mailto:someone@example.com"
+        let s = text(short + "?body=" + String(repeating: "b", count: 400))
+        #expect(s.url.count == ExternalLinkText.maxURL && s.url.hasPrefix(short + "?body=") && s.url.contains("…"), "\(s.url)")
+        // A long address with no query: shown whole.
+        let bare = "mailto:" + String(repeating: "r", count: 200) + "@evil.example"
+        #expect(text(bare).url == bare)
+        // As 0.5.2: a short mailto is whole.
+        #expect(text("mailto:a@example.com?subject=hi").url == "mailto:a@example.com?subject=hi")
+    }
+
     // Grok 4.7 review: a homograph host (Cyrillic а in `аpple.com`) is
     // shown as the punycode the opened URL has, and flagged with its
     // Unicode reading; the user-name warning names the punycode too.

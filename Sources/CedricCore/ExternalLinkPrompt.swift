@@ -41,7 +41,8 @@ public struct ExternalLinkGate: Equatable, Sendable {
 /// - `url`: the whole URL, or for a long one the URL cut in the middle
 ///   (`…`): the scheme, the host and its port are always kept whole, a
 ///   long user name is cut, and the path, query and fragment share what
-///   is left, their start and their end.
+///   is left, their start and their end. A `mailto:` keeps its address
+///   (up to `?`) whole and cuts only the query.
 public struct ExternalLinkText: Equatable, Sendable {
     public let host: String?
     public let unicodeHost: String?
@@ -80,6 +81,14 @@ public struct ExternalLinkText: Equatable, Sendable {
 
     static func shortened(_ raw: String, _ c: URLComponents?, maxURL: Int) -> String {
         guard raw.count > maxURL else { return raw }
+        if c?.rangeOfHost == nil, raw.lowercased().hasPrefix("mailto:") {
+            // The address (through "?") is who the mail goes to: kept
+            // whole, so a cut can't hide the recipient's domain behind an
+            // `…support@apple.com` tail; only the query is cut.
+            guard let q = raw.firstIndex(of: "?") else { return raw }
+            let head = String(raw[..<q])
+            return head + middle(raw[q...], max(maxURL - head.count, 24))
+        }
         guard let c, let h = c.rangeOfHost else { return middle(raw[...], maxURL) }
         // The head: scheme://[user@]host[:port], with a long user name cut.
         let authorityEnd = c.rangeOfPort?.upperBound ?? h.upperBound
