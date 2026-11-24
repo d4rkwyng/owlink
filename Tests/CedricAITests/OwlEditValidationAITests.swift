@@ -80,6 +80,24 @@ import CedricCore
         #expect(OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker()) == .clean)
     }
 
+    @Test func addingExportToAValidFileIsAWarningThroughJSC() throws {
+        for name in ["m.mjs", "m.js"] {
+            let s = OwlDocumentSnapshot(text: "const a = 1;\n", generation: 1, fileName: name, language: "javascript")
+            let p = try OwlEditProposal.anchored(find: "const a", replace: "export const a", in: s).get()
+            let c = OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker())
+            #expect(!c.failsValidation, "\(name)")
+            #expect(c.warnings.first?.message.hasPrefix("May not parse: ") == true, "\(name)")
+        }
+    }
+
+    @Test func aRegexAfterAConditionPassesThroughJSC() {
+        let after = "if (ok) /\\(/.test(s);\n"
+        #expect(JSCSyntaxChecker().syntaxError(in: after) == nil)
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "", after: after,
+                                           original: "", replacement: after, script: JSCSyntaxChecker())
+        #expect(c == .clean)
+    }
+
     @Test func jscSourceNeverRunsScripts() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let source = try String(contentsOf: root.appendingPathComponent("Sources/CedricAI/JSCSyntaxChecker.swift"), encoding: .utf8)

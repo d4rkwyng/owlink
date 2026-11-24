@@ -7,7 +7,7 @@ are its section below (`Scripts/changelog-section.sh`).
 ## [Unreleased]
 
 ### Added
-- **Cedric's proposed edits are checked before you can apply them.** The change is tried on a copy of the document first. If it breaks JSON, a property list, XML or JavaScript, leaves brackets unbalanced, or declares a JavaScript `const`/`let` from itself, Cedric is told once and asked to fix it; if it still fails, the card says “Doesn’t parse” (or “Won’t run”) with the reason and Apply stays off. Problems the document already had don't count against the edit.
+- **Cedric's proposed edits are checked before you can apply them.** The change is tried on a copy of the document first. If it breaks JSON, a property list, XML or JavaScript, leaves brackets unbalanced, or declares a JavaScript `const`/`let` from itself, Cedric is told once and asked to fix it; if it still fails, the card says “Doesn’t parse” (or “Won’t run”) with the reason and Apply stays off. Problems the document already had don't count against the edit: if it didn't parse before, the card only warns that the change may not parse, and Apply stays on.
 - **Warnings on proposed edits.** A card notes when a change assigns a variable to itself, changes a Swift `let` it can't change in place, or adds or drops a negation in prose (“May change the meaning: adds ‘not’”). Apply stays on.
 
 ### Changed

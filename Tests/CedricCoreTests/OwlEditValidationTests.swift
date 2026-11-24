@@ -157,7 +157,9 @@ import Testing
     }
 
     @Test func varSelfInitAndSelfAssignmentAreWarnings() {
-        let v = OwlEditValidation.ruleIssues(language: "javascript", original: "x();", replacement: "var x = x;", firstLine: 1)
+        // Self-initialisation runs on the whole document (selfInitializationIssues).
+        let v = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "x();", after: "var x = x;",
+                                           original: "x();", replacement: "var x = x;", script: nil).issues
         #expect(v.map(\.severity) == [.warning] && v.first?.check == .selfInitialization)
         let a = OwlEditValidation.ruleIssues(language: "c", original: "f();", replacement: "  total = total;", firstLine: 1)
         #expect(a.map(\.check) == [.selfAssignment] && a.first?.severity == .warning)
@@ -298,7 +300,9 @@ import Testing
         let after = "{ \"items\": [1, 2 }"
         let c = OwlEditValidation.validate(language: "json", fileName: "a.json", before: before, after: after,
                                            original: "[1, 2,]", replacement: "[1, 2", script: nil)
-        #expect(c.hardIssue?.check == .json)
+        // The document already failed: a warning ("may not parse"), Apply on.
+        #expect(!c.failsValidation && c.warnings.map(\.check) == [.json])
+        #expect(c.warnings.first?.message.hasPrefix("May not parse: ") == true)
         // The same complaint as before: still not the edit's.
         let same = OwlEditValidation.validate(language: "json", fileName: "a.json",
                                                before: "{\"a\": 1, \"b\": [1,]}\n", after: "{\"a\": 1, \"b\": [1,]}\n",
@@ -308,7 +312,7 @@ import Testing
         let script = FakeLineScript()
         let inEdit = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "x(\nok\nok\n", after: "x(\nok\nbad\n",
                                                 original: "ok", replacement: "bad", firstLine: 3, script: script)
-        #expect(inEdit.hardIssue?.check == .script && inEdit.hardIssue?.line == 3)
+        #expect(!inEdit.failsValidation && inEdit.warnings.first?.check == .script && inEdit.warnings.first?.line == 3)
     }
 
     @Test func aPartialFixOfABrokenJSONDocumentStaysClean() {
@@ -335,8 +339,9 @@ import Testing
                 == OwlEditValidation.comparable(OwlEditValidation.jsonError(after)!.message))
         let c = OwlEditValidation.validate(language: "json", fileName: "a.json", before: before, after: after,
                                            original: "1", replacement: "x", script: nil)
-        #expect(c.hardIssue?.check == .json)
-        #expect(c.hardIssue?.line == 1)
+        // Before already failed: a warning on line 1, Apply on.
+        #expect(!c.failsValidation && c.warnings.first?.check == .json)
+        #expect(c.warnings.first?.line == 1)
     }
 
     @Test func serializationErrorsHaveALineAndAnOffset() {
@@ -435,6 +440,87 @@ import Testing
         let bad = try Self.check(Self.xml, "xml", "note.xml", find: "<to>Tove</to>", replace: "<to>Tove</from>")
         #expect(bad.check.hardIssue?.check == .xml)
         #expect(bad.check.hardIssue?.line == 4)
+    }
+
+    // MARK: Codex regressions (0.5.3, third round)
+
+    @Test func selfInitIsCheckedOnTheWholeDocument() {
+        // Inside a comment or a string the replacement is not code: no hit.
+        for before in ["/* TODO */\nconst y = 1;\n", "const s = \"TODO\";\n"] {
+            let after = before.replacingOccurrences(of: "TODO", with: "const x = x;")
+            let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: before, after: after,
+                                               original: "TODO", replacement: "const x = x;", firstLine: 1, script: nil)
+            #expect(!c.issues.contains { $0.check == .selfInitialization }, "\(before)")
+            #expect(!c.failsValidation, "\(before)")
+        }
+        // Changing only `1` to `x` in `const x = 1;` makes it read itself: hard, on its line.
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "f();\nconst x = 1;\n",
+                                           after: "f();\nconst x = x;\n", original: "1", replacement: "x", firstLine: 2, script: nil)
+        #expect(c.hardIssue?.check == .selfInitialization && c.hardIssue?.line == 2)
+        // One that was already there isn't the edit's.
+        let old = OwlEditValidation.validate(language: "typescript", fileName: "a.ts", before: "let x = x;\nf(1);\n",
+                                             after: "let x = x;\nf(2);\n", original: "1", replacement: "2", firstLine: 2, script: nil)
+        #expect(!old.issues.contains { $0.check == .selfInitialization })
+    }
+
+    @Test func anXMLPartialRepairKeepingALaterMismatchKeepsApplyOn() {
+        // A whole-block replacement fixes <a></b> and leaves <c></d> as it was.
+        let before = "<r>\n<a></b>\n<c></d>\n</r>\n"
+        let after = "<r>\n<a></a>\n<c></d>\n</r>\n"
+        #expect(OwlEditValidation.xmlError(before) != nil && OwlEditValidation.xmlError(after) != nil)
+        let c = OwlEditValidation.validate(language: "xml", fileName: "a.xml", before: before, after: after,
+                                           original: before, replacement: after, firstLine: 1, script: nil)
+        #expect(!c.failsValidation)
+        #expect(c.issues.allSatisfy { $0.severity == .warning })
+        // On a well-formed document the same mismatch is the edit's: hard.
+        let good = "<r>\n<a></a>\n<c></c>\n</r>\n"
+        let hard = OwlEditValidation.validate(language: "xml", fileName: "a.xml", before: good, after: after,
+                                              original: "<c></c>", replacement: "<c></d>", firstLine: 3, script: nil)
+        #expect(hard.hardIssue?.check == .xml)
+    }
+
+    /// Rejects module syntax, like JavaScriptCore's classic-script check.
+    struct ClassicScript: OwlScriptSyntaxChecker {
+        func syntaxError(in script: String) -> OwlSyntaxError? {
+            script.contains("export") || script.contains("import ")
+                ? OwlSyntaxError(message: "Unexpected keyword 'export'", line: 1) : nil
+        }
+    }
+
+    @Test func addingExportToAValidFileIsOnlyAWarning() {
+        for file in ["a.js", "a.mjs"] {
+            let c = OwlEditValidation.validate(language: "javascript", fileName: file, before: "const a = 1;\n",
+                                               after: "export const a = 1;\n", original: "const", replacement: "export const",
+                                               script: ClassicScript())
+            #expect(!c.failsValidation, "\(file)")
+            #expect(c.warnings.map(\.check) == [.script], "\(file)")
+        }
+        // A .mjs file whose text the checker rejects for another reason: still only a warning.
+        let m = OwlEditValidation.validate(language: "javascript", fileName: "a.mjs", before: "f(1);\n", after: "f(1;\n",
+                                           original: "1)", replacement: "1", script: FakeScript(accepts: false))
+        #expect(!m.failsValidation)
+        // Dynamic import() is a classic script: a rejection stays hard.
+        #expect(!OwlEditValidation.usesModuleSyntax("const m = import('x');\n"))
+        #expect(!OwlEditValidation.usesModuleSyntax("// export this\nconst s = 'import x';\n"))
+        #expect(OwlEditValidation.usesModuleSyntax("const a = 1; export { a };\n"))
+    }
+
+    @Test func aTypeScriptRegexAfterAConditionDoesNotBlockApply() {
+        let after = "if (ok) /\\(/.test(s);\n"
+        let c = OwlEditValidation.validate(language: "typescript", fileName: "a.ts", before: "", after: after,
+                                           original: "", replacement: after, script: nil)
+        #expect(!c.failsValidation)
+        // JavaScript the checker accepts isn't reported either.
+        let js = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "", after: after,
+                                            original: "", replacement: after, script: FakeScript(accepts: true))
+        #expect(js == .clean)
+        // TypeScript brackets are a warning, Swift's still hard.
+        let ts = OwlEditValidation.validate(language: "typescript", fileName: "a.ts", before: "f(a)\n", after: "f(a\n",
+                                            original: "a)", replacement: "a", script: nil)
+        #expect(!ts.failsValidation && ts.warnings.map(\.check) == [.brackets])
+        let sw = OwlEditValidation.validate(language: "swift", fileName: "a.swift", before: "f(a)\n", after: "f(a\n",
+                                            original: "a)", replacement: "a", script: nil)
+        #expect(sw.hardIssue?.check == .brackets)
     }
 
     // MARK: The gate

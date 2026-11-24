@@ -104,22 +104,37 @@ public enum OwlEditValidation {
 
     /// Languages whose brackets are balanced-checked, and whether an
     /// unbalanced bracket the edit adds is hard (Apply off) or a warning.
+    /// Strings, comments and regex literals (JS/TS `/…/`, Swift `/…/` and
+    /// `#/…/#`) are blanked over the whole text by the owl's lexer
+    /// (`CodeMask`, from `RulesHintProvider.scanCode`) before counting.
     ///
-    /// - Swift, JavaScript, TypeScript, C, CSS, Python: HARD. Strings,
-    ///   comments and regex literals (JS/TS `/…/`, Swift `/…/` and
-    ///   `#/…/#`) are blanked over the whole text by the owl's lexer
-    ///   (`CodeMask`, from `RulesHintProvider.scanCode`) before counting.
-    ///   JavaScript is the exception when a syntax checker is given and
-    ///   accepts the edited text: the parser wins and the brackets aren't
-    ///   reported at all (a bracket the lexer missed can't block Apply).
+    /// - Swift, C, CSS, Python: HARD.
+    /// - JavaScript: HARD only when the syntax checker also rejects the
+    ///   edited text as a classic script. Accepted: the parser wins and
+    ///   the brackets aren't reported. Module syntax (the checker can't
+    ///   judge it): a WARNING. No checker given: HARD, as the lexer is
+    ///   then the only check (the app always gives one).
+    /// - TypeScript: WARNING. Nothing parses it, and the lexer can't
+    ///   always tell a regex from a division (`if (ok) /\(/.test(s);`).
     /// - Ruby: WARNING, Apply on. Only the highlighter's tokens can blank
     ///   its strings, and they miss `%q{…}`-style literals, regexes and
     ///   anything past the highlighter's per-line limit, so a count there
     ///   is a hint, not a verdict.
     static let bracketLanguages: [String: OwlEditIssue.Severity] = [
-        "swift": .hard, "javascript": .hard, "typescript": .hard, "c": .hard, "css": .hard, "python": .hard,
-        "ruby": .warning,
+        "swift": .hard, "javascript": .hard, "c": .hard, "css": .hard, "python": .hard,
+        "typescript": .warning, "ruby": .warning,
     ]
+
+    /// A statement-start `import` (not a dynamic `import(…)`) or `export`,
+    /// outside strings and comments: module syntax, which JavaScriptCore's
+    /// classic-script check rejects even when it is valid.
+    static let moduleSyntax = try! NSRegularExpression(
+        pattern: #"(?:^|[;{}])[ \t]*(?:import\b(?!\s*\()|export\b)"#, options: [.anchorsMatchLines])
+
+    static func usesModuleSyntax(_ text: String) -> Bool {
+        let code = code(text, language: "javascript")
+        return moduleSyntax.firstMatch(in: code as String, range: NSRange(location: 0, length: code.length)) != nil
+    }
 
     // MARK: Entry points
 
@@ -142,27 +157,29 @@ public enum OwlEditValidation {
         var issues: [OwlEditIssue] = []
         let ext = ((fileName ?? "") as NSString).pathExtension.lowercased()
 
-        // Single-verdict parsers. When the document already failed before,
-        // the after error counts only if it is in the edit (see `isInEdit`)
-        // and is a different complaint (numbers aside) or the before error
-        // wasn't in the text the edit replaced. Anything less certain
-        // fails open: a parser stops at its first error, so a partial fix
-        // of a broken document uncovers an old error elsewhere, and that
-        // must not turn Apply off.
+        // Single-verdict parsers. HARD only when the document parsed
+        // before the edit (or was empty). When it already failed, a parser
+        // stops at its first error, so a partial fix uncovers an old error
+        // and nothing can say for sure that the edit caused it: a WARNING
+        // ("may not parse"), Apply on, and only when the error looks like
+        // the edit's (in the edit, see `isInEdit`, and a different
+        // complaint, numbers aside, or the before error wasn't in the
+        // replaced text). `advisory`: the parser's rejection is never hard
+        // (JavaScript module syntax).
         let region = changedRegions(before, after)
-        func parser(_ check: OwlEditIssue.Check, _ run: (String) -> OwlSyntaxError?) -> OwlSyntaxError? {
+        func parser(_ check: OwlEditIssue.Check, advisory: Bool = false, _ run: (String) -> OwlSyntaxError?) -> OwlSyntaxError? {
             guard !after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let e = run(after) else { return nil }
-            let counts: Bool
-            if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                counts = true
+            if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || run(before) == nil {
+                issues.append(advisory
+                    ? OwlEditIssue(check: check, severity: .warning, message: mayNotParse(e.message), line: e.line)
+                    : OwlEditIssue(check: check, severity: .hard, message: e.message, line: e.line))
             } else if let b = run(before) {
                 let inEdit = isInEdit(e, text: after, region: region.after, fragment: replacement, firstLine: firstLine)
                 let beforeInEdit = isInEdit(b, text: before, region: region.before, fragment: original, firstLine: firstLine)
-                counts = inEdit && (comparable(e.message) != comparable(b.message) || !beforeInEdit)
-            } else {
-                counts = true
+                if inEdit && (comparable(e.message) != comparable(b.message) || !beforeInEdit) {
+                    issues.append(OwlEditIssue(check: check, severity: .warning, message: mayNotParse(e.message), line: e.line))
+                }
             }
-            if counts { issues.append(OwlEditIssue(check: check, severity: .hard, message: e.message, line: e.line)) }
             return e
         }
         if language == "json" {
@@ -173,13 +190,18 @@ public enum OwlEditValidation {
             _ = parser(.xml, xmlError)
         }
         var scriptAccepts = false
+        var bracketSeverity = bracketLanguages[language]
         if language == "javascript", let script {
-            scriptAccepts = parser(.script, script.syntaxError(in:)) == nil
+            // Module syntax (`import`/`export`, a .mjs file) isn't a classic
+            // script: the checker's rejection is only a warning there.
+            let module = ext == "mjs" || usesModuleSyntax(before) || usesModuleSyntax(after)
+            scriptAccepts = parser(.script, advisory: module, script.syntaxError(in:)) == nil
+            if module { bracketSeverity = .warning }
         }
 
         // Brackets: may fail an already-unbalanced document only if it gets worse.
         // JavaScript the syntax checker accepts is balanced (see `bracketLanguages`).
-        if let severity = bracketLanguages[language], !scriptAccepts, let lang = Language(rawValue: language) {
+        if let severity = bracketSeverity, !scriptAccepts, let lang = Language(rawValue: language) {
             let a = bracketProblems(after, language: lang)
             if a.count > 0 {
                 let b = bracketProblems(before, language: lang)
@@ -190,6 +212,9 @@ public enum OwlEditValidation {
         }
 
         issues += ruleIssues(language: language, original: original, replacement: replacement, firstLine: firstLine)
+        if language == "javascript" || language == "typescript" {
+            issues += selfInitializationIssues(language: language, before: before, after: after, changed: region.after)
+        }
         // Hard problems first.
         return OwlEditCheck(issues: issues.filter { $0.severity == .hard } + issues.filter { $0.severity == .warning })
     }
@@ -332,6 +357,11 @@ public enum OwlEditValidation {
         return OwlSyntaxError(message: message.isEmpty ? fallback : message, line: line, offset: offset)
     }
 
+    /// "May not parse: <reason>": an after error the edit may not have caused.
+    static func mayNotParse(_ message: String) -> String {
+        String(localized: "May not parse: \(message)")
+    }
+
     /// One line, no trailing period, the "around line N, column M" (or
     /// "around character N") part left to `line`.
     static func cleanMessage(_ s: String) -> String {
@@ -421,7 +451,8 @@ public enum OwlEditValidation {
     // MARK: Rules
 
     /// The rules, on the edited fragment: only what the replacement has
-    /// more of than the original it replaces.
+    /// more of than the original it replaces. (Self-initialisation runs on
+    /// the whole document instead: `selfInitializationIssues`.)
     static func ruleIssues(language: String, original: String, replacement: String, firstLine: Int) -> [OwlEditIssue] {
         var out: [OwlEditIssue] = []
         func added(_ find: (String) -> [RuleHit]) {
@@ -433,7 +464,6 @@ public enum OwlEditValidation {
                 out.append(OwlEditIssue(check: h.check, severity: h.severity, message: h.message, line: firstLine + h.lineOffset))
             }
         }
-        if language == "javascript" || language == "typescript" { added { selfInitializations($0, language: language) } }
         if ["javascript", "typescript", "c", "swift", "python"].contains(language) { added { selfAssignments($0, language: language) } }
         if language == "swift" { added(swiftLetMutations) }
         if language == "plain" || language == "markdown" {
@@ -450,6 +480,9 @@ public enum OwlEditValidation {
         var key: String
         var message: String
         var lineOffset: Int
+        /// Where in the checked text (UTF-16).
+        var location: Int = 0
+        var length: Int = 0
     }
 
     /// The fragment with strings and comments blanked, when the owl lexes the language.
@@ -468,6 +501,37 @@ public enum OwlEditValidation {
         pattern: #"(?<![\w$.])(const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.<>\[\]| ]+?)?\s*=\s*([A-Za-z_$][\w$]*)\s*(?=;|,|\)|\n|$)"#,
         options: [.anchorsMatchLines])
 
+    /// Rule a over the whole document before and after the edit (strings
+    /// and comments blanked), so a fragment's boundary can't hide a hit
+    /// (`1` → `x` in `const x = 1;`) or invent one (text inside a
+    /// comment). Only hits the edit adds count: per declaration, as many
+    /// as the after text has more of, those in the changed region first.
+    static func selfInitializationIssues(language: String, before: String, after: String, changed: NSRange) -> [OwlEditIssue] {
+        let b = selfInitializations(before, language: language)
+        let a = selfInitializations(after, language: language)
+        var seen: [String: Int] = [:]
+        for h in b { seen[h.key, default: 0] += 1 }
+        var byKey: [String: [RuleHit]] = [:]
+        var order: [String] = []
+        for h in a {
+            if byKey[h.key] == nil { order.append(h.key) }
+            byKey[h.key, default: []].append(h)
+        }
+        let lo = changed.location, hi = NSMaxRange(changed)
+        var out: [OwlEditIssue] = []
+        for key in order {
+            let hits = byKey[key]!
+            let extra = hits.count - (seen[key] ?? 0)
+            guard extra > 0 else { continue }
+            let inEdit = hits.filter { $0.location + $0.length >= lo && $0.location <= hi }
+            let rest = hits.filter { !($0.location + $0.length >= lo && $0.location <= hi) }
+            for h in (inEdit + rest).prefix(extra) {
+                out.append(OwlEditIssue(check: h.check, severity: h.severity, message: h.message, line: 1 + h.lineOffset))
+            }
+        }
+        return out
+    }
+
     /// Rule a. JS/TS: a variable declared from itself.
     /// - `const x = x` / `let x = x`: HARD, Apply off (and one retry for
     ///   the model), because it always throws a ReferenceError (temporal
@@ -484,7 +548,8 @@ public enum OwlEditValidation {
                 ? String(localized: "`\(kw) \(name) = \(name)` reads `\(name)` before it is set, which always throws a ReferenceError")
                 : String(localized: "`var \(name) = \(name)` sets `\(name)` to itself, which does nothing")
             return RuleHit(check: .selfInitialization, severity: hard ? .hard : .warning, key: "init:\(kw):\(name)",
-                           message: message, lineOffset: lineOffset(ns, m.range.location))
+                           message: message, lineOffset: lineOffset(ns, m.range.location),
+                           location: m.range.location, length: m.range.length)
         }
     }
 
@@ -519,6 +584,7 @@ public enum OwlEditValidation {
     /// a class instance, and a lexical check can't know the type (or
     /// whether a nested scope shadows the name). Method calls like
     /// `x.items.append(…)` are out of scope.
+    /// Limit (0.6): only the fragment is read, so a `let` declared outside the edit isn't seen.
     static func swiftLetMutations(_ s: String) -> [RuleHit] {
         let ns = code(s, language: "swift")
         let str = ns as String
