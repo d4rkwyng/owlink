@@ -194,6 +194,48 @@ import Testing
         let worse = OwlEditValidation.validate(language: "swift", fileName: "a.swift", before: before, after: "func b() {\n(\n",
                                                original: "a", replacement: "b", script: nil)
         #expect(worse.hardIssue?.check == .brackets)
+        // Regex literals, template literals and triple-quoted strings, over the whole text.
+        #expect(OwlEditValidation.bracketProblems("const re = /\\(/;\n", language: .javascript).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("const re = /[(]/;\n", language: .javascript).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("const s = `hello {`;\n", language: .javascript).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("s = \"\"\"\n( [ {\n\"\"\"\nf(s)\n", language: .python).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("let r = /[(]/\n", language: .swift).isEmpty)
+        #expect(OwlEditValidation.bracketProblems("let r = #/[(]/#\n", language: .swift).isEmpty)
+        // A string past the highlighter's 20,000-unit line limit is still a string.
+        let long = "const s = \"" + String(repeating: "a", count: 25_000) + "(\";\n"
+        #expect(OwlEditValidation.bracketProblems(long, language: .javascript).isEmpty)
+        // The same edits through validate: Apply stays on.
+        for (lang, file, text) in [("javascript", "a.js", "const re = /\\(/;\n"), ("swift", "a.swift", "let r = /[(]/\n"),
+                                   ("javascript", "a.js", "const s = `hello {`;\n")] {
+            let c = OwlEditValidation.validate(language: lang, fileName: file, before: "", after: text,
+                                               original: "", replacement: text, script: nil)
+            #expect(!c.failsValidation, "\(text)")
+        }
+    }
+
+    struct FakeScript: OwlScriptSyntaxChecker {
+        var accepts: Bool
+        func syntaxError(in script: String) -> OwlSyntaxError? { accepts ? nil : OwlSyntaxError(message: "SyntaxError", line: 1) }
+    }
+
+    @Test func javaScriptTheCheckerAcceptsIsNotFailedOnBrackets() {
+        // An unbalanced count the lexer gets wrong can't block Apply once the parser accepts the text.
+        let after = "f(a]\n"
+        let ok = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "f(a)\n", after: after,
+                                            original: ")", replacement: "]", script: FakeScript(accepts: true))
+        #expect(ok == .clean)
+        let bad = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "", after: after,
+                                             original: "", replacement: after, script: FakeScript(accepts: false))
+        #expect(bad.hardIssue?.check == .script)
+    }
+
+    @Test func rubyBracketsOnlyWarn() {
+        // `%q{ hello ( }` is a string the highlighter doesn't know: a warning, Apply on.
+        let after = "s = %q{ hello ( }\n"
+        let c = OwlEditValidation.validate(language: "ruby", fileName: "a.rb", before: "s = 1\n", after: after,
+                                           original: "1", replacement: "%q{ hello ( }", script: nil)
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.brackets])
     }
 
     // MARK: readonly.md

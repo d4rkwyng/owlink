@@ -100,8 +100,24 @@ public enum OwlEditValidation {
     /// Documents longer than this (UTF-16 units) are not validated.
     public static let maxDocumentLength = 2_000_000
 
-    /// Languages whose brackets are balanced-checked (strings and comments skipped).
-    static let bracketLanguages: Set<String> = ["swift", "javascript", "typescript", "c", "css", "python", "ruby"]
+    /// Languages whose brackets are balanced-checked, and whether an
+    /// unbalanced bracket the edit adds is hard (Apply off) or a warning.
+    ///
+    /// - Swift, JavaScript, TypeScript, C, CSS, Python: HARD. Strings,
+    ///   comments and regex literals (JS/TS `/…/`, Swift `/…/` and
+    ///   `#/…/#`) are blanked over the whole text by the owl's lexer
+    ///   (`CodeMask`, from `RulesHintProvider.scanCode`) before counting.
+    ///   JavaScript is the exception when a syntax checker is given and
+    ///   accepts the edited text: the parser wins and the brackets aren't
+    ///   reported at all (a bracket the lexer missed can't block Apply).
+    /// - Ruby: WARNING, Apply on. Only the highlighter's tokens can blank
+    ///   its strings, and they miss `%q{…}`-style literals, regexes and
+    ///   anything past the highlighter's per-line limit, so a count there
+    ///   is a hint, not a verdict.
+    static let bracketLanguages: [String: OwlEditIssue.Severity] = [
+        "swift": .hard, "javascript": .hard, "typescript": .hard, "c": .hard, "css": .hard, "python": .hard,
+        "ruby": .warning,
+    ]
 
     // MARK: Entry points
 
@@ -125,30 +141,33 @@ public enum OwlEditValidation {
         let ext = ((fileName ?? "") as NSString).pathExtension.lowercased()
 
         // Single-verdict parsers: skipped when the document already failed before.
-        func parser(_ check: OwlEditIssue.Check, _ run: (String) -> OwlSyntaxError?) {
-            guard !after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let e = run(after) else { return }
+        func parser(_ check: OwlEditIssue.Check, _ run: (String) -> OwlSyntaxError?) -> OwlSyntaxError? {
+            guard !after.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let e = run(after) else { return nil }
             if before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || run(before) == nil {
                 issues.append(OwlEditIssue(check: check, severity: .hard, message: e.message, line: e.line))
             }
+            return e
         }
         if language == "json" {
-            parser(.json, jsonError)
+            _ = parser(.json, jsonError)
         } else if ext == "plist", language == "xml" || language == "plain" {
-            parser(.plist, plistError)
+            _ = parser(.plist, plistError)
         } else if language == "xml" || ext == "svg" {
-            parser(.xml, xmlError)
+            _ = parser(.xml, xmlError)
         }
+        var scriptAccepts = false
         if language == "javascript", let script {
-            parser(.script, script.syntaxError(in:))
+            scriptAccepts = parser(.script, script.syntaxError(in:)) == nil
         }
 
         // Brackets: may fail an already-unbalanced document only if it gets worse.
-        if bracketLanguages.contains(language), let lang = Language(rawValue: language) {
+        // JavaScript the syntax checker accepts is balanced (see `bracketLanguages`).
+        if let severity = bracketLanguages[language], !scriptAccepts, let lang = Language(rawValue: language) {
             let a = bracketProblems(after, language: lang)
             if a.count > 0 {
                 let b = bracketProblems(before, language: lang)
                 if a.count > b.count, let first = a.first {
-                    issues.append(OwlEditIssue(check: .brackets, severity: .hard, message: first.message, line: first.line))
+                    issues.append(OwlEditIssue(check: .brackets, severity: severity, message: first.message, line: first.line))
                 }
             }
         }
@@ -263,21 +282,28 @@ public enum OwlEditValidation {
 
     // MARK: Brackets
 
-    /// Unbalanced (), [] and {} outside strings and comments (as the
-    /// syntax highlighter's tokenizer for `language` sees them), in the
-    /// order found. An unmatched closer, a mismatched pair and an
-    /// unclosed opener count one each.
+    /// Unbalanced (), [] and {} outside strings, comments and regex
+    /// literals, in the order found. An unmatched closer, a mismatched
+    /// pair and an unclosed opener count one each.
+    ///
+    /// Strings and comments are blanked over the whole text by the owl's
+    /// lexer (`CodeMask`) for the languages it lexes, regex literals
+    /// included; otherwise (Ruby) by the syntax highlighter's tokens,
+    /// which is why Ruby's count is only a warning (`bracketLanguages`).
     public static func bracketProblems(_ text: String, language: Language) -> [OwlSyntaxError] {
         let ns = text as NSString
         guard ns.length > 0 else { return [] }
         let index = LineIndex(ns)
-        let engine = HighlightEngine(language: language)
-        let tokens = engine.tokens(forLines: 0..<index.lineCount, in: ns, index: index)
         var units = [unichar](repeating: 0, count: ns.length)
-        ns.getCharacters(&units, range: NSRange(location: 0, length: ns.length))
-        for t in tokens where t.kind == .string || t.kind == .comment {
-            let a = max(0, t.start), b = min(units.count, t.end)
-            if a < b { for k in a..<b { units[k] = 32 } }
+        if let mask = CodeMask.make(ns, language: language.rawValue) {
+            mask.codeNS.getCharacters(&units, range: NSRange(location: 0, length: ns.length))
+        } else {
+            ns.getCharacters(&units, range: NSRange(location: 0, length: ns.length))
+            let tokens = HighlightEngine(language: language).tokens(forLines: 0..<index.lineCount, in: ns, index: index)
+            for t in tokens where t.kind == .string || t.kind == .comment {
+                let a = max(0, t.start), b = min(units.count, t.end)
+                if a < b { for k in a..<b { units[k] = 32 } }
+            }
         }
         func line(_ offset: Int) -> Int { index.line(containing: offset) + 1 }
         var stack: [(unichar, Int)] = []
