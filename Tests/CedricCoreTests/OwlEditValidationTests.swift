@@ -331,6 +331,38 @@ import Testing
 
     """
 
+    @Test func aUsedExternalEntityIsNotFetched() throws {
+        // `&ext;` is used, and names a local file whose text is a marker. The
+        // validation's parser never reads it: no marker in the parsed text,
+        // and the check returns at once (no error: the entity is skipped).
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-xml-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("ent.txt")
+        try Data("EXTERNAL-MARKER".utf8).write(to: file)
+        for url in [file.absoluteString, "http://127.0.0.1:9/never-fetched.txt"] {
+            let doc = """
+            <?xml version="1.0"?>
+            <!DOCTYPE note [ <!ENTITY ext SYSTEM "\(url)"> ]>
+            <note>&ext;</note>
+
+            """
+            let started = Date()
+            #expect(OwlEditValidation.xmlError(doc) == nil)
+            #expect(Date().timeIntervalSince(started) < 2)
+            let p = OwlEditValidation.xmlParser(for: Data(doc.utf8))
+            let text = TextCollector()
+            p.delegate = text
+            _ = p.parse()
+            #expect(!text.text.contains("EXTERNAL-MARKER"))
+        }
+    }
+
+    final class TextCollector: NSObject, XMLParserDelegate {
+        var text = ""
+        func parser(_ parser: XMLParser, foundCharacters string: String) { text += string }
+    }
+
     @Test func xmlPassesAndFailsWithoutExternalEntities() throws {
         #expect(OwlEditValidation.xmlParser(for: Data(Self.xml.utf8)).shouldResolveExternalEntities == false)
         let ok = try Self.check(Self.xml, "xml", "note.xml", find: "<to>Tove</to>", replace: "<to>Jani</to>")
