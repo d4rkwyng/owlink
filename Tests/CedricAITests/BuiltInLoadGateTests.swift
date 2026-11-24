@@ -446,12 +446,16 @@ private func builtIn(_ host: BuiltInModelHost) throws -> (BuiltInEngine, BuiltIn
         let host = BuiltInModelHost(runtime: rt, clock: clock)
         let (a, b, req) = (a, b, req)
         let first = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, req) } }
-        #expect(await eventually { rt.attempts.value == 1 && clock.pendingSleepers >= 1 })
+        // Installed before the preconditions below, and those are
+        // requirements: if one isn't met the test ends here and the
+        // release frees both requests, rather than awaiting a request the
+        // single clock advance didn't reach.
         defer { rt.release() }
+        try #require(await eventually { rt.attempts.value == 1 && clock.pendingSleepers >= 1 })
         let second = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, req) } }
         // The second request is waiting on the first load before the
         // watchdog fires (a sleep here let it race the clock).
-        #expect(await eventually { await host.waitingRequests == 1 })
+        try #require(await eventually { await host.waitingRequests == 1 })
         #expect(rt.attempts.value == 1, "no second load while the first is in flight")
         clock.advance(BuiltInWatchdog.seconds + 1)
         await #expect(throws: BuiltInError.loadTimedOut(seconds: Int(BuiltInWatchdog.seconds))) { try await first.value }
