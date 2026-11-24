@@ -143,8 +143,10 @@ final class EditorDocument {
     /// file's stamp. The stamp is taken before the bytes are read: if the
     /// file changes (or a link is pointed elsewhere) in between, the next
     /// check sees a change rather than missing one.
-    /// `shareBytes`: a large ASCII file's text may read the mapped file in
-    /// place (TextCodec.decode), for opening into a tab only.
+    /// `shareBytes`: the bytes are read into memory of their own (not
+    /// mapped: TextCodec.snapshot), and a large ASCII file's text reads
+    /// them in place (TextCodec.decode), for opening into a tab: the file
+    /// changing meanwhile changes nothing already read.
     nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> (DecodedText, DiskStamp?) {
         let data: Data
         if let kind = SpecialFile.kind(atPath: url.path) {
@@ -153,7 +155,7 @@ final class EditorDocument {
         }
         let stamp = DiskStamp.of(url)
         do {
-            data = try Data(contentsOf: url, options: .mappedIfSafe)
+            data = shareBytes ? try TextCodec.snapshot(of: url) : try Data(contentsOf: url, options: .mappedIfSafe)
         } catch {
             throw LoadError.unreadable(url, error)
         }

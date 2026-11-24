@@ -193,34 +193,78 @@ import Testing
     }
 
     /// A large all-ASCII file with no CR, asked to (`shareBytes`), reads
-    /// its bytes in place (no copy of the text); otherwise a copy.
+    /// its bytes in place (no copy of the text); otherwise a copy. Seen by
+    /// when the bytes are let go, never by changing them under a string:
+    /// shared, they live as long as the text; copied, they go with `data`.
     @Test func largeASCIIReadsInPlace() {
         let line = Array("2026-11-24 INFO request id=12 status=200\n".utf8)
         let count = (TextCodec.sharedBytesMinimum / line.count + 1) * line.count
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
-        defer { buffer.deallocate() }
-        for k in 0..<count { buffer[k] = line[k % line.count] }
-        // Data over the buffer without a copy, as a mapped file is.
-        let data = Data(bytesNoCopy: buffer, count: count, deallocator: .none)
-        // Not unless asked: a copy (the text may outlive a change to the file).
-        let copy = TextCodec.decode(data)!.text as NSString
-        let ns = TextCodec.decode(data, shareBytes: true)!.text as NSString
-        #expect(ns.length == count)
-        #expect(ns.character(at: 11) == 0x49)   // "I" of INFO
-        // In place: a byte changed under the string shows through it.
-        buffer[11] = 0x57                       // "W"
-        #expect(ns.character(at: 11) == 0x57)
-        #expect(copy.character(at: 11) == 0x49)
+        func lines(_ n: Int) -> [UInt8] { (0..<n).map { line[$0 % line.count] } }
+        /// Decodes `bytes` from a buffer of their own and reports whether the
+        /// text still held that buffer once the data was let go.
+        func decode(_ bytes: [UInt8], shareBytes: Bool) -> (text: NSString, shared: Bool) {
+            final class Freed: @unchecked Sendable { var done = false }
+            let freed = Freed()
+            var text: NSString!
+            autoreleasepool {
+                let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+                buffer.initialize(from: bytes, count: bytes.count)
+                let data = Data(bytesNoCopy: buffer, count: bytes.count, deallocator: .custom { p, _ in
+                    freed.done = true
+                    p.deallocate()
+                })
+                text = TextCodec.decode(data, shareBytes: shareBytes)!.text as NSString
+            }
+            let shared = !freed.done
+            #expect(text.length > 0)
+            return (text, shared)
+        }
+        let big = lines(count)
+        let shared = decode(big, shareBytes: true)
+        #expect(shared.shared, "asked to, a large ASCII file is read in place")
+        #expect(shared.text.length == count && shared.text.character(at: 11) == 0x49)   // "I" of INFO
+        #expect(shared.text as String == String(decoding: big, as: UTF8.self))
+        let copy = decode(big, shareBytes: false)
+        #expect(!copy.shared, "not unless asked: a copy")
+        #expect(copy.text as String == shared.text as String)
         // Not in place when it would need changing (CRLF), or when small.
-        buffer[39] = 0x0D                       // "...200\r\n"
-        let crlf = TextCodec.decode(data, shareBytes: true)!.text as NSString
-        buffer[12] = 0x58
-        #expect(crlf.character(at: 12) == 0x4E && crlf.length == count - 1)
-        buffer[39] = 0x30
-        let small = Data(bytesNoCopy: buffer, count: 64, deallocator: .none)
-        let copied = TextCodec.decode(small, shareBytes: true)!.text as NSString
-        buffer[13] = 0x59
-        #expect(copied.character(at: 13) == 0x46)
+        var crlf = big
+        crlf[39] = 0x0D                       // "...200\r\n": byte 39 is the first line's last "0"
+        let c = decode(crlf, shareBytes: true)
+        #expect(!c.shared && c.text.length == count - 1 && c.text.character(at: 39) == 0x0A)
+        let small = decode(lines(64), shareBytes: true)
+        #expect(!small.shared && small.text.length == 64 && small.text.character(at: 13) == 0x46)
+    }
+
+    /// TextCodec.snapshot: the file's bytes in memory of their own, so the
+    /// text read in place is the bytes read, whatever the file does next.
+    @Test func snapshotIsNotTheFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fastdecode-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("big.log")
+        let line = Array("2026-11-24 INFO request id=12 status=200\n".utf8)
+        let count = (TextCodec.sharedBytesMinimum / line.count + 1) * line.count
+        let bytes = (0..<count).map { line[$0 % line.count] }
+        try Data(bytes).write(to: url)
+        let data = try TextCodec.snapshot(of: url)
+        #expect(data == Data(bytes))
+        let text = TextCodec.decode(data, shareBytes: true)!.text as NSString
+        #expect(text.length == count && text.character(at: 11) == 0x49)
+        // The file rewritten in place, same length: the text is what was read.
+        let h = try FileHandle(forWritingTo: url)
+        try h.seek(toOffset: 11)
+        try h.write(contentsOf: Data("W".utf8))
+        try h.synchronize()
+        try h.close()
+        #expect(text.character(at: 11) == 0x49, "a write to the file doesn't show through the text")
+        #expect(data[11] == 0x49)
+        // Growing while read and empty files read whole; a missing one throws.
+        #expect(try TextCodec.snapshot(of: url).count == count)
+        let empty = dir.appendingPathComponent("empty")
+        try Data().write(to: empty)
+        #expect(try TextCodec.snapshot(of: empty).isEmpty)
+        #expect(throws: CocoaError.self) { try TextCodec.snapshot(of: dir.appendingPathComponent("missing")) }
     }
 
     /// Random bytes biased towards the interesting ones: the new decode

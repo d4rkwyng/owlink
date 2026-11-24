@@ -234,10 +234,54 @@ public enum TextCodec {
     }
 
     /// With `shareBytes`, text at least this long (bytes, all ASCII, no
-    /// CR) is read straight from the file's bytes rather than copied into a
+    /// CR) is read straight from the data's bytes rather than copied into a
     /// new string: a 1 GB log was a 1 GB copy on top of the editor's own.
     /// Below it, a copy.
     static let sharedBytesMinimum = 16 * 1024 * 1024
+
+    /// The file's bytes as they are now, in memory of their own (read, not
+    /// mapped): the bytes `decode(_:shareBytes:)` may keep. A mapped file
+    /// shows a later write through it, so a same-length rewrite while it
+    /// was checked, indexed and copied gave text that wasn't the bytes
+    /// checked, and a truncation faulted reading past the end.
+    public static func snapshot(of url: URL) throws -> Data {
+        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw readError(url, errno) }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw readError(url, errno) }
+        // Room for the size it has now; more if it grows while read.
+        var capacity = max(Int(st.st_size), 0) + 1
+        guard var buffer = malloc(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
+        var count = 0
+        while true {
+            if count == capacity {
+                capacity *= 2
+                guard let grown = realloc(buffer, capacity) else {
+                    free(buffer)
+                    throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path])
+                }
+                buffer = grown
+            }
+            let n = read(fd, buffer + count, min(capacity - count, Int(Int32.max)))
+            if n == 0 { break }
+            if n < 0 {
+                if errno == EINTR { continue }
+                let e = errno
+                free(buffer)
+                throw readError(url, e)
+            }
+            count += n
+        }
+        return Data(bytesNoCopy: buffer, count: count, deallocator: .free)
+    }
+
+    /// The error Foundation's reading gives for `code` (its message).
+    static func readError(_ url: URL, _ code: Int32) -> CocoaError {
+        let kind: CocoaError.Code = code == ENOENT ? .fileReadNoSuchFile : code == EACCES || code == EPERM ? .fileReadNoPermission : .fileReadUnknown
+        return CocoaError(kind, userInfo: [NSFilePathErrorKey: url.path, NSURLErrorKey: url,
+                                           NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
+    }
 
     /// Decodes `data` (as `encoding`, or the detected one) and normalises
     /// its line endings. Nil if the bytes aren't valid in that encoding.
@@ -249,9 +293,10 @@ public enum TextCodec {
     /// for validity and line endings, and at most one copy: the bytes with
     /// CR and CRLF turned into LF, or with `shareBytes` none for a large
     /// all-ASCII file with no CR (`sharedBytesMinimum`). The text then
-    /// keeps `data` (a mapped file) alive and reads it in place: only for
-    /// a caller that copies the text and lets it go at once (opening a
-    /// file into a tab), never one that keeps it while the file can change.
+    /// keeps `data` alive and reads it in place, so `data` must be bytes
+    /// nothing else changes: memory of its own (`snapshot(of:)`), never a
+    /// mapped file. And best for a caller that copies the text and lets it
+    /// go (opening a file into a tab): kept, it keeps all of `data`.
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
         var enc: TextEncoding
         var scanned: UTF8Scan?
