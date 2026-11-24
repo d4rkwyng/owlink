@@ -709,6 +709,12 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         let q = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !running else { return }
         input.stringValue = ""
+        // A spelling request goes to the offline Fix Typos (OwlSpellingRoute.swift).
+        if OwlSpellingIntent.isSpellingRequest(q), let tab, let id = docID {
+            routeToFixTypos(q, tab: tab, id: id)
+            render()
+            return
+        }
         ask(question: q, action: nil)
     }
 
