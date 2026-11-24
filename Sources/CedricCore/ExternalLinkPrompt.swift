@@ -99,3 +99,31 @@ public struct ExternalLinkText: Equatable, Sendable {
         return String(s.prefix(keep - keep / 2)) + "…" + String(s.suffix(keep / 2))
     }
 }
+
+extension ExternalLinkText {
+    /// The "Open this link?" prompt's title for `url`: "Write an email?"
+    /// for a `mailto:` link.
+    public static func promptTitle(for url: URL) -> String {
+        url.scheme?.lowercased() == "mailto" ? String(localized: "Write an email?") : String(localized: "Open this link?")
+    }
+
+    /// The prompt's text, one paragraph each: the site on a line of its
+    /// own; for a host that isn't plain ASCII (`аpple.com`, Cyrillic а)
+    /// the punycode the browser opens, flagged with how it reads; for a
+    /// user name before the `@` (`https://www.apple.com%2Fsignin@evil.example/`)
+    /// that it is not the site; then the URL (whole, or cut in the middle
+    /// keeping the host). A misleading link text can't hide where it goes.
+    /// Shared by the Mac's and iOS's prompts.
+    public var promptMessage: String {
+        var lines: [String] = []
+        if let host { lines.append(String(localized: "Site: \(host)")) }
+        if let unicodeHost, let host {
+            lines.append(String(localized: "The site’s name is not plain ASCII: \(host) reads as “\(unicodeHost)”, which can imitate another site."))
+        }
+        if let userinfo, let host {
+            lines.append(String(localized: "Before the “@” is a user name (“\(userinfo)”), not the site. This link goes to \(host)."))
+        }
+        lines.append(url)
+        return lines.joined(separator: "\n\n")
+    }
+}

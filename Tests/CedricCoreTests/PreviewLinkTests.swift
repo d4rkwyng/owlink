@@ -509,6 +509,24 @@ import Testing
         #expect(text("mailto:someone@example.com").unicodeHost == nil)
     }
 
+    /// The prompt's wording (shared by the Mac's and iOS's prompts): the
+    /// site on its own line, the flags, then the URL; mailto asks to write.
+    @Test func thePromptNamesTheSiteThenTheURL() {
+        let plain = URL(string: "https://example.com/a?b=1")!
+        #expect(ExternalLinkText.promptTitle(for: plain) == "Open this link?")
+        #expect(ExternalLinkText(plain).promptMessage == "Site: example.com\n\nhttps://example.com/a?b=1")
+        let dressed = text("https://www.apple.com%2Fsignin@evil.example/").promptMessage
+        #expect(dressed == "Site: evil.example\n\nBefore the “@” is a user name (“www.apple.com/signin”), not the site. This link goes to evil.example.\n\nhttps://www.apple.com%2Fsignin@evil.example/", "\(dressed)")
+        let homograph = ExternalLinkText(URL(string: "https://аpple.com/signin")!)
+        let host = homograph.host ?? "?"
+        #expect(homograph.promptMessage.hasPrefix("Site: \(host)\n\nThe site’s name is not plain ASCII: \(host) reads as “аpple.com”, which can imitate another site.\n\n"),
+                "\(homograph.promptMessage)")
+        let mail = URL(string: "mailto:someone@example.com")!
+        #expect(ExternalLinkText.promptTitle(for: mail) == "Write an email?")
+        #expect(ExternalLinkText.promptTitle(for: URL(string: "MAILTO:someone@example.com")!) == "Write an email?")
+        #expect(ExternalLinkText(mail).promptMessage == "mailto:someone@example.com", "no host: the URL alone")
+    }
+
     @Test func hiddenCharactersStayVisible() {
         #expect(ExternalLinkText.middle("abcdefghij", 5) == "ab…ij")
         #expect(ExternalLinkText.middle("abc", 5) == "abc")
