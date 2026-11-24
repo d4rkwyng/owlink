@@ -70,6 +70,11 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     private(set) var expectedPageURL: URL?
     /// The load of `expectedPageURL`, to know when it is over.
     private var pageNavigation: WKNavigation?
+    /// The page in the view: the render generation it was loaded for, and
+    /// whether its front matter block was rendered open. A read of the
+    /// block's state counts only for that page, and only a change from
+    /// that state is the reader's.
+    private var shownPage: (generation: Int, frontMatterOpen: Bool)?
     /// The page URL of the latest render (for tests and checks).
     private(set) var pageURL: URL?
     private var csvPalette = EditorPalettes.light
@@ -209,14 +214,36 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// no script of its own. A change is kept as the preference the next
     /// render (and the next document) opens the block from. Then `then`,
     /// at once when there's no loaded page with front matter.
+    ///
+    /// Only the reader's own change is kept (Codex review of 0.5.2 (17),
+    /// must-fix 2): the block's state is compared with the state that page
+    /// was rendered with, not with the preference, which another preview
+    /// may have changed since. An untouched preview (rendered collapsed,
+    /// still collapsed) wrote "collapsed" over the reader's "expanded"
+    /// from another preview. A read that comes back after its page was
+    /// replaced is dropped.
     func recordFrontMatterState(then: @escaping () -> Void = {}) {
-        guard loaded, !showingCSV, files.pageHTML?.contains("<details class=\"frontmatter\"") == true else { then(); return }
-        web.callAsyncJavaScript(Self.frontMatterStateScript, arguments: [:], in: nil, in: .defaultClient) { result in
-            if case .success(let value) = result, let open = value as? Bool, open != AppSettings.previewFrontMatterExpanded {
+        guard loaded, !showingCSV, let page = shownPage,
+              files.pageHTML?.contains("<details class=\"frontmatter\"") == true else { then(); return }
+        web.callAsyncJavaScript(Self.frontMatterStateScript, arguments: [:], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self else { then(); return }
+            let read: Bool? = if case .success(let value) = result { value as? Bool } else { nil }
+            if let open = Self.frontMatterChange(read: read, renderedOpen: page.frontMatterOpen,
+                                                 readFor: page.generation, shown: self.shownPage?.generation) {
                 AppSettings.previewFrontMatterExpanded = open
+                // Kept: the page now stands for that state.
+                self.shownPage?.frontMatterOpen = open
             }
             then()
         }
+    }
+
+    /// The reader's change to keep, if any: the block's state as read,
+    /// when it differs from the state its page was rendered with and that
+    /// page (`readFor`) is still the one shown.
+    nonisolated static func frontMatterChange(read: Bool?, renderedOpen: Bool, readFor: Int, shown: Int?) -> Bool? {
+        guard let read, readFor == shown, read != renderedOpen else { return nil }
+        return read
     }
 
     static let frontMatterStateScript = """
@@ -288,6 +315,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                 // A reload goes back to the top: keep the reader's place.
                 if keepPlace, self.loaded, self.pendingFraction == nil { self.pendingFraction = self.liveFraction }
                 self.loaded = false
+                self.shownPage = (gen, frontMatterExpanded)
                 guard let baseURL else {
                     self.expectedPageURL = URL(string: "about:blank")
                     self.pageURL = self.expectedPageURL

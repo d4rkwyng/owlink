@@ -122,6 +122,47 @@ final class FrontMatterPreviewTests: XCTestCase {
         XCTAssertFalse(AppSettings.previewFrontMatterExpanded)
     }
 
+    private func record(_ preview: PreviewController) async {
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            preview.recordFrontMatterState { done.resume() }
+        }
+    }
+
+    /// Codex review of 0.5.2 (17), must-fix 2: two previews rendered
+    /// collapsed; the reader expands the first and it goes; then the
+    /// second, untouched, goes. "Expanded" stays: only a change from the
+    /// state a page was rendered with is the reader's.
+    func testAnUntouchedPreviewKeepsTheReadersChoice() async throws {
+        let first = preview()
+        let second = preview()
+        _ = try await block(first, open: false)
+        _ = try await block(second, open: false)
+        _ = try await js(first, "document.querySelector('details.frontmatter').open = true; return true;")
+        await record(first)
+        XCTAssertTrue(AppSettings.previewFrontMatterExpanded)
+        await record(second)
+        XCTAssertTrue(AppSettings.previewFrontMatterExpanded, "the untouched preview wrote collapsed over the reader's choice")
+        // Read twice, kept once: the first preview's page now stands for
+        // expanded, so the reader closing it is a change again.
+        await record(first)
+        XCTAssertTrue(AppSettings.previewFrontMatterExpanded)
+        _ = try await js(first, "document.querySelector('details.frontmatter').open = false; return true;")
+        await record(first)
+        XCTAssertFalse(AppSettings.previewFrontMatterExpanded)
+    }
+
+    /// A read counts only for the page it was made on, and only as a
+    /// change from what that page was rendered with.
+    func testWhatAReadKeeps() {
+        XCTAssertEqual(PreviewController.frontMatterChange(read: true, renderedOpen: false, readFor: 3, shown: 3), true)
+        XCTAssertEqual(PreviewController.frontMatterChange(read: false, renderedOpen: true, readFor: 3, shown: 3), false)
+        XCTAssertNil(PreviewController.frontMatterChange(read: false, renderedOpen: false, readFor: 3, shown: 3), "untouched")
+        XCTAssertNil(PreviewController.frontMatterChange(read: true, renderedOpen: true, readFor: 3, shown: 3), "untouched")
+        XCTAssertNil(PreviewController.frontMatterChange(read: true, renderedOpen: false, readFor: 3, shown: 4), "the page was replaced")
+        XCTAssertNil(PreviewController.frontMatterChange(read: true, renderedOpen: false, readFor: 3, shown: nil), "no page any more")
+        XCTAssertNil(PreviewController.frontMatterChange(read: nil, renderedOpen: false, readFor: 3, shown: 3), "no block")
+    }
+
     /// The summary is a native disclosure: VoiceOver reads it as a button
     /// that is collapsed or expanded (WebKit's own `<summary>` semantics),
     /// its name the summary line with the title.
