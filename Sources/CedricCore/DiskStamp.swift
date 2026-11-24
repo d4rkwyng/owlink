@@ -53,6 +53,20 @@ public struct DiskStamp: Equatable, Sendable {
         return DiskStamp(st)
     }
 
+    /// This stamp for a tab that shows only the file's first `bytes` bytes
+    /// (Follow File, which holds back half a character or a trailing CR
+    /// until the writer finishes it): with fewer bytes shown than the file
+    /// has, the size no longer matches, so ⌘S asks (the conflict sheet)
+    /// instead of writing the shorter text over the bytes never shown.
+    /// Nil `bytes`: the shown text isn't the file's bytes at all; the
+    /// size matches nothing.
+    public func showing(_ bytes: UInt64?) -> DiskStamp {
+        var s = self
+        if let bytes, let size, UInt64(size) == bytes { return s }
+        s.size = bytes.map { Int($0) } ?? -1
+        return s
+    }
+
     /// Dates round-trip through the session file as Doubles: anything
     /// closer than this is the same date.
     public static let tolerance: TimeInterval = 0.001

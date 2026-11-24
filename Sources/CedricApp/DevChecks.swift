@@ -587,7 +587,66 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ])
+        ] + followHeldBytes(app))
+    }
+
+    /// Codex 0.5.4 review 2: a UTF-16 file with an odd byte count (the
+    /// writer mid-character) followed and then stopped: the tab showed
+    /// only the whole characters but was stamped with the whole file, so
+    /// ⌘S wrote it back without the last byte. Now the stamp covers only
+    /// the bytes shown and ⌘S asks. Once for Follow started on the odd
+    /// file, once for an odd append while following.
+    static func followHeldBytes(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let u16 = { (s: String) in Data([0xFF, 0xFE]) + s.data(using: .utf16LittleEndian)! }
+        let started = dir.appendingPathComponent("odd-start.log"), appended = dir.appendingPathComponent("odd-append.log")
+        try? u16("one\n").write(to: started)
+        try? u16("one\n").write(to: appended)
+        let odd = u16("one\nab").dropLast()   // half of "b"
+        var tabs: [EditorWindowController] = []
+        func addBytes(_ url: URL, _ bytes: Data) {
+            let fh = try! FileHandle(forWritingTo: url)
+            fh.seekToEndOfFile()
+            fh.write(bytes)
+            fh.closeFile()
+        }
+        /// Stop following, ⌘S: nothing written, the conflict sheet asks.
+        func stopAndSave(_ i: Int, _ url: URL, _ what: String) {
+            let tab = tabs[i]
+            tab.toggleFollow()
+            expect(!tab.isFollowing, "\(what): Follow stopped")
+            expect(tab.text == "one\na", "\(what): the tab shows the whole characters", tab.text.debugDescription)
+            let saved = tab.save()
+            let onDisk = (try? Data(contentsOf: url)) ?? Data()
+            expect(!saved && onDisk == odd, "\(what): ⌘S doesn't write over the byte it never showed",
+                   "saved \(saved), \(onDisk.count) bytes, want \(odd.count)")
+            expect(tab.window?.attachedSheet != nil || tab.diskBar != nil, "\(what): …it says the file differs")
+            if let sheet = tab.window?.attachedSheet { tab.window?.endSheet(sheet) }
+        }
+        return [
+            sync {
+                // Opened whole; the writer then adds "a" and half of "b".
+                guard let tab = app.open(started) else { expect(false, "odd-start.log opens"); return }
+                tabs.append(tab)
+                addBytes(started, odd.suffix(odd.count - u16("one\n").count))
+                tab.toggleFollow()
+                expect(tab.isFollowing && tab.text == "one\na", "Follow on an odd UTF-16 file shows the whole characters",
+                       tab.text.debugDescription)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync { stopAndSave(0, started, "started odd") },
+            sync {
+                guard let tab = app.open(appended) else { expect(false, "odd-append.log opens"); return }
+                tabs.append(tab)
+                tab.toggleFollow()
+                expect(tab.isFollowing && tab.text == "one\n", "following the even file")
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            { next in
+                addBytes(appended, odd.suffix(odd.count - u16("one\n").count))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { next() }
+            },
+            sync { stopAndSave(1, appended, "appended odd") },
+        ]
     }
 
     // MARK: Open Recent

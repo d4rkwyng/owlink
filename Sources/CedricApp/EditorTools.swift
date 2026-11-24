@@ -284,6 +284,12 @@ extension EditorWindowController {
             setEditable(true)
             window?.subtitle = ""
             recheckWriteAccess()
+            // The tab's stamp counts only the bytes Follow showed: bytes it
+            // held back (half a character, a trailing CR) or never got to
+            // show differ from it. Catch up now (a clean tab reloads; a
+            // file that can't be read shows the "Changed on disk" bar),
+            // and ⌘S asks rather than writing over them.
+            reloadIfChangedOnDisk()
             return
         }
         guard let url = doc.fileURL else { NSSound.beep(); return }
@@ -308,7 +314,9 @@ extension EditorWindowController {
         doc.apply(d)
         setText(d.text)
         doc.markSaved()
-        doc.noteDisk(DiskStamp.of(url))
+        // Stamped as the bytes shown, not the whole file: a half character
+        // left for the first append isn't in this tab's text.
+        doc.noteDisk(DiskStamp.of(url)?.showing(UInt64(used)))
         updateTitle()
         setEditable(false)
         // setText dropped the cards proposed against the editable buffer;
@@ -317,8 +325,8 @@ extension EditorWindowController {
         window?.subtitle = String(localized: "Following")
         scrollToBottom()
         let me = WeakRef(self)
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { e in
-            MainActor.assumeIsolated { me.value?.tailEvent(e) }
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { e, shown in
+            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }
         }
         tail = t
         t.start()
@@ -331,7 +339,9 @@ extension EditorWindowController {
         return clip.bounds.maxY >= textView.frame.maxY - lineHeight
     }
 
-    func tailEvent(_ e: FileTail.Event) {
+    /// `shown`: how many of the file's bytes the text now stands for
+    /// (FileTail's count); the tab is stamped with that size.
+    func tailEvent(_ e: FileTail.Event, shown: UInt64?) {
         guard tail != nil, let storage = textView.textStorage else { return }
         let atBottom = isScrolledToBottom
         switch e {
@@ -352,7 +362,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.noteDisk(doc.fileURL.flatMap { DiskStamp.of($0) })
+        doc.noteDisk(doc.fileURL.flatMap { DiskStamp.of($0) }?.showing(shown))
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {

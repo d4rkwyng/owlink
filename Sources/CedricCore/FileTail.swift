@@ -15,7 +15,7 @@ public final class FileTail: @unchecked Sendable {
     public let encoding: TextEncoding
     private let queue = DispatchQueue(label: "cedric.filetail")
     private let callbackQueue: DispatchQueue
-    private let handler: @Sendable (Event) -> Void
+    private let handler: @Sendable (Event, UInt64?) -> Void
     // Touched only on `queue`.
     private var source: DispatchSourceFileSystemObject?
     private var retry: DispatchSourceTimer?
@@ -23,15 +23,30 @@ public final class FileTail: @unchecked Sendable {
     private var inode: UInt64 = 0
     private var pending = Data()
     private var stopped = false
+    /// The last reset showed lossy text: appends after it aren't the
+    /// file's bytes either, until the next faithful reset.
+    private var lossy = false
 
     /// `offset`: how many bytes of the file the caller already shows.
+    public convenience init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
+                            handler: @escaping @Sendable (Event) -> Void) {
+        self.init(url: url, encoding: encoding, offset: offset, callbackQueue: callbackQueue) { e, _ in handler(e) }
+    }
+
+    /// `update` gets each event with how many bytes of the file the text
+    /// shown after it stands for, byte for byte: the first `shown` bytes.
+    /// Bytes held back (half a character, a CR that may start a CRLF) are
+    /// not counted, so a viewer that stamps its tab with this size can't
+    /// later save over them as if it had shown them. Nil: the shown text
+    /// isn't the file's bytes (a reset that couldn't decode, shown as
+    /// UTF-8 with replacements).
     public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
-                handler: @escaping @Sendable (Event) -> Void) {
+                update: @escaping @Sendable (Event, _ shown: UInt64?) -> Void) {
         self.url = url
         self.encoding = encoding
         self.offset = offset
         self.callbackQueue = callbackQueue
-        self.handler = handler
+        self.handler = update
     }
 
     deinit { source?.cancel(); retry?.cancel() }
@@ -140,11 +155,11 @@ public final class FileTail: @unchecked Sendable {
             if let (d, used) = Self.decodeWhole(data, as: encoding) {
                 offset = UInt64(used)
                 pending = Data()
-                emit(.reset(d.text))
+                emit(.reset(d.text), shown: offset)
             } else {
                 offset = UInt64(data.count)
                 pending = Data()
-                emit(.reset(String(decoding: data, as: UTF8.self)))
+                emit(.reset(String(decoding: data, as: UTF8.self)), shown: nil)
             }
             return
         }
@@ -169,7 +184,7 @@ public final class FileTail: @unchecked Sendable {
                 pending = cr + pending
             }
             guard !s.isEmpty else { return }
-            emit(.appended(TextCodec.normalizeLineEndings(s)))
+            emit(.appended(TextCodec.normalizeLineEndings(s)), shown: lossy ? nil : offset - UInt64(pending.count))
         } catch {
             return
         }
@@ -196,8 +211,9 @@ public final class FileTail: @unchecked Sendable {
         decodePrefix(data, encoding) { TextCodec.decode($0, as: encoding) }
     }
 
-    private func emit(_ e: Event) {
+    private func emit(_ e: Event, shown: UInt64?) {
+        lossy = shown == nil
         let h = handler
-        callbackQueue.async { h(e) }
+        callbackQueue.async { h(e, shown) }
     }
 }

@@ -556,4 +556,108 @@ import Testing
         await waitFor(events, count: 2)
         #expect(events.all == [.appended("a"), .appended("é\n")])
     }
+
+    final class Shown: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [UInt64?] = []
+        func add(_ n: UInt64?) { lock.lock(); list.append(n); lock.unlock() }
+        var all: [UInt64?] { lock.lock(); defer { lock.unlock() }; return list }
+    }
+
+    /// Codex 0.5.4 review 2: Follow stamped its tab with the whole file's
+    /// size while the text left out bytes the tail held back, so stopping
+    /// Follow and pressing ⌘S wrote the shorter text over them. Each event
+    /// now says how many bytes the text shown stands for: never the held
+    /// back half character or trailing CR.
+    @Test func eachEventSaysHowManyBytesItShows() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        try Data([0xFF, 0xFE]).write(to: url)
+        let events = Events(), shown = Shown()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 2, callbackQueue: callbacks) { e, n in
+            events.add(e); shown.add(n)
+        }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // "a" and half of "b": 5 bytes on disk, 4 shown.
+        try appendBytes(url, [0x61, 0x00, 0x62])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a")])
+        #expect(shown.all == [4], "the odd byte isn't shown")
+        // The rest of "b" and a CR that may start a CRLF: 8 on disk, 6 shown.
+        try appendBytes(url, [0x00, 0x0D, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("b")])
+        #expect(shown.all == [4, 6], "the held CR isn't shown")
+        try appendBytes(url, [0x0A, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("b"), .appended("\n")])
+        #expect(shown.all == [4, 6, 10], "all of it once the CRLF is whole")
+
+        // Replaced by a file cut mid-character: the reset shows 4 of 5.
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x63, 0x00, 0x64]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all.last == .reset("c"))
+        #expect(shown.all.last == 4)
+    }
+
+    /// A reset that can't decode shows UTF-8 with replacements: not the
+    /// file's bytes, nor are appends after it.
+    @Test func aLossyResetShowsNoBytes() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let start = Data([0xFF, 0xFE, 0x61, 0x00])
+        try start.write(to: url)
+        let events = Events(), shown = Shown()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 4, callbackQueue: callbacks) { e, n in
+            events.add(e); shown.add(n)
+        }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // A lone low surrogate before two more characters: not UTF-16,
+        // even with the last character or two cut off.
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x00, 0xDC, 0x61, 0x00, 0x62, 0x00]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        try #require(events.all.count == 1 && Self.isReset(events.all[0]))
+        #expect(shown.all == [nil])
+        try appendBytes(url, [0x62, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all.count == 2)
+        #expect(shown.all == [nil, nil])
+    }
+
+    /// The stamp Follow gives its tab: with bytes left out, the file no
+    /// longer matches it, so ⌘S asks instead of writing over them.
+    @Test func aStampShowingFewerBytesIsAChange() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let odd = Data([0xFF, 0xFE, 0x61, 0x00, 0x62])
+        try odd.write(to: url)
+        let (_, used) = try #require(FileTail.decodeWhole(odd, as: .utf16LE))
+        let stamp = try #require(DiskStamp.of(url))
+        #expect(DiskStamp.changed(known: stamp.showing(UInt64(used)), current: DiskStamp.of(url)))
+        #expect(DiskStamp.changed(known: stamp.showing(nil), current: DiskStamp.of(url)))
+        #expect(!DiskStamp.changed(known: stamp.showing(UInt64(odd.count)), current: DiskStamp.of(url)))
+        #expect(stamp.showing(UInt64(odd.count)) == stamp)
+    }
 }
