@@ -280,6 +280,89 @@ final class MenuReachabilityTests: XCTestCase {
         }
     }
 
+    /// The iPad's pinned representative (editor.history: the one button a
+    /// bar too narrow for the pinned group shows) by its menu, end to end
+    /// at model level: Edit from it enters editing, typed text, its Undo
+    /// removes it, its Redo restores it, its Done leaves editing; its
+    /// Undo and Redo enabled exactly when there is something to undo or
+    /// redo (never in read mode), as the pinned bar buttons are. (The
+    /// representative itself isn't brought up on a simulator: a full-screen
+    /// iPad's bar always fits the group, and no launch argument narrows the
+    /// window; Codex b18 re-check 3, item 2.)
+    func testPinnedRepresentativeRunsUndoRedoAndEdit() throws {
+        defer { EditorViewController.barPrioritiesOverrideForTests = nil }
+        for priorities in BarCollapse.priorityPaths {
+            EditorViewController.barPrioritiesOverrideForTests = priorities
+            for sc in Self.sizeClasses where sc.iPad {
+                let name = "\(sc.name), priorities \(priorities)"
+                let editor = editor(SizeClass(name: sc.name, width: sc.width, size: sc.size, readMode: true, iPad: true), "md")
+                let pinned = try XCTUnwrap(editor.navigationItem.pinnedTrailingGroup, "\(name): nothing pinned")
+                let rep = try XCTUnwrap(pinned.representativeItem, "\(name): no representative")
+                XCTAssertEqual(rep.accessibilityIdentifier, "editor.history", name)
+                func bar(_ id: String) throws -> UIBarButtonItem {
+                    try XCTUnwrap(pinned.barButtonItems.first { $0.accessibilityIdentifier == id }, "\(name): no \(id) pinned")
+                }
+                // The representative's menu as it is now (rebuilt on each change).
+                func item(_ id: String, line: UInt = #line) throws -> UIAction {
+                    let menu = try XCTUnwrap(pinned.representativeItem?.menu, "\(name): the representative has no menu", line: line)
+                    func find(_ e: UIMenuElement) -> UIAction? {
+                        if let a = e as? UIAction { return a.accessibilityIdentifier == id ? a : nil }
+                        return (e as? UIMenu)?.children.lazy.compactMap(find).first
+                    }
+                    return try XCTUnwrap(find(menu), "\(name): no \(id) in the representative's menu", line: line)
+                }
+                func enabled(_ id: String, line: UInt = #line) throws -> Bool {
+                    try !item(id, line: line).attributes.contains(.disabled)
+                }
+                func states(_ undo: Bool, _ redo: Bool, _ when: String, line: UInt = #line) throws {
+                    XCTAssertEqual(try enabled("editor.menu.undo", line: line), undo, "\(name): the representative's Undo \(when)", line: line)
+                    XCTAssertEqual(try enabled("editor.menu.redo", line: line), redo, "\(name): the representative's Redo \(when)", line: line)
+                    XCTAssertEqual(try bar("editor.undo").isEnabled, undo, "\(name): the pinned Undo \(when)", line: line)
+                    XCTAssertEqual(try bar("editor.redo").isEnabled, redo, "\(name): the pinned Redo \(when)", line: line)
+                }
+                let original = editor.textView.text ?? ""
+                // A turn of the run loop, as between two touches: the typing's
+                // undo group closes (the undo manager groups by event).
+                func settle() { RunLoop.main.run(until: Date().addingTimeInterval(0.2)) }
+                settle()
+
+                // Read mode: Edit, nothing to undo or redo.
+                XCTAssertEqual(try item("editor.menu.edit").title, "Edit", "\(name): read mode")
+                try states(false, false, "in read mode")
+                try item("editor.menu.edit").performWithSender(nil, target: nil)
+                settle()
+                XCTAssertTrue(editor.textView.isEditable, "\(name): Edit from the representative didn't enter editing")
+                XCTAssertEqual(try item("editor.menu.edit").title, "Done", "\(name): editing")
+                XCTAssertEqual(try bar("editor.edit").title, "Done", "\(name): editing, the pinned button")
+                try states(false, false, "editing, nothing typed")
+
+                // Typed: Undo from the representative removes it, Redo restores it.
+                editor.textView.selectedRange = NSRange(location: (original as NSString).length, length: 0)
+                editor.textView.insertText("hoot")
+                settle()
+                let typed = editor.textView.text ?? ""
+                XCTAssertEqual(typed, original + "hoot", "\(name): typing")
+                try states(true, false, "with typing to undo")
+                try item("editor.menu.undo").performWithSender(nil, target: nil)
+                settle()
+                XCTAssertEqual(editor.textView.text, original, "\(name): Undo from the representative")
+                try states(false, true, "after Undo")
+                try item("editor.menu.redo").performWithSender(nil, target: nil)
+                settle()
+                XCTAssertEqual(editor.textView.text, typed, "\(name): Redo from the representative")
+                try states(true, false, "after Redo")
+
+                // Done: back to read mode, Undo and Redo disabled.
+                try item("editor.menu.edit").performWithSender(nil, target: nil)
+                settle()
+                XCTAssertFalse(editor.textView.isEditable, "\(name): Done from the representative didn't leave editing")
+                XCTAssertEqual(try item("editor.menu.edit").title, "Edit", "\(name): back in read mode")
+                XCTAssertEqual(editor.textView.text, typed, "\(name): Done changed the text")
+                try states(false, false, "back in read mode")
+            }
+        }
+    }
+
     /// At most seven rows at the top of the ••• menu, for each size class
     /// and document: with no bar button collapsed into it, and with every
     /// set of buttons a narrow bar may collapse (Undo and Redo too, by

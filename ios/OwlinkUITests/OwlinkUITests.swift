@@ -59,10 +59,26 @@ final class OwlinkUITests: XCTestCase {
             XCTAssertTrue(edit.waitForExistence(timeout: 5) && edit.isHittable,
                           "a file opened read-only: no Edit on the iPhone's bar", file: file, line: line)
         }
-        if edit.exists, edit.label == "Edit" {
-            edit.tap()
-            let editing = NSPredicate(format: "label == 'Done'")
-            wait(for: [XCTNSPredicateExpectation(predicate: editing, object: edit)], timeout: 5)
+        if edit.exists, edit.isHittable {
+            if edit.label == "Edit" {
+                edit.tap()
+                let editing = NSPredicate(format: "label == 'Done'")
+                wait(for: [XCTNSPredicateExpectation(predicate: editing, object: edit)], timeout: 5)
+            }
+        } else if UIDevice.current.userInterfaceIdiom == .pad, app.navigationBars.buttons["editor.history"].isHittable {
+            // An iPad's bar too narrow for its pinned group: Edit in the
+            // representative's menu (none there: read mode off).
+            let rep = app.navigationBars.buttons["editor.history"].firstMatch
+            rep.tap()
+            let item = representativeMenuList(app).buttons[HistoryCommand.edit.menu].firstMatch
+            if item.waitForExistence(timeout: 3), item.label == "Edit" {
+                item.tap()
+                sleep(1)
+                rep.tap()
+                XCTAssertEqual(representativeMenuList(app).buttons[HistoryCommand.edit.menu].firstMatch.label, "Done",
+                               "Edit from the pinned representative didn't enter editing", file: file, line: line)
+            }
+            closeHistoryContainer(app, .representative, file: file, line: line)
         }
     }
 
@@ -229,6 +245,7 @@ final class OwlinkUITests: XCTestCase {
         let undo = menuList.buttons["editor.menu.undo"].firstMatch
         let redo = menuList.buttons["editor.menu.redo"].firstMatch
         let historyInMenu = undo.exists || redo.exists
+        var pinnedRepresentative = false
         if UIDevice.current.userInterfaceIdiom == .pad {
             // An iPad pins Undo, Redo and Edit / Done in the bar: seven
             // rows, no history row (Codex b18 re-check 2).
@@ -243,8 +260,13 @@ final class OwlinkUITests: XCTestCase {
             XCTAssertTrue(undo.exists && redo.exists, "Undo and Redo not both in the ••• menu")
             XCTAssertEqual(undo.frame.midY, redo.frame.midY, accuracy: 2, "Undo and Redo not in one row")
         } else {
-            XCTAssertTrue(app.navigationBars.buttons["editor.undo"].exists && app.navigationBars.buttons["editor.redo"].exists,
-                          "Undo and Redo neither in the bar nor in the ••• menu")
+            // In the bar: their own buttons, or (an iPad's bar too narrow
+            // for the pinned group) its representative, checked below.
+            // (Read with the ••• menu open over the bar: there, not hittable.)
+            let inBar = app.navigationBars.buttons["editor.undo"].exists && app.navigationBars.buttons["editor.redo"].exists
+            pinnedRepresentative = !inBar && app.navigationBars.buttons["editor.history"].exists
+            XCTAssertTrue(inBar || pinnedRepresentative,
+                          "Undo and Redo neither in the bar, nor the pinned representative, nor the ••• menu")
         }
         // Edit (read mode, on an iPhone): in the bar, or in that row.
         let editInMenu = menuList.buttons["editor.menu.edit"].firstMatch.exists
@@ -252,6 +274,17 @@ final class OwlinkUITests: XCTestCase {
             XCTAssertTrue(editInMenu || app.navigationBars.buttons["editor.edit"].exists, "no Edit in the bar or the ••• menu")
         }
         if editInMenu { XCTAssertEqual(menuList.buttons["editor.menu.edit"].frame.midY, undo.frame.midY, accuracy: 2, "Edit not in the Undo / Redo row") }
+        if pinnedRepresentative {
+            // Undo and Redo by touch through the representative's menu.
+            closeMenu(app)
+            for c in [HistoryCommand.undo, .redo] {
+                let found = historyCommand(app, c)
+                XCTAssertEqual(found.path, .representative, "\(c.name) not in the pinned representative's menu")
+                closeHistoryContainer(app, found.path)
+            }
+            more.tap()
+            XCTAssertTrue(menuList.waitForExistence(timeout: 5), "the ••• menu didn't open again")
+        }
         var order = ["Save", "Share & Export", "Find", "Preview", "Ask Cedric", "More", "Settings"]
         if historyInMenu { order.insert("editor.menu.undo", at: 0) }
         let ys = order.map { menuList.buttons[$0].firstMatch.frame.minY }
@@ -283,58 +316,66 @@ final class OwlinkUITests: XCTestCase {
 
     /// Undo, Redo and Edit / Done by touch, end to end (Codex b18 re-check
     /// 2: the menu checks would pass with Undo and Redo always disabled).
-    /// Each command is taken from the ••• menu's folded Undo | Redo | Edit
-    /// row where the bar has folded it (an iPhone), else from the bar (an
-    /// iPad pins them there), and the test says which. Read mode on (as an
-    /// iPhone opens files) so Edit / Done is there on every device: Edit
-    /// enters editing, typed text, Undo removes it, Redo restores it, Done
-    /// leaves editing; Undo and Redo enabled only when there is something
-    /// to undo or redo (and never in read mode).
+    /// Each command is taken wherever it is (historyCommand): the ••• menu's
+    /// folded Undo | Redo | Edit row (an iPhone), the iPad's pinned
+    /// representative (editor.history, a bar too narrow for the pinned
+    /// group), or the bar's own button (an iPad pins them there), and the
+    /// test says which. On an iPhone on iOS 27 in portrait, where the bar's
+    /// priorities fold Undo first, all three must come from the folded row
+    /// (Codex b18 re-check 3). Read mode on (as an iPhone opens files) so
+    /// Edit / Done is there on every device: Edit enters editing, typed
+    /// text, Undo removes it, Redo restores it, Done leaves editing; Undo
+    /// and Redo enabled only when there is something to undo or redo (and
+    /// never in read mode), each read where it was taken from.
     func testHistoryRowRoundTrip() throws {
         let app = launch("README.md", fresh: true, extra: ["-ios.openReadOnly", "YES"])
         let tv = editor(app)
         let original = tv.value as? String ?? ""
         let marker = "hoot roundtrip"
         XCTAssertFalse(original.contains(marker))
-        let barEdit = app.navigationBars.buttons["editor.edit"]
-        if !barEdit.waitForExistence(timeout: 5) { print("ROUNDTRIP-TREE\n\(app.navigationBars.firstMatch.debugDescription)") }
-        XCTAssertTrue(barEdit.exists, "read mode: no Edit / Done button")
-        var folded: [String: Bool] = [:]
+        var paths: [String: HistoryPath] = [:]
+        let foldingExpected = historyFoldingExpected(app)
+        print("HISTORY-ROUNDTRIP folded row expected: \(foldingExpected)")
 
-        /// Closes the open ••• menu by a tap beside it, left of the text
-        /// (the shared closeMenu taps the window's foot: the keyboard's,
-        /// while editing), and checks it closed.
-        func closeOpenMenu(line: UInt = #line) {
-            app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.4)).tap()
-            sleep(1)
-            XCTAssertFalse(app.collectionViews.buttons["Settings"].firstMatch.exists, "the ••• menu didn't close", line: line)
-        }
-        /// The command: the open ••• menu's row item if the bar folded it
-        /// there (the menu is left open), else the bar's button.
-        func command(_ name: String, menu menuID: String, bar barID: String) -> XCUIElement {
-            sleep(1) // a menu or a mode change before this one settles
-            openMore(app)
-            let list = app.collectionViews.containing(.button, identifier: "Settings").firstMatch
-            XCTAssertTrue(list.waitForExistence(timeout: 5), "no ••• menu list")
-            XCTAssertTrue(list.buttons["Settings"].firstMatch.waitForExistence(timeout: 5), "the ••• menu didn't open")
-            sleep(1) // the menu's appearance animation: its rows all in place
-            let inMenu = list.buttons[menuID].firstMatch
-            if inMenu.waitForExistence(timeout: 2) {
-                if folded[name] == nil { print("HISTORY-ROUNDTRIP \(name): in the ••• menu's folded row") }
-                folded[name] = true
-                return inMenu
+        /// The command where it is now; on the iPhone that folds them, the
+        /// folded row and nowhere else. Its container is left open.
+        func command(_ c: HistoryCommand, line: UInt = #line) -> (element: XCUIElement, path: HistoryPath) {
+            let found = historyCommand(app, c, file: #filePath, line: line)
+            if paths[c.name] == nil { print("HISTORY-ROUNDTRIP \(c.name): \(found.path.rawValue)") }
+            if foldingExpected {
+                XCTAssertEqual(found.path, .foldedRow, "\(c.name) not taken from the ••• menu's folded row on an iPhone on iOS 27", line: line)
             }
-            closeOpenMenu()
-            if folded[name] == nil { print("HISTORY-ROUNDTRIP \(name): not folded, in the bar") }
-            folded[name] = false
-            let inBar = app.navigationBars.buttons[barID].firstMatch
-            XCTAssertTrue(inBar.exists, "\(name) neither in the ••• menu's row nor in the bar")
-            return inBar
+            paths[c.name] = found.path
+            return found
         }
-        func assertEnabled(_ name: String, menu: String, bar: String, _ want: Bool, _ when: String, line: UInt = #line) {
-            let c = command(name, menu: menu, bar: bar)
-            XCTAssertEqual(c.isEnabled, want, "\(name) \(want ? "disabled" : "enabled") \(when)", line: line)
-            if folded[name] == true { closeOpenMenu(line: line) }
+        func assertEnabled(_ c: HistoryCommand, _ want: Bool, _ when: String, line: UInt = #line) {
+            let found = command(c, line: line)
+            XCTAssertEqual(found.element.isEnabled, want, "\(c.name) \(want ? "disabled" : "enabled") \(when) (\(found.path.rawValue))", line: line)
+            closeHistoryContainer(app, found.path, line: line)
+        }
+        /// Edit / Done's title, read where Edit was found, and that place closed.
+        func editTitle(line: UInt = #line) -> String {
+            let found = command(.edit, line: line)
+            let label = found.element.label
+            closeHistoryContainer(app, found.path, line: line)
+            return label
+        }
+        /// Taps Edit / Done where it is and checks the title turned to
+        /// `after` through that same path.
+        func toggleEdit(from before: String, to after: String, line: UInt = #line) {
+            let found = command(.edit, line: line)
+            XCTAssertEqual(found.element.label, before, "the Edit command isn't \(before) (\(found.path.rawValue))", line: line)
+            XCTAssertTrue(found.element.isEnabled, "\(before) disabled (\(found.path.rawValue))", line: line)
+            found.element.tap()
+            if found.path == .bar {
+                let turned = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", after), object: found.element)
+                XCTAssertEqual(XCTWaiter.wait(for: [turned], timeout: 5), .completed, "\(before) didn't turn to \(after) on the bar", line: line)
+            }
+            sleep(1) // the menu's closing, the mode change
+            let again = command(.edit, line: line)
+            XCTAssertEqual(again.path, found.path, "Edit / Done moved from \(found.path.rawValue) to \(again.path.rawValue)", line: line)
+            XCTAssertEqual(again.element.label, after, "\(before) didn't turn to \(after) (\(again.path.rawValue))", line: line)
+            closeHistoryContainer(app, again.path, line: line)
         }
         func text() -> String { tv.value as? String ?? "" }
         func waitText(_ ok: @escaping (String) -> Bool, _ what: String, line: UInt = #line) {
@@ -342,23 +383,16 @@ final class OwlinkUITests: XCTestCase {
             let r = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: p, object: nil)], timeout: 5)
             XCTAssertEqual(r, .completed, "\(what): \(text().prefix(120))", line: line)
         }
-        let undo = (name: "Undo", menu: "editor.menu.undo", bar: "editor.undo")
-        let redo = (name: "Redo", menu: "editor.menu.redo", bar: "editor.redo")
 
-        // Read mode: nothing to undo or redo.
-        XCTAssertEqual(barEdit.label, "Edit")
-        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "in read mode")
-        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "in read mode")
+        // Read mode: Edit, nothing to undo or redo.
+        XCTAssertEqual(editTitle(), "Edit", "read mode: Edit / Done isn't Edit")
+        assertEnabled(.undo, false, "in read mode")
+        assertEnabled(.redo, false, "in read mode")
 
-        // Edit: from the row (or the bar).
-        let edit = command("Edit", menu: "editor.menu.edit", bar: "editor.edit")
-        XCTAssertEqual(edit.label, "Edit", "the Edit command isn't Edit in read mode")
-        XCTAssertTrue(edit.isEnabled, "Edit disabled")
-        edit.tap()
-        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Done'"), object: barEdit)], timeout: 5)
-        XCTAssertEqual(barEdit.label, "Done", "Edit didn't enter editing")
-        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "editing, nothing typed")
-        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "editing, nothing typed")
+        // Edit: from wherever it is; it turns to Done there.
+        toggleEdit(from: "Edit", to: "Done")
+        assertEnabled(.undo, false, "editing, nothing typed")
+        assertEnabled(.redo, false, "editing, nothing typed")
 
         // Type.
         tapText(tv)
@@ -367,44 +401,127 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertEqual(text().count, original.count + marker.count, "typing changed more than the marker")
         let typed = text()
 
-        // Undo from the row: the typed text goes.
-        let u = command(undo.name, menu: undo.menu, bar: undo.bar)
-        XCTAssertTrue(u.isEnabled, "Undo disabled with typing to undo")
-        if folded[undo.name] == true {
-            XCTAssertFalse(app.collectionViews.buttons[redo.menu].firstMatch.isEnabled, "Redo enabled with nothing to redo")
-        } else {
-            XCTAssertFalse(app.navigationBars.buttons[redo.bar].isEnabled, "Redo enabled with nothing to redo")
-        }
-        u.tap()
+        // Undo: the typed text goes. Redo, beside it, disabled.
+        assertEnabled(.redo, false, "with nothing to redo")
+        let u = command(.undo)
+        XCTAssertTrue(u.element.isEnabled, "Undo disabled with typing to undo (\(u.path.rawValue))")
+        u.element.tap()
         waitText({ $0 == original }, "Undo didn't remove the typed text")
         XCTAssertEqual(text(), original, "after Undo")
 
-        // Redo from the row: it comes back.
-        let r = command(redo.name, menu: redo.menu, bar: redo.bar)
-        XCTAssertTrue(r.isEnabled, "Redo disabled with an undo to redo")
-        r.tap()
+        // Redo: it comes back.
+        let r = command(.redo)
+        XCTAssertTrue(r.element.isEnabled, "Redo disabled with an undo to redo (\(r.path.rawValue))")
+        r.element.tap()
         waitText({ $0 == typed }, "Redo didn't restore the typed text")
         XCTAssertEqual(text(), typed, "after Redo")
-        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "after Redo, nothing left to redo")
-        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, true, "after Redo, the typing to undo")
+        assertEnabled(.redo, false, "after Redo, nothing left to redo")
+        assertEnabled(.undo, true, "after Redo, the typing to undo")
 
-        // Done from the row: back to read mode, Undo and Redo disabled.
-        let done = command("Edit", menu: "editor.menu.edit", bar: "editor.edit")
-        XCTAssertEqual(done.label, "Done", "the Edit command isn't Done while editing")
-        done.tap()
-        wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Edit'"), object: barEdit)], timeout: 5)
-        XCTAssertEqual(barEdit.label, "Edit", "Done didn't leave editing")
+        // Done: back to read mode, Undo and Redo disabled.
+        toggleEdit(from: "Done", to: "Edit")
         XCTAssertEqual(text(), typed, "Done changed the text")
-        assertEnabled(undo.name, menu: undo.menu, bar: undo.bar, false, "back in read mode")
-        assertEnabled(redo.name, menu: redo.menu, bar: redo.bar, false, "back in read mode")
+        assertEnabled(.undo, false, "back in read mode")
+        assertEnabled(.redo, false, "back in read mode")
 
         // Said, not silent: where each command was.
-        let summary = folded.keys.sorted().map { "\($0): \(folded[$0]! ? "folded row" : "bar")" }.joined(separator: ", ")
-        print("HISTORY-ROUNDTRIP \(UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone"): \(summary)")
+        let summary = paths.keys.sorted().map { "\($0): \(paths[$0]!.rawValue)" }.joined(separator: ", ")
+        print("HISTORY-ROUNDTRIP \(device): \(summary)")
         XCTContext.runActivity(named: "History commands: \(summary)") { _ in }
-        if UIDevice.current.userInterfaceIdiom == .pad {
-            XCTAssertEqual(folded.values.filter { $0 }.count, 0, "an iPad folded history commands into the ••• menu: \(summary)")
+        XCTAssertEqual(Set(paths.keys), ["Undo", "Redo", "Edit"], "not every command taken: \(summary)")
+        if foldingExpected {
+            XCTAssertEqual(Set(paths.values), [.foldedRow], "an iPhone on iOS 27 took history commands outside the folded row: \(summary)")
         }
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertFalse(paths.values.contains(.foldedRow), "an iPad folded history commands into the ••• menu: \(summary)")
+        }
+    }
+
+    // MARK: Undo, Redo and Edit / Done wherever they are (0.5.2 (18))
+
+    struct HistoryCommand {
+        let name: String, menu: String, bar: String
+        static let undo = HistoryCommand(name: "Undo", menu: "editor.menu.undo", bar: "editor.undo")
+        static let redo = HistoryCommand(name: "Redo", menu: "editor.menu.redo", bar: "editor.redo")
+        static let edit = HistoryCommand(name: "Edit", menu: "editor.menu.edit", bar: "editor.edit")
+    }
+
+    enum HistoryPath: String {
+        /// The ••• menu's Undo | Redo | Edit row (an iPhone's bar folded them).
+        case foldedRow = "folded ••• row"
+        /// The iPad's pinned group shown as its one button (editor.history).
+        case representative = "pinned representative"
+        /// The bar's own button.
+        case bar = "bar"
+    }
+
+    /// Where an iPhone's bar folds Undo (and so the whole row) into the •••
+    /// menu: iOS 27's priorities, a portrait iPhone's narrow bar, read mode.
+    private func historyFoldingExpected(_ app: XCUIApplication) -> Bool {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+        guard #available(iOS 27.0, *) else { return false }
+        let window = app.windows.firstMatch.frame
+        return !window.isEmpty && window.width < window.height && window.width <= 440
+    }
+
+    /// The open ••• menu's own list: the one with Settings in it.
+    private func overflowMenuList(_ app: XCUIApplication) -> XCUIElement {
+        app.collectionViews.containing(.button, identifier: "Settings").firstMatch
+    }
+
+    /// The pinned representative's open menu: the list with its Undo, and
+    /// not the ••• menu's.
+    private func representativeMenuList(_ app: XCUIApplication) -> XCUIElement {
+        // Opened only with the ••• menu closed (historyCommand), so the
+        // one list holding the row's Undo is the representative's.
+        app.collectionViews.containing(.button, identifier: "editor.menu.undo").firstMatch
+    }
+
+    /// Undo, Redo or Edit / Done wherever it is, by touch: the ••• menu's
+    /// folded row (that menu left open), else the iPad's pinned
+    /// representative's menu when the bar shows it in place of the group
+    /// (left open), else the bar's own button. One must be there.
+    private func historyCommand(_ app: XCUIApplication, _ c: HistoryCommand,
+                                file: StaticString = #filePath, line: UInt = #line) -> (element: XCUIElement, path: HistoryPath) {
+        sleep(1) // a menu or a mode change before this one settles
+        openMore(app)
+        let list = overflowMenuList(app)
+        XCTAssertTrue(list.waitForExistence(timeout: 5), "the ••• menu didn't open", file: file, line: line)
+        sleep(1) // the menu's appearance animation: its rows all in place
+        let inMenu = list.buttons[c.menu].firstMatch
+        if inMenu.waitForExistence(timeout: 2) { return (inMenu, .foldedRow) }
+        closeHistoryContainer(app, .foldedRow, file: file, line: line)
+        let inBar = app.navigationBars.buttons[c.bar].firstMatch
+        let rep = app.navigationBars.buttons["editor.history"].firstMatch
+        if !(inBar.exists && inBar.isHittable), rep.exists, rep.isHittable {
+            rep.tap()
+            let repList = representativeMenuList(app)
+            XCTAssertTrue(repList.waitForExistence(timeout: 5), "the pinned representative's menu didn't open", file: file, line: line)
+            XCTAssertFalse(overflowMenuList(app).exists, "the ••• menu open over the representative's", file: file, line: line)
+            sleep(1)
+            let item = repList.buttons[c.menu].firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 3), "no \(c.name) in the pinned representative's menu", file: file, line: line)
+            return (item, .representative)
+        }
+        XCTAssertTrue(inBar.exists && inBar.isHittable,
+                      "\(c.name) neither in the ••• menu's row, nor the pinned representative's menu, nor the bar", file: file, line: line)
+        return (inBar, .bar)
+    }
+
+    /// Closes the menu historyCommand left open (none for the bar) by a
+    /// tap beside it, left of the text (closeMenu taps the window's foot:
+    /// the keyboard's, while editing), and checks it closed.
+    private func closeHistoryContainer(_ app: XCUIApplication, _ path: HistoryPath,
+                                       file: StaticString = #filePath, line: UInt = #line) {
+        let list: XCUIElement
+        switch path {
+        case .bar: return
+        case .foldedRow: list = overflowMenuList(app)
+        case .representative: list = representativeMenuList(app)
+        }
+        guard list.exists else { return }
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.4)).tap()
+        XCTAssertTrue(list.waitForNonExistence(timeout: 3), "the \(path.rawValue)'s menu didn't close", file: file, line: line)
     }
 
     /// Share… (Share & Export ›) brings up the share sheet with the
@@ -557,8 +674,19 @@ final class OwlinkUITests: XCTestCase {
     /// from the middle shown row to the top (or bottom) one, by screen
     /// point. An element swipe isn't used: on an iPad mini, Language ›'s
     /// list and its rows (on screen) fail it with "visible frame is empty".
-    private func swipeMenu(_ app: XCUIApplication, _ list: XCUIElement, up: Bool) {
-        guard let shot = try? list.snapshot() else { return }
+    private func swipeMenu(_ app: XCUIApplication, _ list: XCUIElement, up: Bool,
+                           file: StaticString = #filePath, line: UInt = #line) {
+        // A snapshot that fails is tried again; one that never comes fails
+        // the test, not a swipe silently skipped (Codex b18 re-check 3).
+        var snapshot: XCUIElementSnapshot?
+        for _ in 0..<3 where snapshot == nil {
+            snapshot = try? list.snapshot()
+            if snapshot == nil { sleep(1) }
+        }
+        guard let shot = snapshot else {
+            XCTFail("couldn't read the open menu's list to swipe it", file: file, line: line)
+            return
+        }
         // The rows (cells, in the query's order), top first.
         var rows: [CGRect] = []
         func walk(_ e: XCUIElementSnapshot) {
