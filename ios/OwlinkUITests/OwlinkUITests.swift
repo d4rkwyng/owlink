@@ -254,6 +254,11 @@ final class OwlinkUITests: XCTestCase {
         sleep(1)
     }
 
+    /// ⌘, as a hardware-keyboard event (not a menu tap).
+    private func commandComma(_ app: XCUIApplication) {
+        app.typeKey(",", modifierFlags: .command)
+    }
+
     private func settingsShown(_ app: XCUIApplication) -> Bool {
         app.descendants(matching: .any)["settings.font"].waitForExistence(timeout: 8)
     }
@@ -640,5 +645,42 @@ final class OwlinkUITests: XCTestCase {
         summary.tap()
         XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
         shoot("front-matter-expanded")
+    }
+
+    // MARK: ⌘, from the hardware keyboard (iPad, 0.5.2 (16) findings)
+
+    /// ⌘, opens Owlink's Settings as a real key event: right after the •••
+    /// menu closes, right after Settings (a sheet) closes, with Ask Cedric
+    /// docked beside the text, over Ask Cedric's sheet, and right after
+    /// Ask Cedric closes. Never the system Settings app.
+    func testCommandCommaOpensSettingsOnIPad() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        func expectSettings(_ state: String, askStays: Bool = false) {
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "\(state): ⌘, left Owlink (the system Settings app)")
+            XCTAssertTrue(settingsShown(app), "\(state): ⌘, didn't open Owlink's Settings")
+            closeSettings(app)
+            if askStays {
+                XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "\(state): Ask Cedric went with Settings")
+            }
+        }
+        openMore(app)
+        closeMenu(app)
+        expectSettings("right after the ••• menu closed")
+        expectSettings("right after Settings closed")
+        openAsk(app, sheet: false)
+        expectSettings("Ask Cedric open (docked)", askStays: true)
+        closeAskWithDone(app)
+        expectSettings("right after Ask Cedric (docked) closed")
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        expectSettings("over Ask Cedric's sheet", askStays: true)
+        shoot("settings-over-ask-sheet-command-comma")
+        closeAskWithDone(app)
+        expectSettings("right after Ask Cedric's sheet closed")
+        assertBackReturnsToFiles(app, "after ⌘, in every state")
     }
 }
