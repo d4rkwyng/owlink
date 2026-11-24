@@ -3617,9 +3617,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// Share…: a copy of the document as it is now (unsaved edits too), as
     /// a file named like the document, in the share sheet (as Notes' Send a
-    /// Copy). In the document's encoding and line endings; the copy is
-    /// removed when the sheet is done.
+    /// Copy). Byte for byte what Save would write (encoding, BOM, each
+    /// line's ending); the copy is removed when the sheet is done, and
+    /// none is made when the sheet can't be shown now.
     @objc func shareDocumentCopy() {
+        // UIKit refuses a sheet while another is up or going, or off
+        // screen; the sheet's handler would never run to remove the copy.
+        let presenter = sheetPresenter()
+        guard view.window != nil, presenter.viewIfLoaded?.window != nil, presenter.presentedViewController == nil,
+              !presenter.isBeingDismissed, !presenter.isBeingPresented else { return }
         let manager = FileManager.default
         guard let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
             showExportError(CocoaError(.fileNoSuchFile))
@@ -3627,11 +3633,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         let directory = caches.appendingPathComponent("ShareCopy-\(UUID().uuidString)", isDirectory: true)
         do {
-            let text = textView.text ?? ""
-            guard let data = TextCodec.encode(text, encoding: document.encoding, lineEnding: document.lineEnding,
-                                              includeBOM: document.currentState.hasBOM) else {
-                throw TextDocument.OpenError.unencodable(document.encoding)
-            }
+            let data = try document.serialized(textView.text ?? "").data
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let url = directory.appendingPathComponent(document.displayName)
             try data.write(to: url, options: .atomic)
@@ -3649,7 +3651,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                 }
             }
             sharedCopyItems = [url]
-            present(activity, animated: true)
+            presenter.present(activity, animated: true)
         } catch {
             try? manager.removeItem(at: directory)
             showExportError(error)

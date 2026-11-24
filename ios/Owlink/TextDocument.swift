@@ -94,18 +94,27 @@ final class TextDocument: UIDocument {
                   hasBOM: DiskState.includeBOM(encoding: encoding, onDisk: onDisk))
     }
 
-    override func contents(forType typeName: String) throws -> Any {
-        if let t = currentText?() { text = t }
-        let state = currentState
+    /// The bytes a save writes for `text`: in the document's encoding,
+    /// with its BOM, and with mixed line endings each unchanged line's own.
+    /// Pure: no save bookkeeping (Share… sends exactly this).
+    func serialized(_ text: String) throws -> (data: Data, endings: [LineEnding]?) {
         // Mixed line endings: unchanged lines keep their own.
         var endings: [LineEnding]?
         if mixedLineEndings, let layout = lineEndingLayout {
             endings = TextCodec.lineEndings(for: text, keeping: layout, fallback: lineEnding)
         }
-        guard let data = TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding, includeBOM: state.hasBOM,
+        guard let data = TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding,
+                                          includeBOM: DiskState.includeBOM(encoding: encoding, onDisk: onDisk),
                                           endings: endings) else {
             throw OpenError.unencodable(encoding)
         }
+        return (data, endings)
+    }
+
+    override func contents(forType typeName: String) throws -> Any {
+        if let t = currentText?() { text = t }
+        let state = currentState
+        let (data, endings) = try serialized(text)
         writing = (state, endings.map { LineEndingLayout(text: text, endings: $0) },
                    data.count <= SafetyCopyStore.maxBytes ? data : nil)
         return data

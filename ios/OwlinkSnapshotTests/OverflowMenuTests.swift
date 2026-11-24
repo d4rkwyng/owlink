@@ -164,11 +164,12 @@ final class OverflowMenuTests: XCTestCase {
         Layout(name: "iPad compact", width: .compact, size: CGSize(width: 507, height: 1024), readMode: false, iPad: true),
     ]
 
-    private func editor(_ layout: Layout, _ ext: String) -> EditorViewController {
+    private func editor(_ layout: Layout, _ ext: String, bytes: Data? = nil) -> EditorViewController {
         WindowSupport.overrideForTests = (multipleScenes: layout.iPad, isPhone: !layout.iPad)
         let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext))
         doc.language.choose(ext == "md" ? .markdown : .plain)
         doc.text = ext == "md" ? "# Owls\n\nHoot.\n" : "Owls\n"
+        if let bytes { try? doc.load(fromContents: bytes, ofType: nil) }
         let editor = EditorViewController(document: doc, readModeOnOpen: layout.readMode)
         let nav = UINavigationController(rootViewController: editor)
         nav.traitOverrides.horizontalSizeClass = layout.width
@@ -258,6 +259,79 @@ final class OverflowMenuTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "the copy stays after the sheet")
             editor.dismiss(animated: false)
         }
+    }
+
+    /// Share… sends what Save would write, byte for byte: mixed LF/CRLF
+    /// keep each line's own ending, a BOM stays (UTF-8 and UTF-16), with
+    /// and without an unsaved edit.
+    func testShareSendsTheBytesSaveWrites() throws {
+        let utf16 = Data([0xFF, 0xFE]) + "Owls\r\nHoot\r\n".data(using: .utf16LittleEndian)!
+        let documents: [(String, Data)] = [
+            ("mixed LF/CRLF", Data("One\nTwo\r\nThree\nFour\r\n".utf8)),
+            ("UTF-8 BOM", Data([0xEF, 0xBB, 0xBF]) + Data("Owls\nHoot\n".utf8)),
+            ("UTF-8 BOM, mixed", Data([0xEF, 0xBB, 0xBF]) + Data("Owls\r\nHoot\nWhoo\r\n".utf8)),
+            ("UTF-16 BOM", utf16),
+        ]
+        for (name, bytes) in documents {
+            for edit in [false, true] {
+                let editor = editor(Self.layouts[0], "txt", bytes: bytes)
+                defer { WindowSupport.overrideForTests = nil }
+                if edit { editor.textView.text += "Unsaved line.\n" }
+                editor.shareDocumentCopy()
+                for _ in 0..<50 where editor.presentedViewController == nil {
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+                }
+                let activity = try XCTUnwrap(editor.presentedViewController as? UIActivityViewController, "\(name): no share sheet")
+                let file = try XCTUnwrap(editor.sharedCopyItems.first, name)
+                let shared = try Data(contentsOf: file)
+                let saved = try XCTUnwrap(try editor.document.contents(forType: "public.plain-text") as? Data, name)
+                XCTAssertEqual(shared, saved, "\(name), edited \(edit): not what Save writes")
+                if !edit { XCTAssertEqual(shared, bytes, "\(name): not the file's own bytes") }
+                activity.completionWithItemsHandler?(nil, false, nil, nil)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "\(name): the copy stays after the sheet")
+                editor.dismiss(animated: false)
+            }
+        }
+    }
+
+    private func shareCopies() -> Set<String> {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: caches.path)) ?? []
+        return Set(names.filter { $0.hasPrefix("ShareCopy-") })
+    }
+
+    /// When UIKit can't show the share sheet (an alert is up, or the
+    /// editor isn't on screen), Share… leaves no copy behind.
+    func testRefusedShareLeavesNoCopy() throws {
+        // An alert is up.
+        let editor = editor(Self.layouts[0], "txt")
+        defer { WindowSupport.overrideForTests = nil }
+        let alert = UIAlertController(title: "Owls", message: nil, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        editor.present(alert, animated: false)
+        for _ in 0..<20 where editor.presentedViewController == nil {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        }
+        XCTAssertTrue(editor.presentedViewController is UIAlertController)
+        let before = shareCopies()
+        editor.shareDocumentCopy()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertFalse(editor.presentedViewController is UIActivityViewController)
+        XCTAssertEqual(shareCopies().subtracting(before), [], "alert up: a copy is left in Caches")
+        editor.dismiss(animated: false)
+
+        // Not in a window.
+        let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt"))
+        doc.text = "Owls\n"
+        let offscreen = EditorViewController(document: doc, readModeOnOpen: false)
+        let nav = UINavigationController(rootViewController: offscreen)
+        nav.loadViewIfNeeded()
+        offscreen.loadViewIfNeeded()
+        let before2 = shareCopies()
+        offscreen.shareDocumentCopy()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertNil(offscreen.presentedViewController)
+        XCTAssertEqual(shareCopies().subtracting(before2), [], "off screen: a copy is left in Caches")
     }
 
     /// Without a preview (plain text) the view toggles take Preview's
