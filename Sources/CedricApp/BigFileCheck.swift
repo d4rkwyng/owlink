@@ -7,7 +7,8 @@ import CedricCore
 /// it, checks large mode is on without chunks (TextKit's own paragraphs),
 /// lays out the top and the end, types at the end, then pastes a 30,000-
 /// character line: chunks turn on and TextKit's elements stay contiguous,
-/// with ranges, forwards and backwards across the long line. Scripts/
+/// with ranges, forwards and backwards across the long line, and none
+/// forwards from the end. Scripts/
 /// bigfile-check.sh generates the log (CEDRIC_BIGFILE=path) and fails on
 /// a crash report too; without CEDRIC_BIGFILE the check writes its own.
 extension DevChecks {
@@ -98,6 +99,13 @@ extension DevChecks {
                 let back = walk(from: len, reverse: true, limit: 100)
                 expect(back != nil && back?.last.map(NSMaxRange) == len && (back?.first?.location ?? len) < start,
                        "backwards from the end: contiguous past the long line's start")
+                // As NSTextContentStorage: nothing forwards from the end (the
+                // last line handed out there is what crashed on macOS 26).
+                if let cs = tab.textView.contentStorage {
+                    var past = 0
+                    _ = cs.enumerateTextElements(from: cs.documentRange.endLocation) { _ in past += 1; return false }
+                    expect(past == 0, "no element forwards from the end", "\(past)")
+                }
                 tab.textView.scrollToBeginningOfDocument(nil)
                 tab.window?.displayIfNeeded()
                 layOutEnd()
