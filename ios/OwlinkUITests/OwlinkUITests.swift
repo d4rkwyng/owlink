@@ -467,4 +467,48 @@ final class OwlinkUITests: XCTestCase {
         assertBackReturnsToFiles(app, "detached preview")
     }
 
+    // MARK: Format bar under Ask Cedric, front matter (0.5.2 (17))
+
+    private func formatBar(_ app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'contextbar.'")).firstMatch
+    }
+
+    /// Editing with the keyboard (and so the format bar) up. The iPad
+    /// simulator with its hardware keyboard shows no input accessory at
+    /// all (before Ask Cedric too): nothing to check there.
+    private func startTyping(_ app: XCUIApplication, _ tv: XCUIElement) throws {
+        let edit = app.buttons["editor.edit"]
+        if edit.exists, edit.label == "Edit" { edit.tap() }
+        tv.tap()
+        if !formatBar(app).waitForExistence(timeout: 8), device == "ipad" {
+            throw XCTSkip("no format bar on screen while editing (hardware keyboard, no input accessory shown)")
+        }
+        XCTAssertTrue(formatBar(app).exists, "no format bar while editing Markdown")
+    }
+
+    private func waitGone(_ e: XCUIElement, _ message: String) {
+        let gone = NSPredicate { _, _ in !e.exists || !e.isHittable }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+        XCTAssertFalse(e.exists && e.isHittable, message)
+    }
+
+    func testFormatBarHiddenUnderAskCedric() throws {
+        let app = launch("README.md", fresh: true)
+        let tv = editor(app)
+        try startTyping(app, tv)
+        openAsk(app, sheet: true)
+        waitGone(formatBar(app), "the format bar shows under Ask Cedric")
+        shoot("ask-cedric-no-format-bar")
+        closeAskWithDone(app)
+        tv.tap()
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after Done")
+        shoot("format-bar-restored")
+        // And after a swipe down.
+        openAsk(app, sheet: true)
+        waitGone(formatBar(app), "the format bar shows under Ask Cedric (again)")
+        closeAskBySwipe(app)
+        tv.tap()
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after a swipe down")
+    }
+
 }

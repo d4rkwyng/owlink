@@ -41,6 +41,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     let invisiblesOverlay = InvisiblesOverlay()
     lazy var regexFind = RegexFind(editor: self)
     var contextBar: MarkdownContextBar?
+    /// The Ask Cedric sheet is up: the format bar is off the keyboard.
+    var contextBarHiddenForAsk = false
     private(set) var lineIndex = LineIndex()
     let markdownFenceIndex = FenceIndex()
     /// Left inset of the text before line numbers claim any of it.
@@ -2861,7 +2863,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func presentAskSheet(_ model: AskCedricModel) {
-        let host = UIHostingController(rootView: askRoot(model))
+        let host = AskSheetHost(rootView: askRoot(model))
+        // The format bar (the text view's input accessory) would stay up
+        // over the sheet while the text keeps the keyboard: it goes while
+        // the sheet is up, and comes back however the sheet goes (Done,
+        // swipe down, docked into the panel, closed with the document).
+        host.onGone = { [weak self, weak host] in
+            guard let self else { return }
+            if self.askSheet == nil || self.askSheet === host { self.askSheet = nil }
+            self.contextBarHiddenForAsk = false
+            self.updateContextBar()
+        }
+        contextBarHiddenForAsk = true
+        updateContextBar()
         // Default sizing uses the SwiftUI ideal size. A ScrollView's ideal
         // size is its whole transcript, so the sheet clipped long answers
         // instead of scrolling them.
