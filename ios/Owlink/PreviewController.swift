@@ -221,15 +221,21 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// may have changed since. An untouched preview (rendered collapsed,
     /// still collapsed) wrote "collapsed" over the reader's "expanded"
     /// from another preview. A read that comes back after its page was
-    /// replaced is dropped.
+    /// replaced is dropped. Two reads in flight at once are each compared
+    /// with the page's state when they come back, so the second doesn't
+    /// keep the first's change again over a newer choice.
     func recordFrontMatterState(then: @escaping () -> Void = {}) {
-        guard loaded, !showingCSV, let page = shownPage,
+        guard loaded, !showingCSV, let readFor = shownPage?.generation,
               files.pageHTML?.contains("<details class=\"frontmatter\"") == true else { then(); return }
         web.callAsyncJavaScript(Self.frontMatterStateScript, arguments: [:], in: nil, in: .defaultClient) { [weak self] result in
             guard let self else { then(); return }
             let read: Bool? = if case .success(let value) = result { value as? Bool } else { nil }
+            // Compared with what the page stands for now, not when the read
+            // began: an overlapping read may already have kept this change
+            // (Codex review of the 0.5.2 (17) fixes, must-fix).
+            guard let page = self.shownPage else { then(); return }
             if let open = Self.frontMatterChange(read: read, renderedOpen: page.frontMatterOpen,
-                                                 readFor: page.generation, shown: self.shownPage?.generation) {
+                                                 readFor: readFor, shown: page.generation) {
                 AppSettings.previewFrontMatterExpanded = open
                 // Kept: the page now stands for that state.
                 self.shownPage?.frontMatterOpen = open

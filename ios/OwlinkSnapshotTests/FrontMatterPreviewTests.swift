@@ -151,6 +151,38 @@ final class FrontMatterPreviewTests: XCTestCase {
         XCTAssertFalse(AppSettings.previewFrontMatterExpanded)
     }
 
+    /// Codex review of 0.5.2 (17) fixes, must-fix: two reads of the same
+    /// page in flight at once (both started while it stood for
+    /// collapsed). The reader has expanded it: the first read keeps
+    /// "expanded"; then the reader collapses the block in another preview
+    /// before the second read comes back. The second read sees the same
+    /// expanded block, no change from what the page now stands for, so the
+    /// newer "collapsed" stays.
+    func testOverlappingReadsKeepTheNewerChoice() async throws {
+        let p = preview()
+        _ = try await block(p, open: false)
+        _ = try await js(p, "document.querySelector('details.frontmatter').open = true; return true;")
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            var firstBack = false
+            p.recordFrontMatterState {
+                XCTAssertTrue(AppSettings.previewFrontMatterExpanded, "the first read didn't keep the reader's change")
+                firstBack = true
+                // Another preview's newer choice, before the second read is back.
+                AppSettings.previewFrontMatterExpanded = false
+            }
+            p.recordFrontMatterState {
+                XCTAssertTrue(firstBack, "the reads came back out of order")
+                done.resume()
+            }
+        }
+        XCTAssertFalse(AppSettings.previewFrontMatterExpanded, "the second overlapping read wrote over the newer choice")
+        // The page still stands for expanded: the reader closing it here is a change.
+        _ = try await js(p, "document.querySelector('details.frontmatter').open = false; return true;")
+        AppSettings.previewFrontMatterExpanded = true
+        await record(p)
+        XCTAssertFalse(AppSettings.previewFrontMatterExpanded)
+    }
+
     /// A read counts only for the page it was made on, and only as a
     /// change from what that page was rendered with.
     func testWhatAReadKeeps() {
