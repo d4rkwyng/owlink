@@ -1,5 +1,6 @@
 import UIKit
 import UniformTypeIdentifiers
+import os
 import SwiftUI
 import CedricCore
 import CedricAI
@@ -3684,18 +3685,35 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// still on screen, closing; a sheet presented then can be refused
     /// (b18 review). So the sheet waits for the menu to be gone and the
     /// editor free (checked every 50 ms, two seconds at most), then goes
-    /// up as Share… does: its own checks decide, and leave no copy.
+    /// up as Share… does: its own checks decide, and leave no copy. Still
+    /// busy after two seconds: Share… does nothing (logged), no copy is
+    /// written and nothing presented (Codex b18 re-check 2: it used to run
+    /// anyway, into the transition it was waiting out).
     func shareFromMenu() {
         afterMenuCloses { [weak self] in self?.shareDocumentCopy() }
     }
+
+    /// Whether a menu or a presentation is still in the way of Share…'s
+    /// sheet; tests stand in for a menu that never finishes closing.
+    var shareWaitBusy: (() -> Bool)?
+    /// Times Share… from the menu gave up, the menu still busy; tests read it.
+    private(set) var sharesSkippedBusy = 0
+    private static let shareLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Owlink", category: "Share")
 
     private func afterMenuCloses(tries: Int = 40, _ work: @escaping () -> Void) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self else { return }
             let presenter = sheetPresenter()
-            let busy = menuShowing() || presenter.transitionCoordinator != nil
-                || presenter.isBeingPresented || presenter.isBeingDismissed
-            if busy, tries > 0 { afterMenuCloses(tries: tries - 1, work) } else { work() }
+            let busy = shareWaitBusy?() ?? (menuShowing() || presenter.transitionCoordinator != nil
+                || presenter.isBeingPresented || presenter.isBeingDismissed)
+            if !busy {
+                work()
+            } else if tries > 0 {
+                afterMenuCloses(tries: tries - 1, work)
+            } else {
+                sharesSkippedBusy += 1
+                Self.shareLog.error("Share… skipped: the menu or a presentation was still busy after 2 s; no copy written, nothing presented")
+            }
         }
     }
 

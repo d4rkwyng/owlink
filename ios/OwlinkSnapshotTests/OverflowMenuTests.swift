@@ -421,6 +421,40 @@ final class OverflowMenuTests: XCTestCase {
         XCTAssertNil(editor.presentedViewController)
     }
 
+    /// Share… chosen in the ••• menu, and the menu stays busy (closing)
+    /// past the two-second wait: Share… gives up, writes no copy and
+    /// presents nothing (Codex b18 re-check 2: it ran anyway, into the
+    /// transition). Once idle again, Share… from the menu works.
+    func testShareFromMenuStillBusyAtTheDeadlineDoesNothing() throws {
+        let editor = editor(Self.layouts[0], "txt")
+        defer { WindowSupport.overrideForTests = nil }
+        var offered = 0
+        editor.presentShareSheet = { _, _ in offered += 1 }
+        var busy = true
+        var polls = 0
+        editor.shareWaitBusy = { polls += 1; return busy }
+        let before = shareCopies()
+        try shareAction(editor).performWithSender(nil, target: nil)
+        waitFor(6) { editor.sharesSkippedBusy > 0 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        XCTAssertEqual(editor.sharesSkippedBusy, 1, "Share… didn't give up at the deadline (polled \(polls) times)")
+        XCTAssertGreaterThan(polls, 1, "Share… didn't wait for the menu")
+        XCTAssertEqual(offered, 0, "Share… presented with the menu still busy")
+        XCTAssertNil(editor.navigationController?.presentedViewController, "something presented with the menu still busy")
+        XCTAssertEqual(editor.sharedCopyItems, [], "Share… wrote its copy with the menu still busy")
+        XCTAssertEqual(shareCopies().subtracting(before), [], "a copy is left in Caches")
+        // Idle: Share… from the menu goes ahead.
+        busy = false
+        try shareAction(editor).performWithSender(nil, target: nil)
+        waitFor(5) { offered > 0 }
+        XCTAssertEqual(offered, 1, "Share… didn't present once the menu was idle")
+        XCTAssertEqual(editor.sharesSkippedBusy, 1)
+        if let file = editor.sharedCopyItems.first {
+            waitFor(5) { !FileManager.default.fileExists(atPath: file.path) }
+        }
+        XCTAssertEqual(shareCopies().subtracting(before), [], "a copy is left in Caches")
+    }
+
     /// Share… chosen in the ••• menu just as an alert comes up: the sheet
     /// isn't shown over it, and no copy is left behind.
     func testShareFromMenuWithAnAlertUpLeavesNoCopy() throws {
