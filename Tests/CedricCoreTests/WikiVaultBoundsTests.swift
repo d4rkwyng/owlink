@@ -55,6 +55,24 @@ import Testing
         #expect(vault.root.path == home.standardizedFileURL.path, "the user chose to open the home folder")
     }
 
+    /// iOS passes `vaultRoot(for:granted:)` as the opened root: the vault
+    /// it finds inside a granted folder obeys the same walk bounds, so a
+    /// stray `.obsidian` in the home folder (on iOS the app's container)
+    /// isn't picked over the grant; a real vault inside it still is; and a
+    /// grant with no vault in it is the root, as an opened folder is.
+    @Test func aGrantsVaultFollowsTheSameBounds() throws {
+        let t = try makeTree(["grant/home/.obsidian/x", "grant/home/Notes/doc.md",
+                              "grant/home/Vault/.obsidian/app.json", "grant/home/Vault/a/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let grant = t.appendingPathComponent("grant"), home = t.appendingPathComponent("grant/home")
+        let notes = t.appendingPathComponent("grant/home/Notes"), inVault = t.appendingPathComponent("grant/home/Vault/a")
+        #expect(WikiVault.vaultRoot(for: notes, granted: grant, home: home)?.path == grant.path, "not the stray home vault: the grant")
+        #expect(WikiVault.vaultRoot(for: inVault, granted: grant, home: home)?.standardizedFileURL.path
+                == t.appendingPathComponent("grant/home/Vault").standardizedFileURL.path, "a real vault inside")
+        #expect(WikiVault.vaultRoot(for: notes, granted: home, home: home)?.path == home.path, "a grant of home itself is still the root")
+        #expect(WikiVault.vaultRoot(for: notes, granted: nil, home: home) == nil)
+    }
+
     @Test func boundaryFolders() {
         let home = URL(fileURLWithPath: "/Users/someone")
         let no = ["/", "/Users", "/Users/someone", "/Volumes", "/Volumes/Backup", "/tmp"]
