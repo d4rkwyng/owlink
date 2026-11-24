@@ -194,8 +194,11 @@ public enum TextTools {
 /// A small JSON validator and re-printer. Keeps key order and number
 /// spelling exactly as written (JSONSerialization does neither).
 public enum JSONFormatter {
-    public static func format(_ text: String, pretty: Bool, indent: String = "  ") throws -> String {
+    /// `limit`: the most output bytes (deeply nested JSON indents to many
+    /// times its own size); past it, `TextToolError.invalidJSON`.
+    public static func format(_ text: String, pretty: Bool, indent: String = "  ", limit: Int = .max) throws -> String {
         var p = Parser(Array(text.utf8))
+        p.limit = limit
         var out: [UInt8] = []
         out.reserveCapacity(text.utf8.count + text.utf8.count / 4)
         p.skipSpace()
@@ -210,6 +213,7 @@ public enum JSONFormatter {
     struct Parser {
         let b: [UInt8]
         var i = 0
+        var limit = Int.max
         init(_ b: [UInt8]) { self.b = b }
 
         func error(_ what: String) -> TextToolError {
@@ -240,6 +244,7 @@ public enum JSONFormatter {
                 if i < b.count, b[i] == close { out.append(close); i += 1; return }
                 while true {
                     if pretty { newline(&out, indent, depth + 1) }
+                    if out.count > limit { throw error(String(localized: "too long to format")) }
                     if obj {
                         skipSpace()
                         guard i < b.count, b[i] == UInt8(ascii: "\"") else { throw error(String(localized: "expected a key string")) }

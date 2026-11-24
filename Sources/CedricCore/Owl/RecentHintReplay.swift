@@ -3,33 +3,72 @@ import Foundation
 /// "Looks like JSON. Format it?" shown again from Recent hints after its
 /// text changed (0.5.4 QA #12): the stale replay kept the question but
 /// offered only Not now / Don't show again, a question with no yes. Now
-/// the current text is checked again: still a one-line JSON document, a
-/// fresh hint for the text as it is now (Fix it formats it, nothing
-/// else); otherwise a past hint that asks nothing.
+/// the current text is checked again (off the main thread): still a
+/// one-line JSON document, a fresh hint for the text as it is now (Fix it
+/// formats it, nothing else); otherwise a past hint that asks nothing.
 extension RulesHintProvider {
     /// The past hint's title.
     public static var staleJSONTitle: String { String(localized: "Looked like JSON (the text has changed since).") }
     /// …and when its document is closed.
     public static var closedJSONTitle: String { String(localized: "Looked like JSON.") }
 
-    /// Longest document checked again on the main thread (the hint itself
-    /// was only given for a document wholly in view).
+    /// Longest document checked again (the hint itself was only given for
+    /// a document wholly in view).
     public static let replayJSONLimit = 64 * 1024
+    /// Most UTF-8 bytes of formatted output: 64 KB nested 500 deep would
+    /// indent to tens of megabytes.
+    public static let replayJSONOutputLimit = 1024 * 1024
 
-    /// `r`, a recent hint shown again, for the bubble. Only a stale JSON
-    /// hint changes; `document` is the document's text now (nil: closed).
-    public static func replayJSON(_ r: OwlCoordinator.Replay, document: NSString?) -> OwlCoordinator.Replay {
-        guard r.hint.id == jsonID, r.isStale else { return r }
-        if let doc = document, doc.length <= replayJSONLimit, let pretty = JSONFormatter.prettyIfMinified(doc as String) {
-            let all = NSRange(location: 0, length: doc.length)
-            let hint = OwlHint(id: jsonID, kind: .fix, title: String(localized: "Looks like JSON. Format it?"),
-                               detail: String(localized: "Pretty-prints it with two-space indents; key order is kept."),
-                               range: all, replacement: pretty, source: r.hint.source)
-            return OwlCoordinator.Replay(hint: hint, documentRange: all, expected: doc as String, isStale: false)
+    /// What showing a recent JSON hint again needs.
+    public enum JSONReplay: Equatable, Sendable {
+        /// Show this.
+        case ready(OwlCoordinator.Replay)
+        /// Check `text`, the whole document now, again with `recheckJSON`
+        /// (off the main thread), and show the result only if the
+        /// document still holds `text`.
+        case recheck(text: String, source: String)
+    }
+
+    /// `r`, a recent hint shown again, for the bubble. Only a JSON hint
+    /// changes; `document` is the document's text now (nil: closed).
+    /// - Its document closed: a past hint (no question), with or without
+    ///   a range.
+    /// - The long one-line file's hint (no range): as it was; its Fix it
+    ///   checks the whole file before it formats anything.
+    /// - Its range still holds the text, and that is the whole document:
+    ///   as it was. Text added around it (the JSON kept as a prefix) or
+    ///   changed: checked again (`.recheck`), up to `replayJSONLimit`;
+    ///   past that, a past hint.
+    public static func replayJSON(_ r: OwlCoordinator.Replay, document: NSString?) -> JSONReplay {
+        guard r.hint.id == jsonID else { return .ready(r) }
+        guard let doc = document else { return .ready(pastJSON(closed: true, source: r.hint.source)) }
+        if !r.isStale, r.documentRange == nil { return .ready(r) }
+        if !r.isStale, r.documentRange == NSRange(location: 0, length: doc.length) { return .ready(r) }
+        guard doc.length <= replayJSONLimit else { return .ready(pastJSON(closed: false, source: r.hint.source)) }
+        return .recheck(text: doc as String, source: r.hint.source)
+    }
+
+    /// `text` (a whole document) checked again: still one-line JSON, a
+    /// fresh hint for it (Fix it formats exactly that, nothing else);
+    /// otherwise, or formatted past `replayJSONOutputLimit`, a past hint
+    /// that asks nothing. Pure; call it off the main thread.
+    public static func recheckJSON(_ text: String, source: String) -> OwlCoordinator.Replay {
+        guard let pretty = JSONFormatter.prettyIfMinified(text, limit: replayJSONOutputLimit) else {
+            return pastJSON(closed: false, source: source)
         }
-        let past = OwlHint(id: jsonID, kind: .tip, title: document == nil ? closedJSONTitle : staleJSONTitle,
-                           detail: nil, source: r.hint.source)
-        return OwlCoordinator.Replay(hint: past, documentRange: nil, expected: nil, isStale: true)
+        let all = NSRange(location: 0, length: (text as NSString).length)
+        let hint = OwlHint(id: jsonID, kind: .fix, title: String(localized: "Looks like JSON. Format it?"),
+                           detail: String(localized: "Pretty-prints it with two-space indents; key order is kept."),
+                           range: all, replacement: pretty, source: source)
+        return OwlCoordinator.Replay(hint: hint, documentRange: all, expected: text, isStale: false)
+    }
+
+    /// The past JSON hint: "Looked like JSON (the text has changed
+    /// since)." or, `closed`, "Looked like JSON.".
+    public static func pastJSON(closed: Bool, source: String) -> OwlCoordinator.Replay {
+        OwlCoordinator.Replay(hint: OwlHint(id: jsonID, kind: .tip, title: closed ? closedJSONTitle : staleJSONTitle,
+                                            detail: nil, source: source),
+                              documentRange: nil, expected: nil, isStale: true)
     }
 
     /// Whether `hint` is the past JSON hint (no question: OK and Don't

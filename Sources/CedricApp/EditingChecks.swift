@@ -638,6 +638,12 @@ extension DevChecks {
                 guard let tab, let owl = tab.owl, let shown else { return }
                 expect(tab.text == second, "stale JSON: the text changed, still one-line JSON", tab.text)
                 owl.showAgain(shown, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: checked again off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let owl = tab?.owl else { return }
                 expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: still JSON, it asks",
                        owl.presentedHint?.hint.title ?? "-")
                 expect(titles().first == String(localized: "Fix it"), "stale JSON: …with a Fix it that works", "\(titles())")
@@ -651,6 +657,10 @@ extension DevChecks {
             sync {
                 guard let tab, let owl = tab.owl, let shown else { return }
                 owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (not JSON)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
                 let title = owl.presentedHint?.hint.title ?? "-"
                 expect(title == "Looked like JSON (the text has changed since).", "stale JSON: not JSON now, a past hint", title)
                 expect(!title.contains("?"), "stale JSON: …that asks nothing", title)
@@ -659,6 +669,33 @@ extension DevChecks {
                 expect(owl.presentedHint?.documentRange == nil, "stale JSON: …and no range")
                 owl.bubble?.buttons.first { $0.title == String(localized: "OK") }?.performClick(nil)
                 expect(owl.bubble == nil, "stale JSON: OK closes it")
+                // Codex round 2: the JSON kept as the start of a longer,
+                // invalid text still matched its range and offered to format it.
+                replace(first + " and more")
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (JSON then more)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: JSON then more text, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(!titles().contains(String(localized: "Fix it")), "stale JSON: …no Fix it for the start of it", "\(titles())")
+                owl.hideBubble()
+                // Still one-line JSON when asked, edited while it is checked: not offered for text that has gone.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+            },
+            waitFor("stale JSON: the check comes back (edited meanwhile)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: edited while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(owl.presentedHint?.hint.replacement == nil, "stale JSON: …with nothing to apply")
+                owl.hideBubble()
                 tab.setOwlVisible(false)
                 tab.doc.markSaved()
                 tab.window?.performClose(nil)

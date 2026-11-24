@@ -373,10 +373,10 @@ public struct RulesHintProvider: OwlFactsAwareProvider {
 extension JSONFormatter {
     /// The pretty-printed text if `s` is a JSON object or array written on
     /// one line; nil if it isn't valid JSON or already spans several lines.
-    public static func prettyIfMinified(_ s: String) -> String? {
+    public static func prettyIfMinified(_ s: String, limit: Int = .max) -> String? {
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first, first == "{" || first == "[", !trimmed.contains("\n"),
-              let pretty = try? format(trimmed, pretty: true) else { return nil }
+              let pretty = try? format(trimmed, pretty: true, limit: limit) else { return nil }
         guard pretty.contains("\n") else { return nil } // {} or []
         return pretty + (s.hasSuffix("\n") ? "\n" : "")
     }

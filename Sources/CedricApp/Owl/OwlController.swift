@@ -678,9 +678,37 @@ final class OwlController: NSObject, NSPopoverDelegate {
     /// `own`: the hint is about this tab's document (its actions apply);
     /// otherwise (its document is closed) only OK.
     func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
+        guard tab != nil else { return }
+        // "Looks like JSON. Format it?" whose text changed (or grew): checked
+        // again on the text now, off the main thread (formatting up to 64 KB
+        // can take a while), and shown only if the tab still holds that text.
+        switch RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: document), document: document) {
+        case .ready(let r):
+            showReplay(r, own: own)
+        case .recheck(let text, let source):
+            replayToken &+= 1
+            let token = replayToken
+            pendingRechecks += 1
+            Task { @MainActor [weak self] in
+                let r = await Task.detached(priority: .userInitiated) { RulesHintProvider.recheckJSON(text, source: source) }.value
+                guard let self else { return }
+                self.pendingRechecks -= 1
+                // Another bubble came (or went) meanwhile: that one stays.
+                guard self.replayToken == token, let tab = self.tab else { return }
+                let current = tab.textView.string == text
+                self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
+            }
+        }
+    }
+
+    /// Bumped by every bubble shown or hidden: a JSON replay checked off
+    /// the main thread is dropped if anything came first.
+    private var replayToken = 0
+    /// JSON replays being checked (checks).
+    private(set) var pendingRechecks = 0
+
+    private func showReplay(_ r: OwlCoordinator.Replay, own: Bool) {
         guard let tab else { return }
-        // A stale "Looks like JSON. Format it?": checked again on the text now.
-        let r = RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: document), document: document)
         replays += 1
         presented = (r.hint, r.documentRange, r.expected)
         let buttons = own ? buttons(for: r.hint, tab: tab, isStale: r.isStale)
@@ -845,6 +873,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     private func showBubble(_ hint: OwlHint, buttons: [OwlBubble.Button]) {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         let onlyButton = hint.id == RulesHintProvider.letterID
         let grammar = GrammarMap.isGrammarHint(hint.id)
@@ -866,6 +895,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     func hideBubble() {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         bubble = nil
         presented = nil
