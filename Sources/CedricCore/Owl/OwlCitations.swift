@@ -33,10 +33,18 @@ public enum OwlCitations {
 
     // "line 12", "lines 3-5", "lines 3 to 5", "lines 3, 7 and 9-11",
     // "lines 3 and 31 describe". A number joined by "and" or "&" is always
-    // listed; one after a bare comma must end the list or a clause ("line
-    // 5, 2026 changed" and "line 3, 100 items" cite only 5 and 3).
+    // listed; one after a bare comma only after "lines", and only if it ends
+    // the list or a clause ("line 5, 2026" and "line 3, 100 items" cite only
+    // 5 and 3). A citation may run onto the next row only after a word or
+    // mark that joins it ("Line 4 through" / "9999"): never at "line" itself
+    // or before "and", "to" or a dash, so a stream can tell at a row's end
+    // whether the citation goes on (`Stream`).
+    private static let span = #"(?:(?:[^\S\r\n]*[-–—]|[^\S\r\n]*(?:to|through))\s*\d+)?"#
+    private static let joined = #"(?:[^\S\r\n]*(?:,[^\S\r\n]*and|and|&)\s*\d+"# + span + #"\b)"#
+    private static let comma = #"(?:[^\S\r\n]*,\s*\d+"# + span + #"(?=[^\S\r\n]*(?:[,.;:)]|and\b|&|$)))"#
     private static let listed = try! NSRegularExpression(pattern:
-        #"(?i)\blines?\s+(\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?:\s*(?:,\s*and|and|&)\s*\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?\b|\s*,\s*\d+(?:\s*(?:[-–—]|to|through)\s*\d+)?(?=\s*(?:[,.;:)]|and\b|&|$)))*)\b"#,
+        #"(?i)\b(?:lines[^\S\r\n]+(\d+"# + span + #"(?:"# + joined + "|" + comma + #")*)|line[^\S\r\n]+(\d+"#
+        + span + joined + #"*))\b"#,
         options: [.anchorsMatchLines])
     private static let number = try! NSRegularExpression(pattern: #"(?i)(\d+)(?:\s*(?:[-–—]|to|through)\s*(\d+))?"#)
     // A quoted numbered line: "31| text".
@@ -57,7 +65,7 @@ public enum OwlCitations {
             return Cite(range: whole, lines: min(x, y)...max(x, y))
         }
         for m in listed.matches(in: text, range: all) {
-            let group = m.range(at: 1)
+            let group = m.range(at: m.range(at: 1).location == NSNotFound ? 2 : 1)
             for n in number.matches(in: text, range: group) {
                 if let c = make(n.range(at: 1), n.range(at: 2), whole: n.range) { out.append(c) }
             }
@@ -95,6 +103,27 @@ public enum OwlCitations {
         return s
     }
 
+    /// Where `text` must not be cut (UTF-16 offsets: a cut at `p` falls
+    /// between `p - 1` and `p`): inside a citation, from its "line" or
+    /// "lines" to its last number, and between a number and the `flag`
+    /// after it. A piece holding "Line 4 through" is evidence for line 4
+    /// that the whole citation, read together, may not be.
+    public static func uncuttable(in text: String) -> IndexSet {
+        let ns = text as NSString
+        let all = NSRange(location: 0, length: ns.length)
+        let flagLength = (flag as NSString).length
+        var spans = listed.matches(in: text, range: all).map(\.range)
+        for c in find(text) {
+            let end = NSMaxRange(c.range)
+            let flagged = end + flagLength <= ns.length
+                && ns.substring(with: NSRange(location: end, length: flagLength)) == flag
+            spans.append(NSRange(location: c.range.location, length: c.range.length + (flagged ? flagLength : 0)))
+        }
+        var s = IndexSet()
+        for r in spans where r.length > 1 { s.insert(integersIn: (r.location + 1)..<NSMaxRange(r)) }
+        return s
+    }
+
     /// The line numbers of quoted numbered lines ("12| text") in a tool's
     /// result: the lines a search or outline actually showed.
     public static func quotedLines(in text: String) -> IndexSet {
@@ -115,21 +144,40 @@ public enum OwlCitations {
     /// the text changes.
     public static func filter(_ text: String, allowed: IndexSet) -> Filtered {
         var result = Filtered(text: text, dropped: [], flagged: [])
-        let rows = text.components(separatedBy: "\n")
-        guard !find(text).isEmpty else { return result }
+        let all = find(text)
+        guard !all.isEmpty else { return result }
         func outside(_ c: Cite) -> Bool { !allowed.contains(integersIn: c.lines) }
         func untouched(_ c: Cite) -> Bool { !c.lines.contains { allowed.contains($0) } }
+        // Rows, joined where a citation runs across the break between them
+        // ("Line 4 through" / "9999"): a citation is checked whole, never
+        // a row at a time.
+        let ns = text as NSString
+        var units: [NSRange] = []
+        var start = 0
+        while start <= ns.length {
+            let nl = ns.range(of: "\n", range: NSRange(location: start, length: ns.length - start)).location
+            let end = nl == NSNotFound ? ns.length : nl
+            if start > 0, let last = units.last, all.contains(where: { NSLocationInRange(start - 1, $0.range) }) {
+                units[units.count - 1] = NSRange(location: last.location, length: end - last.location)
+            } else {
+                units.append(NSRange(location: start, length: end - start))
+            }
+            if nl == NSNotFound { break }
+            start = nl + 1
+        }
         var kept: [String] = []
         var dropping = false
         var dropped = false
-        for row in rows {
+        for unit in units {
+            let row = ns.substring(with: unit)
+            let cites = all.filter { NSLocationInRange($0.range.location, unit) }
+                .map { Cite(range: NSRange(location: $0.range.location - unit.location, length: $0.range.length), lines: $0.lines) }
             let trimmed = row.trimmingCharacters(in: .whitespaces)
-            if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", find(row).isEmpty { continue }
+            if dropping, !trimmed.isEmpty, row.first == " " || row.first == "\t", cites.isEmpty { continue }
             // No doubled blank line where an item was taken out.
             if dropped, trimmed.isEmpty, kept.last?.trimmingCharacters(in: .whitespaces).isEmpty ?? true { continue }
             dropping = false
             dropped = false
-            let cites = find(row)
             let bad = cites.filter(outside)
             if bad.isEmpty { kept.append(row); continue }
             let item = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("• ")
@@ -140,10 +188,10 @@ public enum OwlCitations {
                 dropped = true
                 continue
             }
-            let ns = NSMutableString(string: row)
-            for c in bad.reversed() { ns.insert(flag, at: NSMaxRange(c.range)) }
+            let marked = NSMutableString(string: row)
+            for c in bad.reversed() { marked.insert(flag, at: NSMaxRange(c.range)) }
             result.flagged.append(contentsOf: bad.map(\.lines))
-            kept.append(ns as String)
+            kept.append(marked as String)
         }
         guard result.changed else { return result }
         let joined = kept.joined(separator: "\n")
@@ -157,7 +205,8 @@ public enum OwlCitations {
 
     /// Streamed text with a possible citation held from its first number
     /// until the list it starts has ended (the first word after it that
-    /// isn't "and", "to" or "through", or the line's end), then checked
+    /// isn't "and", "to" or "through", or the line's end unless the line
+    /// ends on a word or mark that joins the next number), then checked
     /// (`filter`): a citation of a line the model wasn't given is shown
     /// flagged, never as written, even while the answer is still being
     /// written or after Stop. Text before a number, and numbers not after
@@ -192,7 +241,7 @@ public enum OwlCitations {
                     continue
                 }
                 held.append(ch)
-                if ch.isNewline || (!ch.isLetter && listEnded()) { out += release(allowed) }
+                if ch.isNewline ? !continuesOnNextRow() : (!ch.isLetter && listEnded()) { out += release(allowed) }
             }
             return out
         }
@@ -215,13 +264,28 @@ public enum OwlCitations {
             return checked.contains { !Self.connectors.contains($0) }
         }
 
+        /// Whether the row just ended in `held` leaves its citation open:
+        /// it ends with a word or mark that joins the next number ("Line 4
+        /// through", "lines 3 and", "lines 4,", "Line 4 -"). Held on, the
+        /// citation is checked whole once it ends.
+        private func continuesOnNextRow() -> Bool {
+            guard let lastDigit = held.lastIndex(where: { $0.isASCII && $0.isNumber }) else { return false }
+            let tail = held[held.index(after: lastDigit)...].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["and", "to", "through", ",", ", and", ",and", "&", "-", "–", "—"].contains(tail)
+        }
+
         private mutating func release(_ allowed: IndexSet) -> String {
-            let checked = OwlCitations.filter(raw + held, allowed: allowed).text
+            // Flagged, never cut: a list item about unread lines is dropped
+            // from the finished answer (`filter`), but what was shown of it
+            // can't be taken back, and the rows held may be several.
+            let checked = OwlCitations.flagOnly(raw + held, allowed: allowed).text
             // Flags go after a citation's number: what was shown stays a prefix.
             let out = checked.hasPrefix(shown) ? String(checked.dropFirst(shown.count))
-                : OwlCitations.filter(held, allowed: allowed).text
-            if held.last?.isNewline ?? false {
-                raw = ""; shown = ""
+                : OwlCitations.flagOnly(held, allowed: allowed).text
+            // The row now being written: after the last break, if any.
+            if let nl = held.lastIndex(where: \.isNewline) {
+                raw = String(held[held.index(after: nl)...])
+                shown = out.lastIndex(where: \.isNewline).map { String(out[out.index(after: $0)...]) } ?? raw
             } else {
                 raw += held; shown += out
             }

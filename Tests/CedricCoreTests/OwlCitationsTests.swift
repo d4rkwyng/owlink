@@ -114,6 +114,71 @@ import Testing
         }
     }
 
+    /// Fed to a stream in pieces of `size` characters; what was shown
+    /// before the end, and everything shown.
+    static func streamed(_ answer: String, size: Int, allowed: IndexSet) -> (before: String, all: String) {
+        var stream = OwlCitations.Stream()
+        var shown = ""
+        var i = answer.startIndex
+        while i < answer.endIndex {
+            let j = answer.index(i, offsetBy: size, limitedBy: answer.endIndex) ?? answer.endIndex
+            shown += stream.feed(String(answer[i..<j]), allowed: allowed)
+            i = j
+        }
+        return (shown, shown + stream.finish(allowed: allowed))
+    }
+
+    /// A citation that runs onto the next row is checked whole: "Line 4
+    /// through" / "9999" is lines 4–9999, not line 4 and a stray number.
+    /// 0.5.3's follow-up checked one row at a time, showed it unflagged,
+    /// and so made lines 4–9999 evidence for the combine call.
+    @Test func aCitationAcrossARowBreakIsCheckedWhole() {
+        for brk in ["\n", "\r\n"] {
+            for join in [" through", " to", " -", ","] {
+                let lead = join == "," ? "Lines 4" : "Line 4"
+                let tail = join == "," ? "9999; it describes the setup." : "9999 describes the setup."
+                let answer = "Overview.\(brk)\(lead)\(join)\(brk)\(tail)\(brk)The end."
+                let f = OwlCitations.filter(answer, allowed: Self.lines1to18)
+                #expect(f.text.contains("9999\(OwlCitations.flag)"), "\(answer.debugDescription) → \(f.text.debugDescription)")
+                // Flagged, the citation is evidence for nothing beyond the lines given.
+                #expect(OwlCitations.evidence(in: f.text).isSubset(of: Self.lines1to18), "\(answer.debugDescription)")
+                for size in [1, 2, 3, 7, answer.count] {
+                    let (before, all) = Self.streamed(answer, size: size, allowed: Self.lines1to18)
+                    // Never shown unflagged, even before the end.
+                    for c in OwlCitations.find(before) where !Self.lines1to18.contains(integersIn: c.lines) {
+                        #expect((before as NSString).substring(from: NSMaxRange(c.range)).hasPrefix(OwlCitations.flag),
+                                "\(size): \(before.debugDescription)")
+                    }
+                    #expect(!before.contains("9999 describes") && !before.contains("9999;"), "\(size): \(before.debugDescription)")
+                    #expect(all == f.text, "\(size): \(all.debugDescription)")
+                }
+            }
+        }
+        // Wholly inside the lines given, it passes untouched.
+        let fine = "Line 4 through\n18 describes the setup."
+        #expect(OwlCitations.filter(fine, allowed: Self.lines1to18).text == fine)
+        #expect(Self.streamed(fine, size: 2, allowed: Self.lines1to18).all == fine)
+        // A row break before a dash, "and" or "to", or right after "line",
+        // ends the citation: a list item below is not a range's end.
+        #expect(OwlCitations.find("See line 4\n- 5: an item").map(\.lines) == [4...4, 5...5])
+        #expect(OwlCitations.find("See line 4\nand 31 more").map(\.lines) == [4...4])
+        #expect(OwlCitations.find("Several lines\n31 rows").isEmpty)
+    }
+
+    /// "line 5, 2026" is line 5 and a year, at the end of the text too.
+    @Test func aBareCommaAfterSingularLineListsNothing() {
+        for text in ["On line 5, 2026", "On line 5, 2026\n", "On line 5, 2026.", "Line 3, 100"] {
+            #expect(OwlCitations.find(text).count == 1, "\(text.debugDescription)")
+        }
+        #expect(OwlCitations.find("On line 5, 2026").map(\.lines) == [5...5])
+        // Not shown as an unread line 2026 either.
+        #expect(OwlCitations.filter("On line 5, 2026", allowed: Self.lines1to18).changed == false)
+        // "lines" still lists with commas, and "line … and" still joins.
+        #expect(OwlCitations.find("See lines 3, 7.").map(\.lines) == [3...3, 7...7])
+        #expect(OwlCitations.find("See line 3 and 7.").map(\.lines) == [3...3, 7...7])
+        #expect(OwlCitations.find("L2 regularization").isEmpty)
+    }
+
     @Test func ordinaryProseIsNeverCutOnlyFlagged() {
         // Selection 40–60; paragraphs (not list items) about other lines keep their words.
         let allowed = IndexSet(integersIn: 40...60)
