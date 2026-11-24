@@ -9,7 +9,10 @@ import CedricCore
 /// reads is safe. Then the tab: the whole file, clean, its saved text kept
 /// as chunk hashes rather than a copy (EditedState), and the dirty flag
 /// right through typing, undo, a same-length change and its reversal, a
-/// save (the file on disk has the edit) and Revert to Saved.
+/// save (the file on disk has the edit) and Revert to Saved. Closing the
+/// only other tab while it reads, with Quit when the last window closes
+/// on, doesn't quit. Then two more at once: read one at a time, and a
+/// `cedric -w` on one that is gone before its turn returns.
 /// Scripts/bigfile-check.sh runs it after the bigfile check.
 extension DevChecks {
     static func bigOpenCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -43,10 +46,23 @@ extension DevChecks {
         let second = app.open(url, background: true) { arrived.append($0) }
         expect(second == nil && app.backgroundOpens.count == 1, "opening it again while it reads starts nothing new")
         expect(!app.lastCloseMayQuit, "closing the last other tab while it reads doesn't quit (quit on last close)")
-        // Closing another tab while it reads.
+        // Closing the only other tab while it reads, with Quit when the last
+        // window closes on (bigfile-check.sh): it closes, and the app stays.
+        expect(DevHooks.allowsQuitOnLastClose && Settings.shared.quitWhenLastWindowCloses,
+               "quit on last close is on for this check")
+        expect(app.tabs.count == 1 && app.tabs.first === other && app.viewerTabs.isEmpty, "the other tab is the only one",
+               "\(app.tabs.count)")
         other?.doc.markSaved()
         other?.window?.performClose(nil)
+        expect(app.tabs.isEmpty && !app.terminating, "…it closes, and the app doesn't quit while the file reads",
+               "\(app.tabs.count) tabs, terminating \(app.terminating)")
         var tab: EditorWindowController!
+        let url2 = dir.appendingPathComponent("bigopen-2.log")
+        let url3 = dir.appendingPathComponent("bigopen-3.log")
+        let marker = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cedric-wait.bigopen\(getpid())").path
+        var arrived2: [EditorWindowController] = []
+        var alerts = 0
+        var dismissTimer: Timer?
         let original = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let originalLength = (original as NSString).length
 
@@ -59,13 +75,23 @@ extension DevChecks {
             poll()
         }
 
+        func waitForAll(_ next: @escaping () -> Void) {
+            let deadline = DevHooks.now() + 60
+            func poll() {
+                if app.backgroundOpens.isEmpty || DevHooks.now() > deadline { next(); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+            }
+            poll()
+        }
+
         run([
             { next in waitForTab(next) },
             sync {
                 print(String(format: "check: note: background open ready in %.0f ms", (DevHooks.now() - t0) * 1000))
                 expect(arrived.count == 2 && arrived[0] === arrived[1], "both opens get the one tab", "\(arrived.count)")
                 expect(app.backgroundOpens.isEmpty, "nothing left reading")
-                expect(app.lastCloseMayQuit, "…and a last close may quit again")
+                expect(!app.terminating, "still running after the last other tab closed")
+                expect(app.lastCloseMayQuit && app.quitsOnLastClose, "…and a last close may quit again")
                 let mine = app.tabs.filter { $0.doc.fileURL?.standardizedFileURL == std }
                 expect(mine.count == 1, "one tab for the file", "\(mine.count)")
                 tab = mine.first ?? arrived.first
@@ -127,6 +153,40 @@ extension DevChecks {
             sync {
                 expect(tab.text == "SAVED " + original && !tab.doc.isDirty, "reverted: the saved file, clean")
                 tab.doc.markSaved()
+                // Two more big files at once (a multi-file open), the second
+                // from `cedric -w` and gone before its turn: one read at a
+                // time, and the waiting script let go when it can't open.
+                try? FileManager.default.removeItem(at: url2)
+                try? FileManager.default.copyItem(at: url, to: url2)
+                try? FileManager.default.removeItem(at: url3)
+                try? FileManager.default.copyItem(at: url, to: url3)
+                FileManager.default.createFile(atPath: marker, contents: nil)
+                app.open(url2, background: true) { arrived2.append($0) }
+                let enc = { (s: String) in s.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? s }
+                openURL(app, "cedric://open?path=\(enc(url3.path))&wait=\(enc(marker))")
+                expect(app.backgroundOpens.count == 2, "both wait to be read", "\(app.backgroundOpens.count)")
+                expect(app.backgroundReading == url2.standardizedFileURL, "…one at a time: the first is read, the second waits")
+                expect(FileManager.default.fileExists(atPath: marker), "the script waits")
+                try? FileManager.default.removeItem(at: url3)
+                // Its "couldn't open" alert is answered.
+                let dismiss = Timer(timeInterval: 0.2, repeats: true) { _ in
+                    MainActor.assumeIsolated { if NSApp.modalWindow != nil { alerts += 1; NSApp.abortModal() } }
+                }
+                RunLoop.main.add(dismiss, forMode: .modalPanel)
+                dismissTimer = dismiss
+            },
+            { next in waitForAll(next) },
+            sync {
+                dismissTimer?.invalidate()
+                expect(app.backgroundOpens.isEmpty, "both done")
+                expect(app.mostBackgroundReadsForChecks == 1, "never more than one big file read (or waiting to be shown) at once",
+                       "\(app.mostBackgroundReadsForChecks)")
+                expect(arrived2.count == 1 && arrived2.first?.doc.fileURL?.standardizedFileURL == url2.standardizedFileURL,
+                       "the first opens", "\(arrived2.count)")
+                expect(!app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == url3.standardizedFileURL }, "the gone one has no tab")
+                expect(alerts == 1, "…and says so", "\(alerts)")
+                expect(!FileManager.default.fileExists(atPath: marker), "cedric -w on it returns (its marker is deleted)")
+                arrived2.first?.doc.markSaved()
             },
         ])
         return true

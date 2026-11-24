@@ -117,13 +117,18 @@ extension AppDelegate {
 
     func openFromFolder(_ node: FolderNode, asText: Bool = false) {
         guard let s = FolderSidebar.shared else { return }
-        let tab = open(node.url, asText: asText)
         // Keep the tree beside the file it opened (the tab may not become
-        // key when the app isn't active).
-        if let tab, s.isShown {
+        // key when the app isn't active). A big file is read in the
+        // background: the same when its tab comes.
+        let beside: (EditorWindowController) -> Void = { tab in
+            guard FolderSidebar.shared === s, s.isShown else { return }
             s.show(in: tab)
             s.reveal(tab.doc.fileURL)
             tab.window?.makeFirstResponder(s.outline)
+        }
+        let tab = open(node.url, asText: asText, background: true, then: beside)
+        if tab != nil || backgroundOpens[node.url.standardizedFileURL] != nil {
+            return
         } else if s.isShown, let viewer = viewerTab(for: node.url) {
             s.show(in: viewer)
             s.reveal(viewer.fileURL)

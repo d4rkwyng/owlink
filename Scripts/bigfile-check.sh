@@ -55,7 +55,10 @@ echo "$out" | grep -E "^check:" || true
 # The same log opened in the background, as Finder and File › Open do
 # (BigOpenCheck.swift): no tab until it is whole, then dirty tracking,
 # save and revert without a copy of the saved text.
-out2=$(env CEDRIC_CHECK=bigopen CEDRIC_BIGFILE="$LOG" perl -e 'alarm 240; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
+# Quit when the last window closes is on (as by default) so closing the
+# only other tab while it reads would quit if the pending open didn't count.
+out2=$(env CEDRIC_CHECK=bigopen CEDRIC_BIGFILE="$LOG" CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1 perl -e 'alarm 240; exec @ARGV' "$BIN" \
+    -ApplePersistenceIgnoreState YES -quitWhenLastWindowCloses YES 2>/dev/null || true)
 echo "$out2" | grep -E "^check:" || true
 sleep 3   # let ReportCrash write the .ips
 crash=$(find "$REPORTS" -maxdepth 1 -name 'Cedric*.ips' -newer "$MARK" 2>/dev/null || true)
