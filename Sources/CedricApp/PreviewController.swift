@@ -115,9 +115,21 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Checks only: how long a close-time read's answer is held back
     /// (a WebKit callback that comes back late). 0 in the app.
     static var closeReadDelayForChecks: TimeInterval = 0
-    /// A late close-time read for a page that is loading (or not loaded
-    /// yet): set on that page if it is the read's page (load, didFinish).
-    private var adoptedFrontMatter: FrontMatterChange?
+    /// Checks only: page loads that finish are held (still loading, as far
+    /// as the preview knows) until `releaseFinishesForChecks`.
+    static var holdFinishForChecks = false
+    private static var heldFinishes: [() -> Void] = []
+    static func releaseFinishesForChecks() {
+        holdFinishForChecks = false
+        let held = heldFinishes
+        heldFinishes = []
+        held.forEach { $0() }
+    }
+    /// Late close-time reads that came back while a page was loading (or
+    /// none was loaded yet), one per page key, so another page's read
+    /// can't displace this page's: the page that loads takes its own
+    /// (load, didFinish).
+    private var adoptedFrontMatter: [String: FrontMatterChange] = [:]
     private let latest = RenderTicket()
     /// Called after a whole page load (the tab scrolls it in step).
     var onLoaded: (() -> Void)?
@@ -514,7 +526,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         // No page yet, or one loading (built before this came back): the
         // next page loaded takes it if it's the read's page (load), and is
         // checked when it's in (didFinish).
-        if pageCount == 0 || loadingShell { adoptedFrontMatter = change; return }
+        if pageCount == 0 || loadingShell { adoptedFrontMatter[change.key] = change; return }
         guard pageKey == change.key, !allowJavaScript, let applied = pageFrontMatterOpen, applied != change.open else { return }
         let page = pageCount
         webView.callAsyncJavaScript(Self.adoptScript, arguments: ["want": change.open, "applied": applied, "at": change.at],
@@ -558,7 +570,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         pendingBody = nil
         // A late close-time read's state, for this page.
         let pageKey = entryKey
-        let html = adoptedFrontMatter.flatMap { $0.key == pageKey ? FrontMatterDisclosure.setting(open: $0.open, in: html) : nil } ?? html
+        let html = pageKey.flatMap { adoptedFrontMatter[$0] }.flatMap { FrontMatterDisclosure.setting(open: $0.open, in: html) } ?? html
         let gen = generation
         let go = { [weak self] in
             guard let self, self.generation == gen else { return }
@@ -732,16 +744,21 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard navigation === shellNavigation else { return }
+        if Self.holdFinishForChecks {
+            Self.heldFinishes.append { [weak self, weak webView] in
+                if let self, let webView { self.webView(webView, didFinish: navigation) }
+            }
+            return
+        }
         shellNavigation = nil
         loadingShell = false
         expectedPageURL = nil
         let anchor = pendingAnchor
         pendingAnchor = nil
         // A late close-time read that came back while this page loaded.
-        if let change = adoptedFrontMatter {
-            adoptedFrontMatter = nil
-            adoptFrontMatter(change)
-        }
+        let adopted = pageKey.flatMap { adoptedFrontMatter[$0] }
+        adoptedFrontMatter = [:]
+        if let adopted { adoptFrontMatter(adopted) }
         if let body = pendingBody {
             pendingBody = nil
             swapBody(body)

@@ -78,6 +78,7 @@ extension DevChecks {
         }
         var second: EditorWindowController?
         var linker: EditorWindowController?
+        var secondOpen = false
         run([
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
@@ -274,6 +275,37 @@ extension DevChecks {
             { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
             { next in expectState("false", "the linking page's late read isn't set on the linked page its preview shows", in: linker)(next) },
             sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 2, must-fix 1: A's late read lands while A's
+            // reopened preview is still loading, then B's late read lands
+            // before A has finished loading: A still ends up in A's state
+            // (B's read used to take A's one pending slot).
+            sync { focus(tab); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens (two late reads)"),
+            expectState("true", "the block starts open (two late reads)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            { next in
+                guard let second else { expect(false, "the second document is open"); next(); return }
+                previewJS(second, "const d = document.querySelector('details.frontmatter'); d.open = !d.open; String(d.open)") { v in
+                    secondOpen = v as? String == "true"
+                    next()
+                }
+            },
+            sync {
+                PreviewController.holdFinishForChecks = true
+                PreviewController.closeReadDelayForChecks = 1.0
+                focus(tab); tab.togglePreview(); tab.togglePreview()
+                PreviewController.closeReadDelayForChecks = 1.6
+                if let second { focus(second); second.togglePreview() }
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { next() } },
+            sync { expect(PreviewController.frontMatterExpanded == secondOpen, "B's later read is kept as the preference (two late reads)") },
+            sync { PreviewController.releaseFinishesForChecks() },
+            untilState(tab, "false", "A's and then B's late reads land while A's page loads: A ends up in A's state", timeout: 5),
+            sync { PreviewController.closeReadDelayForChecks = 0; if let second { focus(second); second.togglePreview() } },
+            { next in
+                guard let second else { next(); return }
+                waitForPreview(second, contains: "Pale", "the second document's preview opens again")(next)
+            },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
