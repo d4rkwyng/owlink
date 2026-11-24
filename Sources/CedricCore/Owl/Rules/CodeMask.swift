@@ -19,9 +19,9 @@ public struct CodeMask {
         public var prefix: String = ""
     }
 
-    /// Sorted by location, not overlapping. A string with interpolations
-    /// is one span per literal segment (the interpolated code is in none);
-    /// a segment after an interpolation is blanked whole, closing quote too.
+    /// Sorted by location, not overlapping (a string inside an
+    /// interpolation is part of the string around it, unless the mask was
+    /// made with `splitInterpolations`).
     public let spans: [Span]
     /// The text with comments and string insides blanked (see above), as
     /// an NSString made from UTF-16 units: fast `character(at:)` and
@@ -86,7 +86,13 @@ public struct CodeMask {
     /// The mask for a language the owl lexes, or nil. `window`: the text
     /// is a window that starts part-way into the file, so it may start
     /// inside a block comment or a docstring (see `startsInside`).
-    public static func make(_ s: NSString, language: String, window: Bool = false) -> CodeMask? {
+    ///
+    /// `splitInterpolations` (Swift, JS, TS): the code of a `\( … )` or
+    /// `${ … }` stays, brackets included, and only the literal segments
+    /// around it are blanked (a segment after an interpolation whole,
+    /// closing quote too). For counting brackets; the rules leave it off,
+    /// so nothing in an interpolation is a finding.
+    public static func make(_ s: NSString, language: String, window: Bool = false, splitInterpolations: Bool = false) -> CodeMask? {
         switch language {
         case "swift", "javascript", "typescript", "c", "css", "python":
             if window, let end = startsInside(s, language: language) {
@@ -96,9 +102,11 @@ public struct CodeMask {
                 for k in 0..<end where units[k] != 10 { units[k] = 32 }
                 let rest = NSString(characters: units, length: units.count)
                 let head = Span(range: NSRange(location: 0, length: end), kind: language == "python" ? .string : .comment)
-                return CodeMask(s, spans: [head] + RulesHintProvider.scanCode(rest, language: language, forMask: true).spans)
+                return CodeMask(s, spans: [head] + RulesHintProvider.scanCode(rest, language: language, forMask: true,
+                                                                              splitInterpolations: splitInterpolations).spans)
             }
-            return CodeMask(s, spans: RulesHintProvider.scanCode(s, language: language, forMask: true).spans)
+            return CodeMask(s, spans: RulesHintProvider.scanCode(s, language: language, forMask: true,
+                                                               splitInterpolations: splitInterpolations).spans)
         case "shell":
             if window, let end = startsInsideHeredoc(s) ?? firstBlankLineEnd(s) {
                 var units = Array(repeating: unichar(0), count: s.length)

@@ -240,11 +240,12 @@ extension RulesHintProvider {
         var problem: Problem?
         /// UTF-16 offsets of “ ” ‘ ’ used as quotes in code (not in strings or comments).
         var curly: [Int] = []
-        /// Strings, comments and regex literals, in the order they end.
-        /// A string with interpolations is one span per literal segment:
-        /// the code of a Swift `\( … )` or JS `${ … }`, its brackets
-        /// included, is in no span, so the mask keeps it. `CodeMask` sorts
-        /// and merges them.
+        /// Strings, comments and regex literals, in the order they end
+        /// (an interpolation's strings come before the string around them).
+        /// `CodeMask` sorts and merges them. With `splitInterpolations`, a
+        /// string with interpolations is one span per literal segment: the
+        /// code of a Swift `\( … )` or JS `${ … }`, its brackets included,
+        /// is in no span, so the mask keeps it.
         var spans: [CodeMask.Span] = []
     }
 
@@ -253,7 +254,9 @@ extension RulesHintProvider {
     /// interpolations are scanned as code. Stops at the first problem.
     /// `forMask`: no bracket tracking, never stops: one pass for the
     /// strings and comments of a window (`CodeMask`).
-    static func scanCode(_ s: NSString, language: String, forMask: Bool = false) -> CodeScan {
+    /// `splitInterpolations`: see `CodeScan.spans` (the edit validation's
+    /// bracket count; the lint rules keep interpolations blanked).
+    static func scanCode(_ s: NSString, language: String, forMask: Bool = false, splitInterpolations: Bool = false) -> CodeScan {
         var scan = CodeScan()
         let n = s.length
         let swift = language == "swift", python = language == "python", css = language == "css"
@@ -286,12 +289,18 @@ extension RulesHintProvider {
                 if k == 92, hashes == 0 || (0..<hashes).allSatisfy({ ch(i + 1 + $0) == 35 }) {   // backslash
                     let after = i + 1 + hashes
                     if swift, ch(after) == 40 {   // \( … ): the segment ends at the "(", which is code
-                        endSegment(at: after); i = after + 1; code(until: 41); segment = i; continue
+                        if splitInterpolations { endSegment(at: after) }
+                        i = after + 1; code(until: 41)
+                        if splitInterpolations { segment = i }
+                        continue
                     }
                     i = after + 1; continue
                 }
                 if js, q == 96, k == 36, ch(i + 1) == 123 {   // ${ … }: likewise, from the "{"
-                    endSegment(at: i + 1); i += 2; code(until: 125); segment = i; continue
+                    if splitInterpolations { endSegment(at: i + 1) }
+                    i += 2; code(until: 125)
+                    if splitInterpolations { segment = i }
+                    continue
                 }
                 if k == q {
                     if triple { if ch(i + 1) == q && ch(i + 2) == q { i += 3; break } }

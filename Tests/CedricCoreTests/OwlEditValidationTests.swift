@@ -208,6 +208,11 @@ import Testing
         #expect(OwlEditValidation.bracketProblems("const t = `a ${b(c)} ) ${d[0]} [`;\n", language: .javascript).isEmpty)
         #expect(OwlEditValidation.bracketProblems("let s = \"(\\(a[0]) ]\\(f(\"x)\"))\"\n", language: .swift).isEmpty)
         #expect(OwlEditValidation.bracketProblems("let s = #\"(\\#(a[0]) ]\"#\n", language: .swift).isEmpty)
+        // The lint rules' mask still blanks the interpolation; the bracket count's keeps it.
+        let tpl = "const t = `a ${b(c)} )`;\n" as NSString
+        #expect(CodeMask.make(tpl, language: "javascript")?.code.contains("b(c)") == false)
+        #expect(CodeMask.make(tpl, language: "javascript", splitInterpolations: true)?.code.contains("{b(c)}") == true)
+        #expect(CodeMask.make(tpl, language: "javascript", splitInterpolations: true)?.code.contains(")`") == false)
         // An unclosed interpolation no longer hides a closer further on.
         #expect(OwlEditValidation.bracketProblems("let s = \"\\(a\"\nf(x)\n", language: .swift).isEmpty == false)
         // Through validate: an edit adding the unclosed "[" turns Apply off.

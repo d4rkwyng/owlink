@@ -373,12 +373,14 @@ public enum OwlEditValidation {
     /// lexer (`CodeMask`) for the languages it lexes, regex literals
     /// included; otherwise (Ruby) by the syntax highlighter's tokens,
     /// which is why Ruby's count is only a warning (`bracketLanguages`).
+    /// Interpolated code (Swift `\( … )`, JS/TS `${ … }`) isn't blanked:
+    /// its brackets count like any others.
     public static func bracketProblems(_ text: String, language: Language) -> [OwlSyntaxError] {
         let ns = text as NSString
         guard ns.length > 0 else { return [] }
         let index = LineIndex(ns)
         var units = [unichar](repeating: 0, count: ns.length)
-        if let mask = CodeMask.make(ns, language: language.rawValue) {
+        if let mask = CodeMask.make(ns, language: language.rawValue, splitInterpolations: true) {
             mask.codeNS.getCharacters(&units, range: NSRange(location: 0, length: ns.length))
         } else {
             ns.getCharacters(&units, range: NSRange(location: 0, length: ns.length))
