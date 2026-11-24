@@ -4,6 +4,14 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- **A Preview toggle for CSV and TSV files.** CSV and TSV files get a compact Preview button on the Context Bar, the same eye as Markdown's preview button, so you can show or hide the table without the View menu or ⌥⌘P.
+
+### Fixed
+- **Detaching the preview focuses its window.** View › Detach Preview (⇧⌥⌘P) and the preview's Detach button bring the detached preview window to the front with the focus, for Markdown, CSV and TSV, HTML and the other preview types, instead of returning the focus to the editor. A detached preview restored with your session still leaves the focus where it was.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security

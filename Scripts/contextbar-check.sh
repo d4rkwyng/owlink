@@ -3,7 +3,8 @@
 # (CEDRIC_CHECK=contextbar, Sources/CedricApp/ContextBarCheck.swift). On by
 # default; the check starts it off (no view built); on, a click on Bold over a selection then ⌘Z,
 # ⌘2 on a line, Checkbox on three lines, every other button with its undo,
-# the heading pull-down, the preview toggle, VoiceOver labels, keyboard
+# the heading pull-down, the preview toggle (Markdown, and CSV / TSV's
+# lone Preview toggle), VoiceOver labels, keyboard
 # focus, light and dark themes, right-to-left, the palette's entries, and
 # keystroke timing with the bar hidden and shown (alternating rounds; the
 # medians are printed). Also run by Scripts/tools-check.sh. Throwaway

@@ -218,10 +218,35 @@ extension DevChecks {
         }
     }
 
+    /// A just-detached preview's window is visible, in front of the
+    /// app's other windows, and key (the focus moved there); the menus
+    /// still act on its tab.
+    static func expectDetachedInFront(_ tab: EditorWindowController, _ app: AppDelegate, _ what: String) {
+        guard let w = tab.previewWindow?.window else { expect(false, "\(what): a detached preview window"); return }
+        let ordered = NSApp.orderedWindows.filter(\.isVisible)
+        expect(w.isVisible && ordered.first === w, "\(what): the detached preview is in front", "front: \(ordered.first?.title ?? "-")")
+        // Before the fix the editor was ordered back in front of it.
+        let editorAt = tab.window.flatMap { ordered.firstIndex(of: $0) } ?? -1
+        expect(editorAt > 0, "\(what): its editor window is behind it", "editor at \(editorAt)")
+        if NSApp.isActive {
+            expect(w.isKeyWindow && NSApp.keyWindow === w, "\(what): the detached preview window has the focus",
+                   "key: \(NSApp.keyWindow?.title ?? "-")")
+            expect(tab.window?.isKeyWindow == false, "\(what): the editor window gave up the focus")
+        } else {
+            // An inactive app (launched by a script, screen locked) has no key
+            // window at all: AppKit makes the preview key on activation.
+            print("check: note: \(what): Cedric isn't active, so no window is key; checked the order (preview in front) only")
+        }
+        expect(app.currentTab === tab, "\(what): the menus still act on its document")
+    }
+
     static func detachPreview(_ app: AppDelegate) {
         let a = app.open(write("first.md", "# First\n\nhello\n"))!
         let b = app.open(write("second.md", "# Second\n\nother document\n"))!
-        sized(a); sized(b)
+        let csv = app.open(write("detach.csv", "name,city\nAnn,Oslo\nBo,Rome\n"))!
+        let html = app.open(write("detach.html", "<!doctype html><title>t</title><p>html body</p>\n"))!
+        let restored = app.open(write("restored.md", "# Restored\n\nsession\n"))!
+        sized(a); sized(b); sized(csv); sized(html); sized(restored)
         let item = { menuItem(action: #selector(AppDelegate.toggleDetachPreview(_:))) }
         var pw: NSWindow? { a.previewWindow?.window }
         run([
@@ -245,7 +270,14 @@ extension DevChecks {
                 expect(a.previewPane?.detachButton.accessibilityLabel() == "Attach", "its header now has Attach",
                        a.previewPane?.detachButton.accessibilityLabel() ?? "-")
                 if let i = item() { _ = app.validateMenuItem(i); expect(i.title == "Attach Preview", "the menu says Attach Preview", i.title) }
-                expect(app.currentTab === a, "the editor keeps the focus")
+                // Derek: detaching puts the preview window in focus.
+                expectDetachedInFront(a, app, "Markdown, the header's Detach")
+            },
+            { next in
+                guard let w = pw else { next(); return }
+                snapshot("detached-preview-key.png", window: w)(next)
+            },
+            sync {
                 focus(a)
                 a.textView.setSelectedRange(NSRange(location: (a.text as NSString).length, length: 0))
                 type("live typing")
@@ -279,13 +311,62 @@ extension DevChecks {
             sync {
                 key("p", [.command, .option, .shift])
                 expect(a.previewDetached, "⇧⌥⌘P detaches it")
+                expectDetachedInFront(a, app, "Markdown, ⇧⌥⌘P")
                 // Closing the window closes the preview.
                 pw?.performClose(nil)
                 expect(a.previewPane == nil && !a.previewVisible, "closing its window closes the preview")
+                focus(a)
                 key("p", [.command, .option, .shift])
                 expect(a.previewDetached && pw?.isVisible == true, "⇧⌥⌘P with no preview opens it detached")
+                expectDetachedInFront(a, app, "Markdown, ⇧⌥⌘P with no preview")
             },
+            sync { focus(a) },
             snapshot("detached-preview-editor.png"),
+            // Not Markdown only: a CSV grid (the header's Detach) and an
+            // HTML preview (View › Detach Preview with no preview open).
+            sync {
+                focus(csv)
+                key("p", [.command, .option])
+                expect(csv.previewVisible && !csv.previewDetached, "CSV: ⌥⌘P docks the grid")
+                guard let button = csv.previewPane?.detachButton else { expect(false, "CSV: the grid's header has Detach"); return }
+                // Laid out first: the click lands where the button is drawn.
+                csv.window?.layoutIfNeeded()
+                press(button)
+                expect(csv.previewDetached && csv.previewPane?.renderer is CSVPreview, "CSV: Detach moves the grid into its own window")
+                expectDetachedInFront(csv, app, "CSV, the header's Detach")
+            },
+            { next in
+                guard let w = csv.previewWindow?.window else { next(); return }
+                snapshot("detached-csv-key.png", window: w)(next)
+            },
+            sync {
+                focus(html)
+                guard let i = item() else { expect(false, "View › Detach Preview"); return }
+                _ = app.validateMenuItem(i)
+                expect(i.title == "Detach Preview" && html.previewPane == nil, "HTML: the menu offers Detach Preview, no preview yet", i.title)
+                NSApp.sendAction(i.action!, to: nil, from: i)
+                expect(html.previewDetached, "HTML: View › Detach Preview opens it detached")
+                expectDetachedInFront(html, app, "HTML, View › Detach Preview")
+            },
+            sync {
+                // Session restore (activate: false) leaves the focus alone.
+                focus(restored)
+                key("p", [.command, .option])
+                restored.detachPreview(frame: nil, activate: false)
+                let rw = restored.previewWindow?.window
+                expect(restored.previewDetached && rw?.isVisible == true, "restore: the preview opens detached")
+                expect(rw?.isKeyWindow == false && restored.window?.firstResponder === restored.textView,
+                       "restore (activate: false): the preview doesn't take the focus; the text keeps the keyboard",
+                       "key \(NSApp.keyWindow?.title ?? "-")")
+                if NSApp.isActive {
+                    expect(restored.window?.isKeyWindow == true, "restore (activate: false): the editor stays the key window",
+                           "key \(NSApp.keyWindow?.title ?? "-")")
+                } else {
+                    print("check: note: restore: Cedric isn't active, so no window is key; the editor's key status not checked")
+                }
+                for t in [csv, html, restored] { t.doc.markSaved(); t.window?.performClose(nil) }
+                expect(csv.previewWindow == nil && html.previewWindow == nil && restored.previewWindow == nil, "their detached previews close with them")
+            },
             sync {
                 let w = pw
                 a.doc.markSaved(); b.doc.markSaved()
@@ -446,6 +527,7 @@ extension DevChecks {
                 // Detached: the grid in its own window.
                 key("p", [.command, .option, .shift])
                 expect(tab.previewDetached && g === (tab.previewPane?.renderer as? CSVPreview), "the grid detaches")
+                expectDetachedInFront(tab, app, "csvpreview, ⇧⌥⌘P")
                 expect(shown(g, 4, 1) == "Oslo", "and still shows the rows")
             },
             { next in

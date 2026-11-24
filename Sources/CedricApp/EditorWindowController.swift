@@ -1636,6 +1636,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// View › Detach Preview (⇧⌥⌘P), or the header's Detach: the preview
     /// in its own window, bound to this tab's document. `frame`: where it
     /// was (session restore); `activate` false leaves the focus alone.
+    /// Activated, the new window comes to the front and takes the focus
+    /// (any preview: Markdown, CSV, HTML, the certificate panel).
     func detachPreview(frame: String? = nil, activate: Bool = true) {
         guard !previewDetached else { return }
         guard previewApplies else { NSSound.beep(); return }
@@ -1645,10 +1647,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if docked { FolderSidebar.keepWidth(in: split) }
         let pw = PreviewWindowController(tab: self, pane: pane, frame: frame)
         previewWindow = pw
-        pw.window?.orderFront(nil)
-        if activate { window?.makeKeyAndOrderFront(nil) }
+        if activate { pw.window?.makeKeyAndOrderFront(nil) } else { pw.window?.orderFront(nil) }
         renderPreview()
         updatePreviewBar()
+        contextBar?.refreshStates()
         onChange?(self)
     }
 
@@ -1661,6 +1663,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         window?.makeKeyAndOrderFront(nil)
         renderPreview()
         updatePreviewBar()
+        contextBar?.refreshStates()
         onChange?(self)
     }
 

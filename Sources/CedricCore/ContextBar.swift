@@ -38,6 +38,15 @@ public struct ContextBarItem: Equatable, Sendable {
 }
 
 public enum ContextBarSet {
+    /// View › Show Preview (⌥⌘P) as an on/off toggle. An eye, not
+    /// "sidebar.right" (read as a sidebar toggle, UX review #21).
+    static let preview = ContextBarItem("preview", "eye", "togglePreview:", trailing: true, toggle: true)
+
+    /// CSV / TSV (.csv, .tsv, .tab, .psv): only the preview toggle, the
+    /// same item as Markdown's. The grid's own controls (row count, Unsort,
+    /// zoom, Detach) stay on the preview pane's bar.
+    static let csv: [ContextBarItem] = [preview]
+
     /// Markdown: heading pull-down, inline styles, lists, blocks, then the preview.
     static let markdown: [ContextBarItem] = [
         ContextBarItem("heading", "textformat.size", nil, choices: [
@@ -58,8 +67,7 @@ public enum ContextBarSet {
         ContextBarItem("codeBlock", "curlybraces.square", "markdownCodeBlockMenu:"),
         ContextBarItem("table", "tablecells", "markdownTableMenu:"),
         ContextBarItem("image", "photo", "markdownImageMenu:"),
-        // An eye, not "sidebar.right" (read as a sidebar toggle, UX review #21).
-        ContextBarItem("preview", "eye", "togglePreview:", trailing: true, toggle: true),
+        preview,
         ContextBarItem("explain", "text.magnifyingglass", "explainSelectionMenu:", trailing: true),
         ContextBarItem("rewrite", "pencil.line", "rewriteSelectionMenu:", trailing: true),
     ]
@@ -69,6 +77,7 @@ public enum ContextBarSet {
     public static func items(for language: Language) -> [ContextBarItem] {
         switch language {
         case .markdown: return markdown
+        case .csv: return csv
         default: return []
         }
     }

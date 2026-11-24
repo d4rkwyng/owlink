@@ -224,6 +224,7 @@ extension DevChecks {
                 expect(tab.previewDetached, "Detach on the bar")
                 expect(d.accessibilityLabel() == "Attach", "it now says Attach", d.accessibilityLabel() ?? "-")
                 expect(bar?.window === tab.previewWindow?.window, "the bar goes with it into its window")
+                expectDetachedInFront(tab, app, "previewbar, Detach on the bar")
             },
             { next in
                 guard let w = tab.previewWindow?.window else { next(); return }
@@ -576,8 +577,11 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option, .shift])
                 expect(tab.previewDetached, "the preview detaches")
+                expectDetachedInFront(tab, app, "mdpreview, ⇧⌥⌘P")
                 loadsBefore = p()?.pageLoads ?? 0
                 swapsBefore = p()?.bodySwaps ?? 0
+                // Detaching focuses the preview window: back to the text to type.
+                focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
                 type("detached edit")
             },

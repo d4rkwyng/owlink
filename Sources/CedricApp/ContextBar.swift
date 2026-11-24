@@ -2,8 +2,8 @@ import AppKit
 import CedricCore
 
 /// View › Show Context Bar (0.4.0): one thin row of buttons above the
-/// editor, for file types that have a set (`ContextBarSet` in CedricCore;
-/// only Markdown so far). On by default (UX review #3); the user's own
+/// editor, for file types that have a set (`ContextBarSet` in CedricCore:
+/// Markdown, and CSV / TSV's lone preview toggle). On by default (UX review #3); the user's own
 /// choice in the menu is kept. Nothing is built while it is off or for a
 /// file type without a set: the tab has no view, no observer.
 ///
@@ -59,9 +59,13 @@ final class ContextBarView: NSView {
             rule.bottomAnchor.constraint(equalTo: bottomAnchor),
             rule.heightAnchor.constraint(equalToConstant: 1),
         ])
+        // A set of view toggles only (CSV / TSV: the preview eye) has
+        // nothing to divide: its buttons sit at the leading edge, compact,
+        // like the first buttons of a Markdown bar.
+        let togglesOnly = !items.contains { !$0.trailing }
         var trailingStarted = false
         for item in items {
-            if item.trailing && !trailingStarted {
+            if item.trailing && !trailingStarted && !togglesOnly {
                 trailingStarted = true
                 // Leading items on one side, view toggles on the other (mirrored in RTL).
                 let spacer = NSView()
@@ -76,7 +80,14 @@ final class ContextBarView: NSView {
             let b = item.choices.isEmpty ? button(item) : pullDown(item)
             b.identifier = NSUserInterfaceItemIdentifier("contextbar.\(item.id)")
             buttons[item.id] = b
-            stack.addView(b, in: item.trailing ? .trailing : .leading)
+            stack.addView(b, in: item.trailing && !togglesOnly ? .trailing : .leading)
+        }
+        if togglesOnly {
+            // The free space after them: the bar still spans the window
+            // (the Markdown set's spacer does this between its two sides).
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+            stack.addView(spacer, in: .leading)
         }
         stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
     }
