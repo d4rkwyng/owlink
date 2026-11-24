@@ -175,4 +175,155 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertEqual(focus.count, 1, "Focus Preview more than once in the Preview submenu")
         shoot("menu-preview-submenu")
     }
+
+    // MARK: Settings and the back chevron (0.5.2 (17))
+
+    private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone" }
+
+    private func shoot(_ name: String) {
+        sleep(1) // the appearance animation
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "\(device)-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    private func openMore(_ app: XCUIApplication) {
+        let more = app.navigationBars.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 10), "no ••• button")
+        more.tap()
+    }
+
+    /// An item of the open ••• menu, scrolled to (the menu is long).
+    private func menuItem(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        let item = app.collectionViews.buttons[label].firstMatch
+        // Down the menu, then back up if a swipe went past it.
+        for i in 0..<14 {
+            if item.waitForExistence(timeout: 1), item.isHittable { return item }
+            let list = app.collectionViews.firstMatch
+            guard list.exists else { break }
+            if i < 7 { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
+        }
+        XCTAssertTrue(item.exists && item.isHittable, "no \(label) in the ••• menu")
+        return item
+    }
+
+    /// Closes an open menu by tapping outside it (on the status line).
+    private func closeMenu(_ app: XCUIApplication) {
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
+        sleep(1)
+    }
+
+    private func settingsShown(_ app: XCUIApplication) -> Bool {
+        app.descendants(matching: .any)["settings.font"].waitForExistence(timeout: 8)
+    }
+
+    private func closeSettings(_ app: XCUIApplication) {
+        let done = app.navigationBars.buttons["Done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "no Done in Settings")
+        done.tap()
+        let gone = NSPredicate { _, _ in !app.descendants(matching: .any)["settings.font"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// Ask Cedric from the ••• menu. As a sheet: an iPad at regular width
+    /// docks it beside the text, so there it is popped out into the sheet.
+    private func openAsk(_ app: XCUIApplication, sheet: Bool) {
+        openMore(app)
+        menuItem(app, "Ask Cedric").tap()
+        let done = app.buttons["ask.done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "Ask Cedric didn't open")
+        let popOut = app.buttons["ask.popOut"].firstMatch
+        if sheet, popOut.exists {
+            popOut.tap()
+            sleep(1)
+        }
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+    }
+
+    private func closeAskWithDone(_ app: XCUIApplication) {
+        app.buttons["ask.done"].firstMatch.tap()
+        let gone = NSPredicate { _, _ in !app.buttons["ask.done"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// Swipe-down on the sheet (from just above its Done button).
+    private func closeAskBySwipe(_ app: XCUIApplication) {
+        let done = app.buttons["ask.done"].firstMatch
+        let window = app.windows.firstMatch
+        let top = window.coordinate(withNormalizedOffset: .zero)
+        let y = done.frame.minY - 4
+        let start = top.withOffset(CGVector(dx: window.frame.midX, dy: max(y, 0)))
+        let end = top.withOffset(CGVector(dx: window.frame.midX, dy: window.frame.maxY - 2))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let gone = NSPredicate { _, _ in !app.buttons["ask.done"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// The back chevron closes the document: the file list (the document
+    /// browser, with its own Settings button) comes back.
+    private func assertBackReturnsToFiles(_ app: XCUIApplication, _ state: String, file: StaticString = #filePath, line: UInt = #line) {
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable, "\(state): no back chevron", file: file, line: line)
+        back.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "\(state): the back chevron didn't return to the file list", file: file, line: line)
+        XCTAssertFalse(app.textViews["editor.text"].exists, "\(state): the editor is still open", file: file, line: line)
+    }
+
+    func testSettingsOpensFromTheMenuWithoutCedric() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open from the ••• menu (Ask Cedric closed)")
+        shoot("settings-from-menu")
+        closeSettings(app)
+        // And again after Ask Cedric was opened and closed.
+        openAsk(app, sheet: true)
+        closeAskWithDone(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open from the ••• menu after Ask Cedric closed")
+        closeSettings(app)
+    }
+
+    /// The iPad menu bar's commands reach the editor with nothing in it
+    /// first responder (a document just opened, nothing tapped): ⇧⌘P shows
+    /// the preview, and ⌘, opens Owlink's Settings rather than sending
+    /// Owlink to the system Settings app.
+    func testMenuBarCommandsReachTheEditor() throws {
+        guard device == "ipad" else { throw XCTSkip("the menu bar's keys: iPad") }
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 5), "⇧⌘P didn't reach the editor")
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertEqual(app.state, .runningForeground, "⌘, left Owlink (the system Settings app)")
+        XCTAssertTrue(settingsShown(app), "⌘, didn't open Owlink's Settings")
+        shoot("settings-from-command-comma")
+        closeSettings(app)
+    }
+
+    /// Settings over Ask Cedric, which stays open: Ask Cedric's own button
+    /// (shown with no model ready), else the ••• menu (above the iPhone's
+    /// half-height sheet; beside the iPad's docked panel).
+    func testSettingsOpensWithCedricOpen() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: false)
+        let open = app.buttons["Open Settings"].firstMatch
+        if open.waitForExistence(timeout: 3) { open.tap() } else {
+            openMore(app)
+            menuItem(app, "Settings").tap()
+        }
+        XCTAssertTrue(settingsShown(app), "Settings didn't open with Ask Cedric open")
+        shoot("settings-over-ask-cedric")
+        closeSettings(app)
+        XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "Ask Cedric went with Settings")
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "after Settings over Ask Cedric")
+    }
+
 }

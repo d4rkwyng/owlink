@@ -2832,11 +2832,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         model.makeSnapshot = { [weak self] in self?.askSnapshot() ?? OwlDocumentSnapshot(text: "", generation: 0) }
         model.refreshScope()
         model.askIsVisible = { [weak self] in self?.askPanel != nil || self?.askSheet != nil }
-        model.openSettings = { [weak self] in
-            guard let self else { return }
-            if self.askPanel != nil { self.closeAskPanel(); self.showSettings() }
-            else { self.dismiss(animated: true) { self.showSettings() } }
-        }
+        // On top of Ask Cedric (sheet or panel), which stays open.
+        model.openSettings = { [weak self] in self?.showSettings() }
         askModel = model
         // An iPad at regular width docks Cedric beside the text. A phone
         // always gets the sheet, including landscape, where the width is
@@ -3650,10 +3647,33 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         view.setNeedsLayout()
     }
 
+    /// Settings, from the ••• menu, ⌘, (the iPad menu bar), and Ask
+    /// Cedric's own button: on top of whatever this editor shows (the Ask
+    /// Cedric sheet stays open under it, its conversation kept, and reads
+    /// its engine again when Settings closes). Already showing: nothing.
     @objc func showSettings() {
-        let host = UIHostingController(rootView: SettingsView())
+        let presenter = sheetPresenter()
+        guard !(presenter is SettingsHost) else { return }
+        let host = SettingsHost(rootView: SettingsView())
         host.modalPresentationStyle = .formSheet
-        present(host, animated: true)
+        host.onGone = { [weak self] in
+            guard let model = self?.askModel, model.unavailable != nil else { return }
+            Task { await model.prepare() }
+        }
+        presenter.present(host, animated: true)
+    }
+
+    /// Where a sheet the editor opens goes: on the topmost controller this
+    /// editor's window presents that isn't on its way out (the editor's
+    /// navigation controller when nothing is up). Never a controller that
+    /// is being dismissed, nor one whose view has left the window.
+    func sheetPresenter() -> UIViewController {
+        var top: UIViewController = navigationController ?? self
+        while let next = top.presentedViewController, !next.isBeingDismissed, next.viewIfLoaded?.window != nil,
+              !(next is UIAlertController) {
+            top = next
+        }
+        return top
     }
 
     @objc func newWindow() {

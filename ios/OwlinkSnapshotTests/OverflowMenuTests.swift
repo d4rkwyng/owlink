@@ -167,7 +167,7 @@ final class OverflowMenuTests: XCTestCase {
             for i in all {
                 let key: String
                 switch i.place {
-                case .startOf(let id), .endOf(let id): key = id.rawValue
+                case .startOf(let id), .endOf(let id), .replacing(let id): key = id.rawValue
                 case .after: key = i.menu.title
                 }
                 byTarget[key, default: []].append(i.menu)

@@ -9,6 +9,8 @@ enum MenuBar {
     /// Where a menu goes in the system's main menu.
     enum Place: Equatable {
         case startOf(UIMenu.Identifier), endOf(UIMenu.Identifier), after(UIMenu.Identifier)
+        /// In place of the menu's own children.
+        case replacing(UIMenu.Identifier)
     }
 
     struct Insertion {
@@ -17,7 +19,8 @@ enum MenuBar {
     }
 
     static func build(_ builder: any UIMenuBuilder) {
-        let all = insertions(hasFind: builder.menu(for: .find) != nil, hasSpelling: builder.menu(for: .spelling) != nil)
+        let all = insertions(hasFind: builder.menu(for: .find) != nil, hasSpelling: builder.menu(for: .spelling) != nil,
+                             hasAppSettings: builder.menu(for: .preferences) != nil)
         // Owlink's own Format menu (Markdown) replaces the system's.
         builder.remove(menu: .format)
         for i in all {
@@ -25,13 +28,15 @@ enum MenuBar {
             case .startOf(let id): builder.insertChild(i.menu, atStartOfMenu: id)
             case .endOf(let id): builder.insertChild(i.menu, atEndOfMenu: id)
             case .after(let id): builder.insertSibling(i.menu, afterMenu: id)
+            case .replacing(let id): builder.replaceChildren(ofMenu: id) { _ in i.menu.children }
             }
         }
     }
 
     /// In the order they are applied. `hasFind` / `hasSpelling`: the
     /// system's Edit › Find and Edit › Spelling menus exist.
-    static func insertions(hasFind: Bool, hasSpelling: Bool) -> [Insertion] {
+    /// `hasAppSettings`: the app menu has the system's Settings… item.
+    static func insertions(hasFind: Bool, hasSpelling: Bool, hasAppSettings: Bool = false) -> [Insertion] {
         var out: [Insertion] = []
         let save = UIKeyCommand(title: String(localized: "Save"), action: #selector(EditorViewController.saveDocument),
                                 input: "s", modifierFlags: .command)
@@ -196,7 +201,18 @@ enum MenuBar {
                                    input: "e", modifierFlags: [.command, .alternate, .shift])
         let settings = UIKeyCommand(title: String(localized: "Settings…"), action: #selector(EditorViewController.showSettings),
                                     input: ",", modifierFlags: .command)
-        out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript, settings]), place: .after(.view)))
+        // ⌘, Settings…: iPadOS's app menu has its own "Owlink Settings…"
+        // on ⌘, (orderFrontPreferencesPanel:), which opens Owlink's page in
+        // the system Settings app. It took ⌘, over ours, so ⌘, left Owlink. Ours takes its place there, ahead of the system's
+        // behavior; without that item (older systems) it stays in the
+        // Cedric menu. Settings… is in the menu bar once either way.
+        settings.wantsPriorityOverSystemBehavior = true
+        if hasAppSettings {
+            out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript]), place: .after(.view)))
+            out.append(Insertion(menu: UIMenu(options: .displayInline, children: [settings]), place: .replacing(.preferences)))
+        } else {
+            out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript, settings]), place: .after(.view)))
+        }
         return out
     }
 }

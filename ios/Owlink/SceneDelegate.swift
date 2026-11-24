@@ -98,6 +98,19 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
+    /// Menu-bar and keyboard commands (⌘, Settings…, ⌘W, ⇧⌘P…) with no
+    /// first responder in the editor go up the chain from the window, past
+    /// this scene delegate: they go to this window's editor (see
+    /// `EditorCommandRouting`). The scene the command came from is the one
+    /// that shows the result.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = EditorCommandRouting.editor(presentedBy: window?.rootViewController),
+           editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
+    }
+
     /// The launch's reopen decision, taken by the process's first window.
     private static var launchReopen = LaunchReopenGate()
 
@@ -158,6 +171,14 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         })
         settings.accessibilityIdentifier = "browser.settings"
         additionalTrailingNavigationBarButtonItems = [settings]
+    }
+
+    /// See `EditorCommandRouting`: with an editor up, the editor's commands.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = EditorCommandRouting.editor(presentedBy: self), editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -313,6 +334,16 @@ enum UIHostingSettings {
 /// The editor's navigation controller: the editor decides whether the
 /// status bar and home indicator show (hidden in Focus Preview).
 final class EditorNavigationController: UINavigationController {
+    /// See `EditorCommandRouting`: a sheet over the editor (Ask Cedric,
+    /// Settings) hands its unhandled commands to its presenter, this
+    /// controller, which hands them to the editor it shows.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = topViewController as? EditorViewController, editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
+    }
+
     override var childForStatusBarHidden: UIViewController? { topViewController }
     override var childForHomeIndicatorAutoHidden: UIViewController? { topViewController }
     override var childForScreenEdgesDeferringSystemGestures: UIViewController? { topViewController }
@@ -324,4 +355,25 @@ final class EditorNavigationController: UINavigationController {
             view.bringSubviewToFront(owl)
         }
     }
+}
+
+/// Why menu-bar commands need routing to the editor: UIKit sends a key
+/// command or menu-bar command to the first responder and up its chain.
+/// The editor is the child of a navigation controller the document browser
+/// presents. With nothing in the editor first responder (reading, the
+/// keyboard hidden, Ask Cedric just closed) the chain starts outside it,
+/// and from a sheet over the editor (Ask Cedric, Settings) it goes sheet →
+/// presenter (the navigation controller) → browser → window → scene: past
+/// the editor, never into it. So ⌘, (Settings…) and the rest did nothing
+/// (grayed out in the menu bar), and worked only while Ask Cedric's docked
+/// panel, inside the editor, held the keyboard. The navigation controller,
+/// the browser and the scene delegate hand such commands to the editor.
+@MainActor enum EditorCommandRouting {
+    /// The editor `root` (a window's document browser) presents, if any,
+    /// and not on its way out.
+    static func editor(presentedBy root: UIViewController?) -> EditorViewController? {
+        guard let nav = root?.presentedViewController as? UINavigationController, !nav.isBeingDismissed else { return nil }
+        return nav.viewControllers.first as? EditorViewController
+    }
+
 }

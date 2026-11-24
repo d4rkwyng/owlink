@@ -529,3 +529,17 @@ final class ModelsModel: ObservableObject {
         }
     }
 }
+
+/// Settings' host: says when it has gone, however it went.
+final class SettingsHost: UIHostingController<SettingsView> {
+    var onGone: (() -> Void)?
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || presentingViewController == nil {
+            let gone = onGone
+            onGone = nil
+            gone?()
+        }
+    }
+}
