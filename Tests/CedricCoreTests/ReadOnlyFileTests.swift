@@ -307,6 +307,57 @@ import Testing
                 "no temporary or new file is left")
     }
 
+    /// A write that fails part way through an in-place save (here EFBIG
+    /// from a file-size limit, which takes the same path as a full disk)
+    /// leaves the file as it was: 0.5.4 before QA truncated it first, so
+    /// a 74,893-byte file became the first 100,000 bytes of the new text
+    /// (and 0 bytes on a full disk). The limit is the process's and is
+    /// put back straight after the save, with SIGXFSZ ignored meanwhile.
+    @Test func aWriteThatFailsPartWayLeavesTheInPlaceFileAsItWas() throws {
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+        let url = try file("doc.md")
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
+        let oldHandler = signal(SIGXFSZ, SIG_IGN)
+        var old = rlimit()
+        #expect(getrlimit(RLIMIT_FSIZE, &old) == 0)
+        var limit = rlimit(rlim_cur: 100_000, rlim_max: old.rlim_max)
+        var thrown: Error?
+        if setrlimit(RLIMIT_FSIZE, &limit) == 0 {
+            do { try DocumentWrite.write(bigger, to: url) } catch { thrown = error }
+            #expect(setrlimit(RLIMIT_FSIZE, &old) == 0)
+        } else {
+            Issue.record("couldn't lower RLIMIT_FSIZE")
+        }
+        signal(SIGXFSZ, oldHandler)
+
+        #expect(thrown is CocoaError, "the save fails with an error the user sees")
+        #expect(try Data(contentsOf: url) == original, "the file keeps every original byte, and its length")
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["doc.md"])
+    }
+
+    /// The in-place save is refused, before anything is written, when the
+    /// volume has less room than the whole new text (`f_bavail` blocks of
+    /// `f_bsize`), and an absurd report counts as room.
+    @Test func theInPlaceSaveNeedsRoomForTheWholeText() {
+        var fs = statfs()
+        fs.f_bsize = 4096
+        fs.f_bavail = 10
+        #expect(DocumentWrite.enoughSpace(for: 40_960, in: fs))
+        #expect(!DocumentWrite.enoughSpace(for: 40_961, in: fs))
+        #expect(DocumentWrite.enoughSpace(for: 0, in: fs))
+        fs.f_bavail = 0
+        #expect(!DocumentWrite.enoughSpace(for: 1, in: fs))
+        fs.f_bavail = .max
+        fs.f_bsize = .max
+        #expect(DocumentWrite.enoughSpace(for: .max, in: fs))
+    }
+
     /// Folders that can't be opened for reading: 0300 (write and search)
     /// saves with the usual replace through a search-only handle, and
     /// 0100 (search only, so it also refuses new files) saves in place.

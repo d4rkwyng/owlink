@@ -199,7 +199,7 @@ public enum DocumentWrite {
                     close(old)
                 }
             }
-            try writeAll(data, to: fd, url: url)
+            try writeAll(data, to: fd, at: 0, url: url)
         } catch {
             close(fd)
             throw error
@@ -212,19 +212,30 @@ public enum DocumentWrite {
 
     /// The save into a folder that refuses a new file (a writable file
     /// in a 0555 folder): not atomic, but bound to the checked file. It
-    /// is opened for writing through the same open folder, never through
-    /// a link (`O_NOFOLLOW`), and only if it is still the file the check
-    /// looked at (device and inode) is it truncated and written. Opening
-    /// for writing is itself the kernel's permission check on that very
-    /// file, so a read-only file put in its place can't be opened, and a
-    /// different writable one fails the identity match: either way the
-    /// save fails with an error and nothing else is touched. The open
-    /// doesn't block (`O_NONBLOCK`): a FIFO put there with no reader
-    /// fails it (ENXIO) instead of stalling the save before the
-    /// regular-file check. (0.5.3 fell back to Foundation's atomic write
-    /// by path here.)
+    /// is opened through the same open folder, never through a link
+    /// (`O_NOFOLLOW`), and only if it is still the file the check looked
+    /// at (device and inode) is it written. Opening for writing is itself
+    /// the kernel's permission check on that very file, so a read-only
+    /// file put in its place can't be opened, and a different writable
+    /// one fails the identity match: either way the save fails with an
+    /// error and nothing else is touched. The open doesn't block
+    /// (`O_NONBLOCK`): a FIFO put there fails the regular-file check
+    /// instead of stalling the save. (0.5.3 fell back to Foundation's
+    /// atomic write by path here.)
+    ///
+    /// A failed write never leaves the file destroyed. 0.5.4 before QA
+    /// truncated it to nothing first, so a full disk (ENOSPC), a quota
+    /// or a file-size limit part way through left it empty or holding
+    /// the start of the new text. Now the save is refused before anything
+    /// is written when the volume has less free space than the new text
+    /// (`enoughSpace`, what the usual replace needs too) or can't
+    /// preallocate the growth; the old bytes are read through the same
+    /// handle (so it is opened for reading and writing), the new ones are
+    /// written over them and the file is cut to the new length only after
+    /// every byte is written; and if a write still fails, the old bytes
+    /// and length are put back before the error is thrown.
     private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
-        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        let fd = openat(dir, name, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw writeError(errno, url) }
         do {
             var st = stat()
@@ -232,11 +243,28 @@ public enum DocumentWrite {
             guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
                 throw writeError(EBUSY, url)
             }
-            // The checked regular file: back to ordinary blocking writes.
+            // The checked regular file: back to ordinary blocking I/O.
             let flags = fcntl(fd, F_GETFL)
             guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
-            guard ftruncate(fd, 0) == 0 else { throw writeError(errno, url) }
-            try writeAll(data, to: fd, url: url)
+            var fs = statfs()
+            if fstatfs(fd, &fs) == 0, !enoughSpace(for: data.count, in: fs) { throw writeError(ENOSPC, url) }
+            let old = try readAll(fd, count: Int(st.st_size), url: url)
+            if data.count > old.count {
+                var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL), fst_posmode: F_PEOFPOSMODE,
+                                     fst_offset: 0, fst_length: off_t(data.count - old.count), fst_bytesalloc: 0)
+                if fcntl(fd, F_PREALLOCATE, &store) == -1, errno == ENOSPC || errno == EDQUOT || errno == EFBIG {
+                    throw writeError(errno, url)
+                }
+            }
+            do {
+                try writeAll(data, to: fd, at: 0, url: url)
+                if data.count < old.count, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
+            } catch {
+                // Put the old bytes back (they fit where they were) and the old length.
+                _ = try? writeAll(old, to: fd, at: 0, url: url)
+                _ = ftruncate(fd, off_t(old.count))
+                throw error
+            }
         } catch {
             close(fd)
             throw error
@@ -244,12 +272,41 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
     }
 
-    private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {
+    /// Whether the volume `fs` describes has room for a `count`-byte
+    /// save. The whole new text must fit in the space this user may use
+    /// (`f_bavail`), as it must for the usual replace: a copy-on-write
+    /// volume (APFS) needs new blocks even to write over old ones.
+    static func enoughSpace(for count: Int, in fs: statfs) -> Bool {
+        let free = UInt64(fs.f_bavail).multipliedReportingOverflow(by: UInt64(fs.f_bsize))
+        return free.overflow || free.partialValue >= UInt64(count)
+    }
+
+    /// The first `count` bytes of `fd`, read from the start.
+    private static func readAll(_ fd: Int32, count: Int, url: URL) throws -> Data {
+        var data = Data(count: count)
+        let got = try data.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            var done = 0
+            while done < count {
+                let n = pread(fd, base + done, count - done, off_t(done))
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw writeError(errno, url)
+                }
+                if n == 0 { break }
+                done += n
+            }
+            return done
+        }
+        return got == count ? data : data.prefix(got)
+    }
+
+    private static func writeAll(_ data: Data, to fd: Int32, at offset: off_t, url: URL) throws {
         try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             guard let base = buf.baseAddress else { return }
             var done = 0
             while done < buf.count {
-                let n = Darwin.write(fd, base + done, buf.count - done)
+                let n = pwrite(fd, base + done, buf.count - done, offset + off_t(done))
                 if n < 0 {
                     if errno == EINTR { continue }
                     throw writeError(errno, url)
