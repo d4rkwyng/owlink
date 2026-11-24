@@ -66,6 +66,34 @@ import Testing
         #expect(OwlCitations.quotedLines(in: "12| a match\n40| another\n(3 more lines match)") == IndexSet([12, 40]))
     }
 
+    @Test func aStreamShowsCitationsOnlyOnceChecked() {
+        let answer = "The walk (2026) starts.\n- Lines 19–20 talk about rain.\nLines 3 and 31 describe it.\n31| quoted\nLine 4 ends"
+        // Fed in small pieces, as a model streams.
+        var stream = OwlCitations.Stream()
+        var shown: [String] = []
+        var i = answer.startIndex
+        while i < answer.endIndex {
+            let j = answer.index(i, offsetBy: 3, limitedBy: answer.endIndex) ?? answer.endIndex
+            shown.append(stream.feed(String(answer[i..<j]), allowed: Self.lines1to18))
+            i = j
+        }
+        // Before the end: what was shown never has an unchecked citation of 19, 20 or 31.
+        let before = shown.joined()
+        for c in OwlCitations.find(before) where !Self.lines1to18.contains(integersIn: c.lines) {
+            let end = NSMaxRange(c.range)
+            #expect((before as NSString).substring(from: end).hasPrefix(OwlCitations.flag), "\(c.lines)")
+        }
+        #expect(!before.contains("Line 4"))  // held: its line hasn't ended
+        // Text before a number shows at once; a number not after "line" passes.
+        #expect(before.hasPrefix("The walk (2026) starts.\n- "))
+        let all = before + stream.finish(allowed: Self.lines1to18)
+        #expect(all == "The walk (2026) starts.\n- Lines 19–20\(OwlCitations.flag) talk about rain.\n"
+                + "Lines 3 and 31\(OwlCitations.flag) describe it.\n31\(OwlCitations.flag)| quoted\nLine 4 ends")
+        // No filter: everything passes as it came.
+        var open = OwlCitations.Stream()
+        #expect(open.feed("Line 31 x", allowed: nil) == "Line 31 x" && open.finish(allowed: nil).isEmpty)
+    }
+
     @Test func ordinaryProseIsNeverCutOnlyFlagged() {
         // Selection 40–60; paragraphs (not list items) about other lines keep their words.
         let allowed = IndexSet(integersIn: 40...60)

@@ -546,6 +546,11 @@ public enum OwlChatRunner {
         // Said before the answer, from what the model has seen by its
         // first word (the tools run before it writes).
         let note = TextBuffer()
+        // Lines that cite a line are shown once checked (`OwlCitations.Stream`).
+        let gate = CitationGate()
+        let citable: @Sendable () -> IndexSet? = {
+            req.citableLines(linesRead: toolbox.linesRead, linesShown: toolbox.linesShown, digest: digest, checks: checks)
+        }
         let onText: @Sendable (String) -> Void = { t in
             if !wrote.value {
                 wrote.value = true
@@ -556,7 +561,8 @@ public enum OwlChatRunner {
                 }
             }
             streamed.append(t)
-            onEvent(.text(t))
+            let shown = gate.feed(t, allowed: citable())
+            if !shown.isEmpty { onEvent(.text(shown)) }
         }
         var rounds = 0
         var answer = ""
@@ -596,6 +602,8 @@ public enum OwlChatRunner {
             }
             break
         }
+        let rest = gate.finish(allowed: citable())
+        if !rest.isEmpty { onEvent(.text(rest)) }
         var proposals = toolbox.proposals
         if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
            var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
@@ -671,6 +679,13 @@ final class TextBuffer: @unchecked Sendable {
     private var s = ""
     func append(_ t: String) { lock.withLock { s += t } }
     var value: String { lock.withLock { s } }
+}
+
+final class CitationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stream = OwlCitations.Stream()
+    func feed(_ t: String, allowed: IndexSet?) -> String { lock.withLock { stream.feed(t, allowed: allowed) } }
+    func finish(allowed: IndexSet?) -> String { lock.withLock { stream.finish(allowed: allowed) } }
 }
 
 final class Flag: @unchecked Sendable {

@@ -468,6 +468,41 @@ import CedricCore
         }
     }
 
+    /// Streams `reply` a few characters at a time.
+    final class Trickle: OwlChatEngine, @unchecked Sendable {
+        var title: String { "trickle" }; var scoreKey: String { "trickle" }; var contextBudget: Int { 5_000 }
+        let reply: String
+        init(_ reply: String) { self.reply = reply }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            var i = reply.startIndex
+            while i < reply.endIndex {
+                let j = reply.index(i, offsetBy: 4, limitedBy: reply.endIndex) ?? reply.endIndex
+                onText(String(reply[i..<j]))
+                i = j
+            }
+            return .answer(reply)
+        }
+    }
+
+    @Test func anOrdinaryAnswerNeverStreamsAnUncheckedCitation() async throws {
+        let s = Self.doc282()
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!
+        let reply = "Overview first.\n- Line 3 sets the title.\n- Lines 19–20 talk about rain.\nThe end on line 31 matters."
+        let req = OwlChatRequest(question: "Summarise", action: .summarise, context: ctx, snapshot: s, useTools: false, prose: true)
+        let texts = Box<[String]>([])
+        let outcome = try await OwlChatRunner.run(req, engine: Trickle(reply)) { e in
+            if case .text(let t) = e { texts.mutate { $0.append(t) } }
+        }
+        let shown = texts.value.joined()
+        // What the panel showed (and would keep on Stop): 19–20 and 31 only ever flagged.
+        #expect(shown.contains("- Line 3 sets the title."))
+        #expect(shown.contains("Lines 19–20\(OwlCitations.flag)") && shown.contains("line 31\(OwlCitations.flag)"))
+        #expect(!shown.contains("19–20 talk") && !shown.contains("31 matters"))
+        // The finished answer drops the unread list item entirely.
+        #expect(!outcome.answer.contains("rain") && outcome.answer.contains("line 31\(OwlCitations.flag)"))
+    }
+
     @Test func aFollowUpMayCiteLinesTheConversationNamed() async throws {
         let s = Self.doc282()
         let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!

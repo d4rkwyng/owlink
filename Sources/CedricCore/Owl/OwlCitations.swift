@@ -155,6 +155,85 @@ public enum OwlCitations {
         return result
     }
 
+    /// Streamed text with a possible citation held from its first number
+    /// until the list it starts has ended (the first word after it that
+    /// isn't "and", "to" or "through", or the line's end), then checked
+    /// (`filter`): a citation of a line the model wasn't given is shown
+    /// flagged, never as written, even while the answer is still being
+    /// written or after Stop. Text before a number, and numbers not after
+    /// "line" or at a line's start or list marker, pass at once.
+    public struct Stream: Sendable {
+        /// The current line as the model wrote it, up to `held`.
+        private var raw = ""
+        /// The same, as shown (checked: flags in place).
+        private var shown = ""
+        /// Held: from a citation's first number on.
+        private var held = ""
+        private static let connectors: Set<String> = ["and", "to", "through"]
+
+        public init() {}
+
+        /// What of `text` can be shown now. `allowed` nil: no filter.
+        public mutating func feed(_ text: String, allowed: IndexSet?) -> String {
+            guard let allowed else {
+                let out = held + text
+                held = ""
+                raw = out.components(separatedBy: "\n").last ?? ""
+                shown = raw
+                return out
+            }
+            var out = ""
+            for ch in text {
+                if held.isEmpty {
+                    if ch.isASCII, ch.isNumber, Self.mayCite(raw) { held.append(ch); continue }
+                    out.append(ch)
+                    if ch == "\n" { raw = ""; shown = "" } else { raw.append(ch); shown.append(ch) }
+                    continue
+                }
+                held.append(ch)
+                if ch == "\n" || (!ch.isLetter && listEnded()) { out += release(allowed) }
+            }
+            return out
+        }
+
+        /// The held end, checked, once the text is complete.
+        public mutating func finish(allowed: IndexSet?) -> String {
+            guard !held.isEmpty else { return "" }
+            guard let allowed else { defer { held = "" }; return held }
+            return release(allowed)
+        }
+
+        /// A word after the last number in `held` that can't continue a list.
+        private func listEnded() -> Bool {
+            guard let lastDigit = held.lastIndex(where: { $0.isASCII && $0.isNumber }) else { return true }
+            let after = held[held.index(after: lastDigit)...]
+            let words = after.split { !$0.isLetter }.map { $0.lowercased() }
+            // The last word is complete only if something follows it.
+            let complete = after.last.map { !$0.isLetter } ?? false
+            let checked = complete ? words : Array(words.dropLast())
+            return checked.contains { !Self.connectors.contains($0) }
+        }
+
+        private mutating func release(_ allowed: IndexSet) -> String {
+            let checked = OwlCitations.filter(raw + held, allowed: allowed).text
+            // Flags go after a citation's number: what was shown stays a prefix.
+            let out = checked.hasPrefix(shown) ? String(checked.dropFirst(shown.count))
+                : OwlCitations.filter(held, allowed: allowed).text
+            if held.hasSuffix("\n") {
+                raw = ""; shown = ""
+            } else {
+                raw += held; shown += out
+            }
+            held = ""
+            return out
+        }
+
+        static func mayCite(_ line: String) -> Bool {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            return t.isEmpty || t == "-" || t == "*" || t == "•" || line.range(of: "line", options: .caseInsensitive) != nil
+        }
+    }
+
     private static func flagOnly(_ text: String, allowed: IndexSet) -> Filtered {
         let bad = find(text).filter { !allowed.contains(integersIn: $0.lines) }
         let ns = NSMutableString(string: text)
