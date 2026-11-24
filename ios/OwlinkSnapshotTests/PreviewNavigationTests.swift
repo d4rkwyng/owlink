@@ -290,13 +290,13 @@ final class PreviewNavigationTests: XCTestCase {
 
         // The local preview loads only its own pages.
         let page = try XCTUnwrap(PreviewFolder.pageURL(for: URL(fileURLWithPath: "/tmp/x")))
-        XCTAssertTrue(PreviewController.localLoadAllowed(page, type: .other))
-        XCTAssertTrue(PreviewController.localLoadAllowed(URL(string: "about:blank"), type: .other))
-        XCTAssertFalse(PreviewController.localLoadAllowed(page, type: .formSubmitted))
+        XCTAssertTrue(PreviewController.localLoadCandidate(page, type: .other))
+        XCTAssertTrue(PreviewController.localLoadCandidate(URL(string: "about:blank"), type: .other))
+        XCTAssertFalse(PreviewController.localLoadCandidate(page, type: .formSubmitted))
         let web = try XCTUnwrap(URL(string: "https://example.com/a?b=1"))
-        XCTAssertFalse(PreviewController.localLoadAllowed(web, type: .other))
-        XCTAssertFalse(PreviewController.localLoadAllowed(URL(fileURLWithPath: "/etc/hosts"), type: .other))
-        XCTAssertFalse(PreviewController.localLoadAllowed(URL(string: "javascript:alert(1)"), type: .other))
+        XCTAssertFalse(PreviewController.localLoadCandidate(web, type: .other))
+        XCTAssertFalse(PreviewController.localLoadCandidate(URL(fileURLWithPath: "/etc/hosts"), type: .other))
+        XCTAssertFalse(PreviewController.localLoadCandidate(URL(string: "javascript:alert(1)"), type: .other))
 
         // Review of fc73458 (Grok SF1, Opus SF3): only the page the app is
         // loading, as the Mac's expectedPageURL; not a sibling file a meta
@@ -822,6 +822,119 @@ final class PreviewNavigationTests: XCTestCase {
         preview.finishPrompt(open: false)
         preview.presentedViewController?.dismiss(animated: false)
         XCTAssertEqual(external, [web])
+    }
+
+    /// Calls an alert button's handler, as a tap on it does.
+    private func tap(_ title: String, in alert: UIAlertController) throws {
+        let action = try XCTUnwrap(alert.actions.first { $0.title == title }, title)
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        let block = try XCTUnwrap(action.value(forKey: "handler") as AnyObject?, "handler")
+        unsafeBitCast(block, to: Handler.self)(action)
+    }
+
+    /// Grok 4.7 review (0.5.2 parity, NIT 2): Open opens the URL the
+    /// alert it sits in shows, bound when that alert was made, not
+    /// whatever was asked last.
+    func testOpenOpensTheURLItsAlertShows() throws {
+        // Not in a window: the first prompt waits unpresented, so a second
+        // link replaces it.
+        let preview = PreviewController()
+        preview.loadViewIfNeeded()
+        var external: [URL] = []
+        preview.openExternal = { external.append($0) }
+        let first = try XCTUnwrap(URL(string: "https://first.example/"))
+        let second = try XCTUnwrap(URL(string: "https://second.example/"))
+        preview.confirmOpen(first)
+        let a = try XCTUnwrap(preview.linkPrompt)
+        preview.confirmOpen(second)
+        let b = try XCTUnwrap(preview.linkPrompt)
+        XCTAssertFalse(a === b)
+        XCTAssertTrue(a.message?.contains("first.example") == true && b.message?.contains("second.example") == true)
+        try tap("Open", in: a)
+        XCTAssertEqual(external, [first], "the first alert opens its own URL")
+        XCTAssertTrue(preview.linkPrompt === b, "answering an older alert leaves the one waiting")
+        try tap("Cancel", in: b)
+        XCTAssertNil(preview.linkPrompt)
+        XCTAssertEqual(external, [first])
+
+        // Shown: its buttons answer it.
+        let shown = PreviewController()
+        host(shown)
+        var opened: [URL] = []
+        shown.openExternal = { opened.append($0) }
+        shown.confirmOpen(second)
+        let prompt = try XCTUnwrap(shown.linkPrompt)
+        XCTAssertTrue(shown.presentedViewController === prompt)
+        shown.confirmOpen(first)
+        XCTAssertEqual(shown.droppedPrompts, 1)
+        try tap("Open", in: prompt)
+        prompt.dismiss(animated: false)
+        XCTAssertEqual(opened, [second], "Open opens the URL on screen")
+        XCTAssertNil(shown.linkPrompt)
+    }
+
+    /// A WKWebView navigation action as WebKit hands it to the UI delegate.
+    private final class NewWindowAction: WKNavigationAction {
+        let url: URL
+        let type: WKNavigationType
+        init(_ url: URL, _ type: WKNavigationType) { self.url = url; self.type = type; super.init() }
+        override var request: URLRequest { URLRequest(url: url) }
+        override var navigationType: WKNavigationType { type }
+        override var targetFrame: WKFrameInfo? { nil }
+    }
+
+    /// Grok 4.7 review (0.5.2 parity, SHOULD-FIX 2): the preview has a UI
+    /// delegate that makes no window; a `target=_blank` link that reaches
+    /// it asks like any other link and loads nothing; anything not
+    /// activated by the person (a script's window.open) is dropped.
+    func testNewWindowLinkAsksAndNeverLoads() async throws {
+        let (_, doc) = try tree()
+        let preview = PreviewController()
+        host(preview)
+        var external: [URL] = []
+        preview.openExternal = { external.append($0) }
+        preview.documentURL = doc
+        preview.show(markdown: "# Home\n\n<a href=\"https://example.com/new\" target=\"_blank\">new</a>", palette: EditorPalettes.light)
+        try await waitFor("loaded") { preview.web.url != nil && preview.web.url == preview.pageURL && !preview.web.isLoading }
+        let page = try XCTUnwrap(preview.web.url)
+        XCTAssertTrue(preview.web.uiDelegate === preview, "a UI delegate")
+        let web = try XCTUnwrap(URL(string: "https://example.com/new"))
+
+        let made = preview.webView(preview.web, createWebViewWith: preview.web.configuration,
+                                   for: NewWindowAction(web, .linkActivated), windowFeatures: WKWindowFeatures())
+        XCTAssertNil(made, "no new window")
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(web))
+        let prompt = try XCTUnwrap(preview.linkPrompt)
+        XCTAssertTrue(preview.presentedViewController === prompt, "it asks")
+        XCTAssertEqual(prompt.message, "Site: example.com\n\nhttps://example.com/new")
+        XCTAssertTrue(external.isEmpty, "nothing opens before Open")
+        try tap("Cancel", in: prompt)
+        prompt.dismiss(animated: false)
+        XCTAssertTrue(external.isEmpty)
+
+        // Not activated by the person, or from another web view: dropped, nothing asks.
+        XCTAssertNil(preview.webView(preview.web, createWebViewWith: preview.web.configuration,
+                                     for: NewWindowAction(web, .other), windowFeatures: WKWindowFeatures()))
+        XCTAssertEqual(preview.newWindowRequested(web, type: .other, from: preview.web, command: false), .cancel)
+        XCTAssertEqual(preview.newWindowRequested(web, type: .linkActivated, from: WKWebView(), command: false), .cancel)
+        XCTAssertEqual(preview.newWindowRequested(nil, type: .linkActivated, from: preview.web, command: false), .cancel)
+        XCTAssertNil(preview.linkPrompt)
+
+        // Mail asks too; Open opens it, outside the preview.
+        let mail = try XCTUnwrap(URL(string: "mailto:a@example.com"))
+        XCTAssertEqual(preview.newWindowRequested(mail, type: .linkActivated, from: preview.web, command: false), .route)
+        XCTAssertEqual(preview.lastLinkAction, .confirmExternal(mail))
+        let ask = try XCTUnwrap(preview.linkPrompt)
+        XCTAssertEqual(ask.title, "Write an email?")
+        try tap("Open", in: ask)
+        ask.dismiss(animated: false)
+        XCTAssertEqual(external, [mail])
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitFor("settled") { !preview.web.isLoading }
+        XCTAssertEqual(preview.web.url, page, "nothing loaded")
+        XCTAssertEqual(preview.history.count, 1, "no history step")
+        XCTAssertEqual(webViews(in: preview.view).count, 1)
     }
 
     // MARK: Detached

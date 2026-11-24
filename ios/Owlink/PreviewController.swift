@@ -34,7 +34,7 @@ import CedricCore
 /// does the system open it. Nothing a link names is launched, and the page
 /// itself can't go anywhere (`PreviewNavigation`: no redirect, refresh,
 /// form or frame loads another page).
-final class PreviewController: UIViewController, WKNavigationDelegate, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
+final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDelegate, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
     private(set) var web: WKWebView!
     private(set) var csv: CSVPreviewController?
     private var showingCSV = false
@@ -85,6 +85,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         config.setURLSchemeHandler(files, forURLScheme: PreviewFolder.scheme)
         web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
+        // No new windows (`createWebViewWith`): a target=_blank link asks
+        // like any other.
+        web.uiDelegate = self
         // A long-press preview would load the link outside this policy.
         web.allowsLinkPreview = false
         web.isOpaque = false
@@ -570,6 +573,29 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         decisionHandler(policy == .allowPage ? .allow : .cancel)
     }
 
+    /// No new windows, as on the Mac. A `target=_blank` link click reaches
+    /// the navigation policy above first (no target frame) and is cancelled
+    /// there; should WebKit ask for a window instead, a link the person
+    /// activated goes the same way (`linkActivated`, then `handleLink`:
+    /// web and mail links ask with `confirmOpen`). The request is never
+    /// loaded and no web view is made. Returns what was decided (for tests).
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        newWindowRequested(navigationAction.request.url, type: navigationAction.navigationType,
+                           from: webView, command: Self.command(navigationAction))
+        return nil
+    }
+
+    /// `createWebViewWith`'s decision: only a link the person activated, in
+    /// this preview's web view, is routed (as a click with no target
+    /// frame, so it never scrolls or loads); anything else (a script's
+    /// `window.open`, which can't run here anyway) is dropped.
+    @discardableResult
+    func newWindowRequested(_ url: URL?, type: WKNavigationType, from webView: WKWebView, command: Bool) -> PreviewNavigation {
+        guard webView === web, type == .linkActivated, let url, url.absoluteString != Self.grantURL else { return .cancel }
+        return linkActivated(url, mainFrame: nil, command: command)
+    }
+
     /// A navigation response the policy above let through must still be
     /// the preview's own page in the main frame, never a web page (a second
     /// line, failing closed, as on the Mac).
@@ -611,19 +637,22 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         return decision
     }
 
-    /// The local page's own loads: the first load of a render, nothing a
-    /// page could start by itself (a form, a reload of something else).
-    static func localLoadAllowed(_ url: URL?, type: WKNavigationType) -> Bool {
+    /// The shape of the local page's own loads: an `.other` load of a
+    /// `cedric-doc:` URL or exactly about:blank, nothing a page could start
+    /// by itself (a form, a reload). Only a precondition: it passes every
+    /// `cedric-doc:` URL, so it is never the check by itself (that is
+    /// `localLoadAllowed(_:type:expected:)`). Internal for tests only.
+    static func localLoadCandidate(_ url: URL?, type: WKNavigationType) -> Bool {
         guard type == .other, let scheme = url?.scheme?.lowercased() else { return false }
         return scheme == PreviewFolder.scheme || url?.absoluteString == "about:blank"
     }
 
-    /// `localLoadAllowed`, and only the page the app is loading
+    /// `localLoadCandidate`, and only the page the app is loading
     /// (`expected`: the render's page URL with its `?r=`, or about:blank),
     /// not any `cedric-doc:` URL. A meta refresh the scrub missed would
     /// otherwise load a sibling `.html` file raw, with no CSP and no scrub.
     static func localLoadAllowed(_ url: URL?, type: WKNavigationType, expected: URL?) -> Bool {
-        guard localLoadAllowed(url, type: type), let url, let expected else { return false }
+        guard localLoadCandidate(url, type: type), let url, let expected else { return false }
         if expected.absoluteString == "about:blank" { return url.absoluteString == "about:blank" }
         return PreviewScheme.isPageRequest(url, page: expected) && renderGeneration(of: url) == renderGeneration(of: expected)
             && renderGeneration(of: url) != nil
@@ -806,9 +835,11 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
 
     /// Opens a URL outside the app (after the person confirms).
     var openExternal: @MainActor (URL) -> Void = { UIApplication.shared.open($0) }
-    /// The confirmation on screen (or waiting for a window), and its URL.
+    /// The confirmation on screen (or waiting for a window).
     private(set) var linkPrompt: UIAlertController?
-    private var promptURL: URL?
+    /// `linkPrompt`'s answer, with the URL it shows bound in (what its
+    /// buttons call; `finishPrompt` calls it for tests).
+    private var answerPrompt: ((Bool) -> Void)?
     /// Links dropped because a prompt was already showing (for tests).
     private(set) var droppedPrompts = 0
 
@@ -828,26 +859,30 @@ final class PreviewController: UIViewController, WKNavigationDelegate, UIGesture
         }
         let a = UIAlertController(title: ExternalLinkText.promptTitle(for: url),
                                   message: ExternalLinkText(url).promptMessage, preferredStyle: .alert)
-        a.addAction(UIAlertAction(title: String(localized: "Open"), style: .default) { [weak self] _ in
-            self?.finishPrompt(open: true)
-        })
-        let cancel = UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { [weak self] _ in
-            self?.finishPrompt(open: false)
+        // The URL is bound to this alert: Open opens the URL its text
+        // shows, whatever was asked since.
+        let answer: (Bool) -> Void = { [weak self, weak a] open in
+            guard let self else { return }
+            if let a, self.linkPrompt === a {
+                self.linkPrompt = nil
+                self.answerPrompt = nil
+            }
+            if open { self.openExternal(url) }
         }
+        a.addAction(UIAlertAction(title: String(localized: "Open"), style: .default) { _ in answer(true) })
+        let cancel = UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { _ in answer(false) }
         a.addAction(cancel)
         a.preferredAction = cancel
         a.view.accessibilityIdentifier = "preview.openLinkPrompt"
         linkPrompt = a
-        promptURL = url
+        answerPrompt = answer
         if viewIfLoaded?.window != nil, presentedViewController == nil { present(a, animated: true) }
     }
 
-    /// The prompt's answer: Open opens the URL it showed; Cancel nothing.
+    /// Answers the prompt in `linkPrompt` as its buttons do (for tests):
+    /// Open opens the URL it showed; Cancel nothing.
     func finishPrompt(open: Bool) {
-        let url = promptURL
-        promptURL = nil
-        linkPrompt = nil
-        if open, let url { openExternal(url) }
+        answerPrompt?(open)
     }
 
     // MARK: Navigation bar (Back, Forward, This Document)
