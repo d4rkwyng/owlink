@@ -168,8 +168,8 @@ import CedricCore
     @Test func openingACappedDocumentDoesNotLoadOrAskAModel() async {
         let rt = FakeRuntime()
         let model = testModel(body: Data("x".utf8))
-        let builtIn = BuiltInHintProvider(model: model, path: URL(fileURLWithPath: "/tmp/capped.gguf"),
-                                          host: BuiltInModelHost(runtime: rt))
+        let host = BuiltInModelHost(runtime: rt)
+        let builtIn = BuiltInHintProvider(model: model, path: URL(fileURLWithPath: "/tmp/capped.gguf"), host: host)
         let b = LocalAIOwlBridge(registry: OwlProviderRegistry(), engine: { _ in AppleIntelligenceEngine(status: .available) },
                                  makeProvider: { _ in builtIn })
         await b.apply(Self.settings)
@@ -181,7 +181,10 @@ import CedricCore
         #expect(rt.loads.value.isEmpty, "no model loaded")
         #expect(rt.requests.value.isEmpty)
         #expect(await b.scheduler?.requestCount == 0)
-        // An uncapped document on the same engine does load it (the rig works).
+        // An uncapped document on the same engine does load it (the rig
+        // works), once the user has loaded the model this session
+        // (automatic checks never make the first load: BuiltInLoadGateTests).
+        host.session.noteExplicitLoadForTesting()
         b.contextChanged(context(gen: 1, doc: UUID()))
         #expect(await eventually { !rt.loads.value.isEmpty })
     }

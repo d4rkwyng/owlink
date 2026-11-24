@@ -38,7 +38,7 @@ struct LiveKVCacheTests {
         try #require(store.isInstalled(model), "\(model.id) is not downloaded")
         let host = BuiltInModelHost(runtime: LlamaRuntime())
         let path = store.fileURL(for: model)
-        let llama = try #require(try await host.model(at: path) as? LlamaModel)
+        let llama = try #require(try await BuiltInLoad.userAsked { try await host.model(at: path) } as? LlamaModel)
         let specs = OwlTools.specs(OwlToolName.allCases)
         let grammar = OwlToolGrammar.envelope(specs)
         #expect(llama.grammarCompiles(grammar), "llama.cpp rejects the typed grammar")

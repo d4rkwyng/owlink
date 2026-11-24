@@ -12,6 +12,11 @@ import CedricCore
 ///   timer is armed for it, so no model is loaded because it was opened,
 ///   saved or left idle. `checkNow` (the user asking, after the app's
 ///   confirmation) still works;
+/// - never on its own while the provider's `OwlAutomaticGate` says no
+///   (the built-in engine before the user has loaded its model this
+///   session, or after a load hung): the provider is not asked, so no
+///   model is loaded because a file was opened, saved or left idle.
+///   Rules hints are not affected; `checkNow` still works;
 /// - never when the text has fewer than `HintPrompt.minimumHintCharacters`
 ///   non-whitespace characters: an empty document has nothing to check,
 ///   and asking invents a problem;
@@ -67,6 +72,10 @@ public actor OwlScheduler {
         case tooShort
         /// Over `AutoReviewCap`: never asked on its own; `checkNow` only.
         case autoReviewCapped
+        /// The provider can't be used automatically yet (`OwlAutomaticGate`:
+        /// the built-in model isn't loaded by the user this session, or a
+        /// load hung). Not re-armed; the next edit or scroll looks again.
+        case needsExplicitLoad
     }
 
     public enum Outcome: Sendable, Equatable {
@@ -104,6 +113,8 @@ public actor OwlScheduler {
     public private(set) var appActive = true
     /// How many requests were started, for tests and the budget log.
     public private(set) var requestCount = 0
+    /// Automatic checks that were due but not made (`.needsExplicitLoad`).
+    public private(set) var gatedAutomatic = 0
 
     public init(provider: any OwlHintProvider, config: Config = Config(),
                 clock: any OwlClock = SystemClock(), power: any PowerSource = SystemPowerSource(),
@@ -263,7 +274,7 @@ public actor OwlScheduler {
         doc.timer = nil
         doc.context = context
         docs[id] = doc
-        start(id)
+        start(id, userAsked: true)
         return true
     }
 
@@ -288,6 +299,7 @@ public actor OwlScheduler {
             return .throttled(remaining: config.minInterval - (now - last))
         }
         if !power.current().allowsChecks(minimumBattery: config.minimumBattery) { return .power }
+        if let g = provider as? any OwlAutomaticGate, !g.allowsAutomaticRequests { return .needsExplicitLoad }
         return .fire
     }
 
@@ -317,12 +329,16 @@ public actor OwlScheduler {
         case .fire: start(id)
         case .typing(let r), .throttled(let r): arm(id, after: r)
         case .power: arm(id, after: config.minInterval)   // re-check the battery later
+        case .needsExplicitLoad: gatedAutomatic += 1
         case .inactive, .alreadyAsked, .busy, .unknownDocument, .largeDocument, .tooShort, .autoReviewCapped: break
         }
         return g
     }
 
-    private func start(_ id: UUID) {
+    /// `userAsked`: from `checkNow`. The request runs as
+    /// `BuiltInLoadIntent.userAsked` (it may load the built-in model);
+    /// one from a timer stays automatic (it may not).
+    private func start(_ id: UUID, userAsked: Bool = false) {
         guard var doc = docs[id], HintPrompt.hasEnoughText(doc.context.text) else { return }
         let context = doc.context
         doc.lastFire = clock.now
@@ -330,9 +346,11 @@ public actor OwlScheduler {
         requestCount += 1
         onStart?(context)
         let provider = self.provider, clock = self.clock, timeout = config.timeout
-        doc.inflight = Task { [weak self] in
-            let result = await Self.race(provider: provider, context: context, clock: clock, timeout: timeout)
-            await self?.finish(context, result)
+        doc.inflight = BuiltInLoad.$intent.withValue(userAsked ? .userAsked : .automatic) {
+            Task { [weak self] in
+                let result = await Self.race(provider: provider, context: context, clock: clock, timeout: timeout)
+                await self?.finish(context, result)
+            }
         }
         docs[id] = doc
     }
