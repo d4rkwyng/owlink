@@ -3583,7 +3583,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             a.addAction(UIAlertAction(title: String(localized: "Close"), style: .destructive) { [weak self] _ in
                 self?.finishClose(saveFirst: false)
             })
-            present(a, animated: true)
+            // Over a sheet the editor shows (Ask Cedric, Settings), if any.
+            sheetPresenter().present(a, animated: true)
             return
         }
         switch SavePolicy.onClose(saveAutomatically: AppSettings.saveAutomatically, hasUnsavedChanges: document.hasUnsavedChanges) {
@@ -3598,7 +3599,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             })
             a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { [weak self] _ in self?.afterClose = nil })
             a.preferredAction = a.actions.first
-            present(a, animated: true)
+            // Over a sheet the editor shows (Ask Cedric, Settings), if any.
+            sheetPresenter().present(a, animated: true)
         }
     }
 
@@ -3611,6 +3613,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
+        // Ask Cedric's conversation goes with the document.
+        askModel?.stop()
         // The document is going: so is Fix Typos… (closeWithTab on the Mac).
         spellStep?.close(restoringFocus: false)
         stopDailyWordTracking()
@@ -3629,7 +3633,24 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             DetachedPreviews.documentClosed(path: self.document.recoveryPath)
             let after = self.afterClose
             self.afterClose = nil
-            self.dismiss(animated: true) { after?() }
+            self.dismissEditor { after?() }
+        }
+    }
+
+    /// Takes the editor off screen, with anything it shows over itself.
+    /// `dismiss` on the editor only dismisses the topmost controller it
+    /// presents when there is one: with the Ask Cedric sheet up (its half
+    /// height leaves the back chevron tappable) or Settings, closing took
+    /// that sheet away, left the editor up with its document closed and
+    /// `closing` set, and the back chevron did nothing from then on.
+    /// Dismissing from the controller that presented the editor's
+    /// navigation controller (the document browser) takes the whole stack.
+    func dismissEditor(_ done: @escaping () -> Void) {
+        let shown: UIViewController = navigationController ?? self
+        if let presenter = shown.presentingViewController {
+            presenter.dismiss(animated: true, completion: done)
+        } else {
+            dismiss(animated: true, completion: done)
         }
     }
 

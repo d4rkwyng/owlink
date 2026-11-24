@@ -163,4 +163,17 @@ final class SettingsAndCloseTests: XCTestCase {
 
     // MARK: Close
 
+    /// Close dismisses from the controller that presented the editor (the
+    /// browser): the editor goes with any sheet over it. Dismissing the
+    /// editor itself only took the sheet away.
+    func testCloseDismissesFromTheBrowser() async throws {
+        let (nav, editor) = editor()
+        let browser = Stand()
+        nav.presenting = browser
+        nav.presented = shownSheet()
+        let done = expectation(description: "dismissed")
+        editor.dismissEditor { done.fulfill() }
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(browser.dismissCalls, 1)
+    }
 }

@@ -326,4 +326,145 @@ final class OwlinkUITests: XCTestCase {
         assertBackReturnsToFiles(app, "after Settings over Ask Cedric")
     }
 
+    /// The sheet stops at half height, undimmed: the back chevron stays
+    /// tappable over it. It closes the document (sheet and all), and is
+    /// never left dead.
+    func testBackChevronWithAskCedricOpen() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        // A tap where the chevron is (XCUITest may count the undimmed
+        // sheet's container as covering it; a finger isn't stopped by it).
+        back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        if !app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 6), back.exists {
+            back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap() // the second tap a person would try
+        }
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "Ask Cedric open: the back chevron didn't return to the file list")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
+    }
+
+    /// Settings opened over the Ask Cedric sheet (iPhone: from the •••
+    /// menu above it), closed, Ask Cedric closed, then the back chevron.
+    func testSettingsOverAskCedricThenBack() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        if device == "ipad" { throw XCTSkip("the iPad's Ask Cedric is docked: testSettingsOpensWithCedricOpen") }
+        openAsk(app, sheet: true)
+        let more = app.navigationBars.buttons["More"].firstMatch
+        guard more.exists else { throw XCTSkip("••• covered by the sheet") }
+        more.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open with Ask Cedric open")
+        closeSettings(app)
+        XCTAssertTrue(app.buttons["ask.done"].waitForExistence(timeout: 5), "Ask Cedric went with Settings")
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Settings over Ask Cedric")
+    }
+
+    func testBackChevronAfterAskCedricDone() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Ask Cedric, Done")
+    }
+
+    func testBackChevronAfterAskCedricSwipeDown() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        closeAskBySwipe(app)
+        assertBackReturnsToFiles(app, "Ask Cedric, swipe down")
+    }
+
+    func testBackChevronAfterAskCedricPanel() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: false)
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Ask Cedric (panel on iPad), Done")
+    }
+
+    func testBackChevronAfterSettings() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        closeSettings(app)
+        assertBackReturnsToFiles(app, "Settings")
+    }
+
+    func testBackChevronAfterPreviewAndFocusPreview() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        // Shown and hidden again from the ••• menu's Preview submenu.
+        for _ in 0..<2 {
+            openMore(app)
+            menuItem(app, "Preview").tap()
+            let toggle = app.buttons["editor.menu.preview"].firstMatch
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview toggle in the Preview submenu")
+            toggle.tap()
+            sleep(1)
+        }
+        // Focus Preview in and out.
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let focus = app.buttons["editor.menu.focusPreview"].firstMatch
+        XCTAssertTrue(focus.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
+        focus.tap()
+        let edit = app.buttons["editor.focusDone"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5), "Focus Preview didn't start")
+        edit.tap()
+        sleep(1)
+        assertBackReturnsToFiles(app, "preview shown/hidden and Focus Preview")
+    }
+
+    func testBackChevronAfterMenus() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        closeMenu(app)
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        sleep(1)
+        closeMenu(app)
+        openMore(app)
+        menuItem(app, "Writing Mode").tap()
+        sleep(1)
+        closeMenu(app)
+        assertBackReturnsToFiles(app, "••• menu and its submenus")
+    }
+
+    func testBackChevronAfterDetachingThePreview() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let detach = app.collectionViews.buttons["Open Preview in New Window"].firstMatch
+        guard detach.waitForExistence(timeout: 3) else {
+            closeMenu(app)
+            throw XCTSkip("no detached preview here (iPhone)")
+        }
+        detach.tap()
+        let detached = app.descendants(matching: .any)["detachedPreview.web"]
+        XCTAssertTrue(detached.waitForExistence(timeout: 10), "no preview window")
+        shoot("detached-preview")
+        // Without Stage Manager the new window takes the screen: closing
+        // it brings the editor's window back.
+        if !app.navigationBars.buttons["BackButton"].firstMatch.isHittable {
+            let close = app.buttons["detachedPreview.close"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 5), "no Close in the preview window")
+            close.tap()
+            XCTAssertTrue(app.textViews["editor.text"].waitForExistence(timeout: 10), "the editor's window didn't come back")
+            // The editor's window comes back inactive (XCUITest reports the
+            // app in the background): a first tap would only activate it.
+            if app.state != .runningForeground { app.activate() }
+        }
+        assertBackReturnsToFiles(app, "detached preview")
+    }
+
 }
