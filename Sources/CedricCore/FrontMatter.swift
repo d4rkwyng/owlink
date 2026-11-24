@@ -239,7 +239,8 @@ public enum FrontMatter {
     }
 
     /// Splits on commas outside quotes and nested brackets, a trailing
-    /// comma dropped; nil when the brackets don't balance.
+    /// comma dropped; nil when the brackets don't balance or an entry is
+    /// empty.
     private static func splitFlow(_ s: Substring) -> [String]? {
         var out: [String] = []
         var cur = ""
@@ -264,8 +265,11 @@ public enum FrontMatter {
         guard nesting == 0, quote == nil else { return nil }
         out.append(cur)
         var parts = out.map { $0.trimmingCharacters(in: .whitespaces) }
-        // One trailing comma is allowed (`{icon: owl.png,}`), as in YAML.
-        if parts.count > 1, parts.last == "" { parts.removeLast() }
+        // One trailing comma is allowed after an entry (`{icon: owl.png,}`),
+        // as in YAML. Any other empty entry (`{,}`, `[a,, b]`) is not a
+        // value (Codex round 2): nil, so the whole value stays text.
+        if parts.count > 1, parts.last == "", parts[parts.count - 2] != "" { parts.removeLast() }
+        if parts.count > 1, parts.contains("") { return nil }
         return parts
     }
 

@@ -124,6 +124,20 @@ import Testing
         ]))
         // Still text: an empty entry inside, or a lone comma.
         #expect(FrontMatter.parse(["t: {a: 1,, b: 2}"]) == .map([("t", .scalar("{a: 1,, b: 2}"))]))
+        // Codex round 2, should-fix: a lone comma is not an empty
+        // collection; it and other empty entries stay text.
+        #expect(FrontMatter.parse(["hero: {,}"]) == .map([("hero", .scalar("{,}"))]))
+        #expect(FrontMatter.parse(["hero: { , }"]) == .map([("hero", .scalar("{ , }"))]))
+        #expect(FrontMatter.parse(["t: [,]"]) == .map([("t", .scalar("[,]"))]))
+        #expect(FrontMatter.parse(["t: [a,, b]"]) == .map([("t", .scalar("[a,, b]"))]))
+        #expect(FrontMatter.parse(["t: [, a]"]) == .map([("t", .scalar("[, a]"))]))
+        #expect(FrontMatter.parse(["{,}"]) == .scalar("{,}"))
+        // An empty collection, and one trailing comma, still read.
+        #expect(FrontMatter.parse(["hero: {}", "t: []"]) == .map([("hero", .map([])), ("t", .list([]))]))
+        #expect(FrontMatter.parse(["hero: {icon: owl.png,}"]) == .map([("hero", .map([("icon", .scalar("owl.png"))]))]))
+        let lone = Markdown.render("---\nhero: {,<b>}\n---\n")
+        #expect(lone.contains("<tr><th>hero</th><td>{,&lt;b&gt;}</td></tr>"), "\(lone)")
+        #expect(!lone.contains("<b>"))
         // Through the renderer: the title in the summary, values in the
         // table, all escaped.
         let html = Markdown.render("---\n{title: \"<b>Owls</b>\", hero: {icon: \"<img src=x onerror=1>\",}}\n---\nText\n")
