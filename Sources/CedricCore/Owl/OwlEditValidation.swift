@@ -113,9 +113,10 @@ public enum OwlEditValidation {
     ///   (`.\(` is a class called `(`), and the lexer doesn't read escapes.
     /// - JavaScript: HARD only when the syntax checker also rejects the
     ///   edited text as a classic script. Accepted: the parser wins and
-    ///   the brackets aren't reported. Module syntax (the checker can't
-    ///   judge it): a WARNING. No checker given: HARD, as the lexer is
-    ///   then the only check (the app always gives one).
+    ///   the brackets aren't reported. Possibly a module (see
+    ///   `mentionsImportOrExport`; the checker can't judge one): a
+    ///   WARNING. No checker given: HARD, as the lexer is then the only
+    ///   check (the app always gives one).
     /// - TypeScript: WARNING. Nothing parses it, and the lexer can't
     ///   always tell a regex from a division (`if (ok) /\(/.test(s);`).
     /// - Ruby: WARNING, Apply on. Only the highlighter's tokens can blank
@@ -130,7 +131,8 @@ public enum OwlEditValidation {
     /// A statement-start `import` (not a dynamic `import(…)`) or `export`,
     /// or `import.meta` anywhere, outside strings and comments: module
     /// syntax, which JavaScriptCore's classic-script check rejects even
-    /// when it is valid.
+    /// when it is valid. Not what `validate` uses (that is the looser
+    /// `mentionsImportOrExport`); kept for its existing tests.
     static let moduleSyntax = try! NSRegularExpression(
         pattern: #"(?:^|[;{}])[ \t]*(?:import\b(?!\s*\()|export\b)|(?<![\w$.])import\s*\.\s*meta\b"#,
         options: [.anchorsMatchLines])
@@ -138,6 +140,28 @@ public enum OwlEditValidation {
     static func usesModuleSyntax(_ text: String) -> Bool {
         let code = code(text, language: "javascript")
         return moduleSyntax.firstMatch(in: code as String, range: NSRange(location: 0, length: code.length)) != nil
+    }
+
+    static let importOrExport = try! NSRegularExpression(pattern: #"\b(import|export)\b"#)
+
+    /// The word `import` or `export` anywhere outside comments, strings
+    /// and template interpolations included. The fail-open test for
+    /// JavaScript: a text that has one may be a module (`${import.meta.url}`,
+    /// `f(...import.meta.url)`, `export`), which JavaScriptCore's
+    /// classic-script check rejects even when it is valid, so its
+    /// rejection is only a warning. Deliberately looser than
+    /// `usesModuleSyntax`: no attempt to model module syntax.
+    static func mentionsImportOrExport(_ text: String) -> Bool {
+        let ns = text as NSString
+        guard ns.range(of: "import").location != NSNotFound || ns.range(of: "export").location != NSNotFound else { return false }
+        let code: NSString
+        if let mask = CodeMask.make(ns, language: "javascript") {
+            // Blank only the comments.
+            code = CodeMask(ns, spans: mask.spans.filter { $0.kind == .comment }).codeNS
+        } else {
+            code = ns
+        }
+        return importOrExport.firstMatch(in: code as String, range: NSRange(location: 0, length: code.length)) != nil
     }
 
     // MARK: Entry points
@@ -196,9 +220,10 @@ public enum OwlEditValidation {
         var scriptAccepts = false
         var bracketSeverity = bracketLanguages[language]
         if language == "javascript", let script {
-            // Module syntax (`import`/`export`, a .mjs file) isn't a classic
-            // script: the checker's rejection is only a warning there.
-            let module = ext == "mjs" || usesModuleSyntax(before) || usesModuleSyntax(after)
+            // Possibly a module (a .mjs file, or `import`/`export` anywhere
+            // outside comments, before or after): the checker's classic-script
+            // rejection is only a warning there.
+            let module = ext == "mjs" || mentionsImportOrExport(before) || mentionsImportOrExport(after)
             scriptAccepts = parser(.script, advisory: module, script.syntaxError(in:)) == nil
             if module { bracketSeverity = .warning }
         }

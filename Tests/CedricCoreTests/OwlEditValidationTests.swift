@@ -592,6 +592,29 @@ import Testing
         #expect(!OwlEditValidation.usesModuleSyntax("const s = 'import.meta';\nx.import.meta = 1;\n"))
     }
 
+    @Test func importOrExportOutsideCommentsMakesARejectionAWarning() {
+        // Strings, template interpolations, dynamic import() and member names all count.
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = `${import.meta.url}`;\n"))
+        #expect(OwlEditValidation.mentionsImportOrExport("f(...import.meta.url);\n"))
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = 'export';\n"))
+        #expect(OwlEditValidation.mentionsImportOrExport("const m = import('x');\n"))
+        // Comments don't; nor does a longer word.
+        #expect(!OwlEditValidation.mentionsImportOrExport("// import x\n/* export y */\nconst important = 1;\n"))
+        struct RejectsUnclosed: OwlScriptSyntaxChecker {
+            func syntaxError(in script: String) -> OwlSyntaxError? {
+                script.contains("f(;") || script.contains("f(1;") ? OwlSyntaxError(message: "SyntaxError", line: 1) : nil
+            }
+        }
+        // Either side counts: a rejection is a warning, Apply on.
+        let c = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "f('import');\n", after: "f(;\n",
+                                           original: "'import')", replacement: "", script: RejectsUnclosed())
+        #expect(!c.failsValidation && c.warnings.map(\.check).contains(.script))
+        // Neither side: hard.
+        let h = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "// import\nf(1);\n", after: "// import\nf(1;\n",
+                                           original: "1)", replacement: "1", script: RejectsUnclosed())
+        #expect(h.hardIssue?.check == .script)
+    }
+
     @Test func anEscapedBracketInCSSIsOnlyAWarning() {
         let c = OwlEditValidation.validate(language: "css", fileName: "a.css", before: ".example { color: red; }\n",
                                            after: ".\\( { color: red; }\n", original: ".example", replacement: ".\\(", script: nil)

@@ -115,6 +115,31 @@ import CedricCore
         #expect(c.warnings.map(\.check) == [.script])
     }
 
+    @Test func importMetaInATemplateInterpolationIsAWarningThroughJSC() throws {
+        let s = OwlDocumentSnapshot(text: "const msg = `loaded from ${\"\"}`;\n", generation: 1, fileName: "a.js", language: "javascript")
+        let p = try OwlEditProposal.anchored(find: "${\"\"}", replace: "${import.meta.url}", in: s).get()
+        #expect(JSCSyntaxChecker().syntaxError(in: "const msg = `loaded from ${import.meta.url}`;\n") != nil)
+        let c = OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker())
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.script])
+    }
+
+    @Test func importMetaAfterASpreadIsAWarningThroughJSC() throws {
+        let s = OwlDocumentSnapshot(text: "f(...args);\n", generation: 1, fileName: "a.js", language: "javascript")
+        let p = try OwlEditProposal.anchored(find: "...args", replace: "...import.meta.url", in: s).get()
+        #expect(JSCSyntaxChecker().syntaxError(in: "f(...import.meta.url);\n") != nil)
+        let c = OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker())
+        #expect(!c.failsValidation)
+        #expect(c.warnings.map(\.check) == [.script])
+    }
+
+    @Test func importOnlyInACommentKeepsARejectionHardThroughJSC() throws {
+        let text = "// import x from 'y'\nf(1);\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
+        let p = try OwlEditProposal.anchored(find: "f(1);", replace: "f(1;", in: s).get()
+        #expect(OwlEditValidation.validate(p, in: s, script: JSCSyntaxChecker()).hardIssue?.check == .script)
+    }
+
     @Test func aSecondCardRenamingToTheSameNameFailsThroughJSC() throws {
         let text = "let a = 1;\nlet b = 2;\n"
         let s = OwlDocumentSnapshot(text: text, generation: 1, fileName: "a.js", language: "javascript")
@@ -243,6 +268,12 @@ import CedricCore
         let p = try #require(fixed.proposals.first)
         #expect(fixed.proposals.count == 1 && p.check == .clean)
         #expect(p.canApply(text: Self.validJSON as NSString, generation: 1))
+        // The correction round's get_lines was dropped, never run: the
+        // earlier get_lines calls, the refused edit and the fix.
+        #expect(fixed.toolCalls == OwlTools.maxRounds + 1)
+        let batch = try #require(try await transcriptOfLastBatch(req, BreaksInTheLastRound(fix: true, offered: TextBuffer())))
+        #expect(batch.calls.map(\.name) == ["propose_edit"])
+        #expect(batch.results.count == 1 && batch.results[0].callID == batch.calls[0].id && batch.results[0].name == "propose_edit")
         // Failing again there: marked, Apply off, and no further round.
         let again = TextBuffer()
         let broken = try await OwlChatRunner.run(req, engine: Recording(inner: BreaksInTheLastRound(fix: false, offered: TextBuffer()),
@@ -252,6 +283,55 @@ import CedricCore
         let q = try #require(broken.proposals.first)
         #expect(broken.proposals.count == 1 && q.check.failsValidation)
         #expect(!q.canApply(text: Self.validJSON as NSString, generation: 1))
+    }
+
+    /// The messages after the last `.toolCalls` in what the answer turn saw.
+    func transcriptOfLastBatch(_ req: OwlChatRequest, _ engine: any OwlChatEngine)
+        async throws -> (calls: [OwlToolCall], results: [(callID: String, name: String)])? {
+        let seen = MessageLog()
+        _ = try await OwlChatRunner.run(req, engine: Transcript(inner: engine, seen: seen)) { _ in }
+        let m = seen.messages
+        guard let i = m.lastIndex(where: { if case .toolCalls = $0 { return true }; return false }),
+              case .toolCalls(let calls) = m[i] else { return nil }
+        var results: [(callID: String, name: String)] = []
+        for x in m[(i + 1)...] { if case .toolResult(let id, let name, _) = x { results.append((id, name)) } }
+        return (calls, results)
+    }
+
+    /// The correction round offers propose_edit, and the model sends only get_lines.
+    struct OnlyLooksInTheCorrectionRound: OwlChatEngine {
+        var title: String { "looks" }
+        var scoreKey: String { "looks" }
+        var contextBudget: Int { 6000 }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            let results = messages.compactMap { m -> String? in if case .toolResult(_, _, let c) = m { return c }; return nil }
+            let look = OwlToolCall(name: "get_lines", arguments: .object(["start": .number(1), "end": .number(2)]))
+            if !tools.isEmpty {
+                if results.count < OwlTools.maxRounds - 1 { return .toolCalls([look]) }
+                if results.count == OwlTools.maxRounds - 1 {
+                    return .toolCalls([OwlEditValidationAITests.edit("[1, 2, 3]", "[1, 2, 3,]")])
+                }
+                return .toolCalls([look, look])
+            }
+            onText("I could not fix it.")
+            return .answer("I could not fix it.")
+        }
+    }
+
+    @Test func anAllDroppedCorrectionBatchGoesStraightToTheAnswer() async throws {
+        let s = OwlDocumentSnapshot(text: Self.validJSON, generation: 1, fileName: "a.json", language: "json")
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: 6000)!
+        let req = OwlChatRequest(question: "Change the items.", context: ctx, snapshot: s, useTools: true, prose: false)
+        let out = try await OwlChatRunner.run(req, engine: OnlyLooksInTheCorrectionRound()) { _ in }
+        #expect(out.rounds == OwlTools.maxRounds + 1)
+        #expect(out.toolCalls == OwlTools.maxRounds)
+        #expect(out.proposals.isEmpty)
+        #expect(out.answer.hasSuffix("I could not fix it."))
+        // The last batch in the transcript is still the refused edit and its result.
+        let batch = try #require(try await transcriptOfLastBatch(req, OnlyLooksInTheCorrectionRound()))
+        #expect(batch.calls.map(\.name) == ["propose_edit"])
+        #expect(batch.results.count == 1 && batch.results[0].name == "propose_edit")
     }
 
     /// Two broken edits in one batch, then (told) both fixed, or both still broken.
@@ -307,6 +387,27 @@ import CedricCore
             }
             return try await inner.turn(messages, tools: tools, toolbox: toolbox, maxTokens: maxTokens, onText: onText)
         }
+    }
+
+    /// Passes turns through, keeping the messages the answer turn saw.
+    struct Transcript: OwlChatEngine {
+        let inner: any OwlChatEngine
+        let seen: MessageLog
+        var title: String { inner.title }
+        var scoreKey: String { inner.scoreKey }
+        var contextBudget: Int { inner.contextBudget }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            if tools.isEmpty { seen.set(messages) }
+            return try await inner.turn(messages, tools: tools, toolbox: toolbox, maxTokens: maxTokens, onText: onText)
+        }
+    }
+
+    final class MessageLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _messages: [OwlChatMessage] = []
+        func set(_ m: [OwlChatMessage]) { lock.withLock { _messages = m } }
+        var messages: [OwlChatMessage] { lock.withLock { _messages } }
     }
 
     final class EventLog: @unchecked Sendable {
