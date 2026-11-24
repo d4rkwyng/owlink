@@ -115,6 +115,7 @@ PATHS = {
 # and shadow stay about 4 px in, which also keeps Lanczos fringe off the edge.
 X0, X1, Y0, Y1 = 0.155, 0.845, 0.075, 0.925
 F = 0.19
+FOLD_GAP = 0.02
 RIM = ci.hx('e8e8ee')
 RIM_TYPES = {'', 'LOG', 'SH', 'SQL'}
 
@@ -199,11 +200,15 @@ def draw_glyph(image, glyph, size, labelled):
     d = ImageDraw.Draw(image)
     # Keep ink clear of the lighter fold and above the lower-third label.
     x0, x1 = .30 * size, .70 * size
-    y0, y1 = (.28, .62) if labelled else (.30, .68)
+    y0, y1 = (.31, .63) if labelled else (.31, .68)
     if size == 32:
         y0 += 1 / size
         y1 += 1 / size
     stroke = max(2 if size == 32 else 1, round(.045 * size))
+    # The fold ends at Y0 + F. The top of the stroke stays at least
+    # FOLD_GAP below it, so the Lanczos downsample cannot blend white into it.
+    if size > 32:
+        assert y0 - stroke / 2 / size >= Y0 + F + FOLD_GAP, (size, y0)
     for path in PATHS[glyph]:
         pts = [(round(x0 + x * (x1 - x0)), round((y0 + y * (y1 - y0)) * size)) for x, y in path]
         d.line(pts, fill=ci.WHITE, width=stroke, joint='curve')
