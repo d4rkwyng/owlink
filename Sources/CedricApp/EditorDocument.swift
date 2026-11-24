@@ -154,8 +154,9 @@ final class EditorDocument {
                 String(localized: "Some characters can’t be saved as \(encoding.displayName). Choose UTF-8 from the encoding menu in the status bar and save again.")])
         }
         // Through a symbolic link: replace its target (keeping the link and
-        // the target's permissions), not the link itself.
-        try data.write(to: SafePaths.writeTarget(for: url), options: .atomic)
+        // the target's permissions), not the link itself; never a read-only
+        // file (FileWriteAccess: permissions, locked, read-only volume).
+        try DocumentWrite.write(data, to: url)
         fileURL = url
         noteDisk(DiskStamp.of(url))
         mixedLineEndings = false

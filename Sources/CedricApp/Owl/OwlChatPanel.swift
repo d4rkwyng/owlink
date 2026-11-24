@@ -1086,7 +1086,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var documentIsReadOnly: Bool {
         guard let tab else { return true }
         return OwlEditAccess.readOnly(editable: tab.textView.isEditable, following: tab.tail != nil,
-                                      largeDocument: tab.isLargeDocument, extrasPaused: tab.extrasPaused)
+                                      largeDocument: tab.isLargeDocument, extrasPaused: tab.extrasPaused,
+                                      unwritableFile: tab.fileReadOnly != nil)
     }
 
     func state(of p: OwlEditProposal) -> OwlEditProposal.ApplyState {
@@ -1135,6 +1136,8 @@ final class OwlChatPanel: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @discardableResult
     func apply(_ c: OwlEditCard) -> Bool {
         guard let tab else { return false }
+        // The file may have become read-only since the card was shown.
+        tab.recheckWriteAccess()
         let now = state(of: c.proposal)
         guard case .ready(let range) = now else {
             c.show(now)

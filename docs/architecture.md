@@ -1924,7 +1924,8 @@ Applying (`OwlEditProposal.state`): a `.text` proposal is `.ready(range)` while 
 live text, wherever it now is, so typing elsewhere leaves it applicable and applying one card doesn't strand the
 others; an edit inside it, or a second copy, makes it `.stale`. A quick action's ``` block (no tools) still
 makes a `.lines` proposal, applicable only while the document is unchanged since asking. A read-only document
-(a read-only tab, a followed file, iOS read mode) is `.readOnly` for both. The panel shows one `OwlEditCard` per
+(a read-only tab, a followed file, iOS read mode, a file that can't be written: `FileWriteAccess`, even after Allow
+Editing) is `.readOnly` for both. The panel shows one `OwlEditCard` per
 proposal (Apply / Skip, Ask Again once stale), each Apply one undo step; the cards are rechecked 0.15 s after a
 burst of typing, and only while there are any.
 

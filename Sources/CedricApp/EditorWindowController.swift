@@ -187,6 +187,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var binary: BinaryFileState?
     /// Its bar, built only for such a file.
     var binaryBar: BinaryFileBar?
+    /// The file can't be written (ReadOnlyFile.swift): permissions, locked,
+    /// or a read-only volume; nil when it can (or the tab has no file).
+    var fileReadOnly: FileWriteAccess.Blocked?
+    /// Allow Editing on a read-only file: the buffer takes typing; Save
+    /// still won't write over the file and Apply stays off.
+    var readOnlyEditingAllowed = false
+    /// Its bar, built when first needed.
+    var readOnlyBar: NoticeBar?
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// A one-off notice in this tab (the closed-tab "not saved" notice).
@@ -265,6 +273,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         updateTitle()
         setOwlVisible(Settings.shared.showOwl)
         PerfTrace.mark("owl")
+        recheckWriteAccess()
         AfterFirstFrame.run { [weak self] in self?.gitTabShown() }
     }
 
@@ -770,9 +779,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // Unsaved: a trailing • on the title, so on the tab's label too
         // (a background tab's edited dot is easy to miss), beside the
         // close button's own edited dot. VoiceOver hears "Edited".
-        window.title = EditedIndicator.windowTitle(displayName: name, isDirty: dirty)
-        window.setAccessibilityTitle(EditedIndicator.accessibilityTitle(displayName: name, isDirty: dirty,
-                                                                        edited: String(localized: "Edited")))
+        // A read-only file: "name — Read-Only", the unsaved mark still last.
+        window.title = EditedIndicator.windowTitle(displayName: FileWriteAccess.windowTitle(name, readOnly: fileReadOnly != nil),
+                                                   isDirty: dirty)
+        let spoken = EditedIndicator.accessibilityTitle(displayName: name, isDirty: dirty, edited: String(localized: "Edited"))
+        window.setAccessibilityTitle(fileReadOnly != nil ? spoken + ", " + String(localized: "Read-Only") : spoken)
         window.representedURL = doc.fileURL
         window.isDocumentEdited = dirty
         window.tab.toolTip = doc.fileURL?.path
@@ -970,6 +981,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func save() -> Bool {
         guard !binaryBlocksSave else { NSSound.beep(); return false }
         guard let url = doc.fileURL else { return saveAs() }
+        // A file that became read-only (or always was): never write over it.
+        recheckWriteAccess()
+        if let reason = fileReadOnly { askSaveReadOnly(url, reason); return false }
         // Another app changed the file since it was read or saved here: ask
         // (DiskChange.swift) rather than overwrite its changes.
         if fileChangedOnDisk(url) { askSaveConflict(url); return false }
@@ -1000,6 +1014,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         for pane in panes { pane.textView.breakUndoCoalescing() }
         if doc.languageChoice.saved(fileName: url.lastPathComponent, content: textView.string) { languageChanged() }
         hideDiskBar()
+        // Save As to a writable file: a normal tab from here on.
+        recheckWriteAccess()
         (NSApp.delegate as? AppDelegate)?.noteRecent(url)
         // A word goal follows the tab to its (new) path.
         if let goal = editing.wordGoal { (NSApp.delegate as? AppDelegate)?.setFileWordGoal(goal, path: url.path) }
@@ -1104,7 +1120,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             showError(NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Couldn’t encode the copy.")]))
             return
         }
-        do { try data.write(to: SafePaths.writeTarget(for: url), options: .atomic) } catch { showError(error) }
+        do { try DocumentWrite.write(data, to: url) } catch { showError(error) }
     }
 
     // MARK: Owl
@@ -1231,6 +1247,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // Changed on disk while another tab or app was in front (owl or
         // not). Not before the first frame: nothing new on the launch path.
         if AfterFirstFrame.passed { reloadIfChangedOnDisk() }
+        // chmod, a Finder lock or a remount while another app was in front.
+        recheckWriteAccess()
         gitTabShown()
         (NSApp.delegate as? AppDelegate)?.tabBecameKey(self)
         // The bar's first refresh runs from its initializer, before this
