@@ -2,7 +2,8 @@ import Foundation
 
 /// A small reader for the YAML front matter the Markdown preview shows:
 /// block maps and lists nested by indentation, `- key: value` items,
-/// flow lists (`[a, b]`), quoted scalars and `|` / `>` block text. Not a
+/// flow lists and maps (`[a, {b: [c]}]`, nested), quoted scalars and `|`
+/// / `>` block text (with its blank and `#` lines). Not a
 /// YAML parser (no anchors, tags or multi-document streams): what it
 /// doesn't understand stays text, shown as is (escaped by the renderer).
 public enum FrontMatter {
@@ -27,6 +28,21 @@ public enum FrontMatter {
     private struct Line {
         var indent: Int
         var text: Substring
+        /// Blank: text in a block scalar (`|`, `>`), skipped elsewhere.
+        var blank = false
+        /// Starts with `#`: text in a block scalar, a comment elsewhere.
+        var comment = false
+        var ignorable: Bool { blank || comment }
+    }
+
+    /// The line at `i`, past blank and comment lines (`i` moves to it), or
+    /// nil at the end. Blank and `#` lines are kept until it's known
+    /// whether they are a block scalar's text (Codex review of 0.5.2 (17),
+    /// should-fix 1: dropped up front, a `description: |` lost its
+    /// `# Heading` line and the blank line after it).
+    private static func at(_ lines: [Line], _ i: inout Int) -> Line? {
+        while i < lines.count, lines[i].ignorable { i += 1 }
+        return i < lines.count ? lines[i] : nil
     }
 
     /// The front matter's lines (between the `---` fences).
@@ -34,19 +50,18 @@ public enum FrontMatter {
         var all: [Line] = []
         for raw in lines {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
             var indent = 0
             for ch in raw { if ch == " " { indent += 1 } else if ch == "\t" { indent += 2 } else { break } }
-            all.append(Line(indent: indent, text: Substring(trimmed)))
+            all.append(Line(indent: indent, text: Substring(trimmed), blank: trimmed.isEmpty, comment: trimmed.hasPrefix("#")))
         }
-        guard !all.isEmpty else { return .map([]) }
         var i = 0
         var parts: [Value] = []
-        while i < all.count {
+        while let line = at(all, &i) {
             let before = i
-            parts.append(node(&all, &i, indent: all[i].indent, depth: 0))
+            parts.append(node(&all, &i, indent: line.indent, depth: 0))
             if i == before { i += 1 }
         }
+        if parts.isEmpty { return .map([]) }
         if parts.count == 1 { return parts[0] }
         // Top-level pieces at different indents: merged maps, else a list.
         if parts.allSatisfy({ if case .map = $0 { return true } else { return false } }) {
@@ -89,23 +104,22 @@ public enum FrontMatter {
     }
 
     private static func node(_ lines: inout [Line], _ i: inout Int, indent: Int, depth: Int) -> Value {
-        guard i < lines.count else { return .scalar("") }
+        guard let first = at(lines, &i) else { return .scalar("") }
         if depth > maxDepth { return .scalar(rest(lines, &i, above: indent - 1)) }
-        let first = lines[i]
         if isListItem(first.text) { return list(&lines, &i, indent: first.indent, depth: depth) }
         if keyValue(first.text) != nil { return map(&lines, &i, indent: first.indent, depth: depth) }
         // Plain text, with its more-indented continuation lines.
         i += 1
         var text = String(first.text)
-        while i < lines.count, lines[i].indent > indent { text += " " + lines[i].text; i += 1 }
+        while let next = at(lines, &i), next.indent > indent { text += " " + next.text; i += 1 }
         return .scalar(unquote(text))
     }
 
     /// Every following line indented more than `above`, as text.
     private static func rest(_ lines: [Line], _ i: inout Int, above: Int) -> String {
         var out: [String] = []
-        while i < lines.count, lines[i].indent > above || out.isEmpty {
-            out.append(String(repeating: " ", count: lines[i].indent) + lines[i].text)
+        while let line = at(lines, &i), line.indent > above || out.isEmpty {
+            out.append(String(repeating: " ", count: line.indent) + line.text)
             i += 1
         }
         return out.joined(separator: "\n")
@@ -113,13 +127,13 @@ public enum FrontMatter {
 
     private static func list(_ lines: inout [Line], _ i: inout Int, indent: Int, depth: Int) -> Value {
         var items: [Value] = []
-        while i < lines.count, lines[i].indent == indent, isListItem(lines[i].text) {
-            let text = lines[i].text
+        while let line = at(lines, &i), line.indent == indent, isListItem(line.text) {
+            let text = line.text
             let content = text.dropFirst().drop { $0 == " " }
             if content.isEmpty {
                 i += 1
-                if i < lines.count, lines[i].indent > indent {
-                    items.append(node(&lines, &i, indent: lines[i].indent, depth: depth + 1))
+                if let next = at(lines, &i), next.indent > indent {
+                    items.append(node(&lines, &i, indent: next.indent, depth: depth + 1))
                 } else {
                     items.append(.scalar(""))
                 }
@@ -134,11 +148,11 @@ public enum FrontMatter {
             } else {
                 i += 1
                 var s = String(content)
-                while i < lines.count, lines[i].indent > indent, !isListItem(lines[i].text) || lines[i].indent > column {
-                    s += " " + lines[i].text
+                while let next = at(lines, &i), next.indent > indent, !isListItem(next.text) || next.indent > column {
+                    s += " " + next.text
                     i += 1
                 }
-                items.append(scalar(s))
+                items.append(scalar(s, depth: depth + 1))
             }
         }
         return .list(items)
@@ -146,72 +160,126 @@ public enum FrontMatter {
 
     private static func map(_ lines: inout [Line], _ i: inout Int, indent: Int, depth: Int) -> Value {
         var pairs: [(String, Value)] = []
-        while i < lines.count, lines[i].indent == indent, let kv = keyValue(lines[i].text) {
+        while let line = at(lines, &i), line.indent == indent, let kv = keyValue(line.text) {
             let (key, rest) = kv
             i += 1
             let value: Value
             if rest.isEmpty || rest.hasPrefix("#") {
                 // A nested block: deeper, or a list at the key's own indent.
-                if i < lines.count, lines[i].indent > indent || (lines[i].indent == indent && isListItem(lines[i].text)) {
-                    value = node(&lines, &i, indent: lines[i].indent, depth: depth + 1)
+                if let next = at(lines, &i), next.indent > indent || (next.indent == indent && isListItem(next.text)) {
+                    value = node(&lines, &i, indent: next.indent, depth: depth + 1)
                 } else {
                     value = .scalar("")
                 }
-            } else if let style = rest.first, style == "|" || style == ">", rest.dropFirst().allSatisfy({ "+-0123456789 ".contains($0) }) {
-                var block: [String] = []
-                while i < lines.count, lines[i].indent > indent { block.append(String(lines[i].text)); i += 1 }
-                value = .scalar(block.joined(separator: style == "|" ? "\n" : " "))
+            } else if let style = rest.first, style == "|" || style == ">",
+                      rest.dropFirst().prefix { $0 != "#" }.allSatisfy({ "+-0123456789 ".contains($0) }) {
+                value = .scalar(blockScalar(lines, &i, above: indent, folded: style == ">"))
             } else {
                 var s = String(rest)
                 // A plain value continued on more-indented lines.
-                while i < lines.count, lines[i].indent > indent { s += " " + lines[i].text; i += 1 }
-                value = scalar(s)
+                while let next = at(lines, &i), next.indent > indent { s += " " + next.text; i += 1 }
+                value = scalar(s, depth: depth + 1)
             }
             pairs.append((key, value))
         }
         return .map(pairs)
     }
 
-    /// A scalar, or a flow list `[a, b]` / flow map `{a: 1}` on one line.
-    private static func scalar(_ s: String) -> Value {
-        let t = s.trimmingCharacters(in: .whitespaces)
-        if t.hasPrefix("["), t.hasSuffix("]") {
-            let inner = t.dropFirst().dropLast()
-            if inner.trimmingCharacters(in: .whitespaces).isEmpty { return .list([]) }
-            if !inner.contains("[") && !inner.contains("{") {
-                return .list(splitFlow(inner).map { .scalar(unquote($0)) })
-            }
+    /// A `|` (literal) or `>` (folded) block's text: the lines after its
+    /// key indented more than the key, and the blank lines among them; a
+    /// `#` line in it is text. Indentation beyond the block's first line is
+    /// kept; trailing blank lines go (YAML's default "clip").
+    private static func blockScalar(_ lines: [Line], _ i: inout Int, above indent: Int, folded: Bool) -> String {
+        var block: [String] = []
+        var base: Int?
+        while i < lines.count {
+            let line = lines[i]
+            if line.blank { block.append(""); i += 1; continue }
+            guard line.indent > indent else { break }
+            let b = base ?? line.indent
+            base = b
+            block.append(String(repeating: " ", count: max(0, line.indent - b)) + line.text)
+            i += 1
         }
-        if t.hasPrefix("{"), t.hasSuffix("}") {
-            let inner = t.dropFirst().dropLast()
-            if !inner.contains("[") && !inner.contains("{") {
-                var pairs: [(String, Value)] = []
-                for part in splitFlow(inner) {
-                    if let colon = part.firstIndex(of: ":") {
-                        pairs.append((unquote(String(part[..<colon])), .scalar(unquote(String(part[part.index(after: colon)...])))))
-                    } else {
-                        return .scalar(unquote(t))
-                    }
-                }
-                return .map(pairs)
+        while block.last == "" { block.removeLast() }
+        guard folded else { return block.joined(separator: "\n") }
+        // Folded: lines join with a space; a blank line is a line break.
+        var out = ""
+        var lineStart = true
+        for line in block {
+            if line.isEmpty { out += "\n"; lineStart = true; continue }
+            if !lineStart { out += " " }
+            out += line
+            lineStart = false
+        }
+        return out
+    }
+
+    /// A scalar, or a flow list `[a, b]` / flow map `{a: 1}` on one line,
+    /// nested (`{links: [home, about]}`); unbalanced or too deep: its text.
+    private static func scalar(_ s: String, depth: Int = 0) -> Value {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard depth <= maxDepth else { return .scalar(unquote(t)) }
+        if t.hasPrefix("["), t.hasSuffix("]"), let parts = splitFlow(t.dropFirst().dropLast()) {
+            if parts == [""] { return .list([]) }
+            return .list(parts.map { scalar($0, depth: depth + 1) })
+        }
+        if t.hasPrefix("{"), t.hasSuffix("}"), let parts = splitFlow(t.dropFirst().dropLast()) {
+            if parts == [""] { return .map([]) }
+            var pairs: [(String, Value)] = []
+            for part in parts {
+                guard let colon = flowColon(part) else { return .scalar(unquote(t)) }
+                pairs.append((unquote(String(part[..<colon])), scalar(String(part[part.index(after: colon)...]), depth: depth + 1)))
             }
+            return .map(pairs)
         }
         return .scalar(unquote(t))
     }
 
-    /// Splits on commas outside quotes.
-    private static func splitFlow(_ s: Substring) -> [String] {
+    /// Splits on commas outside quotes and nested brackets; nil when the
+    /// brackets don't balance.
+    private static func splitFlow(_ s: Substring) -> [String]? {
         var out: [String] = []
         var cur = ""
         var quote: Character?
+        var nesting = 0
         for ch in s {
             if let q = quote { cur.append(ch); if ch == q { quote = nil }; continue }
-            if ch == "\"" || ch == "'" { quote = ch; cur.append(ch); continue }
-            if ch == "," { out.append(cur); cur = ""; continue }
+            switch ch {
+            case "\"", "'": quote = ch
+            case "[", "{": nesting += 1
+            case "]", "}":
+                nesting -= 1
+                if nesting < 0 { return nil }
+            case "," where nesting == 0:
+                out.append(cur)
+                cur = ""
+                continue
+            default: break
+            }
             cur.append(ch)
         }
+        guard nesting == 0, quote == nil else { return nil }
         out.append(cur)
         return out.map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// A flow map entry's `:` (outside quotes and brackets).
+    private static func flowColon(_ s: String) -> String.Index? {
+        var quote: Character?
+        var nesting = 0
+        for idx in s.indices {
+            let ch = s[idx]
+            if let q = quote { if ch == q { quote = nil }; continue }
+            switch ch {
+            case "\"", "'": quote = ch
+            case "[", "{": nesting += 1
+            case "]", "}": nesting -= 1
+            case ":" where nesting == 0: return idx
+            default: break
+            }
+        }
+        return nil
     }
 
     private static func unquote(_ s: String) -> String {

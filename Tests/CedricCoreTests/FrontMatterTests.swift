@@ -72,6 +72,43 @@ import Testing
         if case .map = FrontMatter.parse(deep) {} else { Issue.record("deep front matter isn't a map") }
     }
 
+    /// Codex review of 0.5.2 (17), should-fix 1: a block scalar keeps its
+    /// blank and `#` lines (they were dropped before the parser knew they
+    /// were text); elsewhere they are still skipped.
+    @Test func blockTextKeepsItsBlankAndHashLines() {
+        let lines = ["title: Owls", "", "# a comment", "description: |", "  # Heading", "", "  Body line", "    indented", "",
+                     "# after", "tags: [a]"]
+        #expect(FrontMatter.parse(lines) == .map([
+            ("title", .scalar("Owls")),
+            ("description", .scalar("# Heading\n\nBody line\n  indented")),
+            ("tags", .list([.scalar("a")])),
+        ]))
+        // Folded: lines join, a blank line breaks.
+        #expect(FrontMatter.parse(["f: >", "  one", "  two", "", "  # three"]) == .map([("f", .scalar("one two\n# three"))]))
+        // In a list item's map, and with a header comment.
+        #expect(FrontMatter.parse(["- d: |  # note", "    a", "", "    # b"]) == .list([.map([("d", .scalar("a\n\n# b"))])]))
+        // Through the renderer, on the page.
+        let html = Markdown.render("---\ndescription: |\n  # Heading\n\n  Body\n---\nText\n")
+        #expect(html.contains("<tr><th>description</th><td># Heading\n\nBody</td></tr>"), "\(html)")
+    }
+
+    /// Nested flow values are values, not raw YAML.
+    @Test func nestedFlowValues() {
+        #expect(FrontMatter.parse(["hero: {links: [home, about]}"]) == .map([
+            ("hero", .map([("links", .list([.scalar("home"), .scalar("about")]))])),
+        ]))
+        #expect(FrontMatter.parse(["x: [a, {b: 'c, d'}, [e]]"]) == .map([
+            ("x", .list([.scalar("a"), .map([("b", .scalar("c, d"))]), .list([.scalar("e")])])),
+        ]))
+        #expect(FrontMatter.parse(["e: {}", "l: []"]) == .map([("e", .map([])), ("l", .list([]))]))
+        // Unbalanced, or brackets in plain text: text.
+        #expect(FrontMatter.parse(["t: [a, [b]"]) == .map([("t", .scalar("[a, [b]"))]))
+        #expect(FrontMatter.parse(["t: [x] and [y]"]) == .map([("t", .scalar("[x] and [y]"))]))
+        let html = Markdown.render("---\nhero: {links: [home, about]}\n---\n")
+        #expect(html.contains("<tr><th>links</th><td><ul class=\"fm-list\"><li>home</li><li>about</li></ul></td></tr>"), "\(html)")
+        #expect(!html.contains("{links"))
+    }
+
     @Test func everythingIsEscaped() {
         let evil = """
         ---
