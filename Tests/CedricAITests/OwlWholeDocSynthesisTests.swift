@@ -401,6 +401,48 @@ import CedricCore
         #expect(OwlChunkedReviewRunner.keepFindings(full, findings) == full)
     }
 
+    @Test func aFindingWhoseMeaningTheAnswerReversesIsStillKept() {
+        let items = "- Line 12: downloads unsigned code."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        // Same line, most of the same words, the opposite claim.
+        for answer in ["Line 12 downloads signed code.", "Line 12 doesn\u{2019}t download unsigned code.",
+                       "Line 12 never downloads unsigned code."] {
+            let kept = OwlChunkedReviewRunner.keepFindings(answer, findings)
+            #expect(kept.hasPrefix(answer) && kept.hasSuffix(items), "\(answer)")
+        }
+        // The same claim in other words still keeps it.
+        let same = "Line 12 downloads code that is unsigned."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+        // A negated finding needs the answer to say no too.
+        let negated = "- Line 7: never checks the checksum."
+        let neg = OwlChunkedReviewRunner.Findings(text: negated, items: negated, verdict: nil)
+        #expect(OwlChunkedReviewRunner.keepFindings("Line 7 checks the checksum.", neg).hasSuffix(negated))
+        let alsoNegated = "Line 7 never checks the checksum."
+        #expect(OwlChunkedReviewRunner.keepFindings(alsoNegated, neg) == alsoNegated)
+    }
+
+    @Test func aNoteIsNeverCutInsideACitationThatSpansRows() {
+        // The whole note flags 4–9999 as unread: no evidence for line 4.
+        let note = "Overview of the part.\nLine 4 through\n9999\(OwlCitations.flag)| quoted text.\nThe end."
+        #expect(OwlCitations.evidence(in: note).isEmpty)
+        let flagNextRow = "Overview.\nLine 4\n\(OwlCitations.flag.trimmingCharacters(in: .whitespaces)) and more."
+        for text in [note, note.replacingOccurrences(of: "through", with: "to"),
+                     note.replacingOccurrences(of: " through", with: " -"), flagNextRow] {
+            let whole = OwlCitations.evidence(in: text)
+            for limit in 10...(text as NSString).length {
+                guard let pieces = OwlChunkedReviewRunner.splitNote(text, fits: { ($0 as NSString).length <= limit }) else {
+                    continue
+                }
+                for p in pieces {
+                    #expect(OwlCitations.evidence(in: p).isSubset(of: whole), "limit \(limit): \(p)")
+                }
+            }
+        }
+        // Cut at rows where it's safe: "Line 4 through" stays with "9999".
+        let got = OwlChunkedReviewRunner.splitNote(note, fits: { ($0 as NSString).length <= 70 })
+        #expect(got == ["Overview of the part.", "Line 4 through\n9999\(OwlCitations.flag)| quoted text.\nThe end."])
+    }
+
     @Test func checkForRisksKeepsTheMostCautiousVerdictThroughSynthesis() async throws {
         let dontRun = "Verdict: \(ScriptVerdict.dontRun)."
         // One part says don't run; the others trust the source; the combine call softens it.
