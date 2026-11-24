@@ -60,10 +60,55 @@ public final class OwlCoordinator {
     /// Hints that are shown once ever (the letter easter egg).
     public static let onceEver: Set<String> = [RulesHintProvider.letterID]
 
+    /// A hint the owl showed, kept for the popover's "Recent hints" so it
+    /// can be shown again without asking any provider.
     public struct Shown: Equatable, Sendable {
         public let hint: OwlHint
         public let documentID: UUID
         public let date: Date
+        /// The hint's range in the document when it was shown (nil: none,
+        /// or no context was given).
+        public let documentRange: NSRange?
+        /// The text in `documentRange` then: a replay highlights and
+        /// applies only while the document still has it there.
+        public let expected: String?
+
+        public init(hint: OwlHint, documentID: UUID, date: Date, documentRange: NSRange? = nil, expected: String? = nil) {
+            self.hint = hint
+            self.documentID = documentID
+            self.date = date
+            self.documentRange = documentRange
+            self.expected = expected
+        }
+    }
+
+    /// What showing a recent hint again gives the bubble.
+    public struct Replay: Equatable, Sendable {
+        /// The stored hint; without its range and replacement when stale.
+        public let hint: OwlHint
+        /// Where it is in the document now (nil: no range, or stale).
+        public let documentRange: NSRange?
+        public let expected: String?
+        /// The hint had a range, and the text there has changed (or the
+        /// document is gone): title and detail only, no highlight, no Fix it.
+        public let isStale: Bool
+    }
+
+    /// A recent hint, again. Never asks a provider and ignores `isEligible`
+    /// (it was shown, so it is in `shownKeys`), the quiet hour and snoozes:
+    /// the user asked for it. `document` is the document's text now (nil:
+    /// it is closed). With the range still holding the text it had, the
+    /// hint is returned as it was (highlight, Fix it); otherwise its title
+    /// and detail alone.
+    public static func replay(_ shown: Shown, document: NSString?) -> Replay {
+        let h = shown.hint
+        guard h.range != nil else { return Replay(hint: h, documentRange: nil, expected: nil, isStale: false) }
+        if let doc = document, let r = shown.documentRange, let expected = shown.expected,
+           r.location >= 0, NSMaxRange(r) <= doc.length, doc.substring(with: r) == expected {
+            return Replay(hint: h, documentRange: r, expected: expected, isStale: false)
+        }
+        let bare = OwlHint(id: h.id, kind: h.kind, title: h.title, detail: h.detail, source: h.source)
+        return Replay(hint: bare, documentRange: nil, expected: nil, isStale: true)
     }
 
     public let registry: OwlProviderRegistry
@@ -167,7 +212,7 @@ public final class OwlCoordinator {
     public func accept(_ hints: [OwlHint], context: OwlContext, length: Int, generation: Int) -> OwlHint? {
         let ok = hints.filter { Self.matchesDocument($0, context: context, length: length, generation: generation) }
         guard !isQuiet, let hint = ok.first(where: { isEligible($0, documentID: context.documentID) }) else { return nil }
-        markShown(hint, documentID: context.documentID)
+        markShown(hint, documentID: context.documentID, context: context)
         return hint
     }
 
@@ -198,10 +243,20 @@ public final class OwlCoordinator {
         return !shownKeys.contains(key(hint.id, documentID))
     }
 
-    public func markShown(_ hint: OwlHint, documentID: UUID) {
+    /// `context`: the one the hint's range is relative to, kept (as a
+    /// document range and the text there) so the popover can show it again.
+    public func markShown(_ hint: OwlHint, documentID: UUID, context: OwlContext? = nil) {
         shownKeys.insert(key(hint.id, documentID))
         recent.removeAll { $0.hint.id == hint.id && $0.documentID == documentID }
-        recent.insert(Shown(hint: hint, documentID: documentID, date: clock()), at: 0)
+        var docRange: NSRange?, expected: String?
+        if let context, let r = hint.range {
+            let ctx = context.text as NSString
+            if r.location >= 0, NSMaxRange(r) <= ctx.length {
+                docRange = Self.documentRange(hint, context: context)
+                expected = ctx.substring(with: r)
+            }
+        }
+        recent.insert(Shown(hint: hint, documentID: documentID, date: clock(), documentRange: docRange, expected: expected), at: 0)
         if recent.count > recentLimit { recent.removeLast(recent.count - recentLimit) }
         if Self.onceEver.contains(hint.id) { neverShowAgain(hint.id) }
     }

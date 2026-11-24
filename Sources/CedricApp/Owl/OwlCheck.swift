@@ -55,6 +55,11 @@ enum OwlCheck {
         if env["CEDRIC_OWL_CHECK_CHAT"] == "panel-tabs" { PanelTabsCheck.run(tab, out: out); return }
         if env["CEDRIC_OWL_CHECK_CHAT"] == "picture" { OwlChatCheck.runPicture(tab, out: out); return }
         if env["CEDRIC_OWL_CHECK_TYPOS"] == "1" { OwlTypoCheck.run(tab, out: out); return }
+        if env["CEDRIC_OWL_CHECK_HISTORY"] == "1" { OwlHistoryCapCheck.runHistory(tab, out: out); return }
+        if env["CEDRIC_OWL_CHECK_CAP"] == "1" { OwlHistoryCapCheck.runCap(tab, out: out); return }
+        #if DEBUG
+        if env["CEDRIC_OWL_CHECK_BUILTIN"] == "1" { BuiltInGateCheck.run(tab, out: out); return }
+        #endif
         let original = tab.text
         let deadline = Date().addingTimeInterval(20)
         OwlHub.shared.onPresent = { t, hint in

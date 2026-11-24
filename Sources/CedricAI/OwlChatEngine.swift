@@ -549,6 +549,9 @@ public enum OwlChatRunner {
         if shown.isEmpty { shown = stripThinking(streamed.value) }
         // About a script, the owl never says "safe" (`ScriptVerdict`), whatever the model wrote.
         if let mode = req.safeClaimGuard { shown = ScriptVerdict.clamp(shown, forced: req.forcedVerdict, guard: mode) }
+        // Nothing is applied until the user presses Apply: "Fixed …" and
+        // "I changed …" are reworded as proposals (`OwlProposalWording`).
+        shown = OwlProposalWording.guardClaims(shown, proposals: proposals.count)
         // The coverage note shown while it streamed stays with the answer;
         // an engine that wrote nothing through onText still gets it.
         var said: String?
