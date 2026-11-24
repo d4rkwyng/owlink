@@ -108,9 +108,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
             toOpen += list.split(separator: ":").map { URL(fileURLWithPath: String($0)) }
         }
-        for url in toOpen { open(url) }
+        for url in toOpen { open(url, background: true) }
         pendingOpen = []
-        if tabs.isEmpty && viewerTabs.isEmpty { newTab(nil) }
+        // A big file still reading: its tab is the launch's window.
+        if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
         schedulePendingRestore()
         LaunchTrace.mark("tabs_ready")
         recentMenu?.delegate = self
@@ -122,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard launched else { pendingOpen += urls; return }
-        for url in urls { open(url) }
+        for url in urls { open(url, background: true) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -349,8 +350,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
             return
         }
+        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
+        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
+        // The file's tab, now or (a big file read in the background) when it is ready.
+        let arrived: (EditorWindowController) -> Void = { [weak self] tab in
+            if let line { tab.goToLine(line, column: col) }
+            // `cedric -w`: the script waits until this marker file goes.
+            if let marker = q["wait"] { self?.addWaiter(marker, for: tab) }
+        }
         if FileManager.default.fileExists(atPath: path) {
-            open(url)
+            open(url, background: true, then: arrived)
         } else {
             // A new file: an empty tab that saves there.
             let doc = EditorDocument(fileURL: url, untitledName: url.lastPathComponent)
@@ -358,21 +367,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let tab = makeTab(doc, text: "")
             doc.markDirtyFromSession()
             tab.updateTitle()
+            arrived(tab)
         }
-        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
-        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
-        let tab = tabs.first { $0.doc.fileURL?.standardizedFileURL == url.standardizedFileURL }
+        let std = url.standardizedFileURL
+        guard !tabs.contains(where: { $0.doc.fileURL?.standardizedFileURL == std }), backgroundOpens[std] == nil else { return }
         // A PDF: `cedric file.pdf:3` opens it at page 3; -w waits for its tab.
-        if tab == nil, let pdf = pdfTab(for: url) {
+        if let pdf = pdfTab(for: url) {
             if let line { pdf.goToPage(OneBased.index(line, count: Int.max)) }
             if let marker = q["wait"] { addWaiter(marker, forID: pdf.id) }
-        } else if tab == nil, let viewer = viewerTab(for: url), let marker = q["wait"] {
+        } else if let viewer = viewerTab(for: url), let marker = q["wait"] {
             // An image or Office tab: -w waits for it too.
             addWaiter(marker, forID: viewer.id)
         }
-        if let line { tab?.goToLine(line, column: col) }
-        // `cedric -w`: the script waits until this marker file goes.
-        if let marker = q["wait"], let tab { addWaiter(marker, for: tab) }
     }
 
     // MARK: Tabs
@@ -387,8 +393,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @discardableResult
     func makeTab(_ doc: EditorDocument, text: String, in group: NSWindow? = nil, newWindow: Bool = false, show: Bool = true,
-                 tabIndex: Int? = nil) -> EditorWindowController {
-        let tab = EditorWindowController(doc: doc, text: text)
+                 tabIndex: Int? = nil, prepared: EditorWindowController.PreparedText? = nil) -> EditorWindowController {
+        let tab = EditorWindowController(doc: doc, text: text, prepared: prepared)
         if let path = doc.fileURL?.path { tab.editing.wordGoal = FileWordGoals.goal(for: path, in: fileWordGoals) }
         tab.onChange = { [weak self] _ in self?.scheduleSessionSave() }
         tab.onClose = { [weak self] t in
@@ -447,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.canChooseDirectories = false
         if let dir = currentTab?.doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         guard panel.runModal() == .OK else { return }
-        panel.urls.forEach { open($0) }
+        panel.urls.forEach { open($0, background: true) }
     }
 
     /// Set while the command palette validates the whole menu in one go
@@ -497,8 +503,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let w = NSApp.keyWindow, w.attachedSheet == nil { a.beginSheetModal(for: w) } else { a.runModal() }
     }
 
+    /// Opens a file. `background`: a text file of `backgroundOpenBytes`
+    /// or more is read, decoded and indexed off the main thread, and its
+    /// tab appears only when the text is ready (`then` runs with it), so
+    /// there is never a half-loaded tab to edit, save or close; this
+    /// returns nil for it. Otherwise the tab is made at once and returned
+    /// (and `then` runs with it too).
     @discardableResult
-    func open(_ url: URL, asText: Bool = false) -> EditorWindowController? {
+    func open(_ url: URL, asText: Bool = false, background: Bool = false,
+              then: ((EditorWindowController) -> Void)? = nil) -> EditorWindowController? {
         let std = url.standardizedFileURL
         // A folder (dropped on the Dock icon, `owlink dir`): the folder sidebar.
         if Self.isFolder(std) { openFolder(std); return nil }
@@ -515,7 +528,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
             existing.window?.makeKeyAndOrderFront(nil)
+            then?(existing)
             return existing
+        }
+        // Already being read in the background: one tab when it is ready.
+        if let pending = backgroundOpens[std] {
+            if let then { pending.thens.append(then) }
+            return nil
         }
         // A PDF (by its first bytes, or its name) opens in a viewer tab.
         if !asText {
@@ -530,33 +549,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .text: break
             }
         }
+        if background, let size = (try? std.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size >= Self.backgroundOpenBytes {
+            openInBackground(std, then: then)
+            return nil
+        }
         do {
-            let (d, mod) = try EditorDocument.read(std)
-            let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
-            doc.apply(d)
-            doc.noteDisk(mod)
+            // The text goes into the tab's storage (a copy) and is let go.
+            let (d, mod) = try EditorDocument.read(std, shareBytes: true)
             PerfTrace.mark("read_decode")
-            doc.languageChoice = .forFile(named: std.lastPathComponent, content: d.text)
+            let language = LanguageChoice.forFile(named: std.lastPathComponent, content: d.text)
             PerfTrace.mark("detect_language")
-            let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
-            // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
-            let tab = makeTab(doc, text: d.looksBinary ? "" : d.text)
-            if d.looksBinary { tab.holdBinary(d.text) }
-            blank?.window?.close()
-            OwlHub.shared.activity(in: tab)
-            tab.readQuarantineForOwl()
-            noteRecent(std)
-            // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
-            if Certificates.isCertificateText(d.text, fileName: std.lastPathComponent), !CertificatePanel.closedByUser {
-                DispatchQueue.main.async { [weak tab] in
-                    guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
-                    tab.togglePreview()
-                }
-            }
+            let certificate = Certificates.isCertificateText(d.text, fileName: std.lastPathComponent)
+            let tab = showRead(std, d, mod, language: language, certificate: certificate, prepared: nil)
+            then?(tab)
             return tab
         } catch {
             NSAlert(error: error).runModal()
             return nil
+        }
+    }
+
+    /// A file read (on the main thread or off it): its tab.
+    private func showRead(_ std: URL, _ d: DecodedText, _ mod: DiskStamp?, language: LanguageChoice, certificate: Bool,
+                          prepared: EditorWindowController.PreparedText?) -> EditorWindowController {
+        let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
+        doc.apply(d)
+        doc.noteDisk(mod)
+        doc.languageChoice = language
+        let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
+        // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
+        let tab = makeTab(doc, text: d.looksBinary ? "" : d.text, prepared: d.looksBinary ? nil : prepared)
+        if d.looksBinary { tab.holdBinary(d.text) }
+        blank?.window?.close()
+        OwlHub.shared.activity(in: tab)
+        tab.readQuarantineForOwl()
+        noteRecent(std)
+        // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
+        if certificate, !CertificatePanel.closedByUser {
+            DispatchQueue.main.async { [weak tab] in
+                guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
+                tab.togglePreview()
+            }
+        }
+        return tab
+    }
+
+    // MARK: Background open
+
+    /// Text files this big (bytes) open in the background (`open`'s
+    /// `background`): a 1 GB log took 2.8 s to decode on the main thread.
+    static let backgroundOpenBytes = 16 * 1024 * 1024
+
+    /// A file being read off the main thread, and what waits for its tab.
+    @MainActor final class BackgroundOpen {
+        var thens: [(EditorWindowController) -> Void] = []
+    }
+
+    /// Files being read in the background, by standardized URL.
+    private(set) var backgroundOpens: [URL: BackgroundOpen] = [:]
+    /// The line index the last background open made (check builds only:
+    /// BigOpenCheck sees the tab use it rather than scan the text again).
+    var lastBackgroundIndexForChecks: LineIndex?
+    /// Run (once) when the last background open has finished (launch metrics).
+    var whenBackgroundOpensDone: [() -> Void] = []
+
+    /// Everything a background open makes before the tab.
+    struct BackgroundRead: Sendable {
+        let decoded: DecodedText
+        let stamp: DiskStamp?
+        let language: LanguageChoice
+        let certificate: Bool
+        let prepared: EditorWindowController.PreparedText?
+    }
+
+    private func openInBackground(_ std: URL, then: ((EditorWindowController) -> Void)?) {
+        let job = BackgroundOpen()
+        if let then { job.thens.append(then) }
+        backgroundOpens[std] = job
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result { try Self.readInBackground(std) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.finishBackgroundOpen(std, job, result) }
+            }
+        }
+    }
+
+    /// Off the main thread: read and decode, then (side by side) the line
+    /// index, the saved-text fingerprint, the language and the certificate
+    /// sniff. The text is immutable until the tab copies it.
+    nonisolated static func readInBackground(_ std: URL) throws -> BackgroundRead {
+        let (d, mod) = try EditorDocument.read(std, shareBytes: true)
+        let name = std.lastPathComponent
+        let text = d.text
+        let ns = text as NSString
+        nonisolated(unsafe) var index: LineIndex?
+        nonisolated(unsafe) var print: TextFingerprint?
+        nonisolated(unsafe) var language = LanguageChoice()
+        nonisolated(unsafe) var certificate = false
+        DispatchQueue.concurrentPerform(iterations: 3) { k in
+            switch k {
+            case 0: if !d.looksBinary { index = LineIndex(ns) }
+            case 1: if !d.looksBinary, ns.length > EditedState.snapshotLimit { print = TextFingerprint(ns) }
+            default:
+                language = LanguageChoice.forFile(named: name, content: text)
+                certificate = Certificates.isCertificateText(text, fileName: name)
+            }
+        }
+        return BackgroundRead(decoded: d, stamp: mod, language: language, certificate: certificate,
+                              prepared: index.map { EditorWindowController.PreparedText(lineIndex: $0, fingerprint: print) })
+    }
+
+    private func finishBackgroundOpen(_ std: URL, _ job: BackgroundOpen, _ result: Result<BackgroundRead, Error>) {
+        backgroundOpens[std] = nil
+        defer {
+            if backgroundOpens.isEmpty {
+                let done = whenBackgroundOpensDone
+                whenBackgroundOpensDone = []
+                done.forEach { $0() }
+            }
+        }
+        // Quitting: nothing more to show (the session never had this tab).
+        guard !terminating else { return }
+        switch result {
+        case .failure(let error):
+            NSAlert(error: error).runModal()
+            // Opened at launch with nothing else: the usual new tab.
+            if tabs.isEmpty && viewerTabs.isEmpty { newTab(nil) }
+        case .success(let r):
+            // Opened another way meanwhile (a check, a session tab): that tab.
+            if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
+                existing.window?.makeKeyAndOrderFront(nil)
+                job.thens.forEach { $0(existing) }
+                return
+            }
+            let tab = showRead(std, r.decoded, r.stamp, language: r.language, certificate: r.certificate, prepared: r.prepared)
+            if DevEnvironment.checksEnabled { lastBackgroundIndexForChecks = r.prepared?.lineIndex }
+            job.thens.forEach { $0(tab) }
         }
     }
 

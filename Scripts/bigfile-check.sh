@@ -4,7 +4,8 @@
 # layout on macOS 26), opens it in a check build with CEDRIC_CHECK=bigfile
 # (BigFileCheck.swift: large mode without chunks, layout at the top and
 # the end, typing, a pasted 30,000-character line turning chunks on,
-# Revert to Saved turning them off) and
+# Revert to Saved turning them off), then opens it again in the
+# background (CEDRIC_CHECK=bigopen, BigOpenCheck.swift) and
 # fails on a FAIL line, no result, or a new Cedric*.ips crash report.
 # The log is generated each run in a temp folder, never stored in git.
 #
@@ -51,10 +52,16 @@ sleep 1   # reports from before this point stay older than MARK
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$W/out"
 out=$(env CEDRIC_CHECK=bigfile CEDRIC_BIGFILE="$LOG" perl -e 'alarm 240; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
 echo "$out" | grep -E "^check:" || true
+# The same log opened in the background, as Finder and File › Open do
+# (BigOpenCheck.swift): no tab until it is whole, then dirty tracking,
+# save and revert without a copy of the saved text.
+out2=$(env CEDRIC_CHECK=bigopen CEDRIC_BIGFILE="$LOG" perl -e 'alarm 240; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
+echo "$out2" | grep -E "^check:" || true
 sleep 3   # let ReportCrash write the .ips
 crash=$(find "$REPORTS" -maxdepth 1 -name 'Cedric*.ips' -newer "$MARK" 2>/dev/null || true)
 fail=0
 [ -z "$crash" ] || { echo "bigfile-check: new crash report(s): $crash" >&2; fail=1; }
 echo "$out" | grep -q "check: done .* 0 failed" || { echo "bigfile-check: the check failed or didn't finish" >&2; fail=1; }
+echo "$out2" | grep -q "check: done .* 0 failed" || { echo "bigfile-check: the bigopen check failed or didn't finish" >&2; fail=1; }
 [ $fail = 0 ] && echo "bigfile-check: PASS" || echo "bigfile-check: FAILED" >&2
 exit $fail

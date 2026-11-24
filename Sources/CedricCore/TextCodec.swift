@@ -80,13 +80,18 @@ public enum TextCodec {
     /// pattern of zero bytes, else one of the 8-bit Western encodings
     /// (`guessEightBit`).
     public static func detectEncoding(_ data: Data) -> TextEncoding {
+        if let bomOrUTF16 = detectBOMOrUTF16(data) { return bomOrUTF16 }
+        if isValidUTF8(data) { return .utf8 }
+        return guessEightBit(data)
+    }
+
+    /// The encoding a BOM names, else UTF-16 without one (`guessUTF16`).
+    static func detectBOMOrUTF16(_ data: Data) -> TextEncoding? {
         let head = [UInt8](data.prefix(4))
         if head.starts(with: [0xEF, 0xBB, 0xBF]) { return .utf8BOM }
         if head.starts(with: [0xFF, 0xFE]) { return .utf16LE }
         if head.starts(with: [0xFE, 0xFF]) { return .utf16BE }
-        if let guess = guessUTF16(data) { return guess }
-        if isValidUTF8(data) { return .utf8 }
-        return guessEightBit(data)
+        return guessUTF16(data)
     }
 
     /// How much of a file `looksBinary` reads.
@@ -152,50 +157,120 @@ public enum TextCodec {
     }
 
     static func isValidUTF8(_ data: Data) -> Bool {
-        data.withUnsafeBytes { raw -> Bool in
-            let b = raw.bindMemory(to: UInt8.self)
-            var i = 0
-            let n = b.count
-            while i < n {
-                // Fast path: 8 ASCII bytes at a time.
-                if i + 8 <= n {
-                    let word = UnsafeRawPointer(b.baseAddress! + i).loadUnaligned(as: UInt64.self)
-                    if word & 0x8080808080808080 == 0 { i += 8; continue }
-                }
-                let c = b[i]
-                if c < 0x80 { i += 1; continue }
-                let len: Int
-                if c & 0xE0 == 0xC0 { len = 2; if c < 0xC2 { return false } }
-                else if c & 0xF0 == 0xE0 { len = 3 }
-                else if c & 0xF8 == 0xF0 { len = 4; if c > 0xF4 { return false } }
-                else { return false }
-                if i + len > n { return false }
-                for k in 1..<len where b[i + k] & 0xC0 != 0x80 { return false }
-                if len == 3 {
-                    let c1 = b[i + 1]
-                    if c == 0xE0 && c1 < 0xA0 { return false }    // overlong
-                    if c == 0xED && c1 >= 0xA0 { return false }   // surrogates
-                }
-                if len == 4 {
-                    let c1 = b[i + 1]
-                    if c == 0xF0 && c1 < 0x90 { return false }
-                    if c == 0xF4 && c1 >= 0x90 { return false }
-                }
-                i += len
-            }
-            return true
-        }
+        data.withUnsafeBytes { scanUTF8($0).valid }
     }
+
+    /// What one pass over UTF-8 bytes found (`scanUTF8`).
+    struct UTF8Scan: Equatable {
+        /// Valid UTF-8 (overlongs, surrogates, past U+10FFFF and truncated
+        /// sequences are not). The counts stop at the first invalid byte.
+        var valid = true
+        /// No byte over 0x7F.
+        var ascii = true
+        /// Line breaks: "\n" alone, "\r\n", "\r" alone.
+        var lf = 0, crlf = 0, cr = 0
+    }
+
+    /// One pass over `bytes`: UTF-8 validity, whether they are all ASCII,
+    /// and the line endings. Eight bytes at a time while they are ASCII
+    /// with no CR (the usual log or source file); byte by byte through
+    /// anything else.
+    static func scanUTF8(_ bytes: UnsafeRawBufferPointer) -> UTF8Scan {
+        var s = UTF8Scan()
+        guard let base = bytes.baseAddress else { return s }
+        let n = bytes.count
+        let b = base.assumingMemoryBound(to: UInt8.self)
+        let high: UInt64 = 0x8080_8080_8080_8080, low7: UInt64 = 0x7F7F_7F7F_7F7F_7F7F
+        let lfs: UInt64 = 0x0A0A_0A0A_0A0A_0A0A, crs: UInt64 = 0x0D0D_0D0D_0D0D_0D0D
+        /// Bit 7 of each byte of `w` that is zero (exact: no carries between bytes).
+        @inline(__always) func zeroBytes(_ w: UInt64) -> UInt64 { ~(((w & low7) &+ low7) | w) & high }
+        var i = 0
+        while i < n {
+            if i + 8 <= n {
+                let w = base.loadUnaligned(fromByteOffset: i, as: UInt64.self)
+                if w & high == 0, zeroBytes(w ^ crs) == 0 {
+                    s.lf += zeroBytes(w ^ lfs).nonzeroBitCount
+                    i += 8
+                    continue
+                }
+            }
+            let c = b[i]
+            if c < 0x80 {
+                if c == 13 {
+                    if i + 1 < n, b[i + 1] == 10 { s.crlf += 1; i += 2; continue }
+                    s.cr += 1
+                } else if c == 10 {
+                    s.lf += 1
+                }
+                i += 1
+                continue
+            }
+            s.ascii = false
+            let len: Int
+            if c & 0xE0 == 0xC0 { len = 2; if c < 0xC2 { s.valid = false; return s } }
+            else if c & 0xF0 == 0xE0 { len = 3 }
+            else if c & 0xF8 == 0xF0 { len = 4; if c > 0xF4 { s.valid = false; return s } }
+            else { s.valid = false; return s }
+            if i + len > n { s.valid = false; return s }
+            for k in 1..<len where b[i + k] & 0xC0 != 0x80 { s.valid = false; return s }
+            let c1 = b[i + 1]
+            if len == 3 {
+                if c == 0xE0 && c1 < 0xA0 { s.valid = false; return s }    // overlong
+                if c == 0xED && c1 >= 0xA0 { s.valid = false; return s }   // surrogates
+            } else if len == 4 {
+                if c == 0xF0 && c1 < 0x90 { s.valid = false; return s }
+                if c == 0xF4 && c1 >= 0x90 { s.valid = false; return s }
+            }
+            i += len
+        }
+        return s
+    }
+
+    /// The most common line ending, and whether more than one kind occurs.
+    static func lineEnding(lf: Int, crlf: Int, cr: Int) -> (LineEnding, mixed: Bool) {
+        let kinds = [lf, crlf, cr].filter { $0 > 0 }.count
+        let ending: LineEnding = crlf > lf && crlf >= cr ? .crlf : cr > lf && cr > crlf ? .cr : .lf
+        return (ending, kinds > 1)
+    }
+
+    /// With `shareBytes`, text at least this long (bytes, all ASCII, no
+    /// CR) is read straight from the file's bytes rather than copied into a
+    /// new string: a 1 GB log was a 1 GB copy on top of the editor's own.
+    /// Below it, a copy.
+    static let sharedBytesMinimum = 16 * 1024 * 1024
 
     /// Decodes `data` (as `encoding`, or the detected one) and normalises
     /// its line endings. Nil if the bytes aren't valid in that encoding.
     /// UTF-16 with an odd number of bytes after the BOM (a truncated
     /// download) is nil too, as a lone surrogate is: Foundation decoded it
     /// without the last byte, so ⌘S dropped that byte with no notice.
-    public static func decode(_ data: Data, as encoding: TextEncoding? = nil) -> DecodedText? {
-        var enc = encoding ?? detectEncoding(data)
+    ///
+    /// UTF-8 (the usual case) takes one pass over the bytes (`scanUTF8`)
+    /// for validity and line endings, and at most one copy: the bytes with
+    /// CR and CRLF turned into LF, or with `shareBytes` none for a large
+    /// all-ASCII file with no CR (`sharedBytesMinimum`). The text then
+    /// keeps `data` (a mapped file) alive and reads it in place: only for
+    /// a caller that copies the text and lets it go at once (opening a
+    /// file into a tab), never one that keeps it while the file can change.
+    public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
+        var enc: TextEncoding
+        var scanned: UTF8Scan?
+        if let encoding {
+            enc = encoding
+        } else if let found = detectBOMOrUTF16(data) {
+            enc = found
+        } else {
+            let scan = data.withUnsafeBytes { scanUTF8($0) }
+            if scan.valid { enc = .utf8; scanned = scan } else { enc = guessEightBit(data) }
+        }
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
+        if enc == .utf8 || enc == .utf8BOM {
+            // Foundation's UTF-8 decoding drops one leading BOM ("as UTF-8"
+            // on a file with one, or a second BOM after the first): kept.
+            if body.starts(with: [0xEF, 0xBB, 0xBF]) { body = body.dropFirst(3); scanned = nil }
+            return decodeUTF8(body, scan: scanned, encoding: enc, looksBinary: looksBinary(data), shareBytes: shareBytes)
+        }
         if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
         var decoded = String(data: body, encoding: enc.foundation)
         // A guessed 8-bit encoding that can't decode a byte past the sample
@@ -210,36 +285,88 @@ public enum TextCodec {
                            looksBinary: looksBinary(data))
     }
 
+    /// UTF-8 `body` (no BOM) as text, from one scan (`scan`, when the
+    /// caller already made it over exactly these bytes). Nil if invalid.
+    static func decodeUTF8(_ body: Data, scan known: UTF8Scan?, encoding: TextEncoding, looksBinary binary: Bool,
+                           shareBytes: Bool) -> DecodedText? {
+        let scan = known ?? body.withUnsafeBytes { scanUTF8($0) }
+        guard scan.valid else { return nil }
+        let (ending, mixed) = lineEnding(lf: scan.lf, crlf: scan.crlf, cr: scan.cr)
+        let text: String
+        if scan.crlf + scan.cr == 0 {
+            if shareBytes, scan.ascii, !binary, body.count >= sharedBytesMinimum, let shared = sharedASCII(body) {
+                text = shared
+            } else {
+                text = body.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
+            }
+        } else {
+            text = body.withUnsafeBytes { raw in
+                let length = raw.count - scan.crlf
+                if scan.ascii, !binary, length >= sharedBytesMinimum,
+                   let buffer = malloc(max(1, length))?.assumingMemoryBound(to: UInt8.self) {
+                    let written = lfOnly(raw, into: buffer)
+                    if let s = NSString(bytesNoCopy: buffer, length: written, encoding: String.Encoding.ascii.rawValue,
+                                        deallocator: { p, _ in free(p) }) {
+                        return s as String
+                    }
+                    free(buffer)
+                }
+                return String(unsafeUninitializedCapacity: length) { lfOnly(raw, into: $0.baseAddress!) }
+            }
+        }
+        return DecodedText(text: text, encoding: encoding, lineEnding: ending, mixedLineEndings: mixed, looksBinary: binary)
+    }
+
+    /// All-ASCII `data` as a string that reads its bytes in place (kept
+    /// alive by the string; mapped file pages cost no memory of their own).
+    static func sharedASCII(_ data: Data) -> String? {
+        data.withUnsafeBytes { raw -> String? in
+            guard let base = raw.baseAddress else { return nil }
+            let keep = data
+            let s = NSString(bytesNoCopy: UnsafeMutableRawPointer(mutating: base), length: raw.count,
+                             encoding: String.Encoding.ascii.rawValue, deallocator: { _, _ in withExtendedLifetime(keep) {} })
+            return s.map { $0 as String }
+        }
+    }
+
+    /// Copies `raw` into `out` with CRLF and lone CR as LF (as replacing
+    /// "\r\n" then "\r" did); returns the bytes written. `out` has room
+    /// for `raw.count` bytes less one per CRLF.
+    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>) -> Int {
+        guard let base = raw.baseAddress else { return 0 }
+        let n = raw.count
+        let b = base.assumingMemoryBound(to: UInt8.self)
+        var i = 0, o = 0
+        while i < n {
+            let run: Int
+            if let cr = memchr(b + i, 13, n - i) { run = UnsafeRawPointer(cr) - UnsafeRawPointer(b + i) } else { run = n - i }
+            (out + o).update(from: b + i, count: run)
+            o += run
+            i += run
+            guard i < n else { break }
+            out[o] = 10
+            o += 1
+            i += (i + 1 < n && b[i + 1] == 10) ? 2 : 1
+        }
+        return o
+    }
+
     /// The most common line ending, and whether more than one kind occurs.
     /// A file with no line breaks counts as LF.
     public static func detectLineEnding(_ text: String) -> (LineEnding, mixed: Bool) {
-        var lf = 0, crlf = 0, cr = 0
         var copy = text
-        copy.withUTF8 { b in
-            var i = 0
-            while i < b.count {
-                let c = b[i]
-                if c == 13 {
-                    if i + 1 < b.count, b[i + 1] == 10 { crlf += 1; i += 2; continue }
-                    cr += 1
-                } else if c == 10 {
-                    lf += 1
-                }
-                i += 1
-            }
-        }
-        let kinds = [lf, crlf, cr].filter { $0 > 0 }.count
-        let ending: LineEnding = crlf > lf && crlf >= cr ? .crlf : cr > lf && cr > crlf ? .cr : .lf
-        return (ending, kinds > 1)
+        let scan = copy.withUTF8 { scanUTF8(UnsafeRawBufferPointer($0)) }
+        return lineEnding(lf: scan.lf, crlf: scan.crlf, cr: scan.cr)
     }
 
     /// CRLF and CR → LF.
     public static func normalizeLineEndings(_ text: String) -> String {
-        guard text.utf8.contains(13) else { return text }
-        let m = NSMutableString(string: text)
-        m.replaceOccurrences(of: "\r\n", with: "\n", options: .literal, range: NSRange(location: 0, length: m.length))
-        m.replaceOccurrences(of: "\r", with: "\n", options: .literal, range: NSRange(location: 0, length: m.length))
-        return m as String
+        var copy = text
+        return copy.withUTF8 { b -> String in
+            let raw = UnsafeRawBufferPointer(b)
+            guard let base = raw.baseAddress, memchr(base, 13, raw.count) != nil else { return text }
+            return String(unsafeUninitializedCapacity: raw.count) { lfOnly(raw, into: $0.baseAddress!) }
+        }
     }
 
     /// Encodes LF-normalised text for saving: line endings converted, BOM

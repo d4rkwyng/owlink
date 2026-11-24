@@ -315,7 +315,7 @@ final class PDFTabController: NSWindowController, NSWindowDelegate, NSMenuItemVa
         v.maxScaleFactor = PDFTabState.maxScale
         v.document = doc
         v.onZoom = { [weak self] zoomIn in zoomIn ? self?.zoomIn(nil) : self?.zoomOut(nil) }
-        v.onDropFiles = { urls in for u in urls { (NSApp.delegate as? AppDelegate)?.open(u) } }
+        v.onDropFiles = { urls in FileDrop.open(urls) }
         v.onLink = { [weak self] url in self?.followLink(url) }
         v.delegate = linkDelegate
         v.registerForDraggedTypes([.fileURL])

@@ -92,10 +92,26 @@ final class EditorDocument {
     }
 
     /// The text was set without an edit (open, reload): when clean, it is
-    /// what undo has to come back to.
-    func rebaseIfClean() {
-        if !isDirty { edited.saved(currentText?()) }
+    /// what undo has to come back to. `fingerprint`: the text's, made off
+    /// the main thread while a large file opened (used when its length is
+    /// the text's).
+    func rebaseIfClean(fingerprint: TextFingerprint? = nil) {
+        guard !isDirty else { return }
+        let text = currentText?()
+        if let fingerprint, let text, fingerprint.length == text.length, fingerprint.length > edited.snapshotLimit {
+            edited.saved(fingerprint: fingerprint)
+        } else {
+            edited.saved(text)
+        }
     }
+
+    /// The tab's text storage changed (every change, edits and not):
+    /// where the text can now differ from the saved text (EditedState
+    /// keeps a long saved text as chunk hashes, not a copy).
+    func noteStorageEdit(_ range: NSRange, delta: Int) { edited.noteEdit(range, delta: delta) }
+
+    /// The saved text is kept as chunk hashes, not a copy (checks).
+    var keepsSavedFingerprint: Bool { edited.keepsFingerprint }
 
     func markSaved() { edited.saved(currentText?()); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
     /// Restored from a session buffer: unsaved by definition.
@@ -127,7 +143,9 @@ final class EditorDocument {
     /// file's stamp. The stamp is taken before the bytes are read: if the
     /// file changes (or a link is pointed elsewhere) in between, the next
     /// check sees a change rather than missing one.
-    static func read(_ url: URL, encoding: TextEncoding? = nil) throws -> (DecodedText, DiskStamp?) {
+    /// `shareBytes`: a large ASCII file's text may read the mapped file in
+    /// place (TextCodec.decode), for opening into a tab only.
+    nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> (DecodedText, DiskStamp?) {
         let data: Data
         if let kind = SpecialFile.kind(atPath: url.path) {
             throw LoadError.unreadable(url, NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey:
@@ -139,7 +157,7 @@ final class EditorDocument {
         } catch {
             throw LoadError.unreadable(url, error)
         }
-        guard let decoded = TextCodec.decode(data, as: encoding) else { throw LoadError.notText(url) }
+        guard let decoded = TextCodec.decode(data, as: encoding, shareBytes: shareBytes) else { throw LoadError.notText(url) }
         return (decoded, stamp)
     }
 

@@ -43,7 +43,8 @@ import WebKit
 ///   CEDRIC_TEST_EARLY_REOPEN=1    reopen the newest closed tab 0.5 s in, likewise
 ///   CEDRIC_SESSION_DUMP=1         print the restored tabs and closed tabs, and quit
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
-///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn)
+///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
+///                                 "metric doc_ready_ms=…" when a file opened in the background has its tab drawn
 ///   CEDRIC_QUIT_AFTER_LAUNCH=1    quit right after that
 ///   CEDRIC_PERF_OPEN=/big.json    time open + colour + jump to end + typing, print metrics, quit
 ///   CEDRIC_PERF_TYPE=200          keystrokes for the typing measurement (default 200)
@@ -279,7 +280,17 @@ enum DevHooks {
             DispatchQueue.main.async {
                 NSApp.windows.filter(\.isVisible).forEach { $0.displayIfNeeded() }
                 metric("launch_ms", (now() - processStart()) * 1000)
-                if env["CEDRIC_QUIT_AFTER_LAUNCH"] == "1" { exit(0) }
+                let quit = { if env["CEDRIC_QUIT_AFTER_LAUNCH"] == "1" { exit(0) } }
+                guard !app.backgroundOpens.isEmpty else { quit(); return }
+                // A big file opened at launch reads in the background: also
+                // when its tab has drawn, editable ("doc_ready_ms"), then quit.
+                app.whenBackgroundOpensDone.append {
+                    DispatchQueue.main.async {
+                        NSApp.windows.filter(\.isVisible).forEach { $0.displayIfNeeded() }
+                        metric("doc_ready_ms", (now() - processStart()) * 1000)
+                        quit()
+                    }
+                }
             }
         }
         if env["CEDRIC_TYPE_CHECK"] == "1" {

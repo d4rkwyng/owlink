@@ -239,7 +239,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// before the first frame.
     private var didApplyAppearance = false
 
-    init(doc: EditorDocument, text: String) {
+    /// What a background open worked out off the main thread for the
+    /// text it hands the window: its line index and, for a long text, the
+    /// saved-text fingerprint (EditedState).
+    struct PreparedText: Sendable {
+        let lineIndex: LineIndex
+        let fingerprint: TextFingerprint?
+    }
+
+    init(doc: EditorDocument, text: String, prepared: PreparedText? = nil) {
         self.doc = doc
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: true)
@@ -271,7 +279,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             return NSRange(location: index.starts[line], length: index.lineLength(line))
         }
         doc.currentText = { [weak self] in self?.textView.textStorage?.mutableString }
-        setText(text)
+        setText(text, prepared: prepared)
         applyAppearance()
         PerfTrace.mark("apply_appearance")
         observe()
@@ -438,11 +446,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     // MARK: Text
 
     /// Replaces the whole text (open, reload, restore): not a user edit.
-    func setText(_ text: String) {
+    /// `prepared`: its line index (and saved-text fingerprint), made off
+    /// the main thread by a background open.
+    func setText(_ text: String, prepared: PreparedText? = nil) {
         loading = true
         doc.detectedIndentation = nil
         // Large mode first, so TextKit never lays out a huge line whole.
-        let incoming = LineIndex(text as NSString)
+        let ns = text as NSString
+        let incoming = prepared.map(\.lineIndex).flatMap { $0.length == ns.length ? $0 : nil } ?? LineIndex(ns)
         applyLargeMode(LargeDocument.reason(for: incoming), newText: true, chunks: LargeDocument.needsChunks(incoming))
         PerfTrace.mark("large_check")
         let attrs = baseAttributes()
@@ -451,7 +462,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         storage.setAttributedString(NSAttributedString(string: text, attributes: attrs))
         storage.endEditing()
         PerfTrace.mark("set_text_storage")
-        lineIndex = LineIndex(storage.string as NSString)
+        // The storage holds exactly `text`: its index is the one just made.
+        lineIndex = incoming.length == storage.length ? incoming : LineIndex(storage.string as NSString)
         updateAutoReviewCap(newText: true)
         fences.invalidateAll()
         folding?.reset()
@@ -474,7 +486,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             owlChat?.documentBufferReplaced()
         } else {
             // Opening: the text undo comes back to (a clean tab only).
-            doc.rebaseIfClean()
+            doc.rebaseIfClean(fingerprint: prepared?.fingerprint)
         }
         // The storage already has `editorFont`. Crossing the large-document
         // boundary (either way) leaves `textView.font` on the previous face,
@@ -546,6 +558,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         guard let storage = textView.textStorage, storage.editedMask.contains(.editedCharacters) else { return }
         let edited = storage.editedRange
         let delta = storage.changeInLength
+        // Every change, loading or not: a long saved text is chunk hashes,
+        // and the document has to know where the text can differ from it.
+        doc.noteStorageEdit(edited, delta: delta)
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
         let oldLines = lineIndex.lineCount
         lastEditLocation = edited.location
