@@ -106,6 +106,19 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     ///   stamps nothing, so it drops no earlier read.
     private static var preferenceAt: Double = 0
     private static var pageChangeAt: [String: Double] = [:]
+    /// Close-time reads still out, per page key.
+    private static var readsOut: [String: Int] = [:]
+    /// Drops the change times of pages no live preview shows (or holds a
+    /// late read for) and no close-time read is out for (a page closed
+    /// for good keeps nothing).
+    private static func dropUnusedPageChanges() {
+        var used = Set(readsOut.keys)
+        for p in alive.allObjects where !p.closed {
+            if let k = p.pageKey { used.insert(k) }
+            used.formUnion(p.adoptedFrontMatter.keys)
+        }
+        pageChangeAt = pageChangeAt.filter { used.contains($0.key) }
+    }
     /// Every preview alive (weakly), for close-time reads that come back late.
     private static let alive = NSHashTable<PreviewController>.weakObjects()
     /// The live document (set by its tab on each render): its page's key.
@@ -119,6 +132,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// as the preview knows) until `releaseFinishesForChecks`.
     static var holdFinishForChecks = false
     private static var heldFinishes: [() -> Void] = []
+    /// Checks only: the pages a change time is kept for.
+    static var pageChangeKeysForChecks: [String] { Array(pageChangeAt.keys) }
     static func releaseFinishesForChecks() {
         holdFinishForChecks = false
         let held = heldFinishes
@@ -465,12 +480,18 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Nothing waits. See `preferenceAt` for which change stands.
     func keepFrontMatterState() {
         closed = true
-        guard pageFrontMatterOpen != nil, !loadingShell else { return }
+        guard pageFrontMatterOpen != nil, !loadingShell else { Self.dropUnusedPageChanges(); return }
+        let key = pageKey
+        if let key { Self.readsOut[key, default: 0] += 1 }
         let page = pageCount
         let started = Self.now
         let delay = Self.closeReadDelayForChecks
         webView.callAsyncJavaScript(Self.readScript, arguments: [:], in: nil, in: .defaultClient) { [self] result in
             let land = { [self] in
+                defer {
+                    if let key { Self.readsOut[key] = Self.readsOut[key].flatMap { $0 > 1 ? $0 - 1 : nil } }
+                    Self.dropUnusedPageChanges()
+                }
                 guard case .success(let value) = result,
                       let change = recordFrontMatter(Self.frontMatterRead(value as? [Any]), page: page, started: started) else { return }
                 for other in Self.alive.allObjects where other !== self && !other.closed {
@@ -592,6 +613,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             self.pageFrontMatterOpen = FrontMatterDisclosure.isOpen(in: html)
             self.pageKey = pageKey
             self.pageClicksSeen = 0
+            Self.dropUnusedPageChanges()
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }

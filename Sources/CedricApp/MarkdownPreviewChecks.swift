@@ -347,6 +347,13 @@ extension DevChecks {
                 untilState(d, String(!directOpen), "a late read through a symlink is set on the preview opened on the target", timeout: 5)(next)
             },
             sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 2, should-fix 3: once no preview shows a page
+            // and no read of it is out, its kept change time goes.
+            sync { expect(!PreviewController.pageChangeKeysForChecks.isEmpty, "pages' change times are kept while their previews are open") },
+            sync {
+                for t in [tab, second, linker, direct, via].compactMap({ $0 }) where t.previewVisible { focus(t); t.togglePreview() }
+            },
+            until("the pages' change times drain once every preview has closed", timeout: 5) { PreviewController.pageChangeKeysForChecks.isEmpty },
             sync {
                 if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
                 else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
