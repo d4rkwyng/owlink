@@ -130,15 +130,8 @@ public enum DocumentWrite {
             let dir = open(dirPath, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
             guard dir >= 0 else {
                 let code = errno
-                // A folder this user may write in but not read. Without a
-                // handle on it the check and the write go by path, which is
-                // only safe when no link is on the way to it.
-                guard code == EACCES || code == EPERM, !hasLink(dirPath) else { throw writeError(code, url) }
-                if let reason = FileWriteAccess.blocked(target: target) {
-                    throw ReadOnlyFileError(url: url, reason: reason)
-                }
-                afterCheck?()
-                try data.write(to: target, options: .atomic)
+                guard code == EACCES || code == EPERM else { throw writeError(code, url) }
+                try writeByPath(data, to: target, url: url, afterCheck: afterCheck)
                 return
             }
             defer { close(dir) }
@@ -148,17 +141,42 @@ public enum DocumentWrite {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
             afterCheck?()
-            try replace(name, in: dir, with: data, url: url)
+            if try replace(name, in: dir, with: data, url: url) { return }
+            // No new file allowed in the folder: as below, by path.
+            try writeByPath(data, to: target, url: url, afterCheck: nil)
             return
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
     }
 
+    /// When the folder can't be opened or written in directly (one this
+    /// user may write in but not read, or an iOS grant to the file alone):
+    /// the check and Foundation's atomic write go by path, with the
+    /// folder's links (`realpath`) resolved once for both, as close as a
+    /// path gets to the folder handle.
+    private static func writeByPath(_ data: Data, to target: URL, url: URL, afterCheck: (() -> Void)?) throws {
+        var resolved = target
+        if let real = realpath(target.deletingLastPathComponent().path, nil) {
+            resolved = URL(fileURLWithPath: String(cString: real), isDirectory: true).appendingPathComponent(target.lastPathComponent)
+            free(real)
+        }
+        if let reason = FileWriteAccess.blocked(target: resolved) {
+            throw ReadOnlyFileError(url: url, reason: reason)
+        }
+        afterCheck?()
+        try data.write(to: resolved, options: .atomic)
+    }
+
     /// Writes `data` to a new file in `dir` and renames it over `name`.
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws {
+    /// False, with nothing written, when the folder refuses a new file.
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
-        guard fd >= 0 else { throw writeError(errno, url) }
+        guard fd >= 0 else {
+            let code = errno
+            if code == EACCES || code == EPERM { return false }
+            throw writeError(code, url)
+        }
         var renamed = false
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
         do {
@@ -180,6 +198,7 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
+        return true
     }
 
     private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {
@@ -195,13 +214,6 @@ public enum DocumentWrite {
                 done += n
             }
         }
-    }
-
-    /// Some folder on `path` is a symbolic link.
-    private static func hasLink(_ path: String) -> Bool {
-        guard let real = realpath(path, nil) else { return true }
-        defer { free(real) }
-        return String(cString: real) != (path as NSString).standardizingPath
     }
 
     private static func writeError(_ code: Int32, _ url: URL) -> Error {
