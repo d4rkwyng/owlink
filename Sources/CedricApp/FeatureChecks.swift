@@ -225,19 +225,94 @@ extension DevChecks {
         guard let w = tab.previewWindow?.window else { expect(false, "\(what): a detached preview window"); return }
         let ordered = NSApp.orderedWindows.filter(\.isVisible)
         expect(w.isVisible && ordered.first === w, "\(what): the detached preview is in front", "front: \(ordered.first?.title ?? "-")")
-        // Before the fix the editor was ordered back in front of it.
         let editorAt = tab.window.flatMap { ordered.firstIndex(of: $0) } ?? -1
         expect(editorAt > 0, "\(what): its editor window is behind it", "editor at \(editorAt)")
         if NSApp.isActive {
             expect(w.isKeyWindow && NSApp.keyWindow === w, "\(what): the detached preview window has the focus",
                    "key: \(NSApp.keyWindow?.title ?? "-")")
             expect(tab.window?.isKeyWindow == false, "\(what): the editor window gave up the focus")
+            expect(tab.window?.isMainWindow == true && w.isMainWindow == false, "\(what): its editor stays the main window",
+                   "main: \(NSApp.mainWindow?.title ?? "-")")
         } else {
             // An inactive app (launched by a script, screen locked) has no key
             // window at all: AppKit makes the preview key on activation.
             print("check: note: \(what): Cedric isn't active, so no window is key; checked the order (preview in front) only")
         }
+        expect(w.canBecomeMain == false, "\(what): the preview window can be key but never main")
         expect(app.currentTab === tab, "\(what): the menus still act on its document")
+    }
+
+    /// Two editor windows; the older one's preview detached (and key): a
+    /// new tab joins the preview's owner, not the newest window; Float on
+    /// Top acts on the editor; ⌘F types into the editor's find field.
+    static func detachedPreviewCommands(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        var older: EditorWindowController!
+        var newer: EditorWindowController!
+        var pw: NSWindow? { older.previewWindow?.window }
+        func group(_ w: NSWindow?) -> [NSWindow] { w.map { $0.tabbedWindows ?? [$0] } ?? [] }
+        return [
+            sync {
+                older = app.open(write("older.md", "# Older\n\nfind me here\n"))!
+                newer = app.makeTab(EditorDocument(untitledName: "Newer"), text: "", newWindow: true)
+                // A .preferred window can join a group as it is shown; Window › Move Tab to New Window, as a user would.
+                if group(newer.window).count > 1 { newer.window?.moveTabToNewWindow(nil) }
+                sized(older); sized(newer)
+                expect(older.window !== newer.window && !group(newer.window).contains { $0 === older.window },
+                       "two windows: two editor windows, not tabs of one")
+                focus(older)
+                older.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                key("p", [.command, .option, .shift])
+                expect(older.previewDetached, "two windows: ⇧⌥⌘P detaches the older window's preview")
+                expectDetachedInFront(older, app, "two windows")
+                // The routing itself, which needs no key window to check.
+                expect(AppDelegate.documentWindow(for: pw) === older.window,
+                       "two windows: a new tab's host for the detached preview is its own editor window",
+                       AppDelegate.documentWindow(for: pw)?.title ?? "nil")
+            },
+            sync {
+                guard NSApp.isActive, NSApp.keyWindow === pw else {
+                    print("check: note: two windows: Cedric isn't active, so the preview isn't key; Float on Top and ⌘N with the preview key not checked")
+                    return
+                }
+                expect(app.floatTargetWindow() === older.window, "two windows: Float on Top targets the editor, not the preview",
+                       app.floatTargetWindow()?.title ?? "nil")
+                if let i = menuItem(action: #selector(AppDelegate.toggleFloatOnTop(_:))) {
+                    expect(app.validateMenuItem(i), "two windows: Window › Float on Top is enabled with the preview key")
+                    NSApp.sendAction(i.action!, to: nil, from: i)
+                    expect(older.window?.level == .floating && newer.window?.level == .normal, "two windows: it floats the editor's window")
+                    NSApp.sendAction(i.action!, to: nil, from: i)
+                    expect(older.window?.level == .normal, "two windows: and unfloats it")
+                } else { expect(false, "two windows: Window › Float on Top") }
+                let before = app.tabs.count
+                key("n", [.command])
+                let added = app.tabs.count == before + 1 ? app.tabs.last : nil
+                expect(added.map { t in group(older.window).contains { $0 === t.window } } == true,
+                       "two windows: ⌘N with the preview key opens the tab in the preview's owner window",
+                       "older group \(group(older.window).map(\.title)), newer group \(group(newer.window).map(\.title))")
+                expect(added.map { t in !group(newer.window).contains { $0 === t.window } } == true, "two windows: not in the newer window")
+                expect(pw?.contentView?.subviews.contains { $0 is PreviewPane } == true && pw?.tabbedWindows == nil,
+                       "two windows: the preview window hosts no tab")
+                if let added { added.doc.markSaved(); added.window?.performClose(nil) }
+            },
+            sync {
+                // The preview key (front) again, then ⌘F and typing.
+                pw?.makeKeyAndOrderFront(nil)
+                key("f", [.command])
+                type("find")
+                expect(!older.findBar.isHidden && older.findBar.findField.stringValue == "find",
+                       "two windows: ⌘F with the preview key types into the editor's find field",
+                       older.findBar.findField.stringValue.debugDescription)
+                expect((older.window?.firstResponder as? NSText)?.delegate === older.findBar.findField,
+                       "two windows: the find field has the keyboard")
+                if NSApp.isActive {
+                    expect(older.window?.isKeyWindow == true, "two windows: ⌘F makes the editor key",
+                           "key: \(NSApp.keyWindow?.title ?? "-")")
+                }
+                older.hideFindBar()
+                for t in [older!, newer!] { t.doc.markSaved(); t.window?.performClose(nil) }
+                expect(older.previewWindow == nil, "two windows: the detached preview closes with its tab")
+            },
+        ]
     }
 
     static func detachPreview(_ app: AppDelegate) {
@@ -375,6 +450,7 @@ extension DevChecks {
                 expect(w?.delegate == nil && !(w?.contentView is PreviewPane) && w?.contentView?.subviews.contains { $0 is PreviewPane } != true,
                        "and cuts that window loose (no delegate, no pane)")
             },
+        ] + detachedPreviewCommands(app) + [
             // 20 rounds of detach, attach, detach again, close the tab (the
             // preview's WKWebView loaded each time): the windows are torn
             // down without swapping a content view under the web view

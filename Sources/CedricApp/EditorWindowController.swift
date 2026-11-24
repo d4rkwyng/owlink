@@ -1346,6 +1346,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if sel.length > 0, sel.length < 200 {
             findBar.findField.stringValue = (textView.string as NSString).substring(with: sel)
         }
+        // ⌘F with the detached preview key: the editor takes the keyboard first.
+        if window?.isKeyWindow == false { window?.makeKeyAndOrderFront(nil) }
         window?.makeFirstResponder(findBar.findField)
         findBar.findField.selectText(nil)
         findChanged()
