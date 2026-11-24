@@ -2,8 +2,9 @@ import AppKit
 import CedricCore
 
 /// CEDRIC_CHECK=diskconflict (Scripts/tools-check.sh): another process
-/// rewrites an open file, then ⌘S. The save must ask (Keep My Version /
-/// Reload Theirs / Compare) instead of overwriting; a window becoming key
+/// rewrites an open file, then ⌘S. The save must ask (Keep What’s in
+/// This Tab / Reload from Disk / Compare) instead of overwriting, in words
+/// that never blame "another app" (DiskConflict); a window becoming key
 /// shows the "Changed on disk" bar for a tab with unsaved edits, owl off;
 /// a deleted file shows the "deleted" bar and keeps its text unsaved.
 @MainActor
@@ -44,8 +45,18 @@ extension DevChecks {
             sync {
                 expect(disk() == "theirs\n", "⌘S didn't overwrite the other app's change", disk())
                 expect(tab.window?.attachedSheet != nil, "⌘S asks instead")
-                expect(sheetButton(tab, "Keep My Version") != nil && sheetButton(tab, "Reload Theirs") != nil
-                       && sheetButton(tab, "Compare") != nil, "with Keep My Version, Reload Theirs and Compare")
+                expect(sheetButton(tab, "Keep What’s in This Tab") != nil && sheetButton(tab, "Reload from Disk") != nil
+                       && sheetButton(tab, "Compare") != nil, "with Keep What’s in This Tab, Reload from Disk and Compare")
+                let texts = sheetTexts(tab)
+                expect(texts.first == "“conflict.txt” changed on disk.", "the sheet says the file changed on disk", texts.joined(separator: " | "))
+                expect(texts.dropFirst().first?.hasPrefix("The file on disk changed since you opened it.") == true,
+                       "…since you opened it", texts.joined(separator: " | "))
+                expect(!texts.joined().contains("another app") && !texts.joined().contains("Theirs"),
+                       "…without “another app” or “Theirs”", texts.joined(separator: " | "))
+                expect(sheetButton(tab, "Keep What’s in This Tab")?.hasDestructiveAction == true
+                       && sheetButton(tab, "Keep What’s in This Tab")?.keyEquivalent != "\r",
+                       "…Keep is destructive and Return doesn't press it", sheetButton(tab, "Keep What’s in This Tab")?.keyEquivalent ?? "-")
+                expect(sheetButton(tab, "Cancel")?.keyEquivalent == "\u{1b}", "…Esc cancels")
                 sheetButton(tab, "Compare")?.performClick(nil)
             },
             sync {
@@ -57,10 +68,10 @@ extension DevChecks {
             },
             sync {
                 expect(tab.window?.attachedSheet != nil, "⌘S again still asks")
-                sheetButton(tab, "Reload Theirs")?.performClick(nil)
+                sheetButton(tab, "Reload from Disk")?.performClick(nil)
             },
             sync {
-                expect(tab.text == "theirs\n" && !tab.doc.isDirty, "Reload Theirs takes the file's text", tab.text)
+                expect(tab.text == "theirs\n" && !tab.doc.isDirty, "Reload from Disk takes the file's text", tab.text)
                 tab.textView.undoManager?.undo()
                 expect(tab.text == "mine one\n", "Undo brings mine back", tab.text)
                 rewriteElsewhere(url, "theirs again\n")
@@ -69,10 +80,10 @@ extension DevChecks {
             },
             sync {
                 expect(tab.window?.attachedSheet != nil, "a second change asks again")
-                sheetButton(tab, "Keep My Version")?.performClick(nil)
+                sheetButton(tab, "Keep What’s in This Tab")?.performClick(nil)
             },
             sync {
-                expect(disk() == "mine one\n" && !tab.doc.isDirty, "Keep My Version writes this tab's text", disk())
+                expect(disk() == "mine one\n" && !tab.doc.isDirty, "Keep What’s in This Tab writes this tab's text", disk())
                 focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: 8, length: 0))
                 type(" two")
@@ -114,7 +125,53 @@ extension DevChecks {
                 expect(disk() == "clean reload\n" && !tab.doc.isDirty && !tab.doc.missingOnDisk && tab.diskBar?.isHidden == true,
                        "Save writes it back where it was", disk())
             },
-        ] + linkSteps(app))
+        ] + conflictWordingSteps(app) + linkSteps(app))
+    }
+
+    /// The sheet says what Owlink knows: changed since this tab saved it,
+    /// or saved from another Owlink tab on the same file (0.5.4 QA #7:
+    /// both said "changed by another app").
+    static func conflictWordingSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let url = write("conflict-saved.txt", "one\n")
+        var tab: EditorWindowController!
+        var other: EditorWindowController!
+        func detail() -> String { sheetTexts(tab).dropFirst().joined(separator: " ") }
+        func cancel() { sheetButton(tab, "Cancel")?.performClick(nil) }
+        return [
+            sync {
+                guard let t = app.open(url) else { expect(false, "opened conflict-saved.txt"); return }
+                tab = t
+                sized(t)
+                focus(t)
+                t.textView.setSelectedRange(NSRange(location: 3, length: 0))
+                type(" two")
+                key("s", [.command])
+            },
+            sync {
+                expect(tab.window?.attachedSheet == nil && !tab.doc.isDirty, "wording: saved here first")
+                type(" three")
+                rewriteElsewhere(url, "changed after the save\n")
+                key("s", [.command])
+            },
+            sync {
+                expect(detail().hasPrefix("The file on disk changed since Owlink last saved it."), "wording: …since Owlink last saved it", detail())
+                cancel()
+                // Another tab on the same file saves it (as Save As over it would).
+                app.newTab(nil)
+                other = app.tabs.last
+                focus(other)
+                type("from the other tab")
+                expect(other.write(to: url), "wording: another tab saves the same file")
+                focus(tab)
+                key("s", [.command])
+            },
+            sync {
+                expect(detail().hasPrefix("It was saved from another Owlink tab or window"), "wording: …saved from another Owlink tab", detail())
+                expect(!detail().contains("another app"), "wording: …not “another app”", detail())
+                cancel()
+                for t in [tab, other] { t?.doc.markSaved(); t?.window?.performClose(nil) }
+            },
+        ]
     }
 
     /// A tab opened through a symbolic link (0.5.4 QA, F2): its stamp is

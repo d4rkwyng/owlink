@@ -29,6 +29,13 @@ final class EditorDocument {
     /// The file's date at the last read or save.
     var fileModified: Date? { diskStamp.modified }
     func noteDisk(_ s: DiskStamp?) { diskStamp = s ?? DiskStamp(modified: nil) }
+    /// The stamp this tab's last save left (DiskConflict: "since Owlink
+    /// last saved it", and "saved from another Owlink tab" for the others).
+    private(set) var lastSavedStamp: DiskStamp?
+    /// The file as a failed save from this tab left it, if that save
+    /// changed it (an in-place write that stopped part way, put back or
+    /// not): the conflict sheet then says Owlink did it, not another app.
+    var failedSaveStamp: DiskStamp?
 
     /// Edits since open (a generation: grammar results, owl proposals
     /// and session buffer writes compare it). Unsaved is `edited`'s call.
@@ -181,6 +188,8 @@ final class EditorDocument {
         let stamp = try DocumentWrite.write(data, to: url)
         fileURL = url
         noteDisk(stamp)
+        lastSavedStamp = stamp
+        failedSaveStamp = nil
         mixedLineEndings = false
         markSaved()
     }

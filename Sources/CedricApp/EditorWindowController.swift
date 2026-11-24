@@ -1050,8 +1050,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // A file that became read-only (or always was): never write over it.
         recheckWriteAccess()
         if let reason = fileReadOnly { askSaveReadOnly(url, reason); return false }
-        // Another app changed the file since it was read or saved here: ask
-        // (DiskChange.swift) rather than overwrite its changes.
+        // The file changed since it was read or saved here: ask
+        // (DiskChange.swift) rather than overwrite the change.
         if fileChangedOnDisk(url) { askSaveConflict(url); return false }
         return write(to: url)
     }
@@ -1068,10 +1068,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         return write(to: url)
     }
 
-    private func write(to url: URL) -> Bool {
+    func write(to url: URL) -> Bool {
+        let before = url == doc.fileURL ? DiskStamp.of(url) : nil
         do {
             try doc.write(textView.string, to: url)
         } catch {
+            // This tab's own file, changed by the save that failed: the
+            // next ⌘S's sheet says Owlink did it (DiskConflict).
+            if let before, let after = DiskStamp.of(url), DiskStamp.changed(known: before, current: after) {
+                doc.failedSaveStamp = after
+            }
             showSaveError(error, saving: url, offer: .saveAs)
             return false
         }

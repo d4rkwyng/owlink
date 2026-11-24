@@ -51,7 +51,7 @@ public struct RulesHintProvider: OwlFactsAwareProvider {
 
         if facts.changedOnDisk {
             hint(Self.reloadID, .warning, String(localized: "This file changed on disk. Reload?"),
-                 String(localized: "Another app saved it since you opened it. Reloading replaces your unsaved changes (you can undo it)."))
+                 String(localized: "The file on disk changed since this tab last read or saved it. Reloading replaces your unsaved changes (you can undo it)."))
         }
         if let since = facts.unsavedSince, now().timeIntervalSince(since) > unsavedThreshold {
             hint(Self.saveCopyID, .tip, String(localized: "Unsaved for over 2 hours. Save a copy?"),
