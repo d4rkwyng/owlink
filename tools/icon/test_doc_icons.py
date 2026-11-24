@@ -50,11 +50,8 @@ class DocumentIconTests(unittest.TestCase):
 
     def test_white_ink_stays_clear_of_fold(self):
         for size in (16, 32, 64, 128):
-            if size == 16:
-                fold = [(9, 2), (9, 6), (13, 6)]
-                factor = 1
-            elif size == 32:
-                fold = [(18, 2), (18, 10), (26, 10)]
+            if size in (16, 32):
+                fold = icons.SMALL_FOLD[size]
                 factor = 1
             else:
                 factor = icons.ci.SS
@@ -77,9 +74,10 @@ class DocumentIconTests(unittest.TestCase):
 
     def test_small_glyph_ink_stays_inside_page(self):
         for size, page in (
-            (16, [(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)]),
+            (16, [(3, 2), (9, 2), (13, 6), (13, 13), (3, 13)]),
             (32, [(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)]),
         ):
+            self.assertEqual(page, icons.SMALL_PAGE[size])
             mask = Image.new('L', (size, size))
             ImageDraw.Draw(mask).polygon(page, fill=255)
             for text, _ in icons.TYPES:
@@ -143,8 +141,22 @@ class DocumentIconTests(unittest.TestCase):
                 with self.subTest(text=text, size=size):
                     image = icons.doc_icon(text, size)
                     self.assertIn(icons.RIM, {color for _, color in image.getcolors(size * size)})
-                    if size == 16:
-                        self.assertEqual(image.getpixel((15, 15))[3], 0)
+
+    def test_finder_sizes_keep_every_canvas_edge_transparent(self):
+        # Finder list view (16 pt) clipped the page and fold when they touched
+        # the canvas edge. Check every edge pixel, including Retina images.
+        for text, name in icons.TYPES:
+            for size, scale in ((16, 1), (16, 2), (32, 1), (32, 2), (64, 1)):
+                with self.subTest(name=name, size=size, scale=scale):
+                    alpha = icons.doc_icon(text, size, scale).getchannel('A')
+                    n = alpha.width
+                    self.assertEqual(alpha.size, (size * scale, size * scale))
+                    edge = {(x, y) for i in range(n) for x, y in ((i, 0), (i, n - 1), (0, i), (n - 1, i))}
+                    touching = sorted(p for p in edge if alpha.getpixel(p))
+                    self.assertEqual(touching, [], (name, size, scale))
+                    # The page still fills most of the canvas.
+                    l, t, r, b = alpha.getbbox()
+                    self.assertGreaterEqual(min(r - l, b - t), .7 * n, (name, size, scale))
 
     def test_iconset_uses_logical_size_for_retina_images(self):
         # Inspect the actual PNGs passed to iconutil, including both 32 px entries.

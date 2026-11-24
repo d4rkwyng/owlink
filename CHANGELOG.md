@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Fixed
+- **Small document icons are no longer cut off.** In Finder's list view and other small sizes, Owlink's document icons (most visibly `.log`) no longer have the page's right edge, fold, top or bottom clipped. Every type now keeps a clear margin at 16, 32 and 64 pt, on Retina too.
+
 ## [0.5.2] - 2026-11-23
 
 ### Security
