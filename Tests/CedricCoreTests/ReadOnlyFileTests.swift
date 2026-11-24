@@ -208,6 +208,26 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: url.deletingLastPathComponent().path).sorted() == ["kept.md", "new.md"])
     }
 
+    /// A folder the user may write in but not read (0300) can't be opened
+    /// as a handle: the save checks and writes by its resolved path
+    /// instead, still refusing a read-only file. (An iOS grant to the
+    /// file alone takes the same path.)
+    @Test func aFolderThatCantBeReadStillSavesAndRefusesReadOnlyFiles() throws {
+        let url = try file("doc.md", "before\n")
+        let dir = url.deletingLastPathComponent()
+        let locked = dir.appendingPathComponent("locked.md")
+        try Data("read-only\n".utf8).write(to: locked)
+        #expect(chmod(locked.path, 0o444) == 0)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o300) == 0)
+        try DocumentWrite.write(Data("after\n".utf8), to: url)
+        #expect(throws: ReadOnlyFileError.self) { try DocumentWrite.write(Data("x\n".utf8), to: locked) }
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "after\n")
+        #expect(try String(contentsOf: locked, encoding: .utf8) == "read-only\n")
+        #expect(mode(locked) == 0o444)
+    }
+
     @Test func applyIsReadOnlyForAnUnwritableFile() throws {
         let url = try file()
         defer { cleanUp(url) }
