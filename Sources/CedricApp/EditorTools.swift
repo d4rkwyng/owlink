@@ -283,6 +283,7 @@ extension EditorWindowController {
             tail = nil
             setEditable(true)
             window?.subtitle = ""
+            recheckWriteAccess()
             return
         }
         guard let url = doc.fileURL else { NSSound.beep(); return }
@@ -335,6 +336,8 @@ extension EditorWindowController {
             storage.beginEditing()
             storage.append(NSAttributedString(string: s, attributes: baseAttributes()))
             storage.endEditing()
+            // A followed log can grow past the auto-review cap.
+            updateAutoReviewCap(newText: false)
         case .reset(let s):
             setText(s)
         }

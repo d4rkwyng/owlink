@@ -11,10 +11,15 @@ import CedricCore
 final class OwlEditCard: NSStackView {
     let proposal: OwlEditProposal
     let titleLabel = NSTextField(labelWithString: "")
+    /// "Proposed, not applied": the app says so, whatever the model wrote.
+    /// The card goes on Apply, and the transcript says "Applied."
+    let badgeLabel = NSTextField(labelWithString: OwlProposalWording.badge)
     let reasonLabel = NSTextField(wrappingLabelWithString: "")
     let warningLabel = NSTextField(labelWithString: "")
     let diffView = NSTextView()
     let staleLabel = NSTextField(wrappingLabelWithString: "")
+    /// The edit validation's warnings (OwlEditCheck); hidden when there are none.
+    let checkLabel = NSTextField(wrappingLabelWithString: "")
     private(set) var applyButton: NSButton!
     private(set) var skipButton: NSButton!
     private(set) var askAgainButton: NSButton!
@@ -67,7 +72,9 @@ final class OwlEditCard: NSStackView {
 
         titleLabel.stringValue = title(first: p.firstLine, last: p.lastLine)
         titleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        reasonLabel.stringValue = p.reason
+        badgeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        badgeLabel.textColor = .systemOrange
+        reasonLabel.stringValue = OwlProposalWording.guardReason(p.reason)
         reasonLabel.font = .systemFont(ofSize: 11)
         reasonLabel.textColor = .secondaryLabelColor
         reasonLabel.isHidden = p.reason.isEmpty
@@ -111,6 +118,11 @@ final class OwlEditCard: NSStackView {
         staleLabel.textColor = .systemOrange
         staleLabel.isHidden = true
 
+        checkLabel.stringValue = p.check.warningText ?? ""
+        checkLabel.font = .systemFont(ofSize: 11)
+        checkLabel.textColor = .systemOrange
+        checkLabel.isHidden = p.check.warningText == nil
+
         func small(_ title: String, _ action: Selector) -> NSButton {
             let b = NSButton(title: title, target: target, action: action)
             b.controlSize = .small
@@ -129,7 +141,10 @@ final class OwlEditCard: NSStackView {
         let buttons = NSStackView(views: [applyButton, skipButton, askAgainButton])
         buttons.spacing = 6
 
-        for v in [titleLabel, reasonLabel, warningLabel, scroll, showAllButton, staleLabel, buttons] as [NSView] {
+        let header = NSStackView(views: [titleLabel, badgeLabel])
+        header.spacing = 6
+        header.alignment = .firstBaseline
+        for v in [header, reasonLabel, warningLabel, checkLabel, scroll, showAllButton, staleLabel, buttons] as [NSView] {
             addArrangedSubview(v)
         }
         scroll.widthAnchor.constraint(equalTo: widthAnchor, constant: -12).isActive = true
@@ -260,9 +275,11 @@ final class OwlEditCard: NSStackView {
     }
 
     private func updateAccessLabel() {
-        var label = titleLabel.stringValue
-        if !proposal.reason.isEmpty { label += ": " + proposal.reason }
+        var label = titleLabel.stringValue + ". " + badgeLabel.stringValue
+        if !proposal.reason.isEmpty { label += ": " + OwlProposalWording.guardReason(proposal.reason) }
         if warnsInvisible { label += ". " + OwlEditInvisibles.warning }
+        if let f = proposal.check.failureText { label += ". " + f }
+        if let w = proposal.check.warningText { label += ". " + w }
         setAccessibilityLabel(label)
     }
 
@@ -285,6 +302,12 @@ final class OwlEditCard: NSStackView {
         case .readOnly:
             ready = false
             staleLabel.stringValue = Self.readOnlyText
+            staleLabel.isHidden = false
+            askAgainButton.isHidden = true
+        case .failsValidation(let why):
+            // "Doesn't parse: …": Apply stays off.
+            ready = false
+            staleLabel.stringValue = why
             staleLabel.isHidden = false
             askAgainButton.isHidden = true
         }

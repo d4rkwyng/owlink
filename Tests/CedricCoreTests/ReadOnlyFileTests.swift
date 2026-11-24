@@ -1,0 +1,158 @@
+import Foundation
+import Testing
+@testable import CedricCore
+
+/// A file the user can't write (chmod 444, locked in the Finder, on a
+/// read-only volume) is read-only in its tab: Cedric's Apply is off and a
+/// save never replaces it (0.5.2 wrote over a 0444 file with an atomic
+/// rename). Real files in a temporary folder.
+@Suite struct ReadOnlyFileTests {
+    /// A fresh folder with `name` holding `text`; removed (flags and modes
+    /// cleared first) by `cleanUp`.
+    func file(_ name: String = "readonly.md", _ text: String = "# Read me\n\nTry editing it.\n") throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-ro-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent(name)
+        try Data(text.utf8).write(to: url)
+        return url
+    }
+
+    func cleanUp(_ url: URL) {
+        let dir = url.deletingLastPathComponent()
+        for f in (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? [] {
+            let p = dir.appendingPathComponent(f).path
+            _ = chflags(p, 0)
+            _ = chmod(p, 0o644)
+        }
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    func mode(_ url: URL) -> mode_t {
+        var st = stat()
+        _ = stat(url.path, &st)
+        return st.st_mode & 0o7777
+    }
+
+    @Test func chmod444IsReadOnly() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        #expect(FileWriteAccess.blocked(at: url) == nil, "a 0644 file the user owns is writable")
+        #expect(chmod(url.path, 0o444) == 0)
+        // Owned by this user, in a writable folder: still read-only (the real-use repro).
+        #expect(FileWriteAccess.blocked(at: url) == .permissions)
+        #expect(chmod(url.path, 0o400) == 0)
+        #expect(FileWriteAccess.blocked(at: url) == .permissions)
+    }
+
+    @Test func aMissingFileIsNotBlocked() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        #expect(FileWriteAccess.blocked(at: url.deletingLastPathComponent().appendingPathComponent("new.md")) == nil)
+    }
+
+    @Test func theFinderLockIsReadOnly() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        try #require(chflags(url.path, UInt32(UF_IMMUTABLE)) == 0, "chflags uchg on a temp file")
+        #expect(mode(url) & 0o200 != 0, "the mode still says writable")
+        #expect(FileWriteAccess.blocked(at: url) == .locked)
+        #expect(chflags(url.path, 0) == 0)
+        #expect(FileWriteAccess.blocked(at: url) == nil, "unlocked: writable again")
+    }
+
+    @Test func aReadOnlyVolumeIsReadOnly() throws {
+        // The sealed system volume is mounted read-only.
+        let sys = URL(fileURLWithPath: "/System/Library/CoreServices/SystemVersion.plist")
+        try #require(FileManager.default.fileExists(atPath: sys.path))
+        #expect(FileWriteAccess.blocked(at: sys) == .readOnlyVolume)
+    }
+
+    @Test func permissionChangesWhileOpenAreSeenOnTheNextCheck() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        // Opened writable.
+        let opened = try String(contentsOf: url, encoding: .utf8)
+        #expect(FileWriteAccess.blocked(at: url) == nil)
+        // chmod 444 while the tab is open: the next check (save, window key, Apply) sees it.
+        #expect(chmod(url.path, 0o444) == 0)
+        #expect(FileWriteAccess.blocked(at: url) == .permissions)
+        #expect(throws: ReadOnlyFileError(url: url, reason: .permissions)) {
+            try DocumentWrite.write(Data((opened + "typed\n").utf8), to: url)
+        }
+        // chmod 644 again: editable and savable.
+        #expect(chmod(url.path, 0o644) == 0)
+        #expect(FileWriteAccess.blocked(at: url) == nil)
+        try DocumentWrite.write(Data((opened + "typed\n").utf8), to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == opened + "typed\n")
+    }
+
+    @Test func saveRefusesToReplaceAReadOnlyFile() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        let before = try Data(contentsOf: url)
+        #expect(chmod(url.path, 0o444) == 0)
+        #expect(throws: ReadOnlyFileError(url: url, reason: .permissions)) {
+            try DocumentWrite.write(Data("overwritten\n".utf8), to: url)
+        }
+        #expect(try Data(contentsOf: url) == before, "the bytes are unchanged")
+        #expect(mode(url) == 0o444, "the mode is unchanged")
+
+        // Locked: refused too, though the mode allows writing.
+        #expect(chmod(url.path, 0o644) == 0)
+        try #require(chflags(url.path, UInt32(UF_IMMUTABLE)) == 0)
+        #expect(throws: ReadOnlyFileError(url: url, reason: .locked)) {
+            try DocumentWrite.write(Data("overwritten\n".utf8), to: url)
+        }
+        #expect(try Data(contentsOf: url) == before)
+        #expect(chflags(url.path, 0) == 0)
+
+        // Writable: the save goes through.
+        try DocumentWrite.write(Data("saved\n".utf8), to: url)
+        #expect(try String(contentsOf: url, encoding: .utf8) == "saved\n")
+    }
+
+    @Test func aLinkToAReadOnlyFileIsRefusedAndStaysALink() throws {
+        let target = try file("target.md", "target\n")
+        defer { cleanUp(target) }
+        let link = target.deletingLastPathComponent().appendingPathComponent("link.md")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "target.md")
+        #expect(chmod(target.path, 0o444) == 0)
+        #expect(FileWriteAccess.blocked(at: link) == .permissions, "the target decides, not the link")
+        #expect(throws: ReadOnlyFileError.self) { try DocumentWrite.write(Data("x\n".utf8), to: link) }
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: link.path) == "target.md")
+        #expect(try String(contentsOf: target, encoding: .utf8) == "target\n")
+    }
+
+    @Test func applyIsReadOnlyForAnUnwritableFile() throws {
+        let url = try file()
+        defer { cleanUp(url) }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let snap = OwlDocumentSnapshot(text: text, generation: 2, fileName: "readonly.md", language: "markdown")
+        let p = try OwlEditProposal.anchored(find: "Try editing it.", replace: "Editing this file is not permitted.", in: snap).get()
+        func readOnly() -> Bool {
+            // An editable buffer (Allow Editing chosen), not following, not large: only the file decides.
+            OwlEditAccess.readOnly(editable: true, following: false, largeDocument: false, extrasPaused: false,
+                                   unwritableFile: FileWriteAccess.blocked(at: url) != nil)
+        }
+        #expect(!readOnly())
+        #expect(p.state(text: text as NSString, generation: 2, readOnly: readOnly()) == .ready((text as NSString).range(of: "Try editing it.")))
+        #expect(chmod(url.path, 0o444) == 0)
+        #expect(readOnly())
+        #expect(p.state(text: text as NSString, generation: 2, readOnly: readOnly()) == .readOnly)
+        let refreshed = OwlEditProposal.refresh([p], text: text as NSString, generation: 2, readOnly: readOnly())
+        #expect(refreshed.states == [.readOnly] && refreshed.searches == 0)
+        // Writable again: Apply comes back.
+        #expect(chmod(url.path, 0o644) == 0)
+        #expect(!readOnly())
+    }
+
+    @Test func theNoticeAndTitleSayWhy() {
+        #expect(FileWriteAccess.notice(.permissions, name: "a.md").contains("permission"))
+        #expect(FileWriteAccess.notice(.locked, name: "a.md").contains("locked"))
+        #expect(FileWriteAccess.notice(.readOnlyVolume, name: "a.md").contains("read-only volume"))
+        #expect(FileWriteAccess.windowTitle("a.md", readOnly: false) == "a.md")
+        #expect(FileWriteAccess.windowTitle("a.md", readOnly: true) == "a.md — Read-Only")
+        #expect(EditedIndicator.windowTitle(displayName: FileWriteAccess.windowTitle("a.md", readOnly: true), isDirty: true)
+                == "a.md — Read-Only •", "the unsaved mark stays last")
+    }
+}

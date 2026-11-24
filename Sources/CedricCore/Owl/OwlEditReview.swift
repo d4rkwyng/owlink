@@ -22,11 +22,15 @@ public enum OwlBufferReplacement {
 /// When Apply is refused and the card says the document is read-only.
 public enum OwlEditAccess {
     /// Not editable, following the file on disk, in large-document mode
-    /// (the text is chunked, including after Turn On Anyway), or with the
-    /// extras paused (also the moment a paste trips large mode, before the
-    /// bar is shown).
-    public static func readOnly(editable: Bool, following: Bool, largeDocument: Bool, extrasPaused: Bool) -> Bool {
-        !editable || following || largeDocument || extrasPaused
+    /// (even after Turn On Anyway, which brings the extras back but not
+    /// Apply: cards aren't rechecked against a large buffer, see
+    /// OwlCardRefresh; chunks or not doesn't matter), or with the extras paused (also the moment a paste trips large mode, before the
+    /// bar is shown). Also a file that can't be written (FileWriteAccess:
+    /// permissions, locked, read-only volume), even after Allow Editing:
+    /// a read-only document never applies.
+    public static func readOnly(editable: Bool, following: Bool, largeDocument: Bool, extrasPaused: Bool,
+                                unwritableFile: Bool = false) -> Bool {
+        !editable || following || largeDocument || extrasPaused || unwritableFile
     }
 }
 
@@ -72,7 +76,7 @@ extension OwlEditProposal {
                     cache[p.original] = hits
                     searches += 1
                 }
-                states.append(hits.count == 1 ? .ready(hits[0]) : .stale)
+                states.append(hits.count == 1 ? p.validated(.ready(hits[0])) : .stale)
             }
         }
         return OwlEditRefresh(states: states, searches: searches)

@@ -181,12 +181,26 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var largeOverride = false
     /// An edit made the document large; applied on the next turn.
     var largePending = false
+    /// Over the auto-review cap (AutoReviewCapMode.swift): Cedric does
+    /// nothing on his own for this document. Not large mode.
+    var autoReviewCapReason: AutoReviewCap.Reason?
+    /// The user confirmed asking Cedric about this capped document (until
+    /// its text is replaced: open, reload, restore).
+    var autoReviewAskConfirmed = false
     var isLargeDocument: Bool { largeReason != nil }
     let largeBar = LargeDocumentBar()
     /// A file that looks binary (BinaryFile.swift): nil for text.
     var binary: BinaryFileState?
     /// Its bar, built only for such a file.
     var binaryBar: BinaryFileBar?
+    /// The file can't be written (ReadOnlyFile.swift): permissions, locked,
+    /// or a read-only volume; nil when it can (or the tab has no file).
+    var fileReadOnly: FileWriteAccess.Blocked?
+    /// Allow Editing on a read-only file: the buffer takes typing; Save
+    /// still won't write over the file and Apply stays off.
+    var readOnlyEditingAllowed = false
+    /// Its bar, built when first needed.
+    var readOnlyBar: NoticeBar?
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// A one-off notice in this tab (the closed-tab "not saved" notice).
@@ -265,6 +279,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         updateTitle()
         setOwlVisible(Settings.shared.showOwl)
         PerfTrace.mark("owl")
+        recheckWriteAccess()
         AfterFirstFrame.run { [weak self] in self?.gitTabShown() }
     }
 
@@ -427,7 +442,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         loading = true
         doc.detectedIndentation = nil
         // Large mode first, so TextKit never lays out a huge line whole.
-        applyLargeMode(LargeDocument.reason(for: LineIndex(text as NSString)), newText: true)
+        let incoming = LineIndex(text as NSString)
+        applyLargeMode(LargeDocument.reason(for: incoming), newText: true, chunks: LargeDocument.needsChunks(incoming))
         PerfTrace.mark("large_check")
         let attrs = baseAttributes()
         let storage = textView.textStorage!
@@ -436,6 +452,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         storage.endEditing()
         PerfTrace.mark("set_text_storage")
         lineIndex = LineIndex(storage.string as NSString)
+        updateAutoReviewCap(newText: true)
         fences.invalidateAll()
         folding?.reset()
         PerfTrace.mark("line_index")
@@ -511,6 +528,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// (else an undo after a save left the tab marked saved, and its text
     /// unsaved).
     private var storageEdits = 0
+    /// Character edits so far (large mode's queued steps check nothing
+    /// changed in between).
+    var textEditCount: Int { storageEdits }
     private var handledEdits = 0
     private var sniffTimer: Timer?
 
@@ -597,6 +617,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         updateStatus()
         schedulePreview()
         outlineTextChanged()
+        // Before the owl hears of the edit: a paste may take it over the cap.
+        updateAutoReviewCap(newText: false)
         if let owl {
             owl.noteTyping()
             OwlHub.shared.activity(in: self)
@@ -769,9 +791,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // Unsaved: a trailing • on the title, so on the tab's label too
         // (a background tab's edited dot is easy to miss), beside the
         // close button's own edited dot. VoiceOver hears "Edited".
-        window.title = EditedIndicator.windowTitle(displayName: name, isDirty: dirty)
-        window.setAccessibilityTitle(EditedIndicator.accessibilityTitle(displayName: name, isDirty: dirty,
-                                                                        edited: String(localized: "Edited")))
+        // A read-only file: "name — Read-Only", the unsaved mark still last.
+        window.title = EditedIndicator.windowTitle(displayName: FileWriteAccess.windowTitle(name, readOnly: fileReadOnly != nil),
+                                                   isDirty: dirty)
+        let spoken = EditedIndicator.accessibilityTitle(displayName: name, isDirty: dirty, edited: String(localized: "Edited"))
+        window.setAccessibilityTitle(fileReadOnly != nil ? spoken + ", " + String(localized: "Read-Only") : spoken)
         window.representedURL = doc.fileURL
         window.isDocumentEdited = dirty
         window.tab.toolTip = doc.fileURL?.path
@@ -783,6 +807,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         statusBar.gitButton.action = #selector(showGitMenu(_:))
         statusBar.languageButton.target = self
         statusBar.encodingButton.target = self
+        statusBar.previewButton.target = self
+        statusBar.previewButton.action = #selector(previewStatusItemPressed(_:))
         statusBar.counts.onClick = { [weak self] in self?.toggleStatsPopover() }
         statusBar.counts.toolTip = String(localized: "Words, reading time, a word goal and a daily target")
     }
@@ -796,6 +822,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         scheduleCounts()
         editing.statsPopover?.scheduleRefresh()
         statusBar.position.stringValue = pos
+        updatePreviewStatusItem()
         StatusBar.fill(statusBar.languageButton, title: doc.languageChoice.displayTitle,
                        items: Language.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.language) },
                        target: self, action: #selector(pickLanguage(_:)))
@@ -812,6 +839,36 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
                        items: [(String(localized: "Convert Line Endings To"), nil, false)]
                         + LineEnding.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.lineEnding) },
                        target: self, action: #selector(pickLineEnding(_:)))
+    }
+
+    /// The status bar's Preview eye (CSV / TSV only): shown for this
+    /// language, on while the preview is docked or detached. Run by
+    /// `updateStatus()` and wherever the preview opens, closes, detaches
+    /// or attaches (`refreshPreviewToggles()`).
+    func updatePreviewStatusItem() {
+        let eye = statusBar.previewButton
+        let shown = doc.language == .csv
+        if eye.isHidden == shown { eye.isHidden = !shown }
+        guard shown else { return }
+        if eye.toolTip == nil || eye.toolTip?.isEmpty == true {
+            let tip = ContextBarView.toggleLabel(ContextBarView.menuItem("togglePreview:"), fallback: String(localized: "Preview")).tooltip
+            if !tip.isEmpty { eye.toolTip = tip }
+        }
+        statusBar.setPreviewState(previewVisible)
+    }
+
+    /// The eye's click (and VoiceOver's press): View › Show Preview, the
+    /// same command as the menu and ⌥⌘P.
+    @objc func previewStatusItemPressed(_ sender: NSButton) {
+        togglePreview()
+        refreshPreviewToggles()
+    }
+
+    /// The preview's on/off changed: the Context Bar's eye (Markdown) and
+    /// the status bar's (CSV / TSV) follow.
+    func refreshPreviewToggles() {
+        contextBar?.refreshStates()
+        updatePreviewStatusItem()
     }
 
     @objc func pickLanguage(_ sender: NSMenuItem) {
@@ -969,6 +1026,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func save() -> Bool {
         guard !binaryBlocksSave else { NSSound.beep(); return false }
         guard let url = doc.fileURL else { return saveAs() }
+        // A file that became read-only (or always was): never write over it.
+        recheckWriteAccess()
+        if let reason = fileReadOnly { askSaveReadOnly(url, reason); return false }
         // Another app changed the file since it was read or saved here: ask
         // (DiskChange.swift) rather than overwrite its changes.
         if fileChangedOnDisk(url) { askSaveConflict(url); return false }
@@ -999,6 +1059,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         for pane in panes { pane.textView.breakUndoCoalescing() }
         if doc.languageChoice.saved(fileName: url.lastPathComponent, content: textView.string) { languageChanged() }
         hideDiskBar()
+        // Save As to a writable file: a normal tab from here on.
+        recheckWriteAccess()
         (NSApp.delegate as? AppDelegate)?.noteRecent(url)
         // A word goal follows the tab to its (new) path.
         if let goal = editing.wordGoal { (NSApp.delegate as? AppDelegate)?.setFileWordGoal(goal, path: url.path) }
@@ -1063,18 +1125,27 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     /// The owl's "Reload?": replaces the text with the file on disk as one
-    /// undoable edit (unlike `setText`, which clears undo).
-    func reloadFromDisk() {
-        guard let url = doc.fileURL, let storage = textView.textStorage else { return }
+    /// undoable edit (unlike `setText`, which clears undo). A read-only
+    /// file's tab takes it too and stays read-only. Saved state and the
+    /// Changed on disk bar change only once the text is replaced: a refused
+    /// replacement leaves the unsaved edits unsaved, and returns false.
+    @discardableResult
+    func reloadFromDisk() -> Bool {
+        guard let url = doc.fileURL, let storage = textView.textStorage else { return false }
         do {
             let (d, mod) = try EditorDocument.read(url, encoding: doc.encoding)
             let all = NSRange(location: 0, length: storage.length)
             textView.breakUndoCoalescing()
-            if textView.shouldChangeText(in: all, replacementString: d.text) {
-                storage.replaceCharacters(in: all, with: NSAttributedString(string: d.text, attributes: baseAttributes()))
-                textView.didChangeText()
+            let replaced = replacingFromDisk { () -> Bool in
+                guard textView.shouldChangeText(in: all, replacementString: d.text) else { return false }
+                largeModeReplacingAll {
+                    storage.replaceCharacters(in: all, with: NSAttributedString(string: d.text, attributes: baseAttributes()))
+                    textView.didChangeText()
+                }
                 textView.undoManager?.setActionName(String(localized: "Reload"))
+                return true
             }
+            guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
             doc.fileModified = mod
             doc.markSaved()
@@ -1084,8 +1155,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             updateTitle()
             updateStatus()
             onChange?(self)
+            return true
         } catch {
             showError(error)
+            return false
         }
     }
 
@@ -1103,7 +1176,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             showError(NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Couldn’t encode the copy.")]))
             return
         }
-        do { try data.write(to: SafePaths.writeTarget(for: url), options: .atomic) } catch { showError(error) }
+        do { try DocumentWrite.write(data, to: url) } catch { showError(error) }
     }
 
     // MARK: Owl
@@ -1230,6 +1303,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // Changed on disk while another tab or app was in front (owl or
         // not). Not before the first frame: nothing new on the launch path.
         if AfterFirstFrame.passed { reloadIfChangedOnDisk() }
+        // chmod, a Finder lock or a remount while another app was in front.
+        recheckWriteAccess()
         gitTabShown()
         (NSApp.delegate as? AppDelegate)?.tabBecameKey(self)
         // The bar's first refresh runs from its initializer, before this
@@ -1346,6 +1421,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if sel.length > 0, sel.length < 200 {
             findBar.findField.stringValue = (textView.string as NSString).substring(with: sel)
         }
+        // ⌘F with the detached preview key: the editor takes the keyboard first.
+        if window?.isKeyWindow == false { window?.makeKeyAndOrderFront(nil) }
         window?.makeFirstResponder(findBar.findField)
         findBar.findField.selectText(nil)
         findChanged()
@@ -1456,7 +1533,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if showsCertificatePanel { CertificatePanel.closedByUser = false }
         dock(makePreviewPane())
         renderPreview()
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1611,7 +1688,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         dock(makePreviewPane(), width: width)
         renderPreview()
         updatePreviewBar()
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
         guard let width, width.isFinite, width > 0 else { return }
         // The split can still be 0 wide on this turn (the window's frame
@@ -1629,13 +1706,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewPane?.removeFromSuperview()
         previewPane = nil
         if docked { FolderSidebar.keepWidth(in: split) }
-        contextBar?.refreshStates()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
     /// View › Detach Preview (⇧⌥⌘P), or the header's Detach: the preview
     /// in its own window, bound to this tab's document. `frame`: where it
     /// was (session restore); `activate` false leaves the focus alone.
+    /// Activated, the new window comes to the front and takes the focus
+    /// (any preview: Markdown, CSV, HTML, the certificate panel).
     func detachPreview(frame: String? = nil, activate: Bool = true) {
         guard !previewDetached else { return }
         guard previewApplies else { NSSound.beep(); return }
@@ -1645,10 +1724,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if docked { FolderSidebar.keepWidth(in: split) }
         let pw = PreviewWindowController(tab: self, pane: pane, frame: frame)
         previewWindow = pw
-        pw.window?.orderFront(nil)
-        if activate { window?.makeKeyAndOrderFront(nil) }
+        if activate { pw.window?.makeKeyAndOrderFront(nil) } else { pw.window?.orderFront(nil) }
         renderPreview()
         updatePreviewBar()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1661,6 +1740,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         window?.makeKeyAndOrderFront(nil)
         renderPreview()
         updatePreviewBar()
+        refreshPreviewToggles()
         onChange?(self)
     }
 
@@ -1673,6 +1753,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         previewWindow = nil
         previewPane = nil
         previewTimer?.invalidate()
+        // The editor may not become key again: the eyes turn off here.
+        refreshPreviewToggles()
         onChange?(self)
     }
 

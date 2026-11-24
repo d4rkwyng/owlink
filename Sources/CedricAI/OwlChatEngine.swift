@@ -2,7 +2,8 @@ import Foundation
 import CedricCore
 
 // Ask Cedric: one conversation turn per engine, and the runner that loops
-// over tool calls (at most `OwlTools.maxRounds`) until the model answers.
+// over tool calls (at most `OwlTools.maxRounds`, plus one propose_edit-only
+// correction round after a refused last-round edit) until the model answers.
 // Every engine streams its answer. Tools are adapted three ways: OpenAI
 // `tools` for LM Studio / Ollama, a GBNF-constrained JSON envelope for the
 // built-in llama.cpp engine, and FoundationModels' `Tool` protocol for
@@ -70,18 +71,29 @@ public final class OwlToolbox: @unchecked Sendable {
     private var calls = 0
     private var _proposals: [OwlEditProposal] = []
     private var _picture: Task<OwlRenderedImage, Error>?
+    /// propose_edit's validation for this Ask (one retry; OwlEditGate).
+    private var gate: OwlEditGate
     private let onEvent: @Sendable (OwlChatEvent) -> Void
     public static let maxCalls = OwlTools.maxRounds * OwlTools.maxCallsPerRound
 
     public init(snapshot: OwlDocumentSnapshot, allowed: Set<OwlToolName>, imageSource: (any OwlImageSource)? = nil,
-                inlineSelection: String? = nil,
+                inlineSelection: String? = nil, script: (any OwlScriptSyntaxChecker)? = JSCSyntaxChecker(),
                 onEvent: @escaping @Sendable (OwlChatEvent) -> Void = { _ in }) {
+        self.gate = OwlEditGate(script: script)
         self.snapshot = snapshot
         self.allowed = allowed
         self.imageSource = imageSource
         self.inlineSelection = inlineSelection
         self.onEvent = onEvent
     }
+
+    /// The runner starts a batch of tool calls (OwlEditGate.beginBatch).
+    public func beginBatch(retryRoundLeft: Bool) { lock.withLock { gate.beginBatch(retryRoundLeft: retryRoundLeft) } }
+    /// An edit in the batch just run was refused for a retry.
+    public var refusedInBatch: Bool { lock.withLock { gate.refusedInBatch } }
+    /// The runner's one correction round: its calls on top of `maxCalls`.
+    public func allowCorrectionRound() { lock.withLock { extraCalls = OwlTools.maxCallsPerRound } }
+    private var extraCalls = 0
 
     /// The edits proposed so far, in order.
     public var proposals: [OwlEditProposal] { lock.withLock { _proposals } }
@@ -101,7 +113,7 @@ public final class OwlToolbox: @unchecked Sendable {
     /// Counts and logs a call; the refusal when over the budget.
     private func admit(_ call: OwlToolCall) -> OwlToolResult? {
         let n: Int = lock.withLock { calls += 1; _log.append(call); return calls }
-        guard n <= Self.maxCalls else {
+        guard n <= Self.maxCalls + lock.withLock({ extraCalls }) else {
             return OwlToolResult(text: "error: tool limit reached; answer now with what you have", proposal: nil,
                                  summary: "tool limit reached", ok: false)
         }
@@ -134,6 +146,7 @@ public final class OwlToolbox: @unchecked Sendable {
             r = OwlToolResult(text: same ? "error: this edit is already proposed" : "error: this overlaps an edit you already proposed (lines \(other.firstLine)-\(other.lastLine)); put both changes in one edit",
                               proposal: nil, summary: String(localized: "overlapping edit refused"), ok: false)
         }
+        if r.proposal != nil { r = lock.withLock { gate.screen(r, in: snapshot) } }
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
@@ -469,7 +482,9 @@ public struct OwlChatOutcome: Sendable, Equatable {
 
 public enum OwlChatRunner {
     /// Asks `engine`, running tools until it answers (≤ `OwlTools.maxRounds`
-    /// rounds; then it must answer without tools). A quick action that
+    /// rounds; then it must answer without tools). When an edit in the last
+    /// round is refused for its one retry, one more round offers only
+    /// propose_edit; a still-failing edit there is a card with Apply off. A quick action that
     /// edits and got no `propose_edit` (no tools, or the model pasted the
     /// text instead) gets its proposal from the answer's ``` block.
     public static func run(_ req: OwlChatRequest, engine: any OwlChatEngine, model: String = "",
@@ -512,9 +527,11 @@ public enum OwlChatRunner {
         }
         var rounds = 0
         var answer = ""
+        // The one propose_edit-only round after a refusal in the last round.
+        var correcting = false
         while true {
             try Task.checkCancellation()
-            let offer = rounds < OwlTools.maxRounds ? specs : []
+            let offer = correcting ? specs.filter { $0.name == .proposeEdit } : rounds < OwlTools.maxRounds ? specs : []
             if offer.isEmpty, rounds > 0 { messages.append(.user("Answer now, without tools.")) }
             let turn = try await engine.turn(messages, tools: offer, toolbox: offer.isEmpty ? nil : toolbox,
                                              maxTokens: req.maxTokens, onText: onText)
@@ -525,11 +542,22 @@ public enum OwlChatRunner {
                 guard !offer.isEmpty, !calls.isEmpty else { answer = ""; break }
                 rounds += 1
                 var calls = Array(calls.prefix(OwlTools.maxCallsPerRound))
+                let correction = correcting
+                correcting = false
+                if correction { calls = calls.filter { OwlToolName(rawValue: $0.name) == .proposeEdit } }
+                if calls.isEmpty { continue }
                 for i in calls.indices where calls[i].id.isEmpty { calls[i].id = "call_\(rounds)_\(i)" }
                 messages.append(.toolCalls(calls))
+                // A refusal always has a round to answer it in: the next one,
+                // or after the last, the correction round.
+                toolbox.beginBatch(retryRoundLeft: !correction)
                 for c in calls {
                     let r = await toolbox.perform(c)
                     messages.append(.toolResult(callID: c.id, name: c.name, content: r.text))
+                }
+                if !correction, rounds >= OwlTools.maxRounds, toolbox.refusedInBatch {
+                    correcting = true
+                    toolbox.allowCorrectionRound()
                 }
                 continue
             }
@@ -537,8 +565,10 @@ public enum OwlChatRunner {
         }
         var proposals = toolbox.proposals
         if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
-           let p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
+           var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
                                          reason: "", in: req.snapshot) {
+            // No tool loop to retry in: validated and marked directly.
+            p.check = OwlEditValidation.validate(p, in: req.snapshot, script: JSCSyntaxChecker())
             proposals = [p]
             onEvent(.proposal(p))
         }
@@ -549,6 +579,9 @@ public enum OwlChatRunner {
         if shown.isEmpty { shown = stripThinking(streamed.value) }
         // About a script, the owl never says "safe" (`ScriptVerdict`), whatever the model wrote.
         if let mode = req.safeClaimGuard { shown = ScriptVerdict.clamp(shown, forced: req.forcedVerdict, guard: mode) }
+        // Nothing is applied until the user presses Apply: "Fixed …" and
+        // "I changed …" are reworded as proposals (`OwlProposalWording`).
+        shown = OwlProposalWording.guardClaims(shown, proposals: proposals.count)
         // The coverage note shown while it streamed stays with the answer;
         // an engine that wrote nothing through onText still gets it.
         var said: String?
@@ -616,15 +649,31 @@ public struct ServerChatEngine: OwlChatEngine {
     public let client: LocalModelClient
     public let model: String
     public let kind: LocalAISettings.Backend
+    /// What the server says about the model's context window.
+    let contexts: ServerContextCache
 
     public init(client: LocalModelClient, model: String, kind: LocalAISettings.Backend) {
-        self.client = client; self.model = model; self.kind = kind
+        self.init(client: client, model: model, kind: kind, contexts: .shared)
+    }
+
+    init(client: LocalModelClient, model: String, kind: LocalAISettings.Backend, contexts: ServerContextCache) {
+        self.client = client; self.model = model; self.kind = kind; self.contexts = contexts
     }
 
     public var title: String { "\(LocalAIOwlBridge.shortTitle(kind)) · \(HintSource.shortModelName(model))" }
     public var scoreKey: String { "\(kind.rawValue):\(model)" }
-    /// Servers usually have 32k+ context; cap requests while allowing a whole file when it fits.
-    public var contextBudget: Int { 32_000 }
+    /// 32 000 units, or less when LM Studio or Ollama says the model runs
+    /// with a smaller context (`ContextWindow.serverBudget`): read from the
+    /// cache without waiting; a stale entry is refreshed in the background.
+    public var contextBudget: Int {
+        ContextWindow.serverBudget(contextTokens: contexts.current(client: client, model: model, kind: kind)?.tokens)
+    }
+
+    /// Asks the server for the model's context, waiting a few seconds at
+    /// most; never fails (the engine keeps the cap when nothing is known).
+    public func discoverContext() async {
+        _ = await contexts.refresh(client: client, model: model, kind: kind)
+    }
     public var usesServer: Bool { true }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
@@ -841,8 +890,10 @@ public struct BuiltInChatEngine: OwlChatEngine {
 
     public var title: String { "Built-in · \(model.name)" }
     public var scoreKey: String { "builtIn:\(model.id)" }
-    /// n_ctx 16384 tokens: a memory-conscious cap that fits typical whole files.
-    public var contextBudget: Int { 24_000 }
+    /// From the n_ctx `LlamaRuntime` loads this model with on this Mac
+    /// (16 384, 8192 or 4096 tokens by memory and model size), less the
+    /// reply reserve: 23 040, 10 752 or 4608 units.
+    public var contextBudget: Int { ContextWindow.budgetUnits(contextTokens: model.contextTokens()) }
 
     public func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
                      onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
@@ -947,9 +998,17 @@ public enum OwlChatEngines {
             // A slow model may read a long prompt before its first token:
             // a longer wait for the first byte than a hint check gets.
             let client = LocalModelClient(baseURL: settings.baseURL, timeout: max(settings.timeout, 120), session: session)
-            if let m = settings.model, !m.isEmpty { return ServerChatEngine(client: client, model: m, kind: settings.backend) }
-            guard let models = try? await client.listModels(), let pick = ModelPicker.pickSmallQwen(models) else { return nil }
-            return ServerChatEngine(client: client, model: pick.id, kind: settings.backend)
+            let model: String
+            if let m = settings.model, !m.isEmpty {
+                model = m
+            } else {
+                guard let models = try? await client.listModels(), let pick = ModelPicker.pickSmallQwen(models) else { return nil }
+                model = pick.id
+            }
+            let engine = ServerChatEngine(client: client, model: model, kind: settings.backend)
+            // Before the first question: the server's context, if it says (3 s at most).
+            await engine.discoverContext()
+            return engine
         }
     }
 }

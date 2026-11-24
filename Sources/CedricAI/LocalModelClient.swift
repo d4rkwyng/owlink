@@ -281,7 +281,7 @@ public struct LocalModelClient: Sendable {
     }
 
     /// GET or POST with the redirect guard and the size cap.
-    private func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         let guardian = RedirectGuard()
         let (bytes, response) = try await session.bytes(for: request, delegate: guardian)
         if response.expectedContentLength > Int64(Self.maxResponseBytes) {

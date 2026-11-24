@@ -110,8 +110,12 @@ PATHS = {
     'table': [((0, 0), (1, 0), (1, 1), (0, 1), (0, 0)), ((0, .3), (1, .3)), ((0, .65), (1, .65)), ((.5, .3), (.5, 1))],
 }
 
-X0, X1, Y0, Y1 = 0.155, 0.845, 0.06, 0.94
+# Apple's document grid keeps every canvas edge transparent so Finder's list,
+# column and icon views never clip the page or its fold. At 64 pt the outline
+# and shadow stay about 4 px in, which also keeps Lanczos fringe off the edge.
+X0, X1, Y0, Y1 = 0.155, 0.845, 0.075, 0.925
 F = 0.19
+FOLD_GAP = 0.02
 RIM = ci.hx('e8e8ee')
 RIM_TYPES = {'', 'LOG', 'SH', 'SQL'}
 
@@ -157,16 +161,32 @@ def page(c, text):
     c.poly([(X1 - F, Y0), (X1 - F, Y0 + F), (X1, Y0 + F)], fold, owl=False)
 
 
+# Hand-tuned 16 and 32 px pages: outline, then page; the fold is the page's
+# top-right corner. Nothing reaches the canvas edge.
+SMALL_OUTLINE = {
+    16: [(2, 1), (10, 1), (14, 5), (14, 14), (2, 14)],
+    32: [(4, 1), (19, 1), (27, 9), (27, 30), (4, 30)],
+}
+SMALL_PAGE = {
+    16: [(3, 2), (9, 2), (13, 6), (13, 13), (3, 13)],
+    32: [(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)],
+}
+SMALL_FOLD = {
+    16: [(9, 2), (9, 6), (13, 6)],
+    32: [(18, 2), (18, 10), (26, 10)],
+}
+
+
 def small_icon(text):
     color = ci.hx(STYLES[text][0])
     edge, fold = shade(color, 0, .25), shade(color, 255, .16)
     im = Image.new('RGBA', (16, 16))
     d = ImageDraw.Draw(im)
-    if text in RIM_TYPES:
-        d.polygon([(1, 0), (10, 0), (15, 5), (15, 14), (14, 15), (1, 15)], fill=RIM)
-    d.polygon([(2, 1), (10, 1), (14, 5), (14, 15), (2, 15)], fill=edge)
-    d.polygon([(3, 2), (9, 2), (13, 6), (13, 14), (3, 14)], fill=color)
-    d.polygon([(9, 2), (9, 6), (13, 6)], fill=fold)
+    # A one-pixel transparent margin on every side. Dark pages swap their
+    # outline for the pale rim, so every type has the same page and fold.
+    d.polygon(SMALL_OUTLINE[16], fill=RIM if text in RIM_TYPES else edge)
+    d.polygon(SMALL_PAGE[16], fill=color)
+    d.polygon(SMALL_FOLD[16], fill=fold)
     rows = PIXELS[STYLES[text][1]]
     y0 = 7
     for y, row in enumerate(rows):
@@ -180,11 +200,15 @@ def draw_glyph(image, glyph, size, labelled):
     d = ImageDraw.Draw(image)
     # Keep ink clear of the lighter fold and above the lower-third label.
     x0, x1 = .30 * size, .70 * size
-    y0, y1 = (.28, .62) if labelled else (.30, .68)
+    y0, y1 = (.31, .63) if labelled else (.31, .68)
     if size == 32:
         y0 += 1 / size
         y1 += 1 / size
     stroke = max(2 if size == 32 else 1, round(.045 * size))
+    # The fold ends at Y0 + F. The top of the stroke stays at least
+    # FOLD_GAP below it, so the Lanczos downsample cannot blend white into it.
+    if size > 32:
+        assert y0 - stroke / 2 / size >= Y0 + F + FOLD_GAP, (size, y0)
     for path in PATHS[glyph]:
         pts = [(round(x0 + x * (x1 - x0)), round((y0 + y * (y1 - y0)) * size)) for x, y in path]
         d.line(pts, fill=ci.WHITE, width=stroke, joint='curve')
@@ -213,11 +237,9 @@ def doc_icon(text, size, scale=1):
         color = ci.hx(STYLES[text][0])
         im = Image.new('RGBA', (32, 32))
         d = ImageDraw.Draw(im)
-        if text in RIM_TYPES:
-            d.polygon([(3, 0), (19, 0), (28, 9), (28, 31), (3, 31)], fill=RIM)
-        d.polygon([(4, 1), (19, 1), (27, 9), (27, 30), (4, 30)], fill=shade(color, 0, .25))
-        d.polygon([(5, 2), (18, 2), (26, 10), (26, 29), (5, 29)], fill=color)
-        d.polygon([(18, 2), (18, 10), (26, 10)], fill=shade(color, 255, .16))
+        d.polygon(SMALL_OUTLINE[32], fill=RIM if text in RIM_TYPES else shade(color, 0, .25))
+        d.polygon(SMALL_PAGE[32], fill=color)
+        d.polygon(SMALL_FOLD[32], fill=shade(color, 255, .16))
         draw_glyph(im, STYLES[text][1], 32, False)
         return im.resize((32 * scale, 32 * scale), Image.Resampling.NEAREST)
     c = ci.Canvas(size * scale)

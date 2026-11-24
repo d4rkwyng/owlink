@@ -48,6 +48,23 @@ public enum LargeDocument {
 
     // MARK: Chunks
 
+    /// TextKit gets chunks (ChunkedContentStorage) only when a line is
+    /// over `lineThreshold`: a long line is what it can't lay out quickly.
+    /// A large file of ordinary lines (a 55 MB log) keeps TextKit's own
+    /// paragraphs, as it has below `sizeThreshold`. Handing those out one
+    /// by one through the chunking storage crashed on macOS 26 (0.5.2: an
+    /// NSCountableTextLocation compare: exception in layout, every log
+    /// past 25 M characters, the first size that turned large mode on).
+    public static func needsChunks(_ index: LineIndex) -> Bool {
+        index.length > lineThreshold && index.longestLine > lineThreshold
+    }
+
+    /// After an edit of lines `lines`: one of them is now over `lineThreshold`.
+    public static func needsChunks(afterEditOf lines: Range<Int>, in index: LineIndex) -> Bool {
+        guard index.length > lineThreshold else { return false }
+        return lines.contains { $0 < index.lineCount && index.lineLength($0) > lineThreshold }
+    }
+
     /// Where chunk `k` of `line` starts: `k × limit` from the line start,
     /// moved back to the start of a composed character sequence (surrogate
     /// pair, combining marks, CRLF) it would cut. Depends only on the text

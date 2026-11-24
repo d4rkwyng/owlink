@@ -121,7 +121,10 @@ import CedricCore
         let host = BuiltInModelHost(runtime: runtime)
         let model = try #require(ModelCatalog.bundled()?.defaultModel)
         let engine = BuiltInChatEngine(model: model, path: URL(fileURLWithPath: "/x/\(model.fileName)"), host: host)
-        _ = try await engine.turn([.system("s"), .user("q")], tools: OwlTools.specs([.getLines]), toolbox: nil, maxTokens: 10) { _ in }
+        // Ask Cedric: the user asked (BuiltInLoadIntent), so it may load.
+        _ = try await BuiltInLoad.userAsked {
+            try await engine.turn([.system("s"), .user("q")], tools: OwlTools.specs([.getLines]), toolbox: nil, maxTokens: 10) { _ in }
+        }
         let g = try #require(runtime.grammars.value.first ?? nil)
         #expect(g == OwlToolGrammar.envelope(OwlTools.specs([.getLines])))
         #expect(g.contains(#""\"start\"" ws ":" ws integer"#))

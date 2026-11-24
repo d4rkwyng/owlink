@@ -638,6 +638,55 @@ final class OwlController: NSObject, NSPopoverDelegate {
         showBubble(hint, buttons: buttons(for: hint, tab: tab))
     }
 
+    // MARK: Notices
+
+    static let builtInUnhealthyID = "cedric.builtin-unhealthy"
+
+    /// A notice in the owl's bubble (not an alert: it takes no focus and
+    /// blocks nothing). OK, or the close button, dismisses it.
+    func showNotice(id: String, title: String, detail: String) {
+        let hint = OwlHint(id: id, kind: .warning, title: title, detail: detail, source: "notice")
+        presented = (hint, nil, nil)
+        showBubble(hint, buttons: [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }])
+    }
+
+    // MARK: Recent hints, again
+
+    /// Hints shown again from the popover (checks).
+    private(set) var replays = 0
+
+    /// A row under "Recent hints" was chosen: the hint again, in the same
+    /// bubble, without asking any provider (it is already in the
+    /// coordinator's shown set, so `isEligible` would say no). Its own tab
+    /// if that is another open one (brought to the front); its stored title
+    /// and detail here if its document is closed. A range that no longer
+    /// holds the text it had: title and detail only, never dropped.
+    func replay(_ shown: OwlCoordinator.Shown) {
+        closePopover()
+        guard let tab else { return }
+        if shown.documentID != tab.doc.id,
+           let other = (NSApp.delegate as? AppDelegate)?.tabs.first(where: { $0.doc.id == shown.documentID }),
+           let owl = other.owl {
+            other.window?.makeKeyAndOrderFront(nil)
+            owl.showAgain(shown, document: other.textView.string as NSString, own: true)
+            return
+        }
+        let mine = shown.documentID == tab.doc.id
+        showAgain(shown, document: mine ? tab.textView.string as NSString : nil, own: mine)
+    }
+
+    /// `own`: the hint is about this tab's document (its actions apply);
+    /// otherwise (its document is closed) only OK.
+    func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
+        guard let tab else { return }
+        let r = OwlCoordinator.replay(shown, document: document)
+        replays += 1
+        presented = (r.hint, r.documentRange, r.expected)
+        let buttons = own ? buttons(for: r.hint, tab: tab)
+            : [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }]
+        showBubble(r.hint, buttons: buttons)
+    }
+
     // MARK: Typos
 
     static let typoFixID = "spelling.fixTypos"
@@ -669,7 +718,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let hint = OwlHint(id: Self.typoFixID, kind: .fix, title: String(localized: "Fix \(fix.count) typos?"),
                            detail: String(localized: "Fix Typos… goes through them one by one; Fix All uses the first suggestion for each, as one undo step."),
                            range: local, replacement: fix.replacement, source: "rules")
-        hub.coordinator.markShown(hint, documentID: tab.doc.id)
+        hub.coordinator.markShown(hint, documentID: tab.doc.id, context: ctx)
         present(hint, context: ctx)
         return true
     }
@@ -709,7 +758,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
             // cliché, and Ignore this word (Settings' exceptions, saved).
             if hint.replacement != nil {
                 out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self] in _ = self?.applyPresented() })
-            } else {
+            } else if hint.range != nil {
                 out.append(.init(title: String(localized: "Show Me"), isDefault: true) { [weak self] in self?.showPresented() })
             }
             out.append(.init(title: String(localized: "Ignore this word"), isDefault: false) { [weak self] in
@@ -741,7 +790,10 @@ final class OwlController: NSObject, NSPopoverDelegate {
             out.append(.init(title: String(localized: "Fix Typos…"), isDefault: true) { [weak self, weak tab] in
                 self?.hideBubble(); tab?.startSpellStep()
             })
-            out.append(.init(title: String(localized: "Fix All"), isDefault: false) { [weak self] in _ = self?.applyPresented() })
+            // Shown again after the text changed: no replacement, no Fix All.
+            if hint.replacement != nil {
+                out.append(.init(title: String(localized: "Fix All"), isDefault: false) { [weak self] in _ = self?.applyPresented() })
+            }
         } else if hint.replacement != nil {
             out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self, weak tab] in
                 guard let self, self.applyPresented() else { return }
@@ -902,11 +954,20 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let head = NSTextField(labelWithString: String(localized: "Recent hints"))
         head.font = .systemFont(ofSize: 12, weight: .semibold)
         stack.addArrangedSubview(head)
-        if let status = hub.ai.statusLine() {
+        if let status = hub.ai.statusLine(autoReviewCapped: tab?.autoReviewCapped == true) {
             let l = NSTextField(wrappingLabelWithString: status)
             l.font = .systemFont(ofSize: 11)
             l.textColor = .secondaryLabelColor
             l.preferredMaxLayoutWidth = 260
+            stack.addArrangedSubview(l)
+        }
+        // Over the auto-review cap: a quiet line, never a modal on open.
+        if let tab, tab.autoReviewCapped {
+            let l = NSTextField(wrappingLabelWithString: AutoReviewCap.note(tab.autoReviewSize))
+            l.font = .systemFont(ofSize: 11)
+            l.textColor = .secondaryLabelColor
+            l.preferredMaxLayoutWidth = 260
+            l.identifier = Self.autoReviewNoteID
             stack.addArrangedSubview(l)
         }
         let recent = hub.coordinator.recent
@@ -919,10 +980,15 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let f = DateFormatter()
         f.timeStyle = .short
         for r in recent {
-            let l = NSTextField(wrappingLabelWithString: "\(f.string(from: r.date))  \(r.hint.title)")
-            l.font = .systemFont(ofSize: 11)
-            l.preferredMaxLayoutWidth = 260
-            stack.addArrangedSubview(l)
+            // A button that looks like the label it was: shows the hint again.
+            let time = f.string(from: r.date)
+            var spoken = "\(time), \(r.hint.title)"
+            if let d = r.hint.detail, !d.isEmpty {
+                spoken += ". " + (d.count > 120 ? String(d.prefix(120)) + "…" : d)
+            }
+            let row = OwlRecentHintRow(text: "\(time)  \(r.hint.title)", accessibilityText: spoken,
+                                       toolTip: r.hint.detail) { [weak self] in self?.replay(r) }
+            stack.addArrangedSubview(row)
         }
         let quiet: NSButton
         if hub.coordinator.isQuiet {
@@ -973,7 +1039,38 @@ final class OwlController: NSObject, NSPopoverDelegate {
         p.delegate = self
         p.show(relativeTo: owl.bounds, of: owl, preferredEdge: .maxY)
         popover = p
+        // Tab reaches the recent hints (custom views join the loop once it
+        // is recalculated).
+        stack.window?.autorecalculatesKeyViewLoop = true
+        stack.window?.recalculateKeyViewLoop()
     }
+
+    static let autoReviewNoteID = NSUserInterfaceItemIdentifier("owl.autoReviewNote")
+
+    /// The open popover's recent-hint rows, top first (checks).
+    var popoverRecentRows: [OwlRecentHintRow] {
+        var out: [OwlRecentHintRow] = []
+        func walk(_ v: NSView) {
+            if let r = v as? OwlRecentHintRow { out.append(r); return }
+            v.subviews.forEach(walk)
+        }
+        if let root = popover?.contentViewController?.view { walk(root) }
+        return out
+    }
+
+    /// The popover's quiet auto-review note, if shown (checks).
+    var popoverAutoReviewNote: String? {
+        func find(_ v: NSView) -> NSTextField? {
+            if let t = v as? NSTextField, t.identifier == Self.autoReviewNoteID { return t }
+            for s in v.subviews { if let t = find(s) { return t } }
+            return nil
+        }
+        guard let root = popover?.contentViewController?.view else { return nil }
+        return find(root)?.stringValue
+    }
+
+    /// The popover's window (checks: its snapshot).
+    var popoverWindow: NSWindow? { popover?.contentViewController?.view.window }
 
     var popoverShown: Bool { popover?.isShown == true }
     /// A button in the open popover (the checks).
@@ -1023,7 +1120,11 @@ final class OwlController: NSObject, NSPopoverDelegate {
     @objc func askAINow() {
         closePopover()   // at once: a fast answer must not find it still up
         guard let tab else { return }
-        OwlHub.shared.askAI(in: tab)
+        // Over the auto-review cap: a confirmation first (Cancel by default).
+        tab.confirmAskingCedric { [weak tab] in
+            guard let tab else { return }
+            OwlHub.shared.askAI(in: tab)
+        }
     }
 
     @objc func grammarWithAI() {

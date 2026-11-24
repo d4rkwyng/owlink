@@ -43,6 +43,13 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
     /// Ask the model on its own after typing pauses. Off by default for
     /// servers and on Intel Macs; "Ask AI Now" remains available.
     public var automaticChecks: Bool
+    /// Built-in engine only: load the model when Owlink starts (and when
+    /// this is turned on), off the main thread and under the watchdog.
+    /// Off by default: then the built-in model is loaded only when the user
+    /// asks (Ask Cedric, Review, Ask AI Now, Check Grammar with Cedric…),
+    /// and automatic hints use it only after that. Settings saved before
+    /// this existed load with it off.
+    public var loadModelAtLaunch: Bool
 
     /// True on Apple silicon for on-device engines; false on Intel, where
     /// a model on the CPU would compete with typing.
@@ -71,7 +78,8 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
                 pauseDelay: TimeInterval = 5,
                 timeout: TimeInterval = 20,
                 minIdle: TimeInterval = 10,
-                automaticChecks: Bool? = nil) {
+                automaticChecks: Bool? = nil,
+                loadModelAtLaunch: Bool = false) {
         self.enabled = enabled
         self.backend = backend
         self.baseURL = baseURL ?? backend.defaultBaseURL
@@ -81,10 +89,11 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         self.timeout = timeout
         self.minIdle = minIdle
         self.automaticChecks = automaticChecks ?? Self.defaultAutomaticChecks(for: backend)
+        self.loadModelAtLaunch = loadModelAtLaunch
     }
 
     enum CodingKeys: String, CodingKey {
-        case enabled, backend, baseURL, model, minInterval, pauseDelay, timeout, minIdle, automaticChecks
+        case enabled, backend, baseURL, model, minInterval, pauseDelay, timeout, minIdle, automaticChecks, loadModelAtLaunch
     }
 
     /// Settings saved before `minIdle` or `automaticChecks` existed still
@@ -100,7 +109,11 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         timeout = try c.decode(TimeInterval.self, forKey: .timeout)
         minIdle = try c.decodeIfPresent(TimeInterval.self, forKey: .minIdle) ?? 10
         automaticChecks = try c.decodeIfPresent(Bool.self, forKey: .automaticChecks) ?? Self.defaultAutomaticChecks(for: backend)
+        loadModelAtLaunch = try c.decodeIfPresent(Bool.self, forKey: .loadModelAtLaunch) ?? false
     }
+
+    /// Settings › Cedric, under "Load model at launch", word for word.
+    public static let loadModelAtLaunchNote = "Off: automatic hints use the built-in model only after you have asked Cedric something since Owlink started. On: Owlink loads it in the background when it starts."
 
     public static let `default` = LocalAISettings()
 
@@ -326,15 +339,18 @@ extension LocalAISettings {
         public var model: String?
         public var minInterval: TimeInterval
         public var automaticChecks: Bool
+        /// nil: unchanged.
+        public var loadModelAtLaunch: Bool?
 
         public init(enabled: Bool, backend: Backend, addressText: String, model: String?,
-                    minInterval: TimeInterval, automaticChecks: Bool) {
+                    minInterval: TimeInterval, automaticChecks: Bool, loadModelAtLaunch: Bool? = nil) {
             self.enabled = enabled
             self.backend = backend
             self.addressText = addressText
             self.model = model
             self.minInterval = minInterval
             self.automaticChecks = automaticChecks
+            self.loadModelAtLaunch = loadModelAtLaunch
         }
     }
 
@@ -371,6 +387,7 @@ extension LocalAISettings {
         next.model = draft.model
         next.minInterval = draft.minInterval
         next.automaticChecks = switchedToServer ? false : draft.automaticChecks
+        if let v = draft.loadModelAtLaunch { next.loadModelAtLaunch = v }
         return .apply(next)
     }
 }

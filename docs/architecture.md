@@ -534,18 +534,47 @@ What Cedric does now:
   content and separator ranges supplied (TextKit raises without them).
   Lines that fit in one chunk get TextKit's own paragraph (making those
   ourselves broke its height estimates: scrolling a 6 MB many-line file
-  snapped back).
+  snapped back). The storage chunks only when a line is over 20,000
+  characters (`LargeDocument.needsChunks`, also after an edit): a file
+  that is large by size alone keeps TextKit's own enumeration. In 0.5.2
+  every large document chunked, and a log past 25 M characters (the size
+  threshold) went through this override one short line at a time; on
+  macOS 26.6.2 that crashed in layout within a second of opening
+  (`-[NSCountableTextLocation compare:]` raising from
+  `_NSTextLayoutFragmentStorage` under `estimatedSizeForLastTextContainer`;
+  macOS 27 was fine). Not chunking short-line logs fixed the open, but one
+  long line anywhere still turns chunks on, and then every short line goes
+  through the override again: a 55 MiB log with a pasted 30,000-character
+  line crashed the same way. The cause was the override itself, not the
+  mix of TextKit's paragraphs and ours: enumerating forwards from the end
+  of the text it handed out the last line (an element lying before the
+  location asked from), where NSTextContentStorage hands out nothing, and
+  `estimatedSizeForLastTextContainer` asks from exactly there; backwards
+  from nil it also handed out the last line, where TextKit's hands out
+  nothing. Now, with all lines short, the override's elements and returned
+  locations are TextKit's own from every offset, both ways
+  (`Scripts/chunks-check.sh`, no app: also walks chunked lines across
+  edits and lays out a pasted long line in a 60,000-line text). Chunk
+  separators are `\r\n` when the line ends so, as TextKit's.
+  `Scripts/bigfile-check.sh` opens a generated 55 MiB log
+  (`CEDRIC_CHECK=bigfile`) and pastes a 30,000-character line into it.
   Chunk size, measured: 500 → 31 ms per keystroke (too many elements),
   1,000 → 6–10 ms, 2,048 → 6.5 ms, 4,096 → 6.7 ms, 8,192 → 7.6 ms.
   Wrapping stays as the user set it: chunked, wrapped and unwrapped cost
   the same, so there's no reason to turn it off.
 - **Large mode** (`LargeDocument` in CedricCore): on when any line is
   longer than 20,000 characters (from the table above: well under a frame
-  on slower Macs) or the document is longer than 5,000,000 UTF-16 units.
-  Checked before the text reaches TextKit on open, reload and restore, and
+  on slower Macs) or the document is longer than 25,000,000 UTF-16 units
+  (`LargeDocument.sizeThreshold`).
+  Checked before the text reaches TextKit on open and restore, and
   after each edit for the edited lines only (a long paste turns it on; the
-  pause takes effect for that same edit, the chunks a run-loop turn later).
-  Typing a line short again doesn't turn it off; a new text does. It
+  pause takes effect for that same edit, the chunks a run-loop turn later;
+  the queued step bails if the text was replaced meanwhile, and rechecks
+  the whole text if it was edited again). Typing a line short again
+  doesn't turn it off; a new text does. File › Revert to Saved and Reload
+  on the changed-on-disk bar replace the text as one undoable edit, so
+  they recheck all of it a turn later (`largeModeReplacingAll`): large
+  mode, and chunks, follow the file on disk, not just its first line. It
   shows a slim bar ("Very long lines: colouring, spell check and the owl
   are paused for speed. [Turn On Anyway]"), pauses colouring
   (`SyntaxColorizer.paused`, including the whole-document recolour), spell
@@ -617,8 +646,11 @@ first shown (no WebKit work at launch). Markdown goes through
   Cedric scrolls, so no spelling loads another document;
   everything else (redirects, meta refresh,
   script `location`, form submits, frames, new windows, any other scheme)
-  is cancelled. A navigation response that isn't `cedric-doc:` or exactly
-  `about:blank` is cancelled too, and the `WKUIDelegate` opens no windows. Images,
+  is cancelled. A navigation response is let through only in the main
+  frame and only for the exact page Cedric is loading (`expectedPageURL`,
+  set until that load finishes or fails; `PreviewNavigation.allowsResponse`):
+  another `cedric-doc:` page, or any response while no load is in
+  progress, is cancelled (fails closed). The `WKUIDelegate` opens no windows. Images,
   styles and fonts are subresources, governed by the Network setting.
 - The link prompt (`LinkPrompt`, shared with PDF tabs) shows the site on
   its own line as the opened URL spells it (punycode for a non-ASCII
@@ -1748,7 +1780,10 @@ package (2026-11-17, M4 Pro, Command Line Tools only, Swift 6.4.2):
 
 `LlamaRuntime` (`BuiltInRuntime`) loads a GGUF with every layer on Metal
 (Apple silicon) or on the CPU with one thread per physical core (Intel),
-a 4096-token context and the model's own chat template (ChatML fallback),
+a context sized to the Mac (`BuiltInModel.contextTokens()`: the largest of
+16,384, 8,192 or 4,096 tokens whose weights, f16 KV cache and 512 MiB of
+overhead fit in half of physical memory, else 4,096; Ask Cedric's budget
+follows the same n_ctx) and the model's own chat template (ChatML fallback),
 and decodes greedily. Every llama.cpp call runs on one serial queue;
 cancellation (a new edit, the scheduler's 20 s cap) is checked per token.
 Loaded models are freed from an `atexit` handler: ggml's Metal device is a
@@ -1914,7 +1949,8 @@ Applying (`OwlEditProposal.state`): a `.text` proposal is `.ready(range)` while 
 live text, wherever it now is, so typing elsewhere leaves it applicable and applying one card doesn't strand the
 others; an edit inside it, or a second copy, makes it `.stale`. A quick action's ``` block (no tools) still
 makes a `.lines` proposal, applicable only while the document is unchanged since asking. A read-only document
-(a read-only tab, a followed file, iOS read mode) is `.readOnly` for both. The panel shows one `OwlEditCard` per
+(a read-only tab, a followed file, iOS read mode, a file that can't be written: `FileWriteAccess`, even after Allow
+Editing) is `.readOnly` for both. The panel shows one `OwlEditCard` per
 proposal (Apply / Skip, Ask Again once stale), each Apply one undo step; the cards are rechecked 0.15 s after a
 burst of typing, and only while there are any.
 
