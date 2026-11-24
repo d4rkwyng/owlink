@@ -42,6 +42,7 @@ extension DevChecks {
         expect(!app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == std }, "…and has no tab while it reads")
         let second = app.open(url, background: true) { arrived.append($0) }
         expect(second == nil && app.backgroundOpens.count == 1, "opening it again while it reads starts nothing new")
+        expect(!app.lastCloseMayQuit, "closing the last other tab while it reads doesn't quit (quit on last close)")
         // Closing another tab while it reads.
         other?.doc.markSaved()
         other?.window?.performClose(nil)
@@ -64,6 +65,7 @@ extension DevChecks {
                 print(String(format: "check: note: background open ready in %.0f ms", (DevHooks.now() - t0) * 1000))
                 expect(arrived.count == 2 && arrived[0] === arrived[1], "both opens get the one tab", "\(arrived.count)")
                 expect(app.backgroundOpens.isEmpty, "nothing left reading")
+                expect(app.lastCloseMayQuit, "…and a last close may quit again")
                 let mine = app.tabs.filter { $0.doc.fileURL?.standardizedFileURL == std }
                 expect(mine.count == 1, "one tab for the file", "\(mine.count)")
                 tab = mine.first ?? arrived.first

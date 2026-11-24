@@ -179,8 +179,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// dev hooks drive tabs open and shut, so it is off under them unless
     /// CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1.
     var quitsOnLastClose: Bool {
-        launched && !terminating && pendingRestore.isEmpty && DevHooks.allowsQuitOnLastClose
-            && Settings.shared.quitWhenLastWindowCloses
+        lastCloseMayQuit && DevHooks.allowsQuitOnLastClose && Settings.shared.quitWhenLastWindowCloses
+    }
+
+    /// Nothing still to come that a last close would throw away: launch
+    /// done, restored tabs built, no big file reading in the background
+    /// (its tab is on its way: closing the only other tab must not quit).
+    var lastCloseMayQuit: Bool {
+        launched && !terminating && pendingRestore.isEmpty && backgroundOpens.isEmpty
     }
 
     /// The document tabs' windows other than `window` (text and viewer tabs:
