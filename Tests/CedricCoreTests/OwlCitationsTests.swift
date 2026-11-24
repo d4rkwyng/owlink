@@ -154,6 +154,20 @@ import Testing
                 }
             }
         }
+        // After a citation held across rows, a later one on the same row is still checked,
+        // and odd spacing in ", and" still holds the row.
+        for answer in ["Line 4 through\n9999 describes line 77.", "See lines 3 and\n31 describe line 77.",
+                       "lines 3,  and\n9999 describe it.", "lines 3,\tand\r\n9999 describe it."] {
+            let f = OwlCitations.filter(answer, allowed: IndexSet([3, 4]))
+            for size in [1, 2, 5, answer.count] {
+                let (before, all) = Self.streamed(answer, size: size, allowed: IndexSet([3, 4]))
+                for c in OwlCitations.find(before) where !IndexSet([3, 4]).contains(integersIn: c.lines) {
+                    #expect((before as NSString).substring(from: NSMaxRange(c.range)).hasPrefix(OwlCitations.flag),
+                            "\(size): \(before.debugDescription)")
+                }
+                #expect(all == f.text, "\(size): \(all.debugDescription) vs \(f.text.debugDescription)")
+            }
+        }
         // Wholly inside the lines given, it passes untouched.
         let fine = "Line 4 through\n18 describes the setup."
         #expect(OwlCitations.filter(fine, allowed: Self.lines1to18).text == fine)
@@ -176,6 +190,8 @@ import Testing
         // "lines" still lists with commas, and "line … and" still joins.
         #expect(OwlCitations.find("See lines 3, 7.").map(\.lines) == [3...3, 7...7])
         #expect(OwlCitations.find("See line 3 and 7.").map(\.lines) == [3...3, 7...7])
+        #expect(OwlCitations.find("See line 3, 7 and 9-11.").map(\.lines) == [3...3, 7...7, 9...11])
+        #expect(OwlCitations.find("See line 3, 5, 7, and 9").map(\.lines) == [3...3, 5...5, 7...7, 9...9])
         #expect(OwlCitations.find("L2 regularization").isEmpty)
     }
 

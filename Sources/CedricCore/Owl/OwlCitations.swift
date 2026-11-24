@@ -33,18 +33,22 @@ public enum OwlCitations {
 
     // "line 12", "lines 3-5", "lines 3 to 5", "lines 3, 7 and 9-11",
     // "lines 3 and 31 describe". A number joined by "and" or "&" is always
-    // listed; one after a bare comma only after "lines", and only if it ends
-    // the list or a clause ("line 5, 2026" and "line 3, 100 items" cite only
-    // 5 and 3). A citation may run onto the next row only after a word or
+    // listed; one after a bare comma only if it ends the list or a clause,
+    // and after "line" only on the way to an "and" ("line 5, 2026" and
+    // "line 3, 100 items" cite only 5 and 3). A citation may run onto the next row only after a word or
     // mark that joins it ("Line 4 through" / "9999"): never at "line" itself
     // or before "and", "to" or a dash, so a stream can tell at a row's end
     // whether the citation goes on (`Stream`).
     private static let span = #"(?:(?:[^\S\r\n]*[-–—]|[^\S\r\n]*(?:to|through))\s*\d+)?"#
     private static let joined = #"(?:[^\S\r\n]*(?:,[^\S\r\n]*and|and|&)\s*\d+"# + span + #"\b)"#
     private static let comma = #"(?:[^\S\r\n]*,\s*\d+"# + span + #"(?=[^\S\r\n]*(?:[,.;:)]|and\b|&|$)))"#
+    // After "line", a bare comma lists a number only on the way to an "and"
+    // ("line 3, 7 and 9").
+    private static let commaBeforeAnd = #"(?:[^\S\r\n]*,\s*\d+"# + span + #"(?=(?:[^\S\r\n]*,\s*\d+"# + span
+        + #")*[^\S\r\n]*(?:,[^\S\r\n]*)?(?:and|&)\s*\d))"#
     private static let listed = try! NSRegularExpression(pattern:
         #"(?i)\b(?:lines[^\S\r\n]+(\d+"# + span + #"(?:"# + joined + "|" + comma + #")*)|line[^\S\r\n]+(\d+"#
-        + span + joined + #"*))\b"#,
+        + span + #"(?:"# + joined + "|" + commaBeforeAnd + #")*))\b"#,
         options: [.anchorsMatchLines])
     private static let number = try! NSRegularExpression(pattern: #"(?i)(\d+)(?:\s*(?:[-–—]|to|through)\s*(\d+))?"#)
     // A quoted numbered line: "31| text".
@@ -270,8 +274,8 @@ public enum OwlCitations {
         /// citation is checked whole once it ends.
         private func continuesOnNextRow() -> Bool {
             guard let lastDigit = held.lastIndex(where: { $0.isASCII && $0.isNumber }) else { return false }
-            let tail = held[held.index(after: lastDigit)...].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return ["and", "to", "through", ",", ", and", ",and", "&", "-", "–", "—"].contains(tail)
+            let tail = String(held[held.index(after: lastDigit)...].filter { !$0.isWhitespace }).lowercased()
+            return ["and", "to", "through", ",", ",and", "&", "-", "–", "—"].contains(tail)
         }
 
         private mutating func release(_ allowed: IndexSet) -> String {
@@ -282,10 +286,11 @@ public enum OwlCitations {
             // Flags go after a citation's number: what was shown stays a prefix.
             let out = checked.hasPrefix(shown) ? String(checked.dropFirst(shown.count))
                 : OwlCitations.flagOnly(held, allowed: allowed).text
-            // The row now being written: after the last break, if any.
-            if let nl = held.lastIndex(where: \.isNewline) {
-                raw = String(held[held.index(after: nl)...])
-                shown = out.lastIndex(where: \.isNewline).map { String(out[out.index(after: $0)...]) } ?? raw
+            // A row ended outside a citation starts afresh. Rows a citation
+            // ran across stay, so the next check still reads it whole and
+            // what was shown of them stays a prefix of what it gives.
+            if held.last?.isNewline ?? false {
+                raw = ""; shown = ""
             } else {
                 raw += held; shown += out
             }
