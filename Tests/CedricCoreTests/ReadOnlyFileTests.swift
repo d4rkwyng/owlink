@@ -307,13 +307,91 @@ import Testing
                 "no temporary or new file is left")
     }
 
-    /// A write that fails part way through an in-place save (here EFBIG
-    /// from a file-size limit, which takes the same path as a full disk)
-    /// leaves the file as it was: 0.5.4 before QA truncated it first, so
-    /// a 74,893-byte file became the first 100,000 bytes of the new text
-    /// (and 0 bytes on a full disk). The limit is the process's and is
-    /// put back straight after the save, with SIGXFSZ ignored meanwhile.
-    @Test func aWriteThatFailsPartWayLeavesTheInPlaceFileAsItWas() throws {
+    /// The recovery copies named `name` left in the temporary folder.
+    func recoveryCopies(named name: String) -> [String] {
+        let tmp = NSTemporaryDirectory()
+        let dirs = (try? FileManager.default.contentsOfDirectory(atPath: tmp)) ?? []
+        return dirs.filter { $0.hasPrefix("owlink-recovery-") }
+            .map { (tmp as NSString).appendingPathComponent($0) + "/" + name }
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// An in-place save whose write fails after part of the new text is on
+    /// disk (injected EIO) puts the file back byte for byte from its
+    /// recovery copy, longer and shorter, and deletes the copy. 0.5.4
+    /// before QA truncated first; the round-1 fix restored from memory
+    /// and ignored a failed restore.
+    @Test func aWriteThatFailsAfterAPrefixIsPutBackFromTheRecoveryCopy() throws {
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+        let name = "doc-\(UUID().uuidString).md"
+        let url = try file(name)
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        let longer = Data(repeating: UInt8(ascii: "n"), count: 200_000)
+        let shorter = Data("short\n".utf8)
+        for (data, after) in [(longer, 50_000), (longer, 100_000), (shorter, shorter.count)] {
+            var thrown: Error?
+            do {
+                try DocumentWrite.write(data, to: url, fileManager: .default, afterCheck: nil,
+                                        faults: .init(failWriteAfter: after))
+            } catch { thrown = error }
+            #expect(thrown is CocoaError, "the save fails with an error the user sees")
+            #expect((thrown as NSError?)?.userInfo["OwlinkRecoveryCopy"] == nil)
+            #expect(try Data(contentsOf: url) == original, "\(data.count) bytes failing after \(after): every original byte, and the length")
+        }
+        #expect(recoveryCopies(named: name).isEmpty, "the recovery copy is deleted once the file is back")
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [name])
+
+        // And a save that works leaves no copy either.
+        #expect(chmod(dir.path, 0o555) == 0)
+        try DocumentWrite.write(longer, to: url)
+        #expect(try Data(contentsOf: url) == longer)
+        #expect(recoveryCopies(named: name).isEmpty)
+    }
+
+    /// If putting the file back fails too, the recovery copy is kept and
+    /// the error's recovery suggestion says where it is.
+    @Test func aFailedRestoreKeepsTheRecoveryCopyAndSaysWhere() throws {
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) })
+        let name = "doc-\(UUID().uuidString).md"
+        let url = try file(name)
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        var thrown: Error?
+        do {
+            try DocumentWrite.write(Data(repeating: 0x6E, count: 200_000), to: url, fileManager: .default, afterCheck: nil,
+                                    faults: .init(failWriteAfter: 50_000, failRestore: true))
+        } catch { thrown = error }
+        let error = try #require(thrown as NSError?)
+        let copy = try #require(error.userInfo["OwlinkRecoveryCopy"] as? String)
+        defer { try? FileManager.default.removeItem(atPath: (copy as NSString).deletingLastPathComponent) }
+        #expect(error.localizedRecoverySuggestion?.contains(copy) == true, "the alert shows where the copy is")
+        #expect(copy.hasPrefix(NSTemporaryDirectory()) && copy.hasSuffix("/" + name))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: copy)) == original, "the copy is the file as it was")
+        var st = stat()
+        #expect(stat((copy as NSString).deletingLastPathComponent, &st) == 0 && st.st_mode & 0o777 == 0o700, "in a private folder")
+        #expect(recoveryCopies(named: name) == [copy])
+    }
+
+    /// A file-size limit (RLIMIT_FSIZE) in a child process, since the
+    /// limit and SIGXFSZ's disposition are process-wide. With the app's
+    /// launch setup (`ignoreFileSizeSignal`), a save larger than the limit
+    /// is refused before writing; one that hits the limit part way (the
+    /// check skipped) gets EFBIG, not SIGXFSZ, and is put back. Either
+    /// way the child lives and the file keeps every original byte. 0.5.4
+    /// before QA truncated first: 74,893 bytes became the first 100,000
+    /// of the new text.
+    @Test func aFileSizeLimitInAChildProcessLeavesTheFileAsItWas() throws {
+        if let path = ProcessInfo.processInfo.environment["OWLINK_FSIZE_CHILD"] {
+            Self.fileSizeChild(URL(fileURLWithPath: path))
+        }
         let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
         let url = try file("doc.md")
         let dir = url.deletingLastPathComponent()
@@ -321,24 +399,52 @@ import Testing
         defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
         #expect(chmod(dir.path, 0o555) == 0)
 
-        let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
-        let oldHandler = signal(SIGXFSZ, SIG_IGN)
-        var old = rlimit()
-        #expect(getrlimit(RLIMIT_FSIZE, &old) == 0)
-        var limit = rlimit(rlim_cur: 100_000, rlim_max: old.rlim_max)
-        var thrown: Error?
-        if setrlimit(RLIMIT_FSIZE, &limit) == 0 {
-            do { try DocumentWrite.write(bigger, to: url) } catch { thrown = error }
-            #expect(setrlimit(RLIMIT_FSIZE, &old) == 0)
-        } else {
-            Issue.record("couldn't lower RLIMIT_FSIZE")
-        }
-        signal(SIGXFSZ, oldHandler)
-
-        #expect(thrown is CocoaError, "the save fails with an error the user sees")
+        let args = CommandLine.arguments
+        let bundle = try #require(args.firstIndex(of: "--test-bundle-path").map { args[$0 + 1] },
+                                  "run by swiftpm-testing-helper: \(args)")
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: args[0])
+        child.arguments = ["--test-bundle-path", bundle, "--filter", "aFileSizeLimitInAChildProcessLeavesTheFileAsItWas",
+                           bundle, "--testing-library", "swift-testing"]
+        child.environment = ProcessInfo.processInfo.environment.merging(["OWLINK_FSIZE_CHILD": url.path]) { $1 }
+        let out = Pipe()
+        child.standardOutput = out
+        child.standardError = out
+        try child.run()
+        let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        child.waitUntilExit()
+        #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
+        #expect(child.terminationStatus == 0, "\(output)")
+        #expect(output.contains("fsize child: ok"), "\(output)")
         #expect(try Data(contentsOf: url) == original, "the file keeps every original byte, and its length")
         #expect(chmod(dir.path, 0o755) == 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["doc.md"])
+    }
+
+    /// The child's half: exits 0 printing "fsize child: ok", else 1.
+    static func fileSizeChild(_ url: URL) -> Never {
+        DocumentWrite.ignoreFileSizeSignal()
+        var failures: [String] = []
+        guard let original = try? Data(contentsOf: url) else { print("fsize child: can't read"); exit(1) }
+        var limit = rlimit(rlim_cur: 100_000, rlim_max: 0)
+        var old = rlimit()
+        _ = getrlimit(RLIMIT_FSIZE, &old)
+        limit.rlim_max = old.rlim_max
+        guard setrlimit(RLIMIT_FSIZE, &limit) == 0 else { print("fsize child: can't lower RLIMIT_FSIZE"); exit(1) }
+        let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
+        for skip in [false, true] {
+            do {
+                try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
+                                        faults: .init(skipSizeLimit: skip))
+                failures.append("skip=\(skip): the save succeeded")
+            } catch {
+                let posix = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError)?.code
+                if posix != Int(EFBIG) { failures.append("skip=\(skip): \(error), not EFBIG") }
+            }
+            if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
+        }
+        print(failures.isEmpty ? "fsize child: ok" : "fsize child: \(failures)")
+        exit(failures.isEmpty ? 0 : 1)
     }
 
     /// The in-place save is refused, before anything is written, when the

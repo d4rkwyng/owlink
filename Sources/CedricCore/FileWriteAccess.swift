@@ -130,8 +130,20 @@ public enum DocumentWrite {
         try write(data, to: url, fileManager: fm, afterCheck: nil)
     }
 
+    /// Failures the tests inject into the in-place save (`overwrite`).
+    struct Faults {
+        /// Write this many bytes of the new text, then fail with EIO.
+        var failWriteAfter: Int?
+        /// Fail putting the file back with EIO.
+        var failRestore = false
+        /// Skip the file-size limit check, so the kernel's limit is hit
+        /// part way through the write.
+        var skipSizeLimit = false
+    }
+
     /// `afterCheck`: tests only, runs between the check and the write.
-    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?) throws {
+    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?,
+                      faults: Faults? = nil) throws {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
@@ -149,7 +161,7 @@ public enum DocumentWrite {
             // The folder refuses a new file (0555, or search-only 0100):
             // write the checked file in place, through the same folder.
             guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
-            try overwrite(name, in: dir, checked: checked, with: data, url: url)
+            try overwrite(name, in: dir, checked: checked, with: data, url: url, faults: faults)
             return
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
@@ -224,52 +236,153 @@ public enum DocumentWrite {
     /// atomic write by path here.)
     ///
     /// A failed write never leaves the file destroyed. 0.5.4 before QA
-    /// truncated it to nothing first, so a full disk (ENOSPC), a quota
-    /// or a file-size limit part way through left it empty or holding
-    /// the start of the new text. Now the save is refused before anything
-    /// is written when the volume has less free space than the new text
-    /// (`enoughSpace`, what the usual replace needs too) or can't
-    /// preallocate the growth; the old bytes are read through the same
-    /// handle (so it is opened for reading and writing), the new ones are
-    /// written over them and the file is cut to the new length only after
-    /// every byte is written; and if a write still fails, the old bytes
-    /// and length are put back before the error is thrown.
-    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
+    /// truncated it to nothing first, so a full disk (ENOSPC), a quota or
+    /// a file-size limit part way through left it empty or holding the
+    /// start of the new text. Now:
+    ///
+    /// - The save is refused before anything is written when the new text
+    ///   is larger than the process's file-size limit (RLIMIT_FSIZE; the
+    ///   app ignores SIGXFSZ, `ignoreFileSizeSignal`, so a limit hit
+    ///   anyway is an EFBIG error, not a crash), when the volume has less
+    ///   free space than the new text, or can't preallocate the growth.
+    /// - The file as it is is copied to a recovery copy in a private
+    ///   temporary folder (`makeRecoveryCopy`, 64 KB at a time) and the
+    ///   copy is flushed to disk. If the copy can't be made, or the file
+    ///   is shorter than it was or changed while it was copied, nothing is
+    ///   written.
+    /// - The new bytes are written over the old ones, the file is cut to
+    ///   the new length and flushed; then the recovery copy is deleted.
+    /// - If any of that fails, the file is put back from the recovery copy
+    ///   (bytes and length) and the error is thrown. If putting it back
+    ///   fails too, the recovery copy is kept and the error's recovery
+    ///   suggestion says where it is.
+    ///
+    /// Not covered (0.6): another program writing the file during the
+    /// save; its changes can be lost, as with any in-place write.
+    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL,
+                                  faults: Faults?) throws {
         let fd = openat(dir, name, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw writeError(errno, url) }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
+        guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
+            throw writeError(EBUSY, url)
+        }
+        // The checked regular file: back to ordinary blocking I/O.
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
+        if faults?.skipSizeLimit != true, !withinFileSizeLimit(data.count) { throw writeError(EFBIG, url) }
+        var fs = statfs()
+        if fstatfs(fd, &fs) == 0, !enoughSpace(for: data.count, in: fs) { throw writeError(ENOSPC, url) }
+        let oldCount = Int(st.st_size)
+        if data.count > oldCount {
+            var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL), fst_posmode: F_PEOFPOSMODE,
+                                 fst_offset: 0, fst_length: off_t(data.count - oldCount), fst_bytesalloc: 0)
+            if fcntl(fd, F_PREALLOCATE, &store) == -1, errno == ENOSPC || errno == EDQUOT || errno == EFBIG {
+                throw writeError(errno, url)
+            }
+        }
+        // Changed while it was copied (another program writing it): the
+        // copy may not be the file, so nothing is written. (The baseline
+        // is taken after preallocating, which can touch the times.)
+        var before = stat(), now = stat()
+        guard fstat(fd, &before) == 0, before.st_size == st.st_size else { throw writeError(EBUSY, url) }
+        let recovery = try makeRecoveryCopy(of: fd, count: oldCount, name: name, url: url)
+        guard fstat(fd, &now) == 0, now.st_size == before.st_size,
+              now.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, now.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+              now.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec, now.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else {
+            removeRecoveryCopy(recovery)
+            throw writeError(EBUSY, url)
+        }
         do {
-            var st = stat()
-            guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
-            guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
-                throw writeError(EBUSY, url)
+            if let n = faults?.failWriteAfter {
+                try writeAll(data.prefix(n), to: fd, at: 0, url: url)
+                throw writeError(EIO, url)
             }
-            // The checked regular file: back to ordinary blocking I/O.
-            let flags = fcntl(fd, F_GETFL)
-            guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
-            var fs = statfs()
-            if fstatfs(fd, &fs) == 0, !enoughSpace(for: data.count, in: fs) { throw writeError(ENOSPC, url) }
-            let old = try readAll(fd, count: Int(st.st_size), url: url)
-            if data.count > old.count {
-                var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL), fst_posmode: F_PEOFPOSMODE,
-                                     fst_offset: 0, fst_length: off_t(data.count - old.count), fst_bytesalloc: 0)
-                if fcntl(fd, F_PREALLOCATE, &store) == -1, errno == ENOSPC || errno == EDQUOT || errno == EFBIG {
-                    throw writeError(errno, url)
-                }
-            }
-            do {
-                try writeAll(data, to: fd, at: 0, url: url)
-                if data.count < old.count, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
-            } catch {
-                // Put the old bytes back (they fit where they were) and the old length.
-                _ = try? writeAll(old, to: fd, at: 0, url: url)
-                _ = ftruncate(fd, off_t(old.count))
-                throw error
-            }
+            try writeAll(data, to: fd, at: 0, url: url)
+            if data.count < oldCount, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
+            guard fsync(fd) == 0 else { throw writeError(errno, url) }
         } catch {
-            close(fd)
+            do {
+                if faults?.failRestore == true { throw writeError(EIO, url) }
+                try restore(fd, from: recovery, count: oldCount, url: url)
+            } catch {
+                throw keptRecoveryCopy(recovery, after: error, url: url)
+            }
+            removeRecoveryCopy(recovery)
             throw error
         }
-        guard close(fd) == 0 else { throw writeError(errno, url) }
+        removeRecoveryCopy(recovery)
+    }
+
+    /// For the app to call once at launch: a write past the file-size
+    /// limit (RLIMIT_FSIZE) then fails with EFBIG, which a save can
+    /// recover from, instead of SIGXFSZ ending the app.
+    public static func ignoreFileSizeSignal() {
+        signal(SIGXFSZ, SIG_IGN)
+    }
+
+    /// Whether a `count`-byte file is within this process's file-size limit.
+    static func withinFileSizeLimit(_ count: Int) -> Bool {
+        var lim = rlimit()
+        // RLIM_INFINITY, a macro Swift doesn't import.
+        let infinity = (rlim_t(1) << 63) - 1
+        guard getrlimit(RLIMIT_FSIZE, &lim) == 0, lim.rlim_cur < infinity else { return true }
+        return UInt64(count) <= UInt64(lim.rlim_cur)
+    }
+
+    /// Copies the first `count` bytes of `fd` to a new file named `name`
+    /// in a new private (0700) folder in this user's temporary folder,
+    /// and flushes it to disk. Throws, leaving nothing behind, if the copy
+    /// fails or `fd` holds fewer than `count` bytes.
+    static func makeRecoveryCopy(of fd: Int32, count: Int, name: String, url: URL) throws -> URL {
+        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("owlink-recovery-XXXXXX").utf8CString)
+        guard mkdtemp(&template) != nil else { throw writeError(errno, url) }
+        let folder = URL(fileURLWithPath: String(cString: template), isDirectory: true)
+        let copy = folder.appendingPathComponent(name)
+        do {
+            let out = open(copy.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard out >= 0 else { throw writeError(errno, url) }
+            defer { close(out) }
+            let copied = try copyBytes(from: fd, to: out, count: count, url: url)
+            guard copied == count else { throw writeError(EBUSY, url) }
+            guard fsync(out) == 0 else { throw writeError(errno, url) }
+        } catch {
+            removeRecoveryCopy(copy)
+            throw error
+        }
+        return copy
+    }
+
+    /// Puts the file back from its recovery copy: its bytes, its length, flushed.
+    private static func restore(_ fd: Int32, from recovery: URL, count: Int, url: URL) throws {
+        let src = open(recovery.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard src >= 0 else { throw writeError(errno, url) }
+        defer { close(src) }
+        guard try copyBytes(from: src, to: fd, count: count, url: url) == count else { throw writeError(EIO, url) }
+        guard ftruncate(fd, off_t(count)) == 0, fsync(fd) == 0 else { throw writeError(errno, url) }
+    }
+
+    private static func removeRecoveryCopy(_ copy: URL) {
+        _ = unlink(copy.path)
+        _ = rmdir(copy.deletingLastPathComponent().path)
+    }
+
+    /// The save's error, saying where the recovery copy is: the file
+    /// couldn't be put back, so the copy is the only whole one left.
+    private static func keptRecoveryCopy(_ copy: URL, after error: Error, url: URL) -> Error {
+        let ns = error as NSError
+        var info = ns.userInfo
+        info[NSURLErrorKey] = url
+        info[NSFilePathErrorKey] = url.path
+        info[NSLocalizedRecoverySuggestionErrorKey] = String(localized: """
+            Owlink couldn’t put “\(url.lastPathComponent)” back as it was before the save. \
+            A copy of it as it was is at \(copy.path). Your text is still in the tab.
+            """)
+        info["OwlinkRecoveryCopy"] = copy.path
+        return CocoaError(CocoaError.Code(rawValue: ns.domain == NSCocoaErrorDomain ? ns.code : CocoaError.fileWriteUnknown.rawValue),
+                          userInfo: info)
     }
 
     /// Whether the volume `fs` describes has room for a `count`-byte
@@ -281,24 +394,23 @@ public enum DocumentWrite {
         return free.overflow || free.partialValue >= UInt64(count)
     }
 
-    /// The first `count` bytes of `fd`, read from the start.
-    private static func readAll(_ fd: Int32, count: Int, url: URL) throws -> Data {
-        var data = Data(count: count)
-        let got = try data.withUnsafeMutableBytes { (buf: UnsafeMutableRawBufferPointer) -> Int in
-            guard let base = buf.baseAddress else { return 0 }
-            var done = 0
-            while done < count {
-                let n = pread(fd, base + done, count - done, off_t(done))
-                if n < 0 {
-                    if errno == EINTR { continue }
-                    throw writeError(errno, url)
-                }
-                if n == 0 { break }
-                done += n
+    /// Copies up to `count` bytes from the start of `src` to the start of
+    /// `dst`, 64 KB at a time; how many it copied (fewer if `src` ends).
+    private static func copyBytes(from src: Int32, to dst: Int32, count: Int, url: URL) throws -> Int {
+        var buffer = Data(count: min(count, 1 << 16))
+        var done = 0
+        while done < count {
+            let want = min(buffer.count, count - done)
+            let n = buffer.withUnsafeMutableBytes { pread(src, $0.baseAddress, want, off_t(done)) }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw writeError(errno, url)
             }
-            return done
+            if n == 0 { break }
+            try writeAll(buffer.prefix(n), to: dst, at: off_t(done), url: url)
+            done += n
         }
-        return got == count ? data : data.prefix(got)
+        return done
     }
 
     private static func writeAll(_ data: Data, to fd: Int32, at offset: off_t, url: URL) throws {
@@ -311,6 +423,8 @@ public enum DocumentWrite {
                     if errno == EINTR { continue }
                     throw writeError(errno, url)
                 }
+                // No progress and no error: fail rather than loop forever.
+                if n == 0 { throw writeError(EIO, url) }
                 done += n
             }
         }

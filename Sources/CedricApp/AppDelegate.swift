@@ -56,6 +56,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaunchTrace.mark("will_finish")
+        // A save past the file-size limit fails with an error the save
+        // recovers from, instead of SIGXFSZ ending the app mid-write.
+        DocumentWrite.ignoreFileSizeSignal()
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),
