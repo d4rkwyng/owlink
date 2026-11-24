@@ -307,6 +307,43 @@ import CedricCore
         #expect(!outcome.answer.contains("19") && !outcome.answer.contains("31"))
     }
 
+    /// Searches once (with `query`) when offered tools, then answers `reply`.
+    final class Searcher: OwlChatEngine, @unchecked Sendable {
+        var title: String { "searcher" }; var scoreKey: String { "searcher" }; var contextBudget: Int { 5_000 }
+        let query: String, reply: String
+        private let lock = NSLock()
+        private var searched = false
+        init(query: String, reply: String) { self.query = query; self.reply = reply }
+        func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                  onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+            let first = lock.withLock { () -> Bool in defer { searched = true }; return !searched }
+            if first, tools.contains(where: { $0.name == .searchDocument }) {
+                return .toolCalls([OwlToolCall(name: "search_document", arguments: .object(["query": .string(query)]))])
+            }
+            onText(reply)
+            return .answer(reply)
+        }
+    }
+
+    @Test func aSearchKeepsTheCitationFilterOnToTheLinesItShowed() async throws {
+        let s = Self.doc282()
+        let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!
+        // The 282-line document has "Note 200:" on line 205 (four front-matter lines, plus headings).
+        let target = try #require(s.text.components(separatedBy: "\n").firstIndex { $0.hasPrefix("Note 200:") }) + 1
+        let reply = "- Line 3 sets the title.\n- Line \(target) is the match.\n- Line 250 is new."
+        for (query, matched) in [("zz-no-such-text", false), ("Note 200:", true)] {
+            let engine = Searcher(query: query, reply: reply)
+            let req = OwlChatRequest(question: "Where is note 200?", context: ctx, snapshot: s, useTools: true, prose: true)
+            try #require(req.tools.contains(.searchDocument))
+            let outcome = try await OwlChatRunner.run(req, engine: engine) { _ in }
+            #expect(outcome.toolCalls == 1)
+            #expect(outcome.answer.contains("- Line 3 sets the title."))
+            // A search that found nothing vouches for no line; one that found it, for that line only.
+            #expect(outcome.answer.contains("Line \(target) is the match.") == matched, "query \(query)")
+            #expect(!outcome.answer.contains("250"), "query \(query)")
+        }
+    }
+
     @Test func aFollowUpMayCiteLinesTheConversationNamed() async throws {
         let s = Self.doc282()
         let ctx = OwlChatContext.build(s, scope: .wholeDocument, budget: (s.numbered(lines: 1, 18) as NSString).length)!

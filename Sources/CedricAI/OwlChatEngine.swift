@@ -107,6 +107,11 @@ public final class OwlToolbox: @unchecked Sendable {
     /// says he has seen (`OwlChatRequest.coverageNote`).
     public var linesRead: IndexSet { lock.withLock { _linesRead } }
     public var wholeDocumentLooks: Set<OwlToolName> { lock.withLock { _looks } }
+    /// Lines whose number and text a tool result showed ("12| text" from a
+    /// search or the outline): an answer may cite them. A search that
+    /// found nothing shows none.
+    public var linesShown: IndexSet { lock.withLock { _linesShown } }
+    private var _linesShown = IndexSet()
     private var _linesRead = IndexSet()
     private var _looks = Set<OwlToolName>()
 
@@ -150,6 +155,7 @@ public final class OwlToolbox: @unchecked Sendable {
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
+                _linesShown.formUnion(OwlCitations.quotedLines(in: r.text))
                 if let name, name == .searchDocument || name == .getOutline { _looks.insert(name) }
             }
         }
@@ -418,16 +424,18 @@ public struct OwlChatRequest: Sendable {
     }
 
     /// The lines an answer to this request may cite: those it was sent,
-    /// those a tool read, the digest showed or the offline checks and scan
-    /// name, and any the question or the conversation sent with it names
-    /// (a follow-up about "line 210" from an earlier answer). nil (no filter) when a
-    /// whole-document search or outline tool ran (it lists lines from
-    /// anywhere) or for an edit (its proposal is checked on its own).
-    public func citableLines(linesRead: IndexSet = IndexSet(), digest: Digest? = nil, checks: String? = nil,
-                             looks: Set<OwlToolName> = []) -> IndexSet? {
-        guard looks.isEmpty, action?.proposesEdit != true, snapshot.countedLines > 0 else { return nil }
+    /// those a tool read or showed (`linesShown`: the "12|" lines a search
+    /// or the outline returned, never the whole document because one ran),
+    /// the digest showed or the offline checks and scan name, and any the
+    /// question or the conversation sent with it names (a follow-up about
+    /// "line 210" from an earlier answer). nil (no filter) for an edit
+    /// (its proposal is checked on its own).
+    public func citableLines(linesRead: IndexSet = IndexSet(), linesShown: IndexSet = IndexSet(), digest: Digest? = nil,
+                             checks: String? = nil) -> IndexSet? {
+        guard action?.proposesEdit != true, snapshot.countedLines > 0 else { return nil }
         var s = IndexSet(integersIn: context.firstLine...max(context.firstLine, context.lastLine))
         s.formUnion(linesRead)
+        s.formUnion(linesShown)
         if let digest {
             s.formUnion(digest.lines)
             s.formUnion(OwlCitations.lines(in: digest.text))
@@ -609,8 +617,8 @@ public enum OwlChatRunner {
         shown = OwlProposalWording.guardClaims(shown, proposals: proposals.count)
         // Only lines it was given may be cited: "lines 19–20" from a model
         // shown 1–18 is dropped or marked (`OwlCitations`).
-        if let allowed = req.citableLines(linesRead: toolbox.linesRead, digest: digest, checks: checks,
-                                          looks: toolbox.wholeDocumentLooks) {
+        if let allowed = req.citableLines(linesRead: toolbox.linesRead, linesShown: toolbox.linesShown, digest: digest,
+                                          checks: checks) {
             shown = OwlCitations.filter(shown, allowed: allowed).text
         }
         // The coverage note shown while it streamed stays with the answer;
