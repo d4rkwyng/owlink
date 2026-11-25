@@ -158,6 +158,104 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertEqual(without.first?.1, .after(.view))
     }
 
+    /// Records what `MenuBar.apply` does to the system's menus.
+    @MainActor final class RecordingBuilder: MenuBar.Editing {
+        var present: Set<UIMenu.Identifier>
+        var replaced: [(UIMenu.Identifier, UIMenu)] = []
+        var inserted: [UIMenu] = []
+        init(present: Set<UIMenu.Identifier>) { self.present = present }
+        func menu(for identifier: UIMenu.Identifier) -> UIMenu? {
+            present.contains(identifier) ? UIMenu(title: identifier.rawValue, identifier: identifier, children: []) : nil
+        }
+        func remove(menu identifier: UIMenu.Identifier) { present.remove(identifier) }
+        func insertChild(_ menu: UIMenu, atStartOfMenu identifier: UIMenu.Identifier) { inserted.append(menu) }
+        func insertChild(_ menu: UIMenu, atEndOfMenu identifier: UIMenu.Identifier) { inserted.append(menu) }
+        func insertSibling(_ menu: UIMenu, afterMenu identifier: UIMenu.Identifier) { inserted.append(menu) }
+        func replace(menu identifier: UIMenu.Identifier, with menu: UIMenu) { replaced.append((identifier, menu)) }
+        var settingsInserted: [UIKeyCommand] {
+            inserted.flatMap { SettingsAndCloseTests.commands($0) }.filter { $0.action == #selector(EditorViewController.showSettings) }
+        }
+    }
+
+    /// Runs `MenuBar.apply` as at launch, counting the rebuilds it asks for.
+    private func applyMenuBar(_ builder: RecordingBuilder, rebuilds: inout Int) {
+        var count = 0
+        let saved = MenuBar.requestRebuild
+        MenuBar.requestRebuild = { count += 1 }
+        MenuBar.apply(to: builder)
+        MenuBar.requestRebuild = saved
+        rebuilds += count
+    }
+
+    /// 0.5.2 (18): with the app menu's Settings… there, the whole
+    /// `.preferences` menu is replaced by Owlink's (not only its children,
+    /// which could leave the system's ⌘, to open the system Settings app),
+    /// its ⌘, ahead of the system's, and Settings… is not also in the
+    /// Cedric menu. No rebuild is needed.
+    func testAppMenuSettingsIsReplacedWhole() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        let builder = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        var rebuilds = 0
+        applyMenuBar(builder, rebuilds: &rebuilds)
+        let prefs = builder.replaced.filter { $0.0 == .preferences }
+        XCTAssertEqual(prefs.count, 1, "the app menu's Settings… wasn't replaced")
+        XCTAssertNotEqual(prefs.first?.1.identifier, .preferences)
+        XCTAssertEqual(prefs.first?.1.identifier, MenuBar.settingsMenuIdentifier)
+        let keys = prefs.first.map { Self.commands($0.1) } ?? []
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys.first?.action, #selector(EditorViewController.showSettings))
+        XCTAssertEqual(keys.first?.input, ",")
+        XCTAssertEqual(keys.first?.modifierFlags, .command)
+        XCTAssertEqual(keys.first?.wantsPriorityOverSystemBehavior, true)
+        XCTAssertTrue(builder.settingsInserted.isEmpty, "Settings… is in the menu bar twice")
+        XCTAssertEqual(rebuilds, 0)
+    }
+
+    /// No Settings… in the app menu when the menu is built (the system
+    /// adds it later, or never): Settings… goes in the Cedric menu, once,
+    /// and the menu is built again once, so a `.preferences` the system
+    /// adds afterwards is replaced and cannot keep ⌘,.
+    func testWithoutAppMenuSettingsTheMenuIsBuiltAgainOnce() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var rebuilds = 0
+        let first = RecordingBuilder(present: [.find, .spelling, .format])
+        applyMenuBar(first, rebuilds: &rebuilds)
+        XCTAssertTrue(first.replaced.isEmpty)
+        XCTAssertEqual(first.settingsInserted.count, 1)
+        XCTAssertEqual(first.settingsInserted.first?.input, ",")
+        XCTAssertEqual(first.settingsInserted.first?.wantsPriorityOverSystemBehavior, true)
+        XCTAssertEqual(rebuilds, 1, "no rebuild asked for without the app menu's Settings…")
+        // The rebuild: the system's item is there now, and is replaced.
+        let again = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        applyMenuBar(again, rebuilds: &rebuilds)
+        XCTAssertEqual(again.replaced.filter { $0.0 == .preferences }.count, 1)
+        XCTAssertTrue(again.settingsInserted.isEmpty)
+        // Still none (a system without that item): no endless rebuilds.
+        applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
+        XCTAssertEqual(rebuilds, 1)
+    }
+
+    /// ⌘, is also on the responders that stay in the chain whatever holds
+    /// the keys: the editor's navigation controller and Ask Cedric's sheet
+    /// (whose commands go on to it). Untitled, so it is not listed a second
+    /// time, and ahead of the system's ⌘, (the system Settings app).
+    func testCommaIsClaimedOnTheNavigationControllerAndAskSheet() {
+        let (nav, editor) = editorInNav()
+        func settingsKeys(_ r: UIResponder) -> [UIKeyCommand] {
+            (r.keyCommands ?? []).filter { $0.input == "," && $0.modifierFlags == .command }
+        }
+        for (name, r) in [("navigation controller", nav as UIResponder), ("Ask Cedric's sheet", askSheet() as UIResponder)] {
+            let keys = settingsKeys(r)
+            XCTAssertEqual(keys.count, 1, "\(name): no ⌘,")
+            XCTAssertEqual(keys.first?.action, #selector(EditorViewController.showSettings), name)
+            XCTAssertEqual(keys.first?.wantsPriorityOverSystemBehavior, true, name)
+            XCTAssertEqual(keys.first?.title, "", name)
+        }
+        XCTAssertTrue(nav.target(forAction: #selector(EditorViewController.showSettings), withSender: nil) as AnyObject? === editor)
+    }
+
     static func commands(_ menu: UIMenu) -> [UIKeyCommand] {
         menu.children.flatMap { e -> [UIKeyCommand] in
             if let m = e as? UIMenu { return commands(m) }

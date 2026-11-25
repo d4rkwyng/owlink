@@ -1267,6 +1267,34 @@ final class OwlinkUITests: XCTestCase {
         }
     }
 
+    /// The launch-2 failure of testCommandCommaFirstInALaunchOverAskSheet
+    /// (0.5.2 (18), iPad mini): ⌘, over Ask Cedric's sheet brought the
+    /// system Settings app to the front. It was intermittent, so the same
+    /// steps run in eight fresh launches; in every one Owlink stays in
+    /// front, the system Settings app doesn't come up, and Owlink's
+    /// Settings opens over the sheet.
+    func testCommandCommaOverAskSheetInRepeatedLaunches() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        let systemSettings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        for launchNumber in 1...8 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2) // the simulator hands synthesized keys to the app once it has settled
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, over Ask Cedric's sheet left Owlink")
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, over Ask Cedric's sheet opened the system Settings app")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, over Ask Cedric's sheet didn't open Owlink's Settings")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): Owlink left the front with Settings up")
+            closeSettings(app)
+            XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
+            app.terminate()
+        }
+    }
+
     // MARK: Focus Preview listed once (0.5.2 (16) findings)
 
     /// Focus Preview is listed once: never in the ••• menu's main list (not
