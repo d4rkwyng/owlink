@@ -130,8 +130,19 @@ final class Settings {
 
     /// View › Check Spelling While Typing: on by default.
     var checkSpellingWhileTyping: Bool {
-        get { defaults.object(forKey: "checkSpellingWhileTyping") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "checkSpellingWhileTyping"); changed() }
+        get { checkSpellingOverride ?? defaults.object(forKey: "checkSpellingWhileTyping") as? Bool ?? true }
+        set {
+            // The override's own didSet posts the change.
+            if checkSpellingOverride != nil { checkSpellingOverride = newValue; return }
+            defaults.set(newValue, forKey: "checkSpellingWhileTyping")
+            changed()
+        }
+    }
+
+    /// Set by a check: spelling on or off for this run, not saved (as
+    /// `fontSizeOverride`). Nil: the saved switch.
+    var checkSpellingOverride: Bool? {
+        didSet { if checkSpellingOverride != oldValue { changed() } }
     }
 
     /// Settings › "Check grammar in prose" (and Edit › Spelling and
