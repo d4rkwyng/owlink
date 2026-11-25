@@ -346,11 +346,20 @@ final class Settings {
         didSet { if useProseFontOverride != oldValue { changed() } }
     }
 
+    /// Set by a check: a prose font for this run, not saved (as
+    /// `fontSizeOverride`). Nil: the saved prose font.
+    var proseFontNameOverride: String? {
+        didSet { if proseFontNameOverride != oldValue { changed() } }
+    }
+
     /// The prose font: a font's PostScript name, `ProseFont.systemSerif`
     /// (New York), or nil for the system font (SF Pro).
     var proseFontName: String? {
-        get { defaults.string(forKey: "proseFontName") }
+        get { proseFontNameOverride ?? defaults.string(forKey: "proseFontName") }
         set {
+            // The override's own didSet posts the change (nil there ends
+            // the override: back to the saved font).
+            if proseFontNameOverride != nil { proseFontNameOverride = newValue; return }
             if let newValue { defaults.set(newValue, forKey: "proseFontName") } else { defaults.removeObject(forKey: "proseFontName") }
             changed()
         }
