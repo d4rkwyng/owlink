@@ -743,26 +743,28 @@ final class OwlController: NSObject, NSPopoverDelegate {
     /// otherwise (its document is closed) only OK.
     func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
         guard tab != nil else { return }
-        // "Looks like JSON. Format it?" whose text changed (or grew): checked
-        // again on the text now, off the main thread (formatting up to 64 KB
-        // can take a while), and shown only if the tab still holds that text.
-        switch RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: document), document: document) {
-        case .ready(let r):
-            showReplay(r, own: own)
-        case .recheck(let text, let source):
-            replayToken &+= 1
-            let token = replayToken
-            pendingRechecks += 1
-            Task { @MainActor [weak self] in
-                let r = await Task.detached(priority: .userInitiated) { RulesHintProvider.recheckJSON(text, source: source) }.value
-                guard let self else { return }
-                self.pendingRechecks -= 1
-                // Another bubble came (or went) meanwhile: that one stays.
-                guard self.replayToken == token, let tab = self.tab else { return }
-                // The same UTF-16 units, not just an equivalent spelling.
-                let current = (tab.textView.string as NSString).isEqual(to: text)
-                self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
-            }
+        let replay = OwlCoordinator.replay(shown, document: document)
+        // "Looks like JSON. Format it?" in an open document: checked again
+        // on the text now, off the main thread (formatting up to 64 KB, or
+        // the long one-line file's shape check over the whole file, can
+        // take a while; Sol round 3: that scan ran in the click), and
+        // shown only if the tab still holds that text.
+        guard replay.hint.id == RulesHintProvider.jsonID else { showReplay(replay, own: own); return }
+        guard let document else { showReplay(RulesHintProvider.pastJSON(closed: true, source: replay.hint.source), own: own); return }
+        let text = document.copy() as! String
+        let source = replay.hint.source
+        replayToken &+= 1
+        let token = replayToken
+        pendingRechecks += 1
+        Task { @MainActor [weak self] in
+            let r = await Task.detached(priority: .userInitiated) { RulesHintProvider.resolveJSONReplay(replay, document: text) }.value
+            guard let self else { return }
+            self.pendingRechecks -= 1
+            // Another bubble came (or went) meanwhile: that one stays.
+            guard self.replayToken == token, let tab = self.tab else { return }
+            // The same UTF-16 units, not just an equivalent spelling.
+            let current = (tab.textView.string as NSString).isEqual(to: text)
+            self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
         }
     }
 

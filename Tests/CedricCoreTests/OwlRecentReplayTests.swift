@@ -311,6 +311,32 @@ import Testing
         }
     }
 
+    /// Sol round 3: what the app resolves off the main thread is what
+    /// `replayJSON` and `recheckJSON` say, for every kind of JSON replay.
+    @Test func resolvingAJSONReplayIsReplayThenRecheck() throws {
+        let (c, _) = make([])
+        let doc = UUID()
+        let minified = #"{"a":1,"b":[1,2]}"#
+        let inView = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?",
+                             range: NSRange(location: 0, length: (minified as NSString).length),
+                             replacement: "{\n  \"a\" : 1,\n  \"b\" : [1, 2]\n}", source: "rules")
+        c.markShown(inView, documentID: doc, context: window(minified, doc: doc).context)
+        let ranged = try #require(c.recent.first)
+        let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+        c.markShown(longLine, documentID: UUID(), context: window("[1]", doc: doc).context)
+        let rangeless = try #require(c.recent.first)
+        let long = "[" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]"
+        for shown in [ranged, rangeless] {
+            for text in [minified, #"{"a":2}"#, "not json", long, String(repeating: "plain ", count: 12_000)] as [String?] + [nil] {
+                let ns = text.map { $0 as NSString }
+                let r = OwlCoordinator.replay(shown, document: ns)
+                #expect(RulesHintProvider.resolveJSONReplay(r, document: text) == json(r, document: ns), "\(text?.prefix(12) ?? "closed")")
+            }
+        }
+        #expect(RulesHintProvider.resolveJSONReplay(OwlCoordinator.replay(rangeless, document: long as NSString), document: long).hint.title
+                == "Looks like JSON. Format it?")
+    }
+
     /// 0.5.4 QA (should round 2): Fix it checked that the hint's range
     /// still held its text with Swift's `==` (canonical equivalence: "Å"
     /// matched "A" + ring, and the fix wrote the old scalar back), and for

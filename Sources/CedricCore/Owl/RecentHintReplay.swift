@@ -55,6 +55,19 @@ extension RulesHintProvider {
         return .recheck(text: doc as String, source: r.hint.source)
     }
 
+    /// `replayJSON` resolved all the way (a `.recheck` by `recheckJSON`)
+    /// for `document`, the whole document now (nil: closed). Pure, and
+    /// it may scan the whole document (the long range-less hint's shape
+    /// check, past `replayJSONLimit`): the app calls it off the main
+    /// thread, on a copy of the text, and shows the result only if the
+    /// tab still holds that text.
+    public static func resolveJSONReplay(_ r: OwlCoordinator.Replay, document: String?) -> OwlCoordinator.Replay {
+        switch replayJSON(r, document: document.map { $0 as NSString }) {
+        case .ready(let r): return r
+        case .recheck(let text, let source): return recheckJSON(text, source: source)
+        }
+    }
+
     /// `text` (a whole document) checked again: still one-line JSON, a
     /// fresh hint for it (Fix it formats exactly that, nothing else);
     /// otherwise, or formatted past `replayJSONOutputLimit`, a past hint

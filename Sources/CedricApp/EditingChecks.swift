@@ -696,6 +696,28 @@ extension DevChecks {
                        owl.presentedHint?.hint.title ?? "-")
                 expect(owl.presentedHint?.hint.replacement == nil, "stale JSON: …with nothing to apply")
                 owl.hideBubble()
+                // Sol round 3: the long one-line file's hint (no range),
+                // past the length checked again, had its shape checked over
+                // the whole file in the click. Off the main thread now too.
+                let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+                OwlHub.shared.coordinator.markShown(longLine, documentID: tab.doc.id)
+                guard let rangeless = OwlHub.shared.coordinator.recent.first(where: {
+                    $0.hint.id == RulesHintProvider.jsonID && $0.documentID == tab.doc.id }) else {
+                    expect(false, "stale JSON: the long file's hint is under Recent hints"); return
+                }
+                expect(rangeless.hint.range == nil, "stale JSON: the long file's hint has no range")
+                replace("[" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]")
+                expect((tab.text as NSString).length > RulesHintProvider.replayJSONLimit, "stale JSON: the long file is past the recheck length")
+                owl.showAgain(rangeless, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: the long file's hint is checked off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the long file's check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: the long file still JSON-shaped, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
                 tab.setOwlVisible(false)
                 tab.doc.markSaved()
                 tab.window?.performClose(nil)
