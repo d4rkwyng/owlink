@@ -9,7 +9,9 @@ enum MenuBar {
     /// Where a menu goes in the system's main menu.
     enum Place: Equatable {
         case startOf(UIMenu.Identifier), endOf(UIMenu.Identifier), after(UIMenu.Identifier)
-        /// In place of the menu's own children.
+        /// In place of the menu itself (`replace(menu:with:)`), not only
+        /// its children: nothing of the system's menu (its own command,
+        /// its ⌘,) is left behind.
         case replacing(UIMenu.Identifier)
     }
 
@@ -18,9 +20,125 @@ enum MenuBar {
         let place: Place
     }
 
-    static func build(_ builder: any UIMenuBuilder) {
+    /// What `build` does to the system's menus: `UIMenuBuilder`'s calls,
+    /// behind a protocol so the snapshot tests can record them.
+    @MainActor protocol Editing {
+        func menu(for identifier: UIMenu.Identifier) -> UIMenu?
+        func remove(menu identifier: UIMenu.Identifier)
+        func insertChild(_ menu: UIMenu, atStartOfMenu identifier: UIMenu.Identifier)
+        func insertChild(_ menu: UIMenu, atEndOfMenu identifier: UIMenu.Identifier)
+        func insertSibling(_ menu: UIMenu, afterMenu identifier: UIMenu.Identifier)
+        func replace(menu identifier: UIMenu.Identifier, with menu: UIMenu)
+    }
+
+    /// The app's own builder.
+    @MainActor struct BuilderEditing: Editing {
+        let builder: any UIMenuBuilder
+        func menu(for identifier: UIMenu.Identifier) -> UIMenu? { builder.menu(for: identifier) }
+        func remove(menu identifier: UIMenu.Identifier) { builder.remove(menu: identifier) }
+        func insertChild(_ menu: UIMenu, atStartOfMenu identifier: UIMenu.Identifier) { builder.insertChild(menu, atStartOfMenu: identifier) }
+        func insertChild(_ menu: UIMenu, atEndOfMenu identifier: UIMenu.Identifier) { builder.insertChild(menu, atEndOfMenu: identifier) }
+        func insertSibling(_ menu: UIMenu, afterMenu identifier: UIMenu.Identifier) { builder.insertSibling(menu, afterMenu: identifier) }
+        func replace(menu identifier: UIMenu.Identifier, with menu: UIMenu) { builder.replace(menu: identifier, with: menu) }
+    }
+
+    /// Owlink's Settings… menu, in place of the app menu's `.preferences`.
+    static let settingsMenuIdentifier = UIMenu.Identifier("net.cyduck.owlink.settings")
+
+    /// The latest build found the app menu's `.preferences` and replaced
+    /// it with Owlink's Settings…. It is the current build's state, not
+    /// a once-for-the-process flag: a later build without `.preferences`
+    /// sets it back, and the retries start again (within the cap), so a
+    /// system item that comes back afterwards is replaced too.
+    @MainActor private(set) static var appSettingsReplaced = false
+    /// Retries delivered so far (fired, not only scheduled) because the
+    /// app menu had no Settings… item. At most one is pending at a time:
+    /// a build that finds none schedules the next (and a scene becoming
+    /// active does too) only when none is pending, so a burst of builds
+    /// and activations doesn't spend the budget at once. When
+    /// `maxAppSettingsRebuilds` have been delivered the asking stops: on
+    /// a system that never adds the item, Settings… stays in the Cedric
+    /// menu.
+    @MainActor private(set) static var appSettingsRebuilds = 0
+    /// The pending retry's serial (`nil`: none pending). A timer whose
+    /// serial isn't this one (left from before a reset) does nothing.
+    @MainActor private static var pendingRetry: Int?
+    @MainActor private static var retrySerial = 0
+    /// The cap on those retries (with `rebuildDelay`'s back-off, about a
+    /// minute of trying: 0.25 + 0.5 + 1 + 2 + 4 + 7 × 8 seconds).
+    static let maxAppSettingsRebuilds = 12
+    /// How long before retry `attempt` (1, 2, …) fires: a quarter second,
+    /// doubling, at most eight seconds. Not the next main-queue turn: the
+    /// system's item may come later than that.
+    static func rebuildDelay(attempt: Int) -> TimeInterval {
+        min(0.25 * pow(2, Double(max(attempt, 1) - 1)), 8)
+    }
+    /// Schedules retry `attempt`, the one pending retry: after
+    /// `rebuildDelay(attempt:)` it fires (`retryDidFire`). The tests
+    /// record it instead and fire it themselves
+    /// (`firePendingRetryForTesting`).
+    @MainActor static var requestRebuild: @MainActor (_ attempt: Int) -> Void = { attempt in
+        let serial = pendingRetry
+        DispatchQueue.main.asyncAfter(deadline: .now() + rebuildDelay(attempt: attempt)) {
+            MainActor.assumeIsolated { retryDidFire(serial: serial) }
+        }
+    }
+    /// Asks UIKit to build the menus again (the tests record instead).
+    @MainActor static var rebuildMenus: @MainActor () -> Void = {
+        UIMenuSystem.main.setNeedsRebuild()
+    }
+
+    /// Schedules the next retry if the current build hasn't replaced
+    /// `.preferences`, none is pending, and the cap isn't reached.
+    @MainActor private static func rebuildForAppSettingsIfNeeded() {
+        guard !appSettingsReplaced, pendingRetry == nil, appSettingsRebuilds < maxAppSettingsRebuilds else { return }
+        retrySerial += 1
+        pendingRetry = retrySerial
+        requestRebuild(appSettingsRebuilds + 1)
+    }
+
+    /// The pending retry's time has come. If `.preferences` has been
+    /// replaced since it was scheduled, it does nothing (and isn't
+    /// counted); otherwise it is counted as delivered and asks for a
+    /// rebuild, whose build schedules the next if still needed.
+    @MainActor private static func retryDidFire(serial: Int?) {
+        guard let serial, pendingRetry == serial else { return }
+        pendingRetry = nil
+        guard !appSettingsReplaced, appSettingsRebuilds < maxAppSettingsRebuilds else { return }
+        appSettingsRebuilds += 1
+        rebuildMenus()
+    }
+
+    /// A scene became active: a later point in the app's life at which
+    /// the system's app menu may have its Settings… item by now. Schedules
+    /// a retry if the current build hasn't replaced it (one pending at
+    /// most, within the same cap).
+    @MainActor static func sceneDidActivate() {
+        rebuildForAppSettingsIfNeeded()
+    }
+
+    @MainActor static func build(_ builder: any UIMenuBuilder) {
+        apply(to: BuilderEditing(builder: builder))
+    }
+
+    /// 0.5.2 (18): ⌘, over Ask Cedric's sheet opened the system Settings
+    /// app on a second launch. The recording shows the system Settings
+    /// app coming up; it does not show when the app menu's `.preferences`
+    /// ("Owlink Settings…", ⌘,) appeared, nor that it was the item that
+    /// took ⌘, — replacing its children may already have been enough if
+    /// the system's command was one of them. The likely cause, from the
+    /// code: `hasAppSettings` was read once, so a menu built before the
+    /// system added `.preferences` never put our ⌘, in its place. Now
+    /// `.preferences` is replaced whole whenever a build finds it, and
+    /// while the current build hasn't found it, one retry at a time is
+    /// scheduled (with a back-off, by builds and by a scene becoming
+    /// active, up to a cap of delivered retries) until a build finds and
+    /// replaces it. (The responders' ⌘, — `settingsKey()` —
+    /// is the other half, and stays whatever the menu does.)
+    @MainActor static func apply(to builder: some Editing) {
+        let hasAppSettings = builder.menu(for: .preferences) != nil
         let all = insertions(hasFind: builder.menu(for: .find) != nil, hasSpelling: builder.menu(for: .spelling) != nil,
-                             hasAppSettings: builder.menu(for: .preferences) != nil)
+                             hasAppSettings: hasAppSettings)
         // Owlink's own Format menu (Markdown) replaces the system's.
         builder.remove(menu: .format)
         for i in all {
@@ -28,9 +146,45 @@ enum MenuBar {
             case .startOf(let id): builder.insertChild(i.menu, atStartOfMenu: id)
             case .endOf(let id): builder.insertChild(i.menu, atEndOfMenu: id)
             case .after(let id): builder.insertSibling(i.menu, afterMenu: id)
-            case .replacing(let id): builder.replaceChildren(ofMenu: id) { _ in i.menu.children }
+            case .replacing(let id): builder.replace(menu: id, with: i.menu)
             }
         }
+        // The current build's state: replaced now, or missing now (again,
+        // perhaps, after an earlier build replaced it), in which case the
+        // retries go on (one pending at most, within the cap).
+        appSettingsReplaced = hasAppSettings
+        if !hasAppSettings {
+            rebuildForAppSettingsIfNeeded()
+        }
+    }
+
+    /// For the tests: as at launch, nothing replaced, no retry pending or
+    /// delivered (a timer left from before does nothing).
+    @MainActor static func resetRebuildForTesting() {
+        appSettingsReplaced = false
+        appSettingsRebuilds = 0
+        pendingRetry = nil
+    }
+
+    /// For the tests: the pending retry fires now (as its timer would),
+    /// if one is pending. Returns whether one was.
+    @MainActor @discardableResult static func firePendingRetryForTesting() -> Bool {
+        guard let serial = pendingRetry else { return false }
+        retryDidFire(serial: serial)
+        return true
+    }
+
+    /// For the tests: a retry is scheduled and hasn't fired yet.
+    @MainActor static var retryPendingForTesting: Bool { pendingRetry != nil }
+
+    /// ⌘, for the responders that stay in the chain whatever has the keys
+    /// (the editor's navigation controller, Ask Cedric's sheet): Owlink's
+    /// Settings, ahead of the system's ⌘, (the system Settings app). No
+    /// title, so it is not listed a second time next to the menu's.
+    @MainActor static func settingsKey() -> UIKeyCommand {
+        let key = UIKeyCommand(input: ",", modifierFlags: .command, action: #selector(EditorViewController.showSettings))
+        key.wantsPriorityOverSystemBehavior = true
+        return key
     }
 
     /// In the order they are applied. `hasFind` / `hasSpelling`: the
@@ -38,12 +192,22 @@ enum MenuBar {
     /// `hasAppSettings`: the app menu has the system's Settings… item.
     static func insertions(hasFind: Bool, hasSpelling: Bool, hasAppSettings: Bool = false) -> [Insertion] {
         var out: [Insertion] = []
+        /// Shortcuts iPadOS, UIKit, `UITextView` or the preview's
+        /// `WKWebView` may take ahead of Owlink's (⌘W Close Window, ⌘B /
+        /// ⌘I `toggleBoldface:` / `toggleItalics:`, ⌘+ / ⌘- / ⌘0 zoom, ⌘[ /
+        /// ⌘] history, …): Owlink's command wins over the system's
+        /// behavior. (0.5.2 (18): ⇧⌘P was found not reaching the editor.)
+        func claimed(_ key: UIKeyCommand) -> UIKeyCommand {
+            key.wantsPriorityOverSystemBehavior = true
+            return key
+        }
         let save = UIKeyCommand(title: String(localized: "Save"), action: #selector(EditorViewController.saveDocument),
                                 input: "s", modifierFlags: .command)
         let close = UIKeyCommand(title: String(localized: "Close"), action: #selector(EditorViewController.closeDocument),
                                  input: "w", modifierFlags: .command)
         let window = UIKeyCommand(title: String(localized: "New Window"), action: #selector(EditorViewController.newWindow),
                                   input: "n", modifierFlags: [.command, .alternate])
+        for k in [save, close, window] { k.wantsPriorityOverSystemBehavior = true }
         let print = UICommand(title: String(localized: "Print…"), action: #selector(EditorViewController.printDocument))
         let exportHTML = UICommand(title: String(localized: "Export as HTML…"), action: #selector(EditorViewController.exportHTMLDocument))
         let exportPDF = UICommand(title: String(localized: "Export as PDF…"), action: #selector(EditorViewController.exportPDFDocument))
@@ -51,6 +215,7 @@ enum MenuBar {
 
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)
+        goTo.wantsPriorityOverSystemBehavior = true
         out.append(Insertion(menu: UIMenu(options: .displayInline, children: [goTo]), place: .endOf(.edit)))
         // Mark All / Clear Marks, with the Mac's shortcuts, in Edit › Find.
         let marks = UIMenu(options: .displayInline, children: [
@@ -99,6 +264,7 @@ enum MenuBar {
                                    input: "-", modifierFlags: .command)
         let actual = UIKeyCommand(title: String(localized: "Actual Size"), action: #selector(EditorViewController.actualSizeFont),
                                   input: "0", modifierFlags: .command)
+        for k in [preview, focus, bigger, bigger2, smaller, actual] { k.wantsPriorityOverSystemBehavior = true }
         let wrap = UIKeyCommand(title: String(localized: "Wrap Lines"), action: #selector(EditorViewController.toggleWrap),
                                 input: "w", modifierFlags: [.command, .alternate])
         let detach = UICommand(title: String(localized: "Open Preview in New Window"),
@@ -128,9 +294,9 @@ enum MenuBar {
             key(String(localized: "Move Line Up"), #selector(EditorViewController.moveLineUp(_:)), UIKeyCommand.inputUpArrow, [.control, .command]),
             key(String(localized: "Move Line Down"), #selector(EditorViewController.moveLineDown(_:)), UIKeyCommand.inputDownArrow, [.control, .command]),
             key(String(localized: "Delete Line"), #selector(EditorViewController.deleteLine(_:)), "k", [.command, .shift]),
-            key(String(localized: "Comment Selection"), #selector(EditorViewController.commentSelection(_:)), "/"),
-            key(String(localized: "Indent"), #selector(EditorViewController.indentLines(_:)), "]"),
-            key(String(localized: "Outdent"), #selector(EditorViewController.outdentLines(_:)), "["),
+            claimed(key(String(localized: "Comment Selection"), #selector(EditorViewController.commentSelection(_:)), "/")),
+            claimed(key(String(localized: "Indent"), #selector(EditorViewController.indentLines(_:)), "]")),
+            claimed(key(String(localized: "Outdent"), #selector(EditorViewController.outdentLines(_:)), "[")),
             command(String(localized: "Keep Lines Matching…"), #selector(EditorViewController.keepLinesMatching(_:))),
             command(String(localized: "Delete Lines Matching…"), #selector(EditorViewController.deleteLinesMatching(_:))),
         ])
@@ -169,11 +335,11 @@ enum MenuBar {
         ])
         out.append(Insertion(menu: UIMenu(title: String(localized: "Text"), children: [line, indentation, bookmarks, folding]), place: .after(.edit)))
         let markdown = UIMenu(title: String(localized: "Markdown"), children: [
-            key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
-            key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),
+            claimed(key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b")),
+            claimed(key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i")),
             key(String(localized: "Strikethrough"), #selector(EditorViewController.markdownStrikethroughMenu(_:)), "x", [.command, .shift]),
             key(String(localized: "Inline Code"), #selector(EditorViewController.markdownCodeMenu(_:)), "`", .control),
-            key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k"),
+            claimed(key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k")),
             command(String(localized: "Image Link"), #selector(EditorViewController.markdownImageMenu(_:))),
             command(String(localized: "Body"), #selector(EditorViewController.markdownBodyMenu(_:))),
             key(String(localized: "Heading 1"), #selector(EditorViewController.markdownHeading1Menu(_:)), "1"),
@@ -203,13 +369,16 @@ enum MenuBar {
                                     input: ",", modifierFlags: .command)
         // ⌘, Settings…: iPadOS's app menu has its own "Owlink Settings…"
         // on ⌘, (orderFrontPreferencesPanel:), which opens Owlink's page in
-        // the system Settings app. It took ⌘, over ours, so ⌘, left Owlink. Ours takes its place there, ahead of the system's
-        // behavior; without that item (older systems) it stays in the
-        // Cedric menu. Settings… is in the menu bar once either way.
+        // the system Settings app. It took ⌘, over ours, so ⌘, left Owlink. Ours takes its place there (the whole
+        // `.preferences` menu, see `apply`), ahead of the system's
+        // behavior; without that item (older systems, or a menu built
+        // before the system added it: `apply` builds again) it stays in
+        // the Cedric menu. Settings… is in the menu bar once either way.
         settings.wantsPriorityOverSystemBehavior = true
         if hasAppSettings {
             out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript]), place: .after(.view)))
-            out.append(Insertion(menu: UIMenu(options: .displayInline, children: [settings]), place: .replacing(.preferences)))
+            out.append(Insertion(menu: UIMenu(title: "", identifier: settingsMenuIdentifier, options: .displayInline, children: [settings]),
+                                 place: .replacing(.preferences)))
         } else {
             out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript, settings]), place: .after(.view)))
         }

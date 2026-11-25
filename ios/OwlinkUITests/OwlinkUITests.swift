@@ -846,6 +846,11 @@ final class OwlinkUITests: XCTestCase {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        // 0.5.2 (18) gate: a recovery offer left by an earlier test
+        // ("Owlink closed with unsaved changes in README.md. Restore?")
+        // covered the editor and held ⇧⌘P. A fresh sample has none.
+        XCTAssertFalse(app.alerts.firstMatch.exists,
+                       "an alert is over the editor: \(app.alerts.firstMatch.exists ? app.alerts.firstMatch.label : "")")
         app.typeKey("p", modifierFlags: [.command, .shift])
         XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 5), "⇧⌘P didn't reach the editor")
         app.typeKey(",", modifierFlags: .command)
@@ -853,6 +858,9 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(settingsShown(app), "⌘, didn't open Owlink's Settings")
         shoot("settings-from-command-comma")
         closeSettings(app)
+        // ⇧⌘P again: the preview goes (it toggles both ways).
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForNonExistence(timeout: 5), "⇧⌘P didn't hide the preview again")
     }
 
     /// Settings over Ask Cedric, which stays open: Ask Cedric's own button
@@ -1261,6 +1269,62 @@ final class OwlinkUITests: XCTestCase {
             commandComma(app)
             XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, left Owlink")
             XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, first over Ask Cedric's sheet didn't open Settings")
+            closeSettings(app)
+            XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
+            app.terminate()
+        }
+    }
+
+    /// The launch-2 failure of testCommandCommaFirstInALaunchOverAskSheet
+    /// (0.5.2 (18), iPad mini): ⌘, over Ask Cedric's sheet brought the
+    /// system Settings app to the front. It was intermittent, so the same
+    /// steps run in eight fresh launches; in every one Owlink stays in
+    /// front, the system Settings app doesn't come up, and Owlink's
+    /// Settings opens over the sheet.
+    func testCommandCommaOverAskSheetInRepeatedLaunches() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        let systemSettings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        for launchNumber in 1...8 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2) // the simulator hands synthesized keys to the app once it has settled
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            // Launches 1, 2, 3, 5 and 7 (launch 2 among them: the failing
+            // one): the Ask field holds the keys (it took a plain
+            // character, so it is first responder) when ⌘, comes, still
+            // the launch's first shortcut. Launches 4, 6 and 8: the sheet
+            // as opened, nothing typed.
+            let fieldFocused = launchNumber == 2 || launchNumber % 2 == 1
+            if fieldFocused {
+                let field = app.descendants(matching: .any)["ask.field"].firstMatch
+                XCTAssertTrue(field.waitForExistence(timeout: 5), "launch \(launchNumber): no Ask field")
+                field.tap()
+                field.typeText("q7")
+                let took = NSPredicate { _, _ in ((field.value as? String) ?? "").contains("q7") }
+                wait(for: [XCTNSPredicateExpectation(predicate: took, object: nil)], timeout: 5)
+                XCTAssertTrue(((field.value as? String) ?? "").contains("q7"),
+                              "launch \(launchNumber): the Ask field didn't take a typed character (not first responder)")
+            }
+            let how = fieldFocused ? "with the Ask field focused" : "over Ask Cedric's sheet"
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, over Ask Cedric's sheet left Owlink")
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, over Ask Cedric's sheet opened the system Settings app")
+            // A system Settings app that comes up late is caught too.
+            for sample in 1...12 {
+                usleep(250_000)
+                let state = systemSettings.state
+                XCTAssertNotEqual(state, .runningForeground,
+                                  "launch \(launchNumber): ⌘, \(how) opened the system Settings app (sample \(sample), \(sample * 250) ms)")
+                if state == .runningForeground { break }
+            }
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, \(how) opened the system Settings app (within 3 s)")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, \(how) left Owlink (within 3 s)")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, over Ask Cedric's sheet didn't open Owlink's Settings")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): Owlink left the front with Settings up")
             closeSettings(app)
             XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
             app.terminate()

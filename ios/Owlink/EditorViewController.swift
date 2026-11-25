@@ -4191,6 +4191,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(copyAsHTML) || action == #selector(copyAsRichText) {
             return document.language.language == .markdown && textView.window != nil
         }
+        // ⌘B, ⌘], ⌘/… claim priority over the system's keys, so with the
+        // Find field or Ask Cedric's field taking the typing they'd change
+        // the document behind it: off until the text has the keyboard again.
+        if Self.documentMutationActions.contains(action) && otherTextInputHasFocus { return false }
         if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(commentSelection(_:)) { return lineEditable && document.language.language.commentSyntax != nil }
         if Self.lineActions.contains(action) { return lineEditable }
@@ -4220,6 +4224,42 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return document.language.language == .markdown && DetachedPreviews.available
         }
         return super.canPerformAction(action, withSender: sender)
+    }
+
+    /// Commands that change the document (its text, folds, bookmarks) or
+    /// act on its selection: not while another text input has the keyboard.
+    /// Settings, Close, Save, preview, Go to Line, zoom and Ask Cedric stay.
+    static let documentMutationActions: Set<Selector> = markdownActions
+        .union(lineActions)
+        .union(indentationModeActions)
+        .union(foldingActions)
+        .union([#selector(commentSelection(_:)), #selector(unfoldMenu(_:)), #selector(unfoldAllMenu(_:)),
+                #selector(toggleBookmarkMenu(_:)), #selector(clearBookmarksMenu(_:)), #selector(explainSelection),
+                #selector(rewriteSelection), #selector(fixTypos)])
+
+    /// A text field, or a text view other than the editor's, is first
+    /// responder (the Find field, Ask Cedric's field): in the editor's
+    /// window, its scene's other windows, or the window of what the editor
+    /// shows over itself. A web view (the preview) doesn't count.
+    var otherTextInputHasFocus: Bool {
+        var windows: [UIWindow] = []
+        if let w = view.window {
+            windows.append(w)
+            windows += w.windowScene?.windows ?? []
+        }
+        var presented = (navigationController ?? self).presentedViewController
+        while let p = presented {
+            if let w = p.viewIfLoaded?.window { windows.append(w) }
+            presented = p.presentedViewController
+        }
+        var seen = Set<ObjectIdentifier>()
+        return windows.contains { seen.insert(ObjectIdentifier($0)).inserted && hasOtherFocusedTextInput(in: $0) }
+    }
+
+    private func hasOtherFocusedTextInput(in view: UIView) -> Bool {
+        if view === textView { return false }
+        if view.isFirstResponder && (view is UITextField || view is UITextView) { return true }
+        return view.subviews.contains { hasOtherFocusedTextInput(in: $0) }
     }
 
     // MARK: Data safety
