@@ -66,14 +66,13 @@ extension DevChecks {
         /// look (it runs on a later main-queue turn): the keys must reach the
         /// owl from inside the edit, and the look must have finished.
         func typedToOwl(_ name: String, _ f: @escaping () -> Void) -> (@escaping () -> Void) -> Void {
-            { next0 in
-                nonisolated(unsafe) let next = next0
+            { next in
                 guard let owl = tab.owl else { expect(false, "the owl is on"); next(); return }
                 mark(name)
                 let inEdit = owl.caretMovesInEdit, looks = owl.caretLooks
                 let t0 = DevHooks.now()
                 f()
-                func settle(_ turns: Int) {
+                @MainActor func settle(_ turns: Int) {
                     DispatchQueue.main.async {
                         guard owl.caretLookPending, turns < 50 else {
                             timings.ms[name] = (DevHooks.now() - t0) * 1000
