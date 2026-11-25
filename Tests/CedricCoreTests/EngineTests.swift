@@ -104,7 +104,32 @@ import Testing
                 }
             }
         }
-        #expect(pointerSeen >= ascii.count - 1 && bytesSeen >= ascii.count - 1, "pointer \(pointerSeen), byte copies \(bytesSeen)")
+        // Which forms Foundation keeps as 8-bit with a C-string pointer is
+        // its own choice: above, every form is held only to the loop's
+        // starts. The pointer path itself on controlled 8-bit fixtures:
+        _ = pointerSeen
+        #expect(bytesSeen >= ascii.count - 1, "byte copies \(bytesSeen)")
+        // the bytes and their NUL in a buffer of the test's own, read in
+        // place (not copied; 16 bytes or more, as CF keeps shorter ones
+        // as tagged pointers or constants): each short case after 16
+        // bytes of padding too.
+        let controlled = (ascii + ascii.map { String(repeating: "p", count: 16) + $0 })
+            .filter { !$0.contains("\u{0}") && $0.utf8.count >= 16 }
+        #expect(controlled.count >= ascii.count + 5)
+        for s in controlled {
+            let bytes = Array(s.utf8CString).map { UInt8(bitPattern: $0) }
+            let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bytes.count)
+            defer { buffer.deallocate() }
+            buffer.initialize(from: bytes, count: bytes.count)
+            let cf = CFStringCreateWithCStringNoCopy(nil, UnsafeRawPointer(buffer).assumingMemoryBound(to: CChar.self),
+                                                     CFStringBuiltInEncodings.ASCII.rawValue, kCFAllocatorNull)!
+            let text = cf as NSString
+            #expect(CFStringGetCStringPtr(cf, CFStringBuiltInEncodings.ASCII.rawValue).map { UnsafeRawPointer($0) } == UnsafeRawPointer(buffer),
+                    "an 8-bit C string read in place, \(text.length) units")
+            var viaPointer = [0]
+            #expect(LineIndex.scanASCIIPointer(text) { viaPointer.append($0) }, "the pointer path is taken, \(text.length) units")
+            #expect(viaPointer == Self.loopStarts(text) && LineIndex(text).starts == viaPointer, "…with the loop's starts")
+        }
         // A large decode's text (the bytes in place, no NUL after them):
         // no pointer, so the byte copies.
         let big = edged(LineIndex.asciiChunk)
