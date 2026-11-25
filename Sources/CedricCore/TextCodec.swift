@@ -31,6 +31,16 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// The encoding to read a file's bytes in, for a tab whose encoding
+    /// (picked by hand, or detected from the version it last read) is
+    /// this one: the base encoding, without the last version's BOM. UTF-8
+    /// with or without a BOM is decided by the bytes read now, never kept
+    /// from before: a tab that read a version with a BOM, given one
+    /// without (Reload, Follow File's rotation), saved a BOM the file
+    /// never had, and the reverse dropped one. TextCodec.decode as UTF-8
+    /// gives UTF-8 with BOM when the bytes start with one.
+    public var base: TextEncoding { self == .utf8BOM ? .utf8 : self }
+
     var bom: [UInt8] {
         switch self {
         case .utf8BOM: return [0xEF, 0xBB, 0xBF]

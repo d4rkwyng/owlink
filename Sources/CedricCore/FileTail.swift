@@ -79,6 +79,14 @@ public final class FileTail: @unchecked Sendable {
         /// file's CRLF appended to an LF log, or a rotated file's own
         /// breaks, were saved as the wrong kind after Follow stopped.
         public var lineBreaks: LineBreaks? = nil
+        /// A reset's encoding, as its own bytes decoded (decodeWhole):
+        /// UTF-8 with a BOM or without, as the new file has it, never as
+        /// the file before (a rotation). Nil for an append, and for a reset
+        /// that couldn't decode (the text isn't the file's bytes).
+        /// 0.5.4 before release review 5 dropped it, so a save after Follow stopped
+        /// added the old file's BOM to a rotated file without one, or
+        /// dropped the new file's.
+        public var encoding: TextEncoding? = nil
     }
 
     /// `offset`: how many bytes of the file the caller already shows.
@@ -279,7 +287,8 @@ public final class FileTail: @unchecked Sendable {
                 offset = UInt64(data.count)
                 heldCount = UInt64(data.count - used)
                 dominant = d.lineEnding
-                emit(.reset(d.text), shown: UInt64(used), stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil)
+                emit(.reset(d.text), shown: UInt64(used), stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil,
+                     encoding: d.encoding)
             } else {
                 offset = UInt64(data.count)
                 heldCount = 0
@@ -299,6 +308,17 @@ public final class FileTail: @unchecked Sendable {
             // Shorter than what was read (cut since the fstat): the next
             // check resets.
             guard let bytes = try fh.read(upToCount: Int(size - start)), UInt64(bytes.count) > heldCount else { return }
+            // A UTF-8 BOM written to a file of which nothing is shown yet
+            // (followed empty, or a reset to nothing): that version's own
+            // BOM, so the whole file is read as a reset, which decodes it
+            // and carries its encoding, rather than appended as text
+            // (U+FEFF on one macOS, dropped on another, and the tab kept
+            // the encoding it had: a save lost the BOM).
+            if start == 0, encoding.base == .utf8, bytes.starts(with: TextEncoding.utf8BOM.bom) {
+                resetPending = true
+                check()
+                return
+            }
             offset = start + UInt64(bytes.count)
             heldCount = 0
             // Hold back a character cut in half at the end (all of it while
@@ -351,12 +371,14 @@ public final class FileTail: @unchecked Sendable {
     /// holds it: it may be the first half of a CRLF the writer hasn't
     /// finished, and taken as a break of its own it made that CRLF two
     /// breaks once the LF came (0.5.4 before review 3). Nil: the file
-    /// isn't text in `encoding`.
+    /// isn't text in `encoding`. Read in its base (TextEncoding.base):
+    /// whether there is a UTF-8 BOM is up to `data`, never to the file
+    /// followed before.
     /// The CR is found in the bytes before decoding, so the text is
     /// decoded once (a second whole decode, while the first was still
     /// live, doubled the work and the peak memory of starting Follow).
     public static func decodeWhole(_ data: Data, as encoding: TextEncoding) -> (DecodedText, Int)? {
-        let decode = { (d: Data) in TextCodec.decode(d, as: encoding) }
+        let decode = { (d: Data) in TextCodec.decode(d, as: encoding.base) }
         if let end = heldCR(data, encoding), let (d, used) = decodePrefix(data.prefix(end), encoding, decode), used == end {
             return (d, used)
         }
@@ -374,9 +396,11 @@ public final class FileTail: @unchecked Sendable {
         return end - cr.count
     }
 
-    private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp, lineEnding: LineEnding?, breaks: LineBreaks?) {
+    private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp, lineEnding: LineEnding?, breaks: LineBreaks?,
+                      encoding: TextEncoding? = nil) {
         lossy = shown == nil
-        let h = handler, s = Shown(bytes: shown, stamp: stamp.showing(shown), lineEnding: lineEnding, lineBreaks: breaks)
+        let h = handler, s = Shown(bytes: shown, stamp: stamp.showing(shown), lineEnding: lineEnding, lineBreaks: breaks,
+                                   encoding: encoding)
         callbackQueue.async { h(e, s) }
     }
 }

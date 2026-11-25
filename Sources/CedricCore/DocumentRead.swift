@@ -26,6 +26,11 @@ public enum DocumentRead {
     /// so the file changing meanwhile changes nothing already read.
     /// `shareBytes`: a large ASCII file's text reads them in place
     /// (TextCodec.decode), for opening into a tab. `hooks`: tests only.
+    /// `encoding`: the tab's (nil: detected); read as its base
+    /// (TextEncoding.base), so whether there is a UTF-8 BOM is up to the
+    /// bytes read now, never to the version the tab read before: open,
+    /// Reload, Revert to Saved, an encoding reopen, a restored or reopened
+    /// tab all read whichever version is on disk now.
     public static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false,
                             hooks: TextCodec.ReadHooks? = nil) throws -> (DecodedText, DiskStamp?) {
         if let kind = SpecialFile.kind(atPath: url.path) {
@@ -34,7 +39,7 @@ public enum DocumentRead {
         }
         let read: (text: DecodedText?, stamp: DiskStamp)
         do {
-            read = try TextCodec.readTextStamped(at: url, as: encoding, shareBytes: shareBytes, hooks: hooks)
+            read = try TextCodec.readTextStamped(at: url, as: encoding?.base, shareBytes: shareBytes, hooks: hooks)
         } catch {
             throw LoadError.unreadable(url, error)
         }

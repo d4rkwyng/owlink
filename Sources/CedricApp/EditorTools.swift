@@ -380,6 +380,10 @@ extension EditorWindowController {
             // (a rotation): set before the text, which they describe.
             if let le = shown.lineEnding { doc.lineEnding = le }
             doc.lineBreaks = shown.lineBreaks
+            // And its own encoding: UTF-8 with a BOM or without, as the
+            // new file has it (FileTail.Shown.encoding), so a save after
+            // Follow stops neither adds the old file's BOM nor drops its own.
+            if let enc = shown.encoding { doc.encoding = enc }
             setText(s)
         }
         // A reset drops cards inside setText. An append is not a user edit,
