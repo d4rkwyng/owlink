@@ -877,6 +877,96 @@ import Testing
         #expect(last.1.stamp == DiskStamp.of(url))
     }
 
+    /// What a tab following `url` shows, and the bytes ⌘S would write
+    /// after Follow stops (EditorDocument.encoded and appendFollowedBreaks).
+    final class FollowedTab: @unchecked Sendable {
+        private let lock = NSLock()
+        private var text = "", ending = LineEnding.lf, breaks: LineBreaks?
+        func show(_ d: DecodedText) {
+            lock.lock(); defer { lock.unlock() }
+            text = d.text; ending = d.lineEnding; breaks = d.mixedLineEndings ? d.lineBreaks : nil
+        }
+        func event(_ e: FileTail.Event, _ s: FileTail.Shown) {
+            lock.lock(); defer { lock.unlock() }
+            switch e {
+            case .appended(let added):
+                if let odd = s.lineBreaks {
+                    if breaks == nil { breaks = LineBreaks(dominant: ending) }
+                    breaks?.append(odd, at: (text as NSString).length)
+                }
+                text += added
+            case .reset(let all):
+                text = all
+                if let le = s.lineEnding { ending = le }
+                breaks = s.lineBreaks
+            }
+        }
+        var shown: String { lock.lock(); defer { lock.unlock() }; return text }
+        var saved: Data? {
+            lock.lock(); defer { lock.unlock() }
+            if let breaks { return TextCodec.encode(breaks.output(text), encoding: .utf8, lineEnding: .lf) }
+            return TextCodec.encode(text, encoding: .utf8, lineEnding: ending)
+        }
+    }
+
+    /// 0.5.4 QA review 3: a CR at the end of Follow's first read (or a
+    /// reset's) was taken as a break; the LF that finished that CRLF then
+    /// came as a second one, and a save wrote two breaks for one. It is
+    /// held, as an append holds it, and the CRLF is saved as it is.
+    @Test func aCRLFSplitAtFollowsFirstReadIsOneBreak() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\ntwo\r".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        #expect(d.text == "one\ntwo" && used == 7, "the trailing CR is held: \(d.text.debugDescription) \(used)")
+        let tab = FollowedTab()
+        tab.show(d)
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
+                            lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, Array("\nthree\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "one\ntwo\nthree\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
+    /// The same across a reset: a rotated file ending in a CR.
+    @Test func aCRLFSplitAtAResetIsOneBreak() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        let tab = FollowedTab()
+        tab.show(d)
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
+                            lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("x\ny\r".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "x\ny", "the reset holds the CR: \(tab.shown.debugDescription)")
+        try appendBytes(url, Array("\nz\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "x\ny\nz\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
     /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
     /// (its bytes counted as read), and the next good append stamped the
     /// whole file's size: ⌘S then dropped the skipped bytes with no

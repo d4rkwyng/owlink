@@ -324,9 +324,17 @@ public final class FileTail: @unchecked Sendable {
     /// The whole file as Follow first shows it (and shows it again after a
     /// reset): the decoded text and the byte count it covers, which is the
     /// offset to follow from. A character cut in half at the end is left
-    /// for the first append. Nil: the file isn't text in `encoding`.
+    /// for the first append. So is a CR at the very end, as an append
+    /// holds it: it may be the first half of a CRLF the writer hasn't
+    /// finished, and taken as a break of its own it made that CRLF two
+    /// breaks once the LF came (0.5.4 before review 3). Nil: the file
+    /// isn't text in `encoding`.
     public static func decodeWhole(_ data: Data, as encoding: TextEncoding) -> (DecodedText, Int)? {
-        decodePrefix(data, encoding) { TextCodec.decode($0, as: encoding) }
+        guard let (d, used) = decodePrefix(data, encoding, { TextCodec.decode($0, as: encoding) }) else { return nil }
+        guard let cr = "\r".data(using: encoding.foundation), !cr.isEmpty, used >= cr.count,
+              data.prefix(used).suffix(cr.count).elementsEqual(cr),
+              let held = TextCodec.decode(data.prefix(used - cr.count), as: encoding) else { return (d, used) }
+        return (held, used - cr.count)
     }
 
     private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp, lineEnding: LineEnding?, breaks: LineBreaks?) {
