@@ -67,6 +67,22 @@ public struct DiskStamp: Equatable, Sendable {
         return s
     }
 
+    /// A stamp from a session saved before 0.5.4: a date and nothing else.
+    public var isDateOnly: Bool { size == nil && identity == nil }
+
+    /// The stamp a tab restored with unsaved text (a session buffer,
+    /// Reopen Closed Tab) starts from, for its file at `url`. Through a
+    /// symbolic link a date-only stamp (`isDateOnly`) can't be trusted:
+    /// 0.5.3 took the link's own date, not its target's, so it could match
+    /// a different file's date (⌘S then wrote over that file without
+    /// asking) or never match. Such a stamp is unverified: it matches no
+    /// file (size -1), so the first ⌘S asks before writing. Any other
+    /// stamp is kept as it is.
+    public static func restored(_ stamp: DiskStamp, for url: URL, fileManager fm: FileManager = .default) -> DiskStamp {
+        guard stamp.isDateOnly, SafePaths.writeTarget(for: url, fileManager: fm) != url.standardizedFileURL else { return stamp }
+        return DiskStamp(modified: stamp.modified ?? .distantPast, size: -1, identity: nil)
+    }
+
     /// Dates round-trip through the session file as Doubles: anything
     /// closer than this is the same date.
     public static let tolerance: TimeInterval = 0.001

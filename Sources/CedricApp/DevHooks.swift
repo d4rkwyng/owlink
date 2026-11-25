@@ -248,6 +248,8 @@ enum DevHooks {
                 for t in app.tabGroups().joined() {
                     let body = t.text.replacingOccurrences(of: "\n", with: "\\n")
                     print("tab: name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) language=\(t.doc.language.rawValue) text=\(body.prefix(60))")
+                    // Whether ⌘S would ask first (the file differs from the tab's stamp).
+                    if let url = t.doc.fileURL { print("stamp: name=\(t.doc.displayName) asks=\(t.fileChangedOnDisk(url))") }
                     // A mixed file's own breaks: the bytes ⌘S would write (LineBreaks).
                     if t.doc.lineBreaks != nil, let data = t.doc.encoded(t.text) {
                         print("breaks: name=\(t.doc.displayName) saves=\(String(decoding: data, as: UTF8.self).debugDescription)")

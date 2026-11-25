@@ -117,7 +117,8 @@ extension AppDelegate {
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.noteDisk(st.diskStamp)
+            // A pre-0.5.4 date-only stamp through a link: unverified (⌘S asks).
+            doc.noteDisk(url.map { DiskStamp.restored(st.diskStamp, for: $0) } ?? st.diskStamp)
         }
         if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else {

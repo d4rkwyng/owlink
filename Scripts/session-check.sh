@@ -510,5 +510,29 @@ if [ -f "$W/saveas12/mixed.txt" ] && cmp -s "$W/saveas12/mixed.txt" <(printf 'on
     echo "session-check: OK   mixed: Save As after the restore writes each break as it was"
 else echo "session-check: FAIL mixed: Save As wrote '$(od -c "$W/saveas12/mixed.txt" 2>/dev/null | head -3 | tr -s ' ' || echo nothing)'" >&2; fail=1; fi
 
+# 13. A session saved before 0.5.4 (a date-only stamp) with unsaved text
+# for a file opened through a symbolic link: that date was the link's
+# own, so it can't tell which file it was. Restored, ⌘S asks first even
+# when the date matches the file the link points at now.
+export CEDRIC_SESSION_DIR="$W/session13"
+printf 'on disk\n' > "$W/legacy-target.md"
+ln -sf legacy-target.md "$W/legacy-link.md"
+python3 -I - "$W" <<'PY13'
+import os, json, uuid, sys
+w = sys.argv[1]
+d = os.path.join(w, "session13")
+os.makedirs(d, exist_ok=True)
+tid = str(uuid.uuid4()).upper()
+open(os.path.join(d, tid + ".txt"), "w").write("unsaved\n")
+mtime = os.stat(os.path.join(w, "legacy-target.md")).st_mtime - 978307200  # since 2001, as JSONEncoder writes dates
+tab = {"id": tid, "path": os.path.join(w, "legacy-link.md"), "hasBuffer": True, "encoding": "utf8", "lineEnding": "lf",
+       "selectionLocation": 0, "selectionLength": 0, "topLine": 0, "fileModified": mtime}
+json.dump({"version": 1, "untitledCounter": 0, "windows": [{"tabs": [tab], "selectedTab": 0}]},
+          open(os.path.join(d, "session.json"), "w"))
+PY13
+dump
+check "legacy link: the unsaved text restored" "file=$W/legacy-link.md dirty=true .*text=unsaved"
+check "legacy link: a date-only stamp through a link is unverified, ⌘S asks first" "^stamp: name=legacy-link.md asks=true"
+
 [ $fail = 0 ] && echo "session-check: all OK"
 exit $fail

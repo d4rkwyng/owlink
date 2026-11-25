@@ -215,4 +215,29 @@ import Testing
         #expect(inPlace.identity == saved.identity && inPlace.size == 8)
         #expect(DiskStamp.status(known: inPlace, at: link) == .same)
     }
+
+    /// 0.5.4 QA (fix round 2): a tab restored with unsaved text from a
+    /// session saved before 0.5.4 has a date-only stamp. Through a link,
+    /// that date was the link's own: it could match another file's date,
+    /// and ⌘S wrote over that file without asking. Unverified now: ⌘S asks.
+    @Test func aRestoredDateOnlyStampThroughALinkIsUnverified() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-legacy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("target.md"), link = dir.appendingPathComponent("link.md")
+        try Data("t\n".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "target.md")
+        let now = try #require(DiskStamp.of(link))
+        // The date matches the file the link points at: as 0.5.3 kept it.
+        let legacy = DiskStamp(modified: now.modified)
+        #expect(legacy.isDateOnly)
+        #expect(!DiskStamp.changed(known: legacy, current: now), "the case is real: date-only, the date matches")
+        let restored = DiskStamp.restored(legacy, for: link)
+        #expect(DiskStamp.changed(known: restored, current: DiskStamp.of(link)), "through a link: unverified, ⌘S asks")
+        // Not through a link, or a full stamp: kept as it is.
+        #expect(DiskStamp.restored(legacy, for: target) == legacy)
+        #expect(DiskStamp.restored(now, for: link) == now)
+        // No date at all, through a link: still unverified (no date matched nothing before).
+        #expect(DiskStamp.changed(known: DiskStamp.restored(DiskStamp(modified: nil), for: link), current: now))
+    }
 }
