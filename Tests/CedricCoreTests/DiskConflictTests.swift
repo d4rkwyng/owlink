@@ -231,6 +231,71 @@ import Testing
         #expect(try Data(contentsOf: url) == Data("new text\n".utf8))
     }
 
+    /// The POSIX code under a save error.
+    private func posixCode(_ error: Error) -> Int32? {
+        ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError).map { Int32($0.code) }
+    }
+
+    /// The last look before the rename couldn't look (here the folder
+    /// stopped letting this user search it): that is not "nothing there".
+    /// 0.5.4 before review 3 took every `fstatat` failure for a file that
+    /// had gone and let the rename replace whatever was there unchecked.
+    @Test func thePreRenameLookFailingIsNotAnAbsentFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-prerename-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { _ = chmod(dir.path, 0o755); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.md")
+        try Data("old\n".utf8).write(to: url)
+        let fd = open(dir.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        #expect(fd >= 0)
+        defer { close(fd) }
+        var checked = stat()
+        #expect(fstatat(fd, "doc.md", &checked, AT_SYMLINK_NOFOLLOW) == 0)
+        #expect(try DocumentWrite.nothingElseAt("doc.md", in: fd, checked: checked, url: url), "unchanged: may be replaced")
+        #expect(try DocumentWrite.nothingElseAt("gone.md", in: fd, checked: checked, url: url), "ENOENT: gone, may be written")
+        #expect(chmod(dir.path, 0o000) == 0)
+        var probe = stat()
+        let refused = fstatat(fd, "doc.md", &probe, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0
+        #expect(refused == EACCES, "the folder refuses the look: \(refused)")
+        var thrown: Error?
+        do { _ = try DocumentWrite.nothingElseAt("doc.md", in: fd, checked: checked, url: url) } catch { thrown = error }
+        let error = try #require(thrown, "a failed look doesn't authorize the rename")
+        #expect(posixCode(error) == EACCES, "\(error)")
+    }
+
+    /// The same through a whole save: the look fails with EIO, the save
+    /// fails with EIO and the file put in place meanwhile is left alone;
+    /// EINTR is looked again (and sees that file: changed while saving).
+    @Test func aSaveWhosePreRenameLookFailsRenamesNothing() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-prerename-save-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.md")
+        func save(_ errors: [Int32], theirs: String?) throws -> Error? {
+            try Data("old\n".utf8).write(to: url)
+            let known = try #require(DiskStamp.of(url))
+            let other = dir.appendingPathComponent("theirs.md")
+            if let theirs { try Data(theirs.utf8).write(to: other) }
+            do {
+                try DocumentWrite.write(Data("mine\n".utf8), to: url, fileManager: .default, afterCheck: {
+                    if theirs != nil { _ = rename(other.path, url.path) }
+                }, faults: DocumentWrite.Faults(preRenameStatErrors: errors), expecting: known)
+            } catch { return error }
+            return nil
+        }
+        let eio = try #require(try save([EIO], theirs: "theirs\n"), "EIO: no rename")
+        #expect(posixCode(eio) == EIO, "\(eio)")
+        #expect(SaveFailure.cause(of: eio) != .changedWhileSaving)
+        #expect(try Data(contentsOf: url) == Data("theirs\n".utf8), "the file put there is still there")
+        let eintr = try #require(try save([EINTR, EINTR], theirs: "theirs\n"), "EINTR: looked again")
+        #expect(SaveFailure.cause(of: eintr) == .changedWhileSaving, "\(eintr)")
+        #expect(try Data(contentsOf: url) == Data("theirs\n".utf8))
+        #expect(try save([EINTR], theirs: nil) == nil, "EINTR, then the checked file: saved")
+        #expect(try Data(contentsOf: url) == Data("mine\n".utf8))
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(left == ["doc.md"], "no temporary file left: \(left)")
+    }
+
     /// Between ⌘S's check and the writer's own: another app's same-size
     /// edit whose date lands within the session stamp's millisecond
     /// tolerance. The writer compared with that tolerance, so the edit

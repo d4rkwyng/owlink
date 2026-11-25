@@ -161,10 +161,15 @@ public enum DocumentWrite {
         /// can also fail with EFBIG), so the kernel's limit is hit part
         /// way through the write itself.
         public var skipSizeLimit = false
-        public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false) {
+        /// The atomic save's last look before the rename (`nothingElseAt`)
+        /// fails with these errors, one per attempt, before it really looks.
+        public var preRenameStatErrors: [Int32] = []
+        public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false,
+                    preRenameStatErrors: [Int32] = []) {
             self.failWriteAfter = failWriteAfter
             self.failRestore = failRestore
             self.skipSizeLimit = skipSizeLimit
+            self.preRenameStatErrors = preRenameStatErrors
         }
     }
 
@@ -203,7 +208,7 @@ public enum DocumentWrite {
                 throw writeError(EBUSY, url)
             }
             afterCheck?()
-            if let stamp = try replace(name, in: dir, with: data, url: url, checked: checked) { return stamp }
+            if let stamp = try replace(name, in: dir, with: data, url: url, checked: checked, faults: faults) { return stamp }
             // The folder refuses a new file (0555, or search-only 0100):
             // write the checked file in place, through the same folder.
             guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
@@ -233,7 +238,8 @@ public enum DocumentWrite {
     /// Writes `data` to a new file in `dir` and renames it over `name`.
     /// The new file's stamp; nil, with nothing written, when the folder
     /// refuses a new file (`overwrite` then writes the checked file in place).
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL, checked: stat) throws -> DiskStamp? {
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL, checked: stat,
+                                faults: Faults?) throws -> DiskStamp? {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
         guard fd >= 0 else {
@@ -266,7 +272,8 @@ public enum DocumentWrite {
         guard close(fd) == 0 else { throw writeError(errno, url) }
         // Just before the rename: no other file put in the checked one's
         // place meanwhile (EBUSY). Narrows the window to the rename itself.
-        guard nothingElseAt(name, in: dir, checked: checked) else { throw writeError(EBUSY, url) }
+        guard try nothingElseAt(name, in: dir, checked: checked, url: url, failing: faults?.preRenameStatErrors ?? [])
+        else { throw writeError(EBUSY, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
         return DiskStamp(written)
@@ -280,9 +287,30 @@ public enum DocumentWrite {
     /// file written since (another app's in-place edit while the new file
     /// was written: same inode, other size or times) may hold someone's
     /// data: not replaced.
-    static func nothingElseAt(_ name: String, in dir: Int32, checked: stat) -> Bool {
+    ///
+    /// Only "no such file" (ENOENT) is gone. Any other failure to look
+    /// (EIO on a network volume, EACCES on a folder whose permissions
+    /// changed) throws that error and nothing is renamed: 0.5.4 before
+    /// review 3 took every failure for "gone" and renamed over whatever
+    /// was there unchecked. An interrupted call (EINTR) is tried again.
+    /// `failing`: errors to fail with first, one per attempt (Faults).
+    static func nothingElseAt(_ name: String, in dir: Int32, checked: stat, url: URL,
+                              failing: [Int32] = []) throws -> Bool {
         var now = stat()
-        guard fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0 else { return true }
+        var faults = failing[...]
+        while true {
+            let code: Int32
+            if let f = faults.popFirst() {
+                code = f
+            } else if fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0 {
+                break
+            } else {
+                code = errno
+            }
+            if code == EINTR { continue }
+            if code == ENOENT { return true }
+            throw writeError(code, url)
+        }
         switch now.st_mode & S_IFMT {
         case S_IFLNK: return false
         case S_IFREG:
