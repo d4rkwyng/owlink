@@ -192,12 +192,22 @@ enum MenuBar {
     /// `hasAppSettings`: the app menu has the system's Settings… item.
     static func insertions(hasFind: Bool, hasSpelling: Bool, hasAppSettings: Bool = false) -> [Insertion] {
         var out: [Insertion] = []
+        /// Shortcuts iPadOS, UIKit, `UITextView` or the preview's
+        /// `WKWebView` may take ahead of Owlink's (⌘W Close Window, ⌘B /
+        /// ⌘I `toggleBoldface:` / `toggleItalics:`, ⌘+ / ⌘- / ⌘0 zoom, ⌘[ /
+        /// ⌘] history, …): Owlink's command wins over the system's
+        /// behavior. (0.5.2 (18): ⇧⌘P was found not reaching the editor.)
+        func claimed(_ key: UIKeyCommand) -> UIKeyCommand {
+            key.wantsPriorityOverSystemBehavior = true
+            return key
+        }
         let save = UIKeyCommand(title: String(localized: "Save"), action: #selector(EditorViewController.saveDocument),
                                 input: "s", modifierFlags: .command)
         let close = UIKeyCommand(title: String(localized: "Close"), action: #selector(EditorViewController.closeDocument),
                                  input: "w", modifierFlags: .command)
         let window = UIKeyCommand(title: String(localized: "New Window"), action: #selector(EditorViewController.newWindow),
                                   input: "n", modifierFlags: [.command, .alternate])
+        for k in [save, close, window] { k.wantsPriorityOverSystemBehavior = true }
         let print = UICommand(title: String(localized: "Print…"), action: #selector(EditorViewController.printDocument))
         let exportHTML = UICommand(title: String(localized: "Export as HTML…"), action: #selector(EditorViewController.exportHTMLDocument))
         let exportPDF = UICommand(title: String(localized: "Export as PDF…"), action: #selector(EditorViewController.exportPDFDocument))
@@ -205,6 +215,7 @@ enum MenuBar {
 
         let goTo = UIKeyCommand(title: String(localized: "Go to Line…"), action: #selector(EditorViewController.goToLine),
                                 input: "l", modifierFlags: .command)
+        goTo.wantsPriorityOverSystemBehavior = true
         out.append(Insertion(menu: UIMenu(options: .displayInline, children: [goTo]), place: .endOf(.edit)))
         // Mark All / Clear Marks, with the Mac's shortcuts, in Edit › Find.
         let marks = UIMenu(options: .displayInline, children: [
@@ -253,6 +264,7 @@ enum MenuBar {
                                    input: "-", modifierFlags: .command)
         let actual = UIKeyCommand(title: String(localized: "Actual Size"), action: #selector(EditorViewController.actualSizeFont),
                                   input: "0", modifierFlags: .command)
+        for k in [preview, focus, bigger, bigger2, smaller, actual] { k.wantsPriorityOverSystemBehavior = true }
         let wrap = UIKeyCommand(title: String(localized: "Wrap Lines"), action: #selector(EditorViewController.toggleWrap),
                                 input: "w", modifierFlags: [.command, .alternate])
         let detach = UICommand(title: String(localized: "Open Preview in New Window"),
@@ -282,9 +294,9 @@ enum MenuBar {
             key(String(localized: "Move Line Up"), #selector(EditorViewController.moveLineUp(_:)), UIKeyCommand.inputUpArrow, [.control, .command]),
             key(String(localized: "Move Line Down"), #selector(EditorViewController.moveLineDown(_:)), UIKeyCommand.inputDownArrow, [.control, .command]),
             key(String(localized: "Delete Line"), #selector(EditorViewController.deleteLine(_:)), "k", [.command, .shift]),
-            key(String(localized: "Comment Selection"), #selector(EditorViewController.commentSelection(_:)), "/"),
-            key(String(localized: "Indent"), #selector(EditorViewController.indentLines(_:)), "]"),
-            key(String(localized: "Outdent"), #selector(EditorViewController.outdentLines(_:)), "["),
+            claimed(key(String(localized: "Comment Selection"), #selector(EditorViewController.commentSelection(_:)), "/")),
+            claimed(key(String(localized: "Indent"), #selector(EditorViewController.indentLines(_:)), "]")),
+            claimed(key(String(localized: "Outdent"), #selector(EditorViewController.outdentLines(_:)), "[")),
             command(String(localized: "Keep Lines Matching…"), #selector(EditorViewController.keepLinesMatching(_:))),
             command(String(localized: "Delete Lines Matching…"), #selector(EditorViewController.deleteLinesMatching(_:))),
         ])
@@ -323,11 +335,11 @@ enum MenuBar {
         ])
         out.append(Insertion(menu: UIMenu(title: String(localized: "Text"), children: [line, indentation, bookmarks, folding]), place: .after(.edit)))
         let markdown = UIMenu(title: String(localized: "Markdown"), children: [
-            key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b"),
-            key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i"),
+            claimed(key(String(localized: "Bold"), #selector(EditorViewController.markdownBoldMenu(_:)), "b")),
+            claimed(key(String(localized: "Italic"), #selector(EditorViewController.markdownItalicMenu(_:)), "i")),
             key(String(localized: "Strikethrough"), #selector(EditorViewController.markdownStrikethroughMenu(_:)), "x", [.command, .shift]),
             key(String(localized: "Inline Code"), #selector(EditorViewController.markdownCodeMenu(_:)), "`", .control),
-            key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k"),
+            claimed(key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k")),
             command(String(localized: "Image Link"), #selector(EditorViewController.markdownImageMenu(_:))),
             command(String(localized: "Body"), #selector(EditorViewController.markdownBodyMenu(_:))),
             key(String(localized: "Heading 1"), #selector(EditorViewController.markdownHeading1Menu(_:)), "1"),

@@ -145,10 +145,29 @@ enum TestLaunch {
         if fresh || !FileManager.default.fileExists(atPath: url.path),
            let sample = Bundle.main.url(forResource: (name as NSString).deletingPathExtension,
                                         withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.copyItem(at: sample, to: url)
+            if fresh {
+                prepareFreshSample(sample, at: url, recovery: SaveSafetyStores.recovery)
+            } else {
+                try? FileManager.default.copyItem(at: sample, to: url)
+            }
         }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// `-OwlinkFreshSample`: puts the bundled `sample` at `url` as if it
+    /// were new. An earlier test's unsaved text for that document (its
+    /// recovery record) is cleared, and the copy is dated now (`copyItem`
+    /// keeps the bundle's older date, which a leftover record would beat),
+    /// so no "Owlink closed with unsaved changes… Restore?" comes up over
+    /// the next test. Other documents' records are left alone, and launches
+    /// without `-OwlinkFreshSample` keep the recovery offer as it is.
+    static func prepareFreshSample(_ sample: URL, at url: URL, recovery: RecoveryStore, now: Date = Date()) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: url)
+        try? fm.copyItem(at: sample, to: url)
+        try? fm.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+        let paths = Set([url.standardizedFileURL.path, url.resolvingSymlinksInPath().standardizedFileURL.path])
+        for path in paths { recovery.clear(documentPath: path) }
     }
 }
 
