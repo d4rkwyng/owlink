@@ -1283,10 +1283,33 @@ final class OwlinkUITests: XCTestCase {
             primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
             openAsk(app, sheet: true)
             waitForAskSheetToSettle(app)
+            // Odd launches: the Ask field holds the keys (it took a plain
+            // character, so it is first responder) when ⌘, comes, still
+            // the launch's first shortcut. Even launches: the sheet as opened.
+            let fieldFocused = launchNumber % 2 == 1
+            if fieldFocused {
+                let field = app.descendants(matching: .any)["ask.field"].firstMatch
+                XCTAssertTrue(field.waitForExistence(timeout: 5), "launch \(launchNumber): no Ask field")
+                field.tap()
+                field.typeText("q7")
+                let took = NSPredicate { _, _ in ((field.value as? String) ?? "").contains("q7") }
+                wait(for: [XCTNSPredicateExpectation(predicate: took, object: nil)], timeout: 5)
+                XCTAssertTrue(((field.value as? String) ?? "").contains("q7"),
+                              "launch \(launchNumber): the Ask field didn't take a typed character (not first responder)")
+            }
+            let how = fieldFocused ? "with the Ask field focused" : "over Ask Cedric's sheet"
             commandComma(app)
             XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, over Ask Cedric's sheet left Owlink")
             XCTAssertNotEqual(systemSettings.state, .runningForeground,
                               "launch \(launchNumber): ⌘, over Ask Cedric's sheet opened the system Settings app")
+            // A system Settings app that comes up late is caught too.
+            for _ in 0..<12 {
+                usleep(250_000)
+                if systemSettings.state == .runningForeground { break }
+            }
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, \(how) opened the system Settings app (within 3 s)")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, \(how) left Owlink (within 3 s)")
             XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, over Ask Cedric's sheet didn't open Owlink's Settings")
             XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): Owlink left the front with Settings up")
             closeSettings(app)

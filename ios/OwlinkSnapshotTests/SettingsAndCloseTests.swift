@@ -181,7 +181,7 @@ final class SettingsAndCloseTests: XCTestCase {
     private func applyMenuBar(_ builder: RecordingBuilder, rebuilds: inout Int) {
         var count = 0
         let saved = MenuBar.requestRebuild
-        MenuBar.requestRebuild = { count += 1 }
+        MenuBar.requestRebuild = { _ in count += 1 }
         MenuBar.apply(to: builder)
         MenuBar.requestRebuild = saved
         rebuilds += count
@@ -214,8 +214,10 @@ final class SettingsAndCloseTests: XCTestCase {
 
     /// No Settings… in the app menu when the menu is built (the system
     /// adds it later, or never): Settings… goes in the Cedric menu, once,
-    /// and the menu is built again once, so a `.preferences` the system
-    /// adds afterwards is replaced and cannot keep ⌘,.
+    /// and the menu is built again, so a `.preferences` the system adds
+    /// afterwards is replaced and cannot keep ⌘,. Here the first rebuild
+    /// finds it, so that one rebuild is all (more while it is still
+    /// missing: testAbsentAppMenuSettingsOnRetryKeepsRebuildingUntilReplaced).
     func testWithoutAppMenuSettingsTheMenuIsBuiltAgainOnce() {
         MenuBar.resetRebuildForTesting()
         defer { MenuBar.resetRebuildForTesting() }
@@ -235,6 +237,95 @@ final class SettingsAndCloseTests: XCTestCase {
         // Still none (a system without that item): no endless rebuilds.
         applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
         XCTAssertEqual(rebuilds, 1)
+    }
+
+    /// Sol's ordering (0.5.2 (18) review): the first build has no
+    /// `.preferences`, nor does the rebuild it asks for. That second build
+    /// doesn't give up: it asks for another, and the build that does find
+    /// `.preferences` replaces it whole, after which no more are asked for.
+    func testAbsentAppMenuSettingsOnRetryKeepsRebuildingUntilReplaced() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var rebuilds = 0
+        let first = RecordingBuilder(present: [.find, .spelling, .format])
+        applyMenuBar(first, rebuilds: &rebuilds)
+        XCTAssertTrue(first.replaced.isEmpty)
+        XCTAssertEqual(first.settingsInserted.count, 1)
+        XCTAssertEqual(rebuilds, 1, "no rebuild asked for without the app menu's Settings…")
+        // The rebuild: still no Settings… in the app menu.
+        let second = RecordingBuilder(present: [.find, .spelling, .format])
+        applyMenuBar(second, rebuilds: &rebuilds)
+        XCTAssertTrue(second.replaced.isEmpty)
+        XCTAssertEqual(second.settingsInserted.count, 1)
+        XCTAssertEqual(rebuilds, 2, "gave up after one rebuild that still had no app menu Settings…")
+        XCTAssertFalse(MenuBar.appSettingsReplaced)
+        // A later build has it: replaced whole, Settings… not also in the Cedric menu.
+        let third = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        applyMenuBar(third, rebuilds: &rebuilds)
+        let prefs = third.replaced.filter { $0.0 == .preferences }
+        XCTAssertEqual(prefs.count, 1, "the app menu's Settings… wasn't replaced when it came")
+        XCTAssertEqual(prefs.first?.1.identifier, MenuBar.settingsMenuIdentifier)
+        let keys = prefs.first.map { Self.commands($0.1) } ?? []
+        XCTAssertEqual(keys.first?.action, #selector(EditorViewController.showSettings))
+        XCTAssertEqual(keys.first?.input, ",")
+        XCTAssertEqual(keys.first?.wantsPriorityOverSystemBehavior, true)
+        XCTAssertTrue(third.settingsInserted.isEmpty, "Settings… is in the menu bar twice")
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
+        XCTAssertEqual(rebuilds, 2, "a rebuild was asked for after Settings… was replaced")
+        // Replaced: later builds and a scene becoming active ask for none.
+        applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
+        var activations = 0
+        let saved = MenuBar.requestRebuild
+        MenuBar.requestRebuild = { _ in activations += 1 }
+        MenuBar.sceneDidActivate()
+        MenuBar.requestRebuild = saved
+        XCTAssertEqual(rebuilds, 2)
+        XCTAssertEqual(activations, 0)
+    }
+
+    /// A system that never adds the app menu's Settings…: the rebuilds
+    /// stop at the cap (no endless loop), each later than the one before
+    /// (never only the next main-queue turn), and Settings… stays in the
+    /// Cedric menu every time.
+    func testRebuildsForAppMenuSettingsStopAtTheCap() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var attempts: [Int] = []
+        let saved = MenuBar.requestRebuild
+        MenuBar.requestRebuild = { attempts.append($0) }
+        defer { MenuBar.requestRebuild = saved }
+        for _ in 0..<(MenuBar.maxAppSettingsRebuilds + 5) {
+            let b = RecordingBuilder(present: [.find, .spelling, .format])
+            MenuBar.apply(to: b)
+            XCTAssertEqual(b.settingsInserted.count, 1)
+        }
+        MenuBar.sceneDidActivate()
+        XCTAssertEqual(attempts, Array(1...MenuBar.maxAppSettingsRebuilds))
+        XCTAssertFalse(MenuBar.appSettingsReplaced)
+        XCTAssertGreaterThan(MenuBar.rebuildDelay(attempt: 1), 0)
+        for n in 1..<MenuBar.maxAppSettingsRebuilds {
+            XCTAssertLessThanOrEqual(MenuBar.rebuildDelay(attempt: n), MenuBar.rebuildDelay(attempt: n + 1))
+        }
+        XCTAssertLessThanOrEqual(MenuBar.rebuildDelay(attempt: MenuBar.maxAppSettingsRebuilds), 8)
+    }
+
+    /// A scene becoming active before any build found `.preferences` asks
+    /// for a rebuild, which replaces it once it is there.
+    func testSceneActivationAsksForARebuildUntilAppMenuSettingsIsReplaced() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var rebuilds = 0
+        applyMenuBar(RecordingBuilder(present: [.find, .spelling, .format]), rebuilds: &rebuilds)
+        var activations = 0
+        let saved = MenuBar.requestRebuild
+        MenuBar.requestRebuild = { _ in activations += 1 }
+        MenuBar.sceneDidActivate()
+        MenuBar.requestRebuild = saved
+        XCTAssertEqual(activations, 1, "becoming active didn't ask for a rebuild")
+        let later = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        applyMenuBar(later, rebuilds: &rebuilds)
+        XCTAssertEqual(later.replaced.filter { $0.0 == .preferences }.count, 1)
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
     }
 
     /// ⌘, is also on the responders that stay in the chain whatever holds
