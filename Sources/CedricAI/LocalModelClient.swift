@@ -85,6 +85,11 @@ public struct LocalModelClient: Sendable {
     /// measured on (monotonic seconds). Tests put a virtual one in, so a
     /// stalled CI runner can't make a dribble look like a stall.
     var streamClock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Streams only, tests only (nil in the app): told after each touch of
+    /// the watch has been stored, with the time stored and the bytes read
+    /// so far, so a virtual-time stub moves on only once the client has
+    /// both read a chunk and reset its idle deadline on it.
+    var streamTouched: (@Sendable (_ at: TimeInterval, _ bytesRead: Int) -> Void)? = nil
     /// `withDeadline`'s wait for `timeout` seconds. Tests whose point isn't
     /// the deadline put in one that never ends on its own, so a stalled CI
     /// runner can't make an answer in time look late.
