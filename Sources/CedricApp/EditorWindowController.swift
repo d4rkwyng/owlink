@@ -110,6 +110,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         splitEditor?.second.gutter.needsDisplay = true
     }
     private(set) var lineIndex = LineIndex()
+    /// `baseAttributes()`, and what it was made from.
+    private var baseAttributesCache: (key: BaseAttributesKey, attributes: [NSAttributedString.Key: Any])?
+    /// The status pull-downs' inputs when they were last built, and those
+    /// menus (`updateStatus()`); for the checks, how often they were built
+    /// and skipped.
+    struct WeakMenu { weak var menu: NSMenu? }
+    private var lastStatusMenus: (key: StatusMenusKey, menus: [WeakMenu])?
+    private(set) var statusMenuBuilds = 0
+    private(set) var statusMenuSkips = 0
     private(set) var colorizer: SyntaxColorizer!
     /// Built the first time it is used (an NSSearchField and its row cost
     /// ~5 ms of every tab's launch otherwise).
@@ -565,13 +574,36 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// proportional font made typing 20-29 % slower (perf-compare).
     var editorFont: NSFont { largeReason != nil ? Settings.shared.font : Settings.shared.font(for: doc.language) }
 
+    /// The text's own attributes: the tab's font, tab stops a tab width of
+    /// spaces apart and the theme's text colour. Made again only when one
+    /// of those changes: measuring the spaces with CoreText ran on every
+    /// selection change.
     func baseAttributes() -> [NSAttributedString.Key: Any] {
-        let font = editorFont
+        let key = BaseAttributesKey(font: editorFont, tabWidth: tabWidth, foreground: palette.foreground)
+        if let cached = baseAttributesCache, cached.key == key { return cached.attributes }
         let para = NSMutableParagraphStyle()
-        let space = (String(repeating: " ", count: tabWidth) as NSString).size(withAttributes: [.font: font]).width
+        let space = (String(repeating: " ", count: key.tabWidth) as NSString).size(withAttributes: [.font: key.font]).width
         para.tabStops = []
         para.defaultTabInterval = space
-        return [.font: font, .paragraphStyle: para, .foregroundColor: NSColor(hex: palette.foreground)]
+        // Immutable: every caller shares this one.
+        let attributes: [NSAttributedString.Key: Any] = [.font: key.font, .paragraphStyle: para.copy() as! NSParagraphStyle,
+                                                         .foregroundColor: NSColor(hex: key.foreground)]
+        baseAttributesCache = (key, attributes)
+        return attributes
+    }
+
+    /// For the checks: the next `baseAttributes()` and `updateStatus()`
+    /// build afresh, as before they were cached.
+    func forgetStatusAndAttributeCachesForChecks() {
+        baseAttributesCache = nil
+        lastStatusMenus = nil
+    }
+
+    /// What `baseAttributes()` is made from.
+    struct BaseAttributesKey: Equatable {
+        let font: NSFont
+        let tabWidth: Int
+        let foreground: UInt32
     }
 
     /// Where the last edit began and how much it inserted (the language
@@ -875,6 +907,25 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         statusBar.counts.toolTip = String(localized: "Words, reading time, a word goal and a daily target")
     }
 
+    /// What the status bar's three pull-downs show: they are built again
+    /// only when one of these changes (not on every caret move).
+    struct StatusMenusKey: Equatable {
+        let languageChoice: LanguageChoice
+        let language: Language
+        let encoding: TextEncoding
+        let encodingGuessed: Bool
+        let hasFile: Bool
+        let lineEnding: LineEnding
+        let mixedLineEndings: Bool
+    }
+
+    var statusMenusKey: StatusMenusKey {
+        let shown = lineEndingShown
+        return StatusMenusKey(languageChoice: doc.languageChoice, language: doc.language, encoding: doc.encoding,
+                              encodingGuessed: doc.encodingGuessed, hasFile: doc.fileURL != nil,
+                              lineEnding: shown.ending, mixedLineEndings: shown.mixed)
+    }
+
     func updateStatus() {
         let sel = textView.selectedRange()
         let line = lineIndex.line(containing: sel.location)
@@ -885,6 +936,14 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         editing.statsPopover?.scheduleRefresh()
         statusBar.position.stringValue = pos
         updatePreviewStatusItem()
+        let key = statusMenusKey
+        let menus = [statusBar.languageButton.menu, statusBar.encodingButton.menu, statusBar.lineEndingButton.menu]
+        // The same inputs, and the pull-downs still hold the menus made from them.
+        if let last = lastStatusMenus, last.key == key, last.menus.count == menus.count,
+           zip(last.menus, menus).allSatisfy({ $0.menu != nil && $0.menu === $1 }) {
+            statusMenuSkips &+= 1
+            return
+        }
         StatusBar.fill(statusBar.languageButton, title: doc.languageChoice.displayTitle,
                        items: Language.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.language) },
                        target: self, action: #selector(pickLanguage(_:)))
@@ -904,6 +963,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
                        items: [(String(localized: "Convert Line Endings To"), nil, false)]
                         + LineEnding.allCases.map { ($0.displayName, $0.rawValue, $0 == shown.ending) },
                        target: self, action: #selector(pickLineEnding(_:)))
+        lastStatusMenus = (key, [statusBar.languageButton.menu, statusBar.encodingButton.menu, statusBar.lineEndingButton.menu]
+                                .map { WeakMenu(menu: $0) })
+        statusMenuBuilds &+= 1
     }
 
     /// The status bar's Preview eye (CSV / TSV only): shown for this
