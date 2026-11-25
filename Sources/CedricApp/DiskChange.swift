@@ -82,9 +82,12 @@ final class NoticeBar: NSView {
 /// Nothing is ever dropped silently. Works with the owl on or off.
 extension EditorWindowController {
     /// Whether `url` changed on disk since this tab read or saved it.
-    func fileChangedOnDisk(_ url: URL) -> Bool {
+    func fileChangedOnDisk(_ url: URL) -> Bool { fileChangedOnDisk(url, current: DiskStamp.of(url)) }
+
+    /// As `fileChangedOnDisk(_:)`, against a stamp the caller already took.
+    func fileChangedOnDisk(_ url: URL, current: DiskStamp?) -> Bool {
         guard url == doc.fileURL else { return false }
-        return DiskStamp.changed(known: doc.diskStamp, current: DiskStamp.of(url))
+        return DiskStamp.changed(known: doc.diskStamp, current: current)
     }
 
     static var conflictKeep: String { DiskConflict.keepTitle }

@@ -231,6 +231,50 @@ import Testing
         #expect(try Data(contentsOf: url) == Data("new text\n".utf8))
     }
 
+    /// Between ⌘S's check and the writer's own: another app's same-size
+    /// edit whose date lands within the session stamp's millisecond
+    /// tolerance. The writer compared with that tolerance, so the edit
+    /// passed, became the baseline for the pre-rename recheck, and was
+    /// overwritten (0.5.4 QA review 3). The tab's exact `stat` (`seen`)
+    /// now goes to the writer, and any difference fails the save.
+    @Test func aSameSizeSubMillisecondEditAfterTheTabsCheckIsLeftAlone() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-exact-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.md")
+        try Data("mine\n".utf8).write(to: url)
+        func setModified(_ sec: Int, _ nsec: Int) -> Bool {
+            var times = [timespec(tv_sec: sec, tv_nsec: nsec), timespec(tv_sec: sec, tv_nsec: nsec)]
+            return utimensat(AT_FDCWD, url.path, &times, 0) == 0
+        }
+        let base = Int(Date().timeIntervalSince1970) - 60
+        #expect(setModified(base, 100_000_000))
+        // The tab's ⌘S check: its stamp and the exact file, from one stat.
+        let known = try #require(DiskStamp.of(url))
+        let (seen, stamp) = try #require(DiskStamp.Exact.of(url))
+        #expect(stamp == known)
+        // Another app: same five bytes, same inode, 0.4 ms later.
+        let fd = open(url.path, O_WRONLY | O_CLOEXEC)
+        #expect(fd >= 0)
+        let bytes = Array("MINE\n".utf8)
+        #expect(pwrite(fd, bytes, bytes.count, 0) == bytes.count)
+        close(fd)
+        #expect(setModified(base, 100_400_000))
+        #expect(!DiskStamp.changed(known: known, current: DiskStamp.of(url)), "within the tolerant stamp's millisecond")
+        var thrown: Error?
+        do { try DocumentWrite.write(Data("new text\n".utf8), to: url, expecting: known, seen: seen) } catch { thrown = error }
+        let error = try #require(thrown, "the save didn't write over the edit")
+        #expect(SaveFailure.cause(of: error) == .changedWhileSaving, "\(error)")
+        #expect(DocumentWrite.fileLeft(by: error) == nil, "Owlink didn't write into it")
+        #expect(try Data(contentsOf: url) == Data("MINE\n".utf8), "their edit is still there")
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(left == ["doc.md"], "no temporary file left: \(left)")
+        // Checked again (the file as it is now): saved.
+        let again = try #require(DiskStamp.Exact.of(url))
+        try DocumentWrite.write(Data("new text\n".utf8), to: url, expecting: again.stamp, seen: again.exact)
+        #expect(try Data(contentsOf: url) == Data("new text\n".utf8))
+    }
+
     /// The same on the in-place save (a 0555 folder, Sol round 3): the
     /// checked file edited in place by another app after the writer's
     /// check, before it opens the file. The identity matched, so the

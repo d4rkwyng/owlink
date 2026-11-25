@@ -137,10 +137,17 @@ public enum DocumentWrite {
     /// written (EBUSY, "replaced or changed while saving"): a link pointed
     /// at another writable file after the tab's check otherwise had the
     /// save go there. Nil (Save As, a copy, an export): no such check.
+    ///
+    /// `seen`: the file exactly as that ⌘S check saw it (DiskStamp.Exact
+    /// from the same `stat`). The writer's file must match it to the
+    /// nanosecond, size, inode and change time included, or nothing is
+    /// written (EBUSY): `expecting` alone is compared within the session
+    /// file's millisecond tolerance, so a same-size edit in between could
+    /// pass and become the baseline the rename is then checked against.
     @discardableResult
     public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default,
-                             expecting: DiskStamp? = nil) throws -> DiskStamp {
-        try write(data, to: url, fileManager: fm, afterCheck: nil, expecting: expecting)
+                             expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: fm, afterCheck: nil, expecting: expecting, seen: seen)
     }
 
     /// Failures the tests (and the app's check builds) inject into the
@@ -164,14 +171,15 @@ public enum DocumentWrite {
     /// `write(_:to:)` with `faults` injected into an in-place save (check
     /// builds: a save that fails part way through the file, in the app).
     @discardableResult
-    public static func write(_ data: Data, to url: URL, faults: Faults, expecting: DiskStamp? = nil) throws -> DiskStamp {
-        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults, expecting: expecting)
+    public static func write(_ data: Data, to url: URL, faults: Faults, expecting: DiskStamp? = nil,
+                             seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults, expecting: expecting, seen: seen)
     }
 
     /// `afterCheck`: tests only, runs between the check and the write.
     @discardableResult
     static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?,
-                      faults: Faults? = nil, expecting: DiskStamp? = nil) throws -> DiskStamp {
+                      faults: Faults? = nil, expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
@@ -187,6 +195,11 @@ public enum DocumentWrite {
             // The file found here is the one the tab checked (a file that
             // has gone since is written anew, as a save of a deleted file is).
             if let expecting, checked.st_ino != 0, DiskStamp.changed(known: expecting, current: DiskStamp(checked)) {
+                throw writeError(EBUSY, url)
+            }
+            // …and exactly the file that check saw: any write since, even
+            // the same size within the tolerance above, is a change.
+            if let seen, checked.st_ino != 0, !seen.matches(checked) {
                 throw writeError(EBUSY, url)
             }
             afterCheck?()

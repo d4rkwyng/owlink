@@ -1116,10 +1116,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if let reason = fileReadOnly { askSaveReadOnly(url, reason); return false }
         // The file changed since it was read or saved here: ask
         // (DiskChange.swift) rather than overwrite the change.
-        if fileChangedOnDisk(url) { askSaveConflict(url); return false }
-        // The writer checks the file it opens against the same stamp: a
-        // link pointed elsewhere since this check isn't written through.
-        return write(to: url, expecting: doc.diskStamp)
+        // One stat for the check and for the writer: it checks the file it
+        // opens against the same stamp (a link pointed elsewhere since this
+        // check isn't written through) and against this exact version (a
+        // write in between, however small and quick, is a change).
+        let seen = DiskStamp.Exact.of(url)
+        if fileChangedOnDisk(url, current: seen?.stamp) { askSaveConflict(url); return false }
+        return write(to: url, expecting: doc.diskStamp, seen: seen?.exact)
     }
 
     @discardableResult
@@ -1140,9 +1143,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// panel chooses, without showing it. Only DevChecks sets it.
     static var checkSaveAsURL: URL?
 
-    func write(to url: URL, expecting: DiskStamp? = nil) -> Bool {
+    func write(to url: URL, expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) -> Bool {
         do {
-            try doc.write(textView.string, to: url, expecting: expecting)
+            try doc.write(textView.string, to: url, expecting: expecting, seen: seen)
         } catch {
             // This tab's own file, written into by the save that failed
             // (the writer says so): the next ⌘S's sheet says Owlink did it

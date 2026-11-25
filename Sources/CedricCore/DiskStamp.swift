@@ -70,6 +70,42 @@ public struct DiskStamp: Equatable, Sendable {
     /// A stamp from a session saved before 0.5.4: a date and nothing else.
     public var isDateOnly: Bool { size == nil && identity == nil }
 
+    /// The file exactly as one `stat` saw it: device, inode, size, and
+    /// the modification and change times to the nanosecond. A DiskStamp
+    /// keeps the date as a Double and compares it within `tolerance`, which
+    /// suits a stamp that went through the session file; this is for the
+    /// short hop from ⌘S's conflict check to the writer's own check
+    /// (DocumentWrite `seen`), where any difference at all means the file
+    /// was written in between. 0.5.4 QA before review 3 carried only the
+    /// tolerant stamp there, so a same-size edit within a millisecond of
+    /// the check passed the writer and then became its baseline.
+    public struct Exact: Equatable, Sendable {
+        public var device: Int32
+        public var inode: UInt64
+        public var size: Int64
+        public var modifiedSec: Int, modifiedNsec: Int
+        public var changedSec: Int, changedNsec: Int
+
+        public init(_ st: stat) {
+            device = st.st_dev
+            inode = UInt64(st.st_ino)
+            size = Int64(st.st_size)
+            modifiedSec = st.st_mtimespec.tv_sec; modifiedNsec = st.st_mtimespec.tv_nsec
+            changedSec = st.st_ctimespec.tv_sec; changedNsec = st.st_ctimespec.tv_nsec
+        }
+
+        /// The file a save through `url` would write (as `DiskStamp.of`),
+        /// with the stamp from the same `stat`; nil if it can't be read.
+        public static func of(_ url: URL) -> (exact: Exact, stamp: DiskStamp)? {
+            var st = stat()
+            guard stat(SafePaths.writeTarget(for: url).path, &st) == 0 else { return nil }
+            return (Exact(st), DiskStamp(st))
+        }
+
+        /// Whether `st` is this very file, not written since: every field equal.
+        public func matches(_ st: stat) -> Bool { Exact(st) == self }
+    }
+
     /// The stamp a tab restored with unsaved text (a session buffer,
     /// Reopen Closed Tab) starts from, for its file at `url`. Through a
     /// symbolic link a date-only stamp (`isDateOnly`) can't be trusted:

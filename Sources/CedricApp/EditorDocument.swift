@@ -219,8 +219,9 @@ final class EditorDocument {
     static var checkWriteFaults: DocumentWrite.Faults?
 
     /// Writes `text` to `url` in this document's encoding and line ending.
-    /// `expecting`: the stamp ⌘S checked the file against (DocumentWrite).
-    func write(_ text: String, to url: URL, expecting: DiskStamp? = nil) throws {
+    /// `expecting`: the stamp ⌘S checked the file against, and `seen` the
+    /// file exactly as that check saw it (DocumentWrite).
+    func write(_ text: String, to url: URL, expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) throws {
         guard let data = encoded(text) else {
             throw NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey:
                 String(localized: "Some characters can’t be saved as \(encoding.displayName). Choose UTF-8 from the encoding menu in the status bar and save again.")])
@@ -231,9 +232,9 @@ final class EditorDocument {
         let stamp: DiskStamp
         if DevEnvironment.checksEnabled, let faults = Self.checkWriteFaults {
             Self.checkWriteFaults = nil
-            stamp = try DocumentWrite.write(data, to: url, faults: faults, expecting: expecting)
+            stamp = try DocumentWrite.write(data, to: url, faults: faults, expecting: expecting, seen: seen)
         } else {
-            stamp = try DocumentWrite.write(data, to: url, expecting: expecting)
+            stamp = try DocumentWrite.write(data, to: url, expecting: expecting, seen: seen)
         }
         fileURL = url
         noteDisk(stamp)
