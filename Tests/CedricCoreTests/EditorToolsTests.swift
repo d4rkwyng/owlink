@@ -967,6 +967,81 @@ import Testing
         #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
     }
 
+    /// Sol, 0.5.4 QA round 4: the CR held at Follow's first read was
+    /// counted out of the bytes read, so `old\r` rewritten in place as
+    /// `new` (the size the tail thought it had read) went unseen, and the
+    /// LF after it showed `old\n`, stamped as the file. The held bytes
+    /// count as read: the file cut below them is a reset.
+    @Test func aFileRewrittenBelowAHeldCRAtTheFirstReadIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\r".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        #expect(d.text == "old" && used == 3)
+        let tab = FollowedTab()
+        tab.show(d)
+        // Rewritten in place (same file) before the tail's first look.
+        let fh = try FileHandle(forWritingTo: url)
+        try fh.truncate(atOffset: 0)
+        try fh.write(contentsOf: Data("new".utf8))
+        try fh.close()
+        #expect(DiskStamp.of(url)?.identity == stamp.identity, "the same file")
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), held: data.suffix(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(tab.shown == "new", "the rewrite is a reset: \(tab.shown.debugDescription)")
+        try appendBytes(url, Array("\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "new\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
+    /// The same after a reset: a CR held there counts as read, so the file
+    /// cut to the bytes shown is seen (a reset, stamped as the file now).
+    @Test func aFileCutBelowAResetsHeldCRIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        final class Got: @unchecked Sendable {
+            private let lock = NSLock()
+            private var list: [(FileTail.Event, FileTail.Shown)] = []
+            func add(_ e: FileTail.Event, _ s: FileTail.Shown) { lock.lock(); list.append((e, s)); lock.unlock() }
+            var all: [(FileTail.Event, FileTail.Shown)] { lock.lock(); defer { lock.unlock() }; return list }
+        }
+        let got = Got()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
+                            lineEnding: d.lineEnding, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("ab\r".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .reset("ab") && got.all.last?.1.bytes == 2, "\(got.all.map(\.0))")
+        let before = got.all.count
+        #expect(truncate(url.path, 2) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        let after = got.all.dropFirst(before)
+        #expect(after.contains { $0.0 == .reset("ab") }, "the cut is a reset: \(after.map(\.0))")
+        let last = try #require(got.all.last)
+        #expect(last.1.bytes == 2 && last.1.stamp == DiskStamp.of(url), "stamped as the file now")
+    }
+
     /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
     /// (its bytes counted as read), and the next good append stamped the
     /// whole file's size: ⌘S then dropped the skipped bytes with no

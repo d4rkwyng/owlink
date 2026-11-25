@@ -19,6 +19,11 @@ public final class FileTail: @unchecked Sendable {
     // Touched only on `queue`.
     private var source: DispatchSourceFileSystemObject?
     private var retry: DispatchSourceTimer?
+    /// How many of the file's bytes have been read: those shown and those
+    /// held in `pending`. A file shorter than this was truncated. Not the
+    /// bytes shown: with a held CR counted out of it, `old\r` rewritten in
+    /// place as `new` looked unchanged, and the LF that came next showed
+    /// `old\n`, stamped as the file (Sol, 0.5.4 QA round 4).
     private var offset: UInt64
     /// The file being followed (device and inode): the start's, from the
     /// read Follow began with, then each reset's. Another file there is a
@@ -86,13 +91,17 @@ public final class FileTail: @unchecked Sendable {
     /// `startedFrom`: the stamp of the read the caller shows (its first
     /// `offset` bytes): a file put in its place before the tail starts
     /// watching is a reset, not an append to it. `lineEnding`: that text's
-    /// most common line ending.
-    public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
-                startedFrom: DiskStamp? = nil, lineEnding: LineEnding = .lf,
+    /// most common line ending. `held`: the bytes that read had past the
+    /// `offset` it shows (what decodeWhole left out): they count as read,
+    /// so the file cut below them is a reset, and come before the first
+    /// append.
+    public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, held: Data = Data(),
+                callbackQueue: DispatchQueue = .main, startedFrom: DiskStamp? = nil, lineEnding: LineEnding = .lf,
                 stamped: @escaping @Sendable (Event, Shown) -> Void) {
         self.url = url
         self.encoding = encoding
-        self.offset = offset
+        self.offset = offset + UInt64(held.count)
+        self.pending = held
         self.identity = startedFrom?.identity
         self.dominant = lineEnding
         self.callbackQueue = callbackQueue
@@ -258,10 +267,12 @@ public final class FileTail: @unchecked Sendable {
             // The same decode Follow starts with: a character cut in half
             // at the end (the writer still busy) waits for the next append.
             if let (d, used) = Self.decodeWhole(data, as: encoding) {
-                offset = UInt64(used)
-                pending = Data()
+                // All of it read; what wasn't shown is held, as an append
+                // holds it.
+                offset = UInt64(data.count)
+                pending = data.suffix(data.count - used)
                 dominant = d.lineEnding
-                emit(.reset(d.text), shown: offset, stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil)
+                emit(.reset(d.text), shown: UInt64(used), stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil)
             } else {
                 offset = UInt64(data.count)
                 pending = Data()

@@ -330,7 +330,10 @@ extension EditorWindowController {
         let me = WeakRef(self)
         // From the read shown: a file put in its place before the tail
         // watches is a reset, not an append to this text.
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), startedFrom: stamp,
+        // The bytes left out (a held CR, half a character) are read: a
+        // file cut below them is a reset.
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), held: data.suffix(data.count - used),
+                         startedFrom: stamp,
                          lineEnding: d.lineEnding) { (e: FileTail.Event, shown: FileTail.Shown) in
             MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }
         }
