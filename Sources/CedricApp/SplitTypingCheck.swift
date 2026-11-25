@@ -284,11 +284,30 @@ extension DevChecks {
                 }
                 guard let bottom else { expect(false, "a chunk lower than the visible rect"); return }
                 viewport.bottom = bottom
+                viewport.reported = tv.viewportLayoutsReportedByTextKit
                 let clip = tab.primaryPane.scrollView.contentView
                 clip.scroll(to: NSPoint(x: clip.bounds.minX, y: bottom - h))
                 tab.primaryPane.scrollView.reflectScrolledClipView(clip)
             },
-            waitFor("the viewport there is laid out") { viewportLaidOutAtTop() },
+            // A pass of TextKit's own after the scroll, not the one before
+            // (its overdraw can cover the new visible rect already), and one
+            // that ends the viewport with that chunk: then the caret's place
+            // is read from fragments laid out for this scroll.
+            waitFor("a fresh viewport pass there ends with that chunk") {
+                let tv = tab.primaryTextView
+                guard tv.viewportLayoutsReportedByTextKit > viewport.reported, viewportLaidOutAtTop(),
+                      let vr = tv.viewportCharacterRange, let tlm = tv.textLayoutManager,
+                      let start = tlm.textViewportLayoutController.viewportRange?.location else { return false }
+                var endsAt: CGFloat?
+                tlm.enumerateTextLayoutFragments(from: start, options: []) { frag in
+                    if tv.offset(of: frag.rangeInElement.endLocation) == NSMaxRange(vr) {
+                        endsAt = frag.layoutFragmentFrame.maxY + tv.textContainerOrigin.y
+                        return false
+                    }
+                    return true
+                }
+                return endsAt == viewport.bottom
+            },
             sync {
                 let tv = tab.primaryTextView
                 guard let vr = tv.viewportCharacterRange, let tlm = tv.textLayoutManager else { expect(false, "a viewport"); return }

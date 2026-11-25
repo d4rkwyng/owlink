@@ -190,22 +190,42 @@ final class EditorTextView: NSTextView {
 
     override func layout() {
         super.layout()
+        installViewportProxy()
         viewportLaidOut()
     }
 
-    /// TextKit's own word that a viewport pass is over (macOS 27 declares
-    /// it; NSTextView, the controller's delegate, has had it before). It
-    /// can run outside NSView.layout(): a scroll lays out the new viewport
-    /// without one.
-    override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
-        if Self.superHasDidLayout { super.textViewportLayoutControllerDidLayout(controller) }
-        if viewportLaidOut() { viewportLayoutsReportedByTextKit += 1 }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installViewportProxy()
     }
 
-    private static let superHasDidLayout = NSTextView.instancesRespond(to: #selector(NSTextView.textViewportLayoutControllerDidLayout(_:)))
+    /// TextKit's own word that a viewport pass is over
+    /// (`textViewportLayoutControllerDidLayout`). It can come outside
+    /// NSView.layout(): a scroll lays out the new viewport without one.
+    /// NSTextView, the controller's delegate, has the method, but only the
+    /// macOS 27 SDK declares it on NSTextView, so an override neither built
+    /// with an older SDK nor passed the availability check for macOS 14.
+    /// Instead the controller's delegate is a proxy that hands every call
+    /// to the text view's own delegate methods and hears `didLayout` on
+    /// its way through.
+    private var viewportProxy: ViewportDelegateProxy?
+
+    private func installViewportProxy() {
+        guard let controller = textLayoutManager?.textViewportLayoutController else { return }
+        if let proxy = viewportProxy, controller.delegate === proxy { return }
+        // A new controller (layout manager replaced): wrap its delegate,
+        // which is this view; never wrap a proxy in a proxy.
+        guard let original = controller.delegate, !(original is ViewportDelegateProxy) else { return }
+        let proxy = ViewportDelegateProxy(original: original) { [weak self] in
+            guard let self else { return }
+            if self.viewportLaidOut() { self.viewportLayoutsReportedByTextKit += 1 }
+        }
+        viewportProxy = proxy
+        controller.delegate = proxy
+    }
 
     /// Reports a viewport pass that laid out something new; true if it did.
-    @discardableResult private func viewportLaidOut() -> Bool {
+    @discardableResult fileprivate func viewportLaidOut() -> Bool {
         guard let tlm = textLayoutManager else { return false }
         let now = (range: viewportCharacterRange, bounds: tlm.textViewportLayoutController.viewportBounds)
         if let last = lastLaidOutViewport, last.range == now.range, last.bounds == now.bounds { return false }
@@ -1048,5 +1068,48 @@ final class GutterView: NSView {
         }
         // The last empty line after a trailing newline has no fragment in
         // some TextKit versions; number it from the previous one.
+    }
+}
+
+/// The viewport layout controller's delegate in front of the text view's
+/// own (EditorTextView.installViewportProxy): every call goes on to it
+/// (the protocol's methods, and any other selector TextKit sends its
+/// delegate, by forwarding), and `didLayout` also runs `onDidLayout`.
+/// The original is held weakly: it is the text view, which holds this.
+final class ViewportDelegateProxy: NSObject, NSTextViewportLayoutControllerDelegate {
+    private weak var original: (any NSTextViewportLayoutControllerDelegate)?
+    private let onDidLayout: () -> Void
+
+    init(original: any NSTextViewportLayoutControllerDelegate, onDidLayout: @escaping () -> Void) {
+        self.original = original
+        self.onDidLayout = onDidLayout
+    }
+
+    func viewportBounds(for textViewportLayoutController: NSTextViewportLayoutController) -> CGRect {
+        original?.viewportBounds(for: textViewportLayoutController) ?? .zero
+    }
+
+    func textViewportLayoutController(_ textViewportLayoutController: NSTextViewportLayoutController,
+                                      configureRenderingSurfaceFor textLayoutFragment: NSTextLayoutFragment) {
+        original?.textViewportLayoutController(textViewportLayoutController, configureRenderingSurfaceFor: textLayoutFragment)
+    }
+
+    func textViewportLayoutControllerWillLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        original?.textViewportLayoutControllerWillLayout?(textViewportLayoutController)
+    }
+
+    func textViewportLayoutControllerDidLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        original?.textViewportLayoutControllerDidLayout?(textViewportLayoutController)
+        onDidLayout()
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return (original as? NSObject)?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let target = original as? NSObject, target.responds(to: aSelector) { return target }
+        return super.forwardingTarget(for: aSelector)
     }
 }
