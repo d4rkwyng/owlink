@@ -1317,7 +1317,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         DispatchQueue.global(qos: .userInitiated).async {
             let read = try? EditorDocument.read(url, encoding: encoding, shareBytes: true)
             let prepared = read.flatMap { $0.0.looksBinary ? nil : PreparedText(lineIndex: LineIndex($0.0.text as NSString, expectedLineCount: $0.0.newlineCount.map { $0 + 1 }), fingerprint: nil) }
-            nonisolated(unsafe) let result = read
+            let result = read
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.catchUpReads -= 1
