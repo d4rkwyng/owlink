@@ -400,7 +400,11 @@ import Testing
 
             let outcome = Outcome()
             let done = DispatchSemaphore(value: 0)
-            DispatchQueue.global().async {
+            // A thread of its own, not DispatchQueue.global(): GCD starts
+            // no thread there while as many as there are cores run CPU work
+            // at that QoS, and on a 3-core runner the save didn't start
+            // within the 20 s bound (run 45449763393, both jobs).
+            Thread.detachNewThread {
                 do {
                     try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {
                         // Between the check and the write: a FIFO takes the checked file's name.
