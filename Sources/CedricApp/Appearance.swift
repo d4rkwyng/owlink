@@ -331,8 +331,19 @@ final class Settings {
     /// Settings › Writing › "Use a prose font for Markdown and plain text"
     /// (0.4.1): off by default, so nothing changes until it is turned on.
     var useProseFont: Bool {
-        get { defaults.bool(forKey: "useProseFont") }
-        set { defaults.set(newValue, forKey: "useProseFont"); changed() }
+        get { useProseFontOverride ?? defaults.bool(forKey: "useProseFont") }
+        set {
+            // The override's own didSet posts the change.
+            if useProseFontOverride != nil { useProseFontOverride = newValue; return }
+            defaults.set(newValue, forKey: "useProseFont")
+            changed()
+        }
+    }
+
+    /// Set by a check: the prose font on or off for this run, not saved
+    /// (as `fontSizeOverride`). Nil: the saved switch.
+    var useProseFontOverride: Bool? {
+        didSet { if useProseFontOverride != oldValue { changed() } }
     }
 
     /// The prose font: a font's PostScript name, `ProseFont.systemSerif`
