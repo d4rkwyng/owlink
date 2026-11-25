@@ -42,6 +42,7 @@ import WebKit
 ///   CEDRIC_TEST_EARLY_CLOSE=1     close the selected tab 0.5 s in, before deferred tabs are built
 ///   CEDRIC_TEST_EARLY_REOPEN=1    reopen the newest closed tab 0.5 s in, likewise
 ///   CEDRIC_SESSION_DUMP=1         print the restored tabs and closed tabs, and quit
+///   CEDRIC_TEST_SAVE_AS_DIR=dir   with the dump: Save As each mixed-endings tab into dir (its name), the real write
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
 ///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
 ///                                 "metric doc_ready_ms=…" when a file opened in the background has its tab drawn
@@ -250,6 +251,12 @@ enum DevHooks {
                     // A mixed file's own breaks: the bytes ⌘S would write (LineBreaks).
                     if t.doc.lineBreaks != nil, let data = t.doc.encoded(t.text) {
                         print("breaks: name=\(t.doc.displayName) saves=\(String(decoding: data, as: UTF8.self).debugDescription)")
+                        // The bytes Save As really writes, for the script to read back.
+                        if let dir = env["CEDRIC_TEST_SAVE_AS_DIR"] {
+                            let target = URL(fileURLWithPath: dir).appendingPathComponent(t.doc.displayName)
+                            EditorWindowController.checkSaveAsURL = target
+                            print("savedas: name=\(t.doc.displayName) ok=\(t.saveAs()) path=\(target.path)")
+                        }
                     }
                 }
                 for v in app.viewerTabs { print("viewer: file=\(v.fileURL.path)") }

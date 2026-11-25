@@ -469,14 +469,46 @@ export CEDRIC_SESSION_DIR="$W/session12"
 printf 'one\r\ntwo\nthree\rfour\r\n' > "$W/mixed.txt"
 env CEDRIC_OPEN="$W/mixed.txt" CEDRIC_TEST_TYPE="five" "$BIN" -ApplePersistenceIgnoreState YES >/dev/null 2>&1 &
 pid=$!
-sleep 4
+# Killed only once the autosave is on disk: the session's entry for the
+# tab (unsaved, mixed) and its buffer with the edit and its own breaks
+# (a fixed sleep raced a slow launch). At most 20 s.
+saved12=no
+for _ in $(seq 1 80); do
+    if python3 -I - "$W/session12" "$W/mixed.txt" <<'PY12'
+import json, os, sys
+d, path = sys.argv[1], sys.argv[2]
+try:
+    s = json.load(open(os.path.join(d, "session.json")))
+except Exception:
+    sys.exit(1)
+for w in s.get("windows", []):
+    for t in w.get("tabs", []):
+        if t.get("path") == path and t.get("hasBuffer") and t.get("mixedLineEndings"):
+            try:
+                b = open(os.path.join(d, t["id"] + ".txt"), "rb").read()
+            except OSError:
+                sys.exit(1)
+            sys.exit(0 if b == b"one\r\ntwo\nthree\rfour\r\nfive" else 1)
+sys.exit(1)
+PY12
+    then saved12=yes; break; fi
+    sleep 0.25
+done
 kill -9 $pid; wait $pid 2>/dev/null || true
+if [ $saved12 = yes ]; then echo "session-check: OK   mixed: the unsaved buffer and its session entry were on disk before the crash"
+else echo "session-check: FAIL mixed: no unsaved buffer with its breaks on disk within 20 s" >&2; fail=1; fi
 printf 'one\ntwo\n' > "$W/mixed.txt"
-dump
+mkdir -p "$W/saveas12"
+env CEDRIC_SESSION_DUMP=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_TEST_SAVE_AS_DIR="$W/saveas12" "$BIN" -ApplePersistenceIgnoreState YES > "$W/dump.txt" 2>/dev/null || true
+cat "$W/dump.txt"
 check "mixed: the unsaved edit restored" "file=$W/mixed.txt dirty=true .*text=one\\\\ntwo\\\\nthree\\\\nfour\\\\nfive"
 if grep -qF 'breaks: name=mixed.txt saves="one\r\ntwo\nthree\rfour\r\nfive"' "$W/dump.txt"; then
     echo "session-check: OK   mixed: each line break as it was, from the buffer, not the replaced file"
 else echo "session-check: FAIL mixed: restored breaks are '$(grep '^breaks: name=mixed.txt' "$W/dump.txt" || echo none)'" >&2; fail=1; fi
+# What Save As really wrote, read back from disk.
+if [ -f "$W/saveas12/mixed.txt" ] && cmp -s "$W/saveas12/mixed.txt" <(printf 'one\r\ntwo\nthree\rfour\r\nfive'); then
+    echo "session-check: OK   mixed: Save As after the restore writes each break as it was"
+else echo "session-check: FAIL mixed: Save As wrote '$(od -c "$W/saveas12/mixed.txt" 2>/dev/null | head -3 | tr -s ' ' || echo nothing)'" >&2; fail=1; fi
 
 [ $fail = 0 ] && echo "session-check: all OK"
 exit $fail
