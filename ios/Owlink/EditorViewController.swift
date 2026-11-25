@@ -341,8 +341,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        // The window is nil until the editor is on screen, so the scene-level
-        // title colour is applied again here.
+        // The editor now covers the browser: the scene-level title colour
+        // (the window's interface style) goes on here, not as it slides in.
+        themesWindow = true
         applyBarStyle()
         EditorBarStyle.renderNavigationBarIfRequested(navigationController?.navigationBar)
         updateEdited()
@@ -2389,17 +2390,40 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// already nil by the time the editor has disappeared.
     private weak var themedWindow: UIWindow?
 
+    /// Whether the theme may set the window's (and its scene's) interface
+    /// style: only while the editor covers the document browser, from the
+    /// end of the open animation to the start of the close. That style
+    /// reaches the browser too. Set as the editor started sliding in, a
+    /// dark theme turned the browser dark under it while the phone was
+    /// light (a light theme turned it light in dark mode); put back only
+    /// once the close animation had ended, the browser came back dark and
+    /// then snapped to light. The editor and its bar keep the theme
+    /// throughout from the navigation controller's own style.
+    private(set) var themesWindow = false
+
     /// Title and bar tint follow the theme. A fixed theme also sets this
-    /// window's interface style; System leaves it unspecified so it tracks
-    /// the phone, and never replaces the accent tint. See `EditorBarStyle`.
+    /// window's interface style while the editor covers the browser;
+    /// System leaves it unspecified so it tracks the phone, and never
+    /// replaces the accent tint. See `EditorBarStyle`.
     private func applyBarStyle() {
         let style = EditorBarStyle.interfaceStyle(theme: AppSettings.theme, isDark: palette.isDark)
-        if let window = view.window { themedWindow = window }
+        let window = themesWindow ? view.window : nil
+        if let window { themedWindow = window }
         EditorBarStyle.apply(navigationController: navigationController,
                              item: navigationItem,
-                             window: view.window,
+                             window: window,
                              foreground: UIColor(hex: palette.foreground),
                              interfaceStyle: style)
+    }
+
+    /// The browser is about to show again: its window and scene go back to
+    /// the phone's appearance now, before the close animation uncovers it,
+    /// and nothing during the animation (a document state change, a trait
+    /// change) sets them again.
+    func handWindowBackToPhone() {
+        themesWindow = false
+        EditorBarStyle.restore(window: themedWindow)
+        themedWindow = nil
     }
 
     override func viewIsAppearing(_ animated: Bool) {
@@ -2411,6 +2435,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         if owlInRail { setOwlFrame(owlFrame, inRail: false) }
+        if isBeingDismissed || navigationController?.isBeingDismissed == true {
+            handWindowBackToPhone()
+        }
     }
 
     override func willMove(toParent parent: UIViewController?) {
@@ -2430,8 +2457,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if isBeingDismissed || navigationController?.isBeingDismissed == true {
             // Dismissed, not just covered (Settings over it keeps the card).
             spellStep?.close(restoringFocus: false)
-            EditorBarStyle.restore(window: themedWindow)
-            themedWindow = nil
+            // Already done as the close began; again in case a dismissal
+            // skipped viewWillDisappear.
+            handWindowBackToPhone()
         }
     }
 
@@ -3865,6 +3893,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Dismissing from the controller that presented the editor's
     /// navigation controller (the document browser) takes the whole stack.
     func dismissEditor(_ done: @escaping () -> Void) {
+        // The browser is on the phone's appearance before it is uncovered.
+        handWindowBackToPhone()
         let shown: UIViewController = navigationController ?? self
         if let presenter = shown.presentingViewController {
             presenter.dismiss(animated: true, completion: done)

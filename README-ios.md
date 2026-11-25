@@ -72,6 +72,15 @@ Build 18 (from a device check of build 17):
   at once shows the block as it was left even when reading it back is
   slow, and that read no longer holds up previews in other tabs.
 
+After build 18 (not in it):
+
+- **Fixed: closing a file no longer flashes dark.** In light mode the
+  file list came back black or dark for a moment, then turned light; with
+  a dark theme it also went dark under the editor as a file opened (and
+  light, in dark mode, with a light theme). The theme now colours the
+  window only while the editor covers the list, and the list is on the
+  phone's appearance before it shows again.
+
 Build 17 (fixes from a device check of build 16):
 
 - **The ••• menu is tidied.** Focus Preview is in it once, in its Preview

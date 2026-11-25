@@ -27,6 +27,13 @@ enum EditorBarStyle {
         theme == .system ? .unspecified : (isDark ? .dark : .light)
     }
 
+    /// What a scene's window shows where nothing covers it: the system
+    /// background, white in light mode and black in dark, following the
+    /// window's (the phone's) appearance. A window's own default is no
+    /// colour, which draws black: closing an editor in light mode showed
+    /// black for a moment before the document browser drew.
+    static let windowBackground: UIColor = .systemBackground
+
     /// One appearance, shared by the bar and the navigation item.
     static func appearance(foreground: UIColor) -> UINavigationBarAppearance {
         let appearance = UINavigationBarAppearance()
@@ -88,10 +95,11 @@ enum EditorBarStyle {
         window.windowScene?.traitOverrides.userInterfaceStyle = interfaceStyle
     }
 
-    /// Puts this window back on the phone's style once its editor has gone.
-    /// Other windows are left as they are. A detached preview has no call:
-    /// its window goes away with the scene, and there is no shared proxy
-    /// to put back.
+    /// Puts this window back on the phone's style as its editor goes: at
+    /// the start of the close, before the browser is uncovered (see
+    /// `EditorViewController.handWindowBackToPhone`). Other windows are
+    /// left as they are. A detached preview has no call: its window goes
+    /// away with the scene, and there is no shared proxy to put back.
     static func restore(window: UIWindow?) {
         window?.tintColor = nil
         window?.overrideUserInterfaceStyle = .unspecified

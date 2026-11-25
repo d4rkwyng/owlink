@@ -12,6 +12,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let ws = scene as? UIWindowScene else { return }
         let browser = DocumentBrowserViewController()
         let w = UIWindow(windowScene: ws)
+        // Not black behind the browser as an editor opens or closes.
+        w.backgroundColor = EditorBarStyle.windowBackground
         w.rootViewController = browser
         // Launch opens a file of its own (a URL from another app,
         // `-OwlinkOpen`), or reopens the last document: decided once per
