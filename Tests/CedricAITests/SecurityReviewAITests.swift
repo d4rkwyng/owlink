@@ -39,14 +39,16 @@ import CedricCore
         await #expect(throws: LocalAIError.endpointNotLocal("studio.local")) { try await client.checkLocal() }
     }
 
-    @Test func aRebindAfterTheCheckIsNotFollowed() async throws {
+    // No real-time deadline on the client (`withoutRealDeadline`): what is
+    // checked is where the request goes, not how fast a busy runner gets it there.
+    @Test(.timeLimit(.minutes(1))) func aRebindAfterTheCheckIsNotFollowed() async throws {
         // The name's first answer is private (a real server on 127.0.0.1);
         // every later answer is public. The request must go to the address
         // that was checked, with the name in the Host header, and the name
         // must be looked up once: a second lookup is where a rebind lands.
         let server = try OneShotHTTPServer(body: #"{"data":[{"id":"m"}]}"#)
         let lookups = Locked(0)
-        var client = LocalModelClient(baseURL: URL(string: "http://rebind-test.local:\(server.port)/v1")!, timeout: 5)
+        var client = LocalModelClient(baseURL: URL(string: "http://rebind-test.local:\(server.port)/v1")!, timeout: 5).withoutRealDeadline()
         client.resolver = { _ in
             lookups.mutate { $0 += 1; return $0 } == 1 ? ["127.0.0.1"] : ["8.8.8.8"]
         }
@@ -160,10 +162,13 @@ import CedricCore
         }
     }
 
-    @Test func peerCheckSeesARealConnection() async throws {
+    // Neither the client's deadline nor the guard's wait is on the wall
+    // clock here (`withoutRealDeadline`, `FrozenClock`): URLSession's report
+    // is awaited however late a busy runner delivers it.
+    @Test(.timeLimit(.minutes(1))) func peerCheckSeesARealConnection() async throws {
         let server = try OneShotHTTPServer(body: #"{"data":[{"id":"m"}]}"#)
         let base = URL(string: "http://127.0.0.1:\(server.port)/v1")!
-        let client = LocalModelClient(baseURL: base, timeout: 5)
+        let client = LocalModelClient(baseURL: base, timeout: 5).withoutRealDeadline()
         // Through the client: the peer (127.0.0.1) is private, the list comes back.
         #expect(try await client.listModels().map(\.id) == ["m"])
         // The guard got the connection's address from URLSession.
@@ -172,7 +177,7 @@ import CedricCore
         let (bytes, _) = try await URLSession(configuration: .ephemeral)
             .bytes(for: URLRequest(url: URL(string: "http://127.0.0.1:\(again.port)/")!), delegate: g)
         for try await _ in bytes {}
-        try await g.checkPeers(wait: 2)
+        try await g.checkPeers(wait: 2, clock: FrozenClock())
         #expect(g.connectedAddresses?.contains("127.0.0.1") == true)
     }
 

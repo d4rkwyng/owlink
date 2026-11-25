@@ -114,11 +114,14 @@ import Testing
     }
 }
 
-@Suite(.timely) struct ServerContextProbeTests {
+/// The requests and answers, not the deadline: a client deadline that
+/// never passes on its own (`withoutRealDeadline`), except for the one
+/// whose point is the deadline (0.2 s against an hour's stall).
+@Suite(.timely, .timeLimit(.minutes(1))) struct ServerContextProbeTests {
     @Test func lmStudioServerIsAskedOnItsNativeList() async {
         let server = StubServer()
         server.json("/api/v0/models", ["data": [["id": "qwen3-4b", "state": "loaded", "loaded_context_length": 8_192]]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "qwen3-4b", kind: .lmStudio) == ServerContextReport(tokens: 8_192, source: .loaded))
         #expect(!server.recorded.contains { $0.path.hasPrefix("/api/ps") || $0.path.hasPrefix("/api/show") })
     }
@@ -127,7 +130,7 @@ import Testing
         let server = StubServer()
         server.json("/api/ps", ["models": []])
         server.json("/api/show", ["parameters": "num_ctx 6144", "model_info": ["qwen3.context_length": 40_960]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "qwen3:4b", kind: .ollama) == ServerContextReport(tokens: 6_144, source: .configured))
         let show = try #require(server.recorded.first { $0.path == "/api/show" }?.body)
         let sent = try #require(try JSONSerialization.jsonObject(with: show) as? [String: String])
@@ -138,20 +141,20 @@ import Testing
     @Test func customServerTriesLMStudioThenOllama() async {
         let server = StubServer()
         server.json("/api/ps", ["models": [["model": "m:latest", "context_length": 32_768]]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "m", kind: .custom) == ServerContextReport(tokens: 32_768, source: .loaded))
     }
 
     @Test func aServerThatSaysNothingOrFailsGivesNil() async {
         let server = StubServer()   // every path 404
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "m", kind: .custom) == nil)
         #expect(await client.contextReport(model: "m", kind: .lmStudio) == nil)
         let slow = StubServer()
         slow.json("/api/v0/models", ["data": [["id": "m", "state": "loaded", "loaded_context_length": 8_192]]], delay: 3_600)
         let quick = LocalModelClient(baseURL: slow.baseURL, timeout: 0.2, session: slow.session)
         #expect(await quick.contextReport(model: "m", kind: .lmStudio) == nil, "past the deadline")
-        let public_ = LocalModelClient(baseURL: URL(string: "http://example.com/v1")!, timeout: 1, session: server.session)
+        let public_ = LocalModelClient(baseURL: URL(string: "http://example.com/v1")!, timeout: 1, session: server.session).withoutRealDeadline()
         #expect(await public_.contextReport(model: "m", kind: .lmStudio) == nil, "not a local server: never asked")
     }
 }
