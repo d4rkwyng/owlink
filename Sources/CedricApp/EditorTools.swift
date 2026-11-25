@@ -332,7 +332,7 @@ extension EditorWindowController {
         // watches is a reset, not an append to this text.
         // The bytes left out (a held CR, half a character) are read: a
         // file cut below them is a reset.
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), held: data.suffix(data.count - used),
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), held: UInt64(data.count - used),
                          startedFrom: stamp,
                          lineEnding: d.lineEnding) { (e: FileTail.Event, shown: FileTail.Shown) in
             MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }

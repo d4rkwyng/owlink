@@ -19,8 +19,8 @@ public final class FileTail: @unchecked Sendable {
     // Touched only on `queue`.
     private var source: DispatchSourceFileSystemObject?
     private var retry: DispatchSourceTimer?
-    /// How many of the file's bytes have been read: those shown and those
-    /// held in `pending`. A file shorter than this was truncated. Not the
+    /// How many of the file's bytes have been read: those shown and the
+    /// `heldCount` after them. A file shorter than this was truncated. Not the
     /// bytes shown: with a held CR counted out of it, `old\r` rewritten in
     /// place as `new` looked unchanged, and the LF that came next showed
     /// `old\n`, stamped as the file (Sol, 0.5.4 QA round 4).
@@ -32,7 +32,14 @@ public final class FileTail: @unchecked Sendable {
     /// The most common line ending of the text shown (the start's, then
     /// each reset's): appended breaks of another kind are noted against it.
     private var dominant: LineEnding
-    private var pending = Data()
+    /// How many bytes at the end of `offset` were read but not shown (half
+    /// a character, a CR that may start a CRLF). Only the count is kept:
+    /// the next append rereads them from the file with the new bytes, so
+    /// a writer that rewrote them meanwhile is shown as the file has them
+    /// (0.5.4 QA leftovers 2: kept bytes decoded a rewritten `C2` → `C3 A9`
+    /// as `©`, or a CR rewritten as `X\n` as a CRLF, stamped as the file),
+    /// and no slice of a whole read is kept alive until the next append.
+    private var heldCount: UInt64 = 0
     private var stopped = false
     /// The last reset showed lossy text: appends after it aren't the
     /// file's bytes either, until the next faithful reset.
@@ -91,17 +98,17 @@ public final class FileTail: @unchecked Sendable {
     /// `startedFrom`: the stamp of the read the caller shows (its first
     /// `offset` bytes): a file put in its place before the tail starts
     /// watching is a reset, not an append to it. `lineEnding`: that text's
-    /// most common line ending. `held`: the bytes that read had past the
-    /// `offset` it shows (what decodeWhole left out): they count as read,
-    /// so the file cut below them is a reset, and come before the first
-    /// append.
-    public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, held: Data = Data(),
+    /// most common line ending. `held`: how many bytes that read had past
+    /// the `offset` it shows (what decodeWhole left out): they count as
+    /// read, so the file cut below them is a reset, and are reread with the
+    /// first append.
+    public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, held: UInt64 = 0,
                 callbackQueue: DispatchQueue = .main, startedFrom: DiskStamp? = nil, lineEnding: LineEnding = .lf,
                 stamped: @escaping @Sendable (Event, Shown) -> Void) {
         self.url = url
         self.encoding = encoding
-        self.offset = offset + UInt64(held.count)
-        self.pending = held
+        self.offset = offset + held
+        self.heldCount = held
         self.identity = startedFrom?.identity
         self.dominant = lineEnding
         self.callbackQueue = callbackQueue
@@ -270,12 +277,12 @@ public final class FileTail: @unchecked Sendable {
                 // All of it read; what wasn't shown is held, as an append
                 // holds it.
                 offset = UInt64(data.count)
-                pending = data.suffix(data.count - used)
+                heldCount = UInt64(data.count - used)
                 dominant = d.lineEnding
                 emit(.reset(d.text), shown: UInt64(used), stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil)
             } else {
                 offset = UInt64(data.count)
-                pending = Data()
+                heldCount = 0
                 let raw = String(decoding: data, as: UTF8.self)
                 let le = TextCodec.detectLineEnding(raw).0
                 dominant = le
@@ -285,16 +292,21 @@ public final class FileTail: @unchecked Sendable {
         }
         guard size > offset else { return }
         do {
-            try fh.seek(toOffset: offset)
-            guard let chunk = try fh.read(upToCount: Int(size - offset)), !chunk.isEmpty else { return }
-            offset += UInt64(chunk.count)
-            let bytes = pending + chunk
-            pending = Data()
-            // Hold back a character cut in half at the end.
+            // From the end of the text shown: the held bytes are read again
+            // with the new ones, through this descriptor, as they are now.
+            let start = offset - heldCount
+            try fh.seek(toOffset: start)
+            // Shorter than what was read (cut since the fstat): the next
+            // check resets.
+            guard let bytes = try fh.read(upToCount: Int(size - start)), UInt64(bytes.count) > heldCount else { return }
+            offset = start + UInt64(bytes.count)
+            heldCount = 0
+            // Hold back a character cut in half at the end (all of it while
+            // no whole character has come yet).
             var text: String?
             if let (s, used) = Self.decodePrefix(bytes, encoding, { String(data: $0, encoding: encoding.foundation) }) {
                 text = s
-                pending = bytes.suffix(bytes.count - used)
+                heldCount = UInt64(bytes.count - used)
             } else {
                 // Bytes that aren't text in this encoding are skipped, so
                 // the text no longer stands for the file's bytes: no size
@@ -306,13 +318,13 @@ public final class FileTail: @unchecked Sendable {
             // A CR at the very end may be the first half of a CRLF.
             if s.hasSuffix("\r"), let cr = "\r".data(using: encoding.foundation) {
                 s.removeLast()
-                pending = cr + pending
+                heldCount += UInt64(cr.count)
             }
             guard !s.isEmpty else { return }
             var rec: TextCodec.BreakRecorder? = TextCodec.BreakRecorder(dominant: dominant, ascii: false)
             let appended = TextCodec.normalizeLineEndings(s, recording: &rec)
             let odd = rec.map { LineBreaks(dominant: dominant, others: $0.others) }
-            emit(.appended(appended), shown: lossy ? nil : offset - UInt64(pending.count), stamp,
+            emit(.appended(appended), shown: lossy ? nil : offset - heldCount, stamp,
                  lineEnding: nil, breaks: odd?.isMixed == true ? odd : nil)
         } catch {
             return
