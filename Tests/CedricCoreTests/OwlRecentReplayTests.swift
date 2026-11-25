@@ -337,4 +337,24 @@ import Testing
         #expect(RulesHintProvider.stillApplies(other, range: NSRange(location: 0, length: 3), expected: "the", in: "the the end"))
         #expect(!RulesHintProvider.stillApplies(other, range: NSRange(location: 0, length: 3), expected: "the", in: "th"))
     }
+
+    /// 0.5.4 QA (should round 2): the output limit was checked before each
+    /// member only, so the last value and the closing lines could go past
+    /// it ("[1]" pretty with a limit of 4 gave 7 bytes). Never past it.
+    @Test func theJSONOutputLimitCoversTheLastBytes() throws {
+        #expect(throws: TextToolError.self) { try JSONFormatter.format("[1]", pretty: true, limit: 4) }
+        let whole = try JSONFormatter.format("[1]", pretty: true)
+        #expect(whole.utf8.count == 7)
+        #expect(try JSONFormatter.format("[1]", pretty: true, limit: 7) == whole, "exactly at the limit: formatted")
+        #expect(throws: TextToolError.self) { try JSONFormatter.format("[1]", pretty: true, limit: 6) }
+        // The last member's long value, and the final newline, count too.
+        let text = #"{"a":1,"b":"\#(String(repeating: "x", count: 100))"}"# + "\n"
+        let full = try JSONFormatter.format(text, pretty: true)
+        #expect(full.hasSuffix("}\n"))
+        for limit in [full.utf8.count - 1, full.utf8.count - 50] {
+            #expect(throws: TextToolError.self, "limit \(limit)") { try JSONFormatter.format(text, pretty: true, limit: limit) }
+        }
+        #expect(try JSONFormatter.format(text, pretty: true, limit: full.utf8.count) == full)
+        #expect(try JSONFormatter.format(text, pretty: false, limit: 200).utf8.count <= 200)
+    }
 }

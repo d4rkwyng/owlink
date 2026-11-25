@@ -207,6 +207,10 @@ public enum JSONFormatter {
         p.skipSpace()
         if p.i < p.b.count { throw p.error(String(localized: "unexpected text after the value")) }
         if pretty && text.hasSuffix("\n") { out.append(10) }
+        // The check inside stops early, before each member; the last value
+        // and the closing lines come after it, so the whole output is
+        // held to the limit here too.
+        if out.count > limit { throw p.error(String(localized: "too long to format")) }
         return String(decoding: out, as: UTF8.self)
     }
 
