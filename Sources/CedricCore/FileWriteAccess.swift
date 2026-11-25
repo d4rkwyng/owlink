@@ -273,14 +273,20 @@ public enum DocumentWrite {
         switch now.st_mode & S_IFMT {
         case S_IFLNK: return false
         case S_IFREG:
-            return checked.st_ino != 0 && now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
-                && now.st_size == checked.st_size
-                && now.st_mtimespec.tv_sec == checked.st_mtimespec.tv_sec
-                && now.st_mtimespec.tv_nsec == checked.st_mtimespec.tv_nsec
-                && now.st_ctimespec.tv_sec == checked.st_ctimespec.tv_sec
-                && now.st_ctimespec.tv_nsec == checked.st_ctimespec.tv_nsec
+            return checked.st_ino != 0 && unchanged(now, since: checked)
         default: return true
         }
+    }
+
+    /// Whether `now` is the file `checked` looked at, not written since:
+    /// the same device and inode, size, modification and change times.
+    static func unchanged(_ now: stat, since checked: stat) -> Bool {
+        now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
+            && now.st_size == checked.st_size
+            && now.st_mtimespec.tv_sec == checked.st_mtimespec.tv_sec
+            && now.st_mtimespec.tv_nsec == checked.st_mtimespec.tv_nsec
+            && now.st_ctimespec.tv_sec == checked.st_ctimespec.tv_sec
+            && now.st_ctimespec.tv_nsec == checked.st_ctimespec.tv_nsec
     }
 
     /// The save into a folder that refuses a new file (a writable file
@@ -328,6 +334,12 @@ public enum DocumentWrite {
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
         guard st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else { throw writeError(EBUSY, url) }
+        // The checked file written in place since the check (same inode,
+        // other size or times: another app's edit): the recovery copy
+        // below would take their edit as the file to put back, and the
+        // save would overwrite it. Checked before preallocating, which
+        // can touch the times itself.
+        guard unchanged(st, since: checked) else { throw writeError(EBUSY, url) }
         // The checked file itself is a pipe, socket or device: nothing a
         // save can write a document into (not "changed while saving").
         guard st.st_mode & S_IFMT == S_IFREG else { throw writeError(ENXIO, url) }
@@ -543,4 +555,3 @@ public enum DocumentWrite {
         return CocoaError(kind, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path, NSUnderlyingErrorKey: underlying])
     }
 }
-

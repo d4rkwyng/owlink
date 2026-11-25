@@ -196,8 +196,9 @@ import Testing
     /// the check, while the new text was written: the pre-rename check
     /// compared device and inode only and replaced it, losing that edit
     /// (Sol round 2). Its size and times are rechecked too: same length or
-    /// longer, the save fails and their bytes stay.
-    @Test(arguments: ["THEIRS\n", "theirs, longer\n"])
+    /// longer, the save fails and their bytes stay. `MINE\n` is the same
+    /// five bytes as the file was (Sol round 3): only the times tell.
+    @Test(arguments: ["MINE\n", "THEIRS\n", "theirs, longer\n"])
     func theCheckedFileEditedInPlaceBeforeTheRenameIsLeftAlone(edit: String) throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-inplace-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -225,6 +226,44 @@ import Testing
         let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
         #expect(left == ["doc.md"], "no temporary file left: \(left)")
         // Untouched since the check: saved.
+        let again = try #require(DiskStamp.of(url))
+        try DocumentWrite.write(Data("new text\n".utf8), to: url, expecting: again)
+        #expect(try Data(contentsOf: url) == Data("new text\n".utf8))
+    }
+
+    /// The same on the in-place save (a 0555 folder, Sol round 3): the
+    /// checked file edited in place by another app after the writer's
+    /// check, before it opens the file. The identity matched, so the
+    /// recovery copy took their edit as the file and the save overwrote
+    /// it. Now its size and times are rechecked against the check first.
+    @Test(arguments: ["MINE\n", "theirs, longer\n"])
+    func theCheckedFileEditedInPlaceBeforeAnInPlaceSaveIsLeftAlone(edit: String) throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-inplace0555-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { _ = chmod(dir.path, 0o755); try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.md")
+        try Data("mine\n".utf8).write(to: url)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: url.path)
+        #expect(chmod(dir.path, 0o555) == 0)
+        let known = try #require(DiskStamp.of(url))
+        final class Edited: @unchecked Sendable { var ok = false }
+        let edited = Edited()
+        var thrown: Error?
+        do {
+            try DocumentWrite.write(Data("new text\n".utf8), to: url, fileManager: .default, afterCheck: {
+                let fd = open(url.path, O_WRONLY | O_CLOEXEC)
+                guard fd >= 0 else { return }
+                let bytes = Array(edit.utf8)
+                edited.ok = pwrite(fd, bytes, bytes.count, 0) == bytes.count
+                close(fd)
+            }, expecting: known)
+        } catch { thrown = error }
+        #expect(edited.ok, "the file was edited in place after the check")
+        let error = try #require(thrown, "the in-place save didn't overwrite the edited file")
+        #expect(SaveFailure.cause(of: error) == .changedWhileSaving, "\(error)")
+        #expect(DocumentWrite.fileLeft(by: error) == nil, "Owlink didn't write into it")
+        #expect(try Data(contentsOf: url) == Data(edit.utf8), "their edit is still there")
+        // Untouched since the check: saved in place.
         let again = try #require(DiskStamp.of(url))
         try DocumentWrite.write(Data("new text\n".utf8), to: url, expecting: again)
         #expect(try Data(contentsOf: url) == Data("new text\n".utf8))
