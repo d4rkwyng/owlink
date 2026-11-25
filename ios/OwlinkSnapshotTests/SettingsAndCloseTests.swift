@@ -46,11 +46,11 @@ final class SettingsAndCloseTests: XCTestCase {
         windows = []
     }
 
-    private func editor() -> (StandNav, EditorViewController) {
+    private func editor(readMode: Bool = true) -> (StandNav, EditorViewController) {
         let doc = TextDocument(fileURL: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md"))
         doc.language.choose(.markdown)
         doc.text = "# Owls\n"
-        let editor = EditorViewController(document: doc, readModeOnOpen: true)
+        let editor = EditorViewController(document: doc, readModeOnOpen: readMode)
         let nav = StandNav(rootViewController: editor)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = nav
@@ -239,6 +239,94 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertNil(store.pending(documentPath: path, documentModified: modified))
         XCTAssertEqual(store.read(documentPath: otherPath), record(otherPath), "another document's recovery record was cleared")
         XCTAssertEqual(store.all().map(\.documentPath), [otherPath])
+    }
+
+    /// Astra / Sol (18): a sample that can't be put in place keeps the
+    /// document as it was and its recovery record (the unsaved text is
+    /// still offered), and says so.
+    func testFreshSampleThatFailsKeepsTheRecoveryRecord() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FreshSampleFail-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let docs = root.appendingPathComponent("Documents", isDirectory: true)
+        try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+        let url = docs.appendingPathComponent("README.md")
+        let earlier = Data("# Sample\nhoot roundtrip\n".utf8)
+        try earlier.write(to: url)
+        let missing = root.appendingPathComponent("Samples/README.md")
+        let store = RecoveryStore(directory: root.appendingPathComponent("Recovery", isDirectory: true))
+        let path = url.standardizedFileURL.path
+        let record = RecoveryRecord(documentPath: path, displayName: "README.md", bookmark: nil,
+                                    savedAt: Date(timeIntervalSince1970: 1_600_000_060), text: "unsaved",
+                                    encoding: .utf8, lineEnding: .lf)
+        try store.write(record)
+
+        let queue = DispatchQueue(label: "test.fresh-sample")
+        XCTAssertFalse(TestLaunch.prepareFreshSample(missing, at: url, recovery: store, queue: queue,
+                                                     now: Date(timeIntervalSince1970: 1_800_000_000)))
+
+        XCTAssertEqual(store.read(documentPath: path), record, "a failed fresh sample cleared the recovery record")
+        XCTAssertEqual(try Data(contentsOf: url), earlier, "a failed fresh sample changed the document")
+        XCTAssertEqual(try fm.contentsOfDirectory(atPath: docs.path), ["README.md"], "a staged copy was left behind")
+    }
+
+    /// Astra (18): `-OwlinkFreshSample` is acted on once per process, so a
+    /// second window (⌥⌘N) doesn't wipe the document under the first.
+    func testFreshSampleIsClaimedOncePerProcess() {
+        TestLaunch.resetFreshSampleClaim()
+        defer { TestLaunch.resetFreshSampleClaim() }
+        XCTAssertFalse(TestLaunch.claimFreshSample(requested: false))
+        XCTAssertFalse(TestLaunch.freshSampleConsumed, "a launch without the flag used up the claim")
+        XCTAssertTrue(TestLaunch.claimFreshSample(requested: true))
+        XCTAssertTrue(TestLaunch.freshSampleConsumed)
+        XCTAssertFalse(TestLaunch.claimFreshSample(requested: true), "a second window prepared the fresh sample again")
+    }
+
+    /// Astra / Sol (18): ⌘B, ⌘] and ⌘/ claim priority over the system's
+    /// keys, so with the Find field (a field in the editor's window) or
+    /// Ask Cedric's field (in its sheet's window) taking the typing they'd
+    /// change the document behind it. They're off while it has the
+    /// keyboard and back once it lets go; ⌘, ⌘W ⌘S and ⇧⌘P stay on.
+    func testDocumentEditsStayOffWhileAnotherFieldHasTheKeyboard() throws {
+        let (nav, editor) = editor(readMode: false)
+        let edits = [#selector(EditorViewController.markdownBoldMenu(_:)), #selector(EditorViewController.indentLines(_:)),
+                     #selector(EditorViewController.commentSelection(_:))]
+        let kept = [#selector(EditorViewController.showSettings), #selector(EditorViewController.closeDocument),
+                    #selector(EditorViewController.saveDocument), #selector(EditorViewController.togglePreview)]
+        func check(_ editsOn: Bool, _ when: String, file: StaticString = #filePath, line: UInt = #line) {
+            for action in edits {
+                XCTAssertEqual(editor.canPerformAction(action, withSender: nil), editsOn, "\(action) \(when)", file: file, line: line)
+            }
+            for action in kept {
+                XCTAssertTrue(editor.canPerformAction(action, withSender: nil), "\(action) \(when)", file: file, line: line)
+            }
+        }
+        check(true, "with nothing else focused")
+        XCTAssertTrue(editor.textView.becomeFirstResponder())
+        XCTAssertFalse(editor.otherTextInputHasFocus, "the editor's own text view counted as another field")
+        check(true, "with the text focused")
+
+        // The Find field: in the editor's window.
+        let window = try XCTUnwrap(editor.view.window)
+        let find = UITextField(frame: CGRect(x: 0, y: 0, width: 100, height: 30))
+        window.addSubview(find)
+        XCTAssertTrue(find.becomeFirstResponder())
+        check(false, "with the Find field focused")
+        XCTAssertTrue(find.resignFirstResponder())
+        check(true, "after the Find field let go")
+        find.removeFromSuperview()
+
+        // Ask Cedric's field: in its sheet's own window here.
+        let ask = askSheet()
+        nav.presented = ask
+        let field = UITextField(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
+        ask.view.addSubview(field)
+        field.window?.makeKey()
+        XCTAssertTrue(field.becomeFirstResponder())
+        check(false, "with Ask Cedric's field focused")
+        XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.askCedric), withSender: nil))
+        XCTAssertTrue(field.resignFirstResponder())
+        check(true, "after Ask Cedric's field let go")
     }
 
     /// Records what `MenuBar.apply` does to the system's menus.
