@@ -398,7 +398,9 @@ struct SplitMix {
         edit(&text, &breaks, all, converted)
         let out = TextCodec.encode(breaks.output(text as String), encoding: .utf8, lineEnding: .lf)
         #expect(out == Data("a\r\n\tb\n\tc\r\n\t\td\r\n".utf8), "each line's break as it was")
-        #expect(breaks.counts == [1, 0, 0] || breaks.counts == [0, 1, 0] || breaks.counts.reduce(0, +) == breaks.others.count)
+        // Mostly CRLF: the one odd break is the LF after "b".
+        #expect(breaks.counts == [1, 0, 0], "\(breaks.counts)")
+        #expect(breaks.counts.reduce(0, +) == breaks.others.count)
     }
 
     /// Only whitespace at a line's ends may change; anything else (a
