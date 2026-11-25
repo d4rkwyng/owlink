@@ -37,8 +37,11 @@ public struct LineIndex: Sendable {
     }
 
     /// Calls `found` with the offset just after each "\n" in `range`.
+    /// The scratch buffer is the size of the range, up to 64 K units: an
+    /// edit of one character asks for 2 bytes, not 128 KB.
     static func scanNewlines(_ text: NSString, in range: NSRange, _ found: (Int) -> Void) {
-        let chunk = 65536
+        guard range.length > 0 else { return }
+        let chunk = min(65536, range.length)
         var buffer = [UInt16](repeating: 0, count: chunk)
         var pos = range.location
         let end = range.location + range.length

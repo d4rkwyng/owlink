@@ -38,7 +38,28 @@ import Testing
             if idx.starts != fresh.starts { break }
         }
     }
+
+    /// The scratch buffer is sized to the range: empty ranges report
+    /// nothing, and every range (inside one chunk, across chunk edges,
+    /// at the end) reports the newlines a character walk finds.
+    @Test func scanNewlinesOverAnyRange() {
+        let s = String(repeating: "ab\ncd\n\n", count: 30_000) + "é\n😀x"
+        let text = s as NSString
+        let units = Array(s.utf16)
+        let expected: (NSRange) -> [Int] = { r in (r.location..<(r.location + r.length)).filter { units[$0] == 10 }.map { $0 + 1 } }
+        let ranges = [NSRange(location: 0, length: 0), NSRange(location: 5, length: 0), NSRange(location: text.length, length: 0),
+                      NSRange(location: 0, length: 1), NSRange(location: 2, length: 1), NSRange(location: 3, length: 3),
+                      NSRange(location: 65_530, length: 12), NSRange(location: 1, length: 65_536), NSRange(location: 0, length: 65_537),
+                      NSRange(location: 7, length: 131_100), NSRange(location: text.length - 4, length: 4),
+                      NSRange(location: 0, length: text.length)]
+        for r in ranges {
+            var got: [Int] = []
+            LineIndex.scanNewlines(text, in: r) { got.append($0) }
+            #expect(got == expected(r), "range \(r)")
+        }
+    }
 }
+
 
 @Suite struct HighlightEngineTests {
     @Test func absoluteOffsetsForRequestedLines() {
