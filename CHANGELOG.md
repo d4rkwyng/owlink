@@ -4,7 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
+## [0.5.4] - 2026-11-25
+
+### Changed
+- **Owlink settles faster after opening a file.** Once a file is open, Owlink finishes its background work and stops using the processor sooner. On an M4 Pro: about 0.25 s instead of 0.46 s for an empty file, 0.58 s instead of 1.39 s for a 100 MB file, and 1.1 s instead of 2.0 s for a 1 GB file. Two things held it up: with spelling off, macOS still ran its automatic text checking about a second after each layout, and Owlink threw the result away; and the Git status redrew the gutter and status bar even when there was nothing to clear. Files that keep spelling on, such as `.log` files, still run the spelling pass, so they settle as before (about 1.4 s for a 10 MB log).
+- **With spelling off, macOS word completion is off too.** Wherever spelling is off (Check Spelling While Typing turned off, large-document mode, or a data file such as JSON), Owlink now turns off the system's automatic text checking, and word completion goes with it, because leaving completion on brings back the one-second pass above. When spelling comes back on, so does word completion. Writing Tools work as before, with spelling on or off.
 
 ### Fixed
 - **A question about the whole document gets one answer.** When a document is too long for the model to read at once, Cedric reads it in parts and then writes one answer from what he found, instead of stacking a separate answer for each part. The answer comes first; the notes on each part are folded away under it (“▸ Section notes”), and clicking that opens them, with the lines each one covers. Find Problems and Check for Risks still list every finding once with its line, and Check for Risks still gives the most cautious verdict any part earned.
@@ -339,6 +343,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[0.5.4]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.4
 [0.5.3]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.3
 [0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
 [0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
