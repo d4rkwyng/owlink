@@ -477,41 +477,67 @@ import Testing
         guard pipe(&pipeFDs) == 0 else { print("fsize child: no pipe"); exit(1) }
         for fd in pipeFDs { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
         fileSizeSignalPipe = pipeFDs[1]
-        func signalsCaught() -> Int {
-            var n = 0, byte: UInt8 = 0
-            while read(pipeFDs[0], &byte, 1) == 1 { n += 1 }
-            return n
-        }
-        for (skip, counting) in [(false, false), (true, false), (true, true)] {
-            if counting {
-                var action = sigaction()
-                action.__sigaction_u.__sa_handler = { _ in
-                    var b: UInt8 = 1
-                    _ = write(fileSizeSignalPipe, &b, 1)
-                }
-                sigemptyset(&action.sa_mask)
-                _ = sigaction(SIGXFSZ, &action, nil)
-                _ = signalsCaught()
+        /// The signals caught since last asked, and how many of them on
+        /// another thread than the one making the saves.
+        func signalsCaught() -> (count: Int, elsewhere: Int) {
+            var n = 0, elsewhere = 0, byte: UInt8 = 0
+            while read(pipeFDs[0], &byte, 1) == 1 {
+                n += 1
+                if byte != 1 { elsewhere += 1 }
             }
-            do {
-                try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
-                                        faults: .init(skipSizeLimit: skip))
-                failures.append("skip=\(skip): the save succeeded")
-            } catch {
-                let posix = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError)?.code
-                if posix != Int(EFBIG) { failures.append("skip=\(skip): \(error), not EFBIG") }
-                // The bypass must reach the write past the limit itself:
-                // the writer says it wrote into the file, and the kernel's
-                // SIGXFSZ came and was caught (not refused earlier).
-                if skip {
-                    if DocumentWrite.fileLeft(by: error) == nil { failures.append("skip=true: refused before writing") }
-                    if counting, signalsCaught() == 0 { failures.append("skip=true: no SIGXFSZ was caught") }
-                } else if DocumentWrite.fileLeft(by: error) != nil {
-                    failures.append("skip=false: wrote before refusing")
-                }
-            }
-            if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
+            return (n, elsewhere)
         }
+        // The saves run on the main thread. A write's SIGXFSZ is sent to
+        // the process, and the kernel gives it to the first thread that
+        // can take it, the main one: never to a test's own thread (a
+        // Swift concurrency / dispatch worker, which takes no signal sent
+        // to the process), so made there the handler ran on the main
+        // thread whenever it was next scheduled, and under load that was
+        // after the check below (CI: "no SIGXFSZ was caught"). Made on the
+        // main thread, the write's own thread takes it before the write
+        // returns.
+        let saves = {
+            var current = sigset_t()
+            _ = pthread_sigmask(SIG_BLOCK, nil, &current)
+            if sigismember(&current, SIGXFSZ) != 0 { failures.append("the saving thread blocks SIGXFSZ") }
+            fileSizeSignalWriter = pthread_self()
+            for (skip, counting) in [(false, false), (true, false), (true, true)] {
+                if counting {
+                    var action = sigaction()
+                    action.__sigaction_u.__sa_handler = { _ in
+                        // 1: caught on the thread that made the write.
+                        var b: UInt8 = fileSizeSignalWriter.map { pthread_equal(pthread_self(), $0) != 0 } == true ? 1 : 2
+                        _ = write(fileSizeSignalPipe, &b, 1)
+                    }
+                    sigemptyset(&action.sa_mask)
+                    _ = sigaction(SIGXFSZ, &action, nil)
+                    _ = signalsCaught()
+                }
+                do {
+                    try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
+                                            faults: .init(skipSizeLimit: skip))
+                    failures.append("skip=\(skip): the save succeeded")
+                } catch {
+                    let posix = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError)?.code
+                    if posix != Int(EFBIG) { failures.append("skip=\(skip): \(error), not EFBIG") }
+                    // The bypass must reach the write past the limit itself:
+                    // the writer says it wrote into the file, and the kernel's
+                    // SIGXFSZ came and was caught (not refused earlier).
+                    if skip {
+                        if DocumentWrite.fileLeft(by: error) == nil { failures.append("skip=true: refused before writing") }
+                        if counting {
+                            let caught = signalsCaught()
+                            if caught.count == 0 { failures.append("skip=true: no SIGXFSZ was caught") }
+                            if caught.elsewhere != 0 { failures.append("skip=true: SIGXFSZ was caught on another thread than the write's") }
+                        }
+                    } else if DocumentWrite.fileLeft(by: error) != nil {
+                        failures.append("skip=false: wrote before refusing")
+                    }
+                }
+                if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
+            }
+        }
+        if Thread.isMainThread { saves() } else { DispatchQueue.main.sync(execute: saves) }
         DocumentWrite.catchFileSizeSignal()
         // A program started from here (git, as Git.run starts it) gets
         // SIGXFSZ's default action back: an ignored SIGXFSZ was inherited.
@@ -731,6 +757,8 @@ import Testing
 /// before that handler is installed, then only read (by it), in a child
 /// process of its own.
 nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
+/// The thread the file-size child's saves run on (set before its handler is).
+nonisolated(unsafe) private var fileSizeSignalWriter: pthread_t?
 
 /// The recovery copy's byte copy (DocumentWrite.copyBytes), 4 MB at a
 /// time: every byte, for sizes around and across the chunk, a count short
