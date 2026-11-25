@@ -493,7 +493,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // Large mode first, so TextKit never lays out a huge line whole.
         let ns = text as NSString
         let incoming = prepared.map(\.lineIndex).flatMap { $0.length == ns.length ? $0 : nil } ?? LineIndex(ns)
-        applyLargeMode(LargeDocument.reason(for: incoming), newText: true, chunks: LargeDocument.needsChunks(incoming))
+        let large = LargeDocument.setupDecision(for: incoming)
+        applyLargeMode(large.reason, newText: true, chunks: large.needsChunks)
         PerfTrace.mark("large_check")
         let attrs = baseAttributes()
         let storage = textView.textStorage!

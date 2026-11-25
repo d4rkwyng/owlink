@@ -177,8 +177,8 @@ extension EditorWindowController {
             // Always, from the whole text: it also settles any edit step queued before.
             guard let self, self.textView.contentStorage === storage else { return }
             let wasPaused = self.extrasPaused
-            self.applyLargeMode(LargeDocument.reason(for: self.lineIndex), newText: false,
-                                chunks: LargeDocument.needsChunks(self.lineIndex))
+            let large = LargeDocument.setupDecision(for: self.lineIndex)
+            self.applyLargeMode(large.reason, newText: false, chunks: large.needsChunks)
             if wasPaused, !self.extrasPaused { self.colorizer.recolorAll() }
         }
     }
