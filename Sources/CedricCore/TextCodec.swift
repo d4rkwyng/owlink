@@ -260,12 +260,21 @@ public enum TextCodec {
     /// shows a later write through it, so a same-length rewrite while it
     /// was checked, indexed and copied gave text that wasn't the bytes
     /// checked, and a truncation faulted reading past the end.
+    ///
+    /// Only a regular file, judged by what was opened: a path checked
+    /// before and swapped for a FIFO since blocked `open` (no writer) or
+    /// `read` forever, on the large-open queue or a synchronous restore.
+    /// So the open doesn't wait (O_NONBLOCK), the opened file is checked
+    /// (fstat), and only then are reads made blocking again.
     public static func snapshot(of url: URL) throws -> Data {
-        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC)
+        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
         guard fd >= 0 else { throw readError(url, errno) }
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw readError(url, errno) }
+        guard st.st_mode & S_IFMT == S_IFREG else { throw notRegularFile(url) }
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw readError(url, errno) }
         // Room for the size it has now; more if it grows while read.
         var capacity = max(Int(st.st_size), 0) + 1
         guard var buffer = malloc(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
@@ -290,6 +299,13 @@ public enum TextCodec {
             count += n
         }
         return Data(bytesNoCopy: buffer, count: count, deallocator: .free)
+    }
+
+    /// A FIFO, device or directory where a file was expected.
+    static func notRegularFile(_ url: URL) -> CocoaError {
+        CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path, NSURLErrorKey: url,
+                                                NSLocalizedDescriptionKey: String(localized: "It isn’t a regular file."),
+                                                NSUnderlyingErrorKey: POSIXError(.EFTYPE)])
     }
 
     /// The error Foundation's reading gives for `code` (its message).

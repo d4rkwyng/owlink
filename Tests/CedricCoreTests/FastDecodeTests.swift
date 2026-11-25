@@ -310,4 +310,37 @@ import Testing
         #expect(d?.text == "one\ntwo\nthree\nfour\nfive", "the text of the bytes as they are now")
         #expect(d?.lineEnding == .crlf && d?.mixedLineEndings == true)
     }
+
+    /// A path checked as a file and swapped for a FIFO before the
+    /// snapshot opens it: opening it waited for a writer that never came,
+    /// blocking the large-open queue (or a synchronous restore) forever.
+    /// Now it is refused at once. A watchdog unblocks the read (opening
+    /// the FIFO for writing) so the old code fails here instead of hanging.
+    @Test func snapshotRefusesAFIFOWithoutWaiting() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-fifo-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fifo = dir.appendingPathComponent("swapped.log")
+        #expect(mkfifo(fifo.path, 0o600) == 0)
+        final class Outcome: @unchecked Sendable { var result: Result<Data, Error>? }
+        let outcome = Outcome()
+        let done = DispatchSemaphore(value: 0)
+        Thread {
+            outcome.result = Result { try TextCodec.snapshot(of: fifo) }
+            done.signal()
+        }.start()
+        let inTime = done.wait(timeout: .now() + 3) == .success
+        #expect(inTime, "the snapshot of a FIFO came back without a writer")
+        if !inTime {
+            // Let the stuck open (then read) finish: a writer that writes nothing.
+            let w = Darwin.open(fifo.path, O_WRONLY | O_NONBLOCK)
+            if w >= 0 { close(w) }
+            _ = done.wait(timeout: .now() + 5)
+        }
+        if case .success = outcome.result { Issue.record("a FIFO read as a file") }
+        // A regular file still reads, blocking reads and all.
+        let file = dir.appendingPathComponent("plain.log")
+        try Data("ok\n".utf8).write(to: file)
+        #expect(try TextCodec.snapshot(of: file) == Data("ok\n".utf8))
+    }
 }
