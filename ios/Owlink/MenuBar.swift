@@ -45,43 +45,74 @@ enum MenuBar {
     /// Owlink's Settings… menu, in place of the app menu's `.preferences`.
     static let settingsMenuIdentifier = UIMenu.Identifier("net.cyduck.owlink.settings")
 
-    /// The app menu's `.preferences` was seen and replaced by Owlink's
-    /// Settings…: no more rebuilds are asked for on its account.
+    /// The latest build found the app menu's `.preferences` and replaced
+    /// it with Owlink's Settings…. It is the current build's state, not
+    /// a once-for-the-process flag: a later build without `.preferences`
+    /// sets it back, and the retries start again (within the cap), so a
+    /// system item that comes back afterwards is replaced too.
     @MainActor private(set) static var appSettingsReplaced = false
-    /// Rebuilds asked for so far because the app menu had no Settings…
-    /// item yet. Each build that still finds none asks for another (and
-    /// a scene becoming active asks too), until one finds it or this
-    /// reaches `maxAppSettingsRebuilds`: on a system that never adds the
-    /// item, Settings… stays in the Cedric menu and the asking stops.
+    /// Retries delivered so far (fired, not only scheduled) because the
+    /// app menu had no Settings… item. At most one is pending at a time:
+    /// a build that finds none schedules the next (and a scene becoming
+    /// active does too) only when none is pending, so a burst of builds
+    /// and activations doesn't spend the budget at once. When
+    /// `maxAppSettingsRebuilds` have been delivered the asking stops: on
+    /// a system that never adds the item, Settings… stays in the Cedric
+    /// menu.
     @MainActor private(set) static var appSettingsRebuilds = 0
-    /// The cap on those rebuilds (with `rebuildDelay`'s back-off, about a
-    /// minute of trying).
+    /// The pending retry's serial (`nil`: none pending). A timer whose
+    /// serial isn't this one (left from before a reset) does nothing.
+    @MainActor private static var pendingRetry: Int?
+    @MainActor private static var retrySerial = 0
+    /// The cap on those retries (with `rebuildDelay`'s back-off, about a
+    /// minute of trying: 0.25 + 0.5 + 1 + 2 + 4 + 7 × 8 seconds).
     static let maxAppSettingsRebuilds = 12
-    /// How long after build `attempt` (1, 2, …) the next one is asked
-    /// for: a quarter second, doubling, at most eight seconds. Not the
-    /// next main-queue turn: the system's item may come later than that.
+    /// How long before retry `attempt` (1, 2, …) fires: a quarter second,
+    /// doubling, at most eight seconds. Not the next main-queue turn: the
+    /// system's item may come later than that.
     static func rebuildDelay(attempt: Int) -> TimeInterval {
         min(0.25 * pow(2, Double(max(attempt, 1) - 1)), 8)
     }
-    /// Asks UIKit for a rebuild, `attempt` being its number (the tests
-    /// record instead).
+    /// Schedules retry `attempt`, the one pending retry: after
+    /// `rebuildDelay(attempt:)` it fires (`retryDidFire`). The tests
+    /// record it instead and fire it themselves
+    /// (`firePendingRetryForTesting`).
     @MainActor static var requestRebuild: @MainActor (_ attempt: Int) -> Void = { attempt in
+        let serial = pendingRetry
         DispatchQueue.main.asyncAfter(deadline: .now() + rebuildDelay(attempt: attempt)) {
-            MainActor.assumeIsolated { UIMenuSystem.main.setNeedsRebuild() }
+            MainActor.assumeIsolated { retryDidFire(serial: serial) }
         }
     }
+    /// Asks UIKit to build the menus again (the tests record instead).
+    @MainActor static var rebuildMenus: @MainActor () -> Void = {
+        UIMenuSystem.main.setNeedsRebuild()
+    }
 
-    /// Asks for one more rebuild if `.preferences` hasn't been replaced
-    /// yet and the cap isn't reached.
+    /// Schedules the next retry if the current build hasn't replaced
+    /// `.preferences`, none is pending, and the cap isn't reached.
     @MainActor private static func rebuildForAppSettingsIfNeeded() {
+        guard !appSettingsReplaced, pendingRetry == nil, appSettingsRebuilds < maxAppSettingsRebuilds else { return }
+        retrySerial += 1
+        pendingRetry = retrySerial
+        requestRebuild(appSettingsRebuilds + 1)
+    }
+
+    /// The pending retry's time has come. If `.preferences` has been
+    /// replaced since it was scheduled, it does nothing (and isn't
+    /// counted); otherwise it is counted as delivered and asks for a
+    /// rebuild, whose build schedules the next if still needed.
+    @MainActor private static func retryDidFire(serial: Int?) {
+        guard let serial, pendingRetry == serial else { return }
+        pendingRetry = nil
         guard !appSettingsReplaced, appSettingsRebuilds < maxAppSettingsRebuilds else { return }
         appSettingsRebuilds += 1
-        requestRebuild(appSettingsRebuilds)
+        rebuildMenus()
     }
 
     /// A scene became active: a later point in the app's life at which
-    /// the system's app menu may have its Settings… item by now. Asks for
-    /// a rebuild if it still hasn't been replaced (within the same cap).
+    /// the system's app menu may have its Settings… item by now. Schedules
+    /// a retry if the current build hasn't replaced it (one pending at
+    /// most, within the same cap).
     @MainActor static func sceneDidActivate() {
         rebuildForAppSettingsIfNeeded()
     }
@@ -99,9 +130,10 @@ enum MenuBar {
     /// code: `hasAppSettings` was read once, so a menu built before the
     /// system added `.preferences` never put our ⌘, in its place. Now
     /// `.preferences` is replaced whole whenever a build finds it, and
-    /// while no build has found it, builds are asked for again (with a
-    /// back-off, and when a scene becomes active, up to a cap) until one
-    /// finds and replaces it. (The responders' ⌘, — `settingsKey()` —
+    /// while the current build hasn't found it, one retry at a time is
+    /// scheduled (with a back-off, by builds and by a scene becoming
+    /// active, up to a cap of delivered retries) until a build finds and
+    /// replaces it. (The responders' ⌘, — `settingsKey()` —
     /// is the other half, and stays whatever the menu does.)
     @MainActor static func apply(to builder: some Editing) {
         let hasAppSettings = builder.menu(for: .preferences) != nil
@@ -117,18 +149,33 @@ enum MenuBar {
             case .replacing(let id): builder.replace(menu: id, with: i.menu)
             }
         }
-        if hasAppSettings {
-            appSettingsReplaced = true
-        } else {
+        // The current build's state: replaced now, or missing now (again,
+        // perhaps, after an earlier build replaced it), in which case the
+        // retries go on (one pending at most, within the cap).
+        appSettingsReplaced = hasAppSettings
+        if !hasAppSettings {
             rebuildForAppSettingsIfNeeded()
         }
     }
 
-    /// For the tests: as at launch, nothing replaced, no rebuild asked for.
+    /// For the tests: as at launch, nothing replaced, no retry pending or
+    /// delivered (a timer left from before does nothing).
     @MainActor static func resetRebuildForTesting() {
         appSettingsReplaced = false
         appSettingsRebuilds = 0
+        pendingRetry = nil
     }
+
+    /// For the tests: the pending retry fires now (as its timer would),
+    /// if one is pending. Returns whether one was.
+    @MainActor @discardableResult static func firePendingRetryForTesting() -> Bool {
+        guard let serial = pendingRetry else { return false }
+        retryDidFire(serial: serial)
+        return true
+    }
+
+    /// For the tests: a retry is scheduled and hasn't fired yet.
+    @MainActor static var retryPendingForTesting: Bool { pendingRetry != nil }
 
     /// ⌘, for the responders that stay in the chain whatever has the keys
     /// (the editor's navigation controller, Ask Cedric's sheet): Owlink's
