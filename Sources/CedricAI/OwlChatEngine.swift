@@ -787,7 +787,7 @@ extension LocalModelClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = timeout
+        request.timeoutInterval = requestTimeout ?? timeout
         // `timeout` covers the name check and the wait for the first byte
         // of the answer (a slow model reads a long prompt first); after
         // that, at most `streamIdleLimit` between bytes, and `streamCap`

@@ -91,8 +91,9 @@ public struct LocalModelClient: Sendable {
     var deadlineSleep: @Sendable (TimeInterval) async throws -> Void = {
         try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000))
     }
-    /// What `send` gives URLSession as the request's own timeout (the wait
-    /// between packets); nil: `timeout`. Tests that take the overall
+    /// What every request gives URLSession as its own timeout (the wait
+    /// between packets); nil: each request's usual one (`timeout`, or 2 s
+    /// for `enrich`'s best-effort lookups). Tests that take the overall
     /// deadline off the wall clock take this one off too.
     var requestTimeout: TimeInterval? = nil
 
@@ -353,7 +354,7 @@ public struct LocalModelClient: Sendable {
     /// quantization and load state; Ollama's adds bytes and parameter size.
     private func enrich(_ models: inout [LocalModelInfo], pin: Pin) async {
         var quick = pin.apply(URLRequest(url: serverRoot.appendingPathComponent("api/v0/models")))
-        quick.timeoutInterval = 2
+        quick.timeoutInterval = requestTimeout ?? 2
         if let data = try? await fetch(quick).0,
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = obj["data"] as? [[String: Any]] {
@@ -366,7 +367,7 @@ public struct LocalModelClient: Sendable {
             return
         }
         var tags = pin.apply(URLRequest(url: serverRoot.appendingPathComponent("api/tags")))
-        tags.timeoutInterval = 2
+        tags.timeoutInterval = requestTimeout ?? 2
         if let data = try? await fetch(tags).0,
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = obj["models"] as? [[String: Any]] {
