@@ -590,7 +590,8 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ] + followHeldBytes(app) + followLineBreaks(app) + bomPerVersion(app))
+        ] + followHeldBytes(app) + followLineBreaks(app) + bomPerVersion(app) + bomHeldBinaryReload(app)
+          + bomAppended(app))
     }
 
     /// 0.5.4 QA (should round 2): Follow's appended text came with every
@@ -660,7 +661,8 @@ enum DevChecks {
     /// Follow's rotation kept the tab's encoding, adding or dropping one.
     /// Each case: the file replaced (another inode), the tab reloads or
     /// follows it, then "!" typed at the end and ⌘S: the new version's
-    /// bytes and the "!", BOM as the new version has it.
+    /// bytes and the "!", BOM as the new version has it. The "unedited"
+    /// cases save with nothing typed: the new version byte for byte.
     static func bomPerVersion(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
         let bom = Data([0xEF, 0xBB, 0xBF])
         let cases: [(name: String, first: Data, then: Data)] = [
@@ -668,6 +670,10 @@ enum DevChecks {
             ("follow none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
             ("reload BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
             ("reload none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("follow unedited BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("follow unedited none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("reload unedited BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("reload unedited none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
         ]
         var tabs: [String: EditorWindowController] = [:]
         var urls: [String: URL] = [:]
@@ -703,6 +709,14 @@ enum DevChecks {
                 let want: TextEncoding = c.then.starts(with: bom) ? .utf8BOM : .utf8
                 expect(tab.doc.encoding == want, "\(c.name): the new version's BOM, not the old one's", "\(tab.doc.encoding)")
                 if follows { tab.toggleFollow() }
+                if c.name.contains("unedited") {
+                    expect(!tab.doc.isDirty, "\(c.name): nothing to save but the file as it is")
+                    let saved = tab.save()
+                    let got = (try? Data(contentsOf: url)) ?? Data()
+                    expect(saved && got == c.then, "\(c.name): saved unedited, the new version byte for byte",
+                           "saved \(saved): \([UInt8](got))")
+                    return
+                }
                 focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
                 type("!")
@@ -710,6 +724,106 @@ enum DevChecks {
                 let got = (try? Data(contentsOf: url)) ?? Data()
                 expect(saved && got == c.then + Data("!".utf8), "\(c.name): saved with the new version's BOM",
                        "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
+    }
+
+    /// 0.5.4 release review 6: a tab holding a binary-looking file (not
+    /// shown, before Open Anyway) reloads a new version: it takes that
+    /// version's format with its text (doc.apply in reloadClean's held
+    /// branch, 9238eb7). Open Anyway, Allow Editing, ⌘S with nothing
+    /// typed: the new version byte for byte (BOM and breaks as it has
+    /// them). Before 9238eb7 the old version's encoding and breaks stayed.
+    static func bomHeldBinaryReload(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        // A NUL makes the first version look binary; a file with a BOM
+        // never does, so the BOM can only come with the new version.
+        let cases: [(name: String, first: Data, then: Data, shown: String)] = [
+            ("held none -> BOM+CRLF", Data("a\0\n".utf8), bom + Data("b\0\r\nc\r\n".utf8), "b\0\nc\n"),
+            ("held CRLF -> LF", Data("a\0\r\nz\r\n".utf8), Data("b\0\nc\n".utf8), "b\0\nc\n"),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-held-\(i).bin")
+            try? c.first.write(to: url)
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                expect(tab.binaryHeldText != nil, "\(c.name): the first version is held as binary",
+                       "\(String(describing: tab.binary).prefix(40))")
+                let next = url.appendingPathExtension("next")
+                try? c.then.write(to: next)
+                _ = rename(next.path, url.path)
+                tab.reloadIfChangedOnDisk()
+            })
+            steps.append(waitFor("\(c.name): the new version is held") { tabs[c.name]?.binaryHeldText == c.shown })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                let want: TextEncoding = c.then.starts(with: bom) ? .utf8BOM : .utf8
+                expect(tab.doc.encoding == want, "\(c.name): held, the new version's BOM", "\(tab.doc.encoding)")
+                tab.binaryBar?.button.performClick(nil)
+                expect(tab.binary == .readOnly && tab.text == c.shown, "\(c.name): Open Anyway shows the new version",
+                       tab.text.debugDescription)
+                tab.binaryBar?.button.performClick(nil)
+                expect(tab.binary == .editable, "\(c.name): Allow Editing")
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == c.then, "\(c.name): saved unedited, the new version byte for byte",
+                       "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
+    }
+
+    /// 0.5.4 release review 6: BOMs that come as Follow appends, each
+    /// write read on its own. A BOM after bytes already shown is text
+    /// (U+FEFF): the tab shows it, and ⌘S with nothing typed after Follow
+    /// stops writes the file byte for byte. At d3d28d1 the append was
+    /// decoded by Foundation, which drops a leading U+FEFF on macOS 26,
+    /// and the save wrote three bytes fewer.
+    static func bomAppended(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF], x = Array("x".utf8)
+        let cases: [(name: String, first: [UInt8], writes: [[UInt8]], shown: String)] = [
+            ("append: BOM, then BOM+x", bom, [bom + x], "\u{FEFF}x"),
+            ("append: empty, BOM, then BOM+x", [], [bom, bom + x], "\u{FEFF}x"),
+            ("append: BOM+text, then a BOM split 1+3", bom + Array("a\n".utf8), [[0xEF], [0xBB, 0xBF] + x], "a\n\u{FEFF}x"),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-append-\(i).log")
+            try? Data(c.first).write(to: url)
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                for w in c.writes {
+                    let fh = try! FileHandle(forWritingTo: url)
+                    fh.seekToEndOfFile()
+                    fh.write(Data(w))
+                    fh.closeFile()
+                    // Read before the next write: each its own append.
+                    tab.tail?.poll()
+                    _ = tab.tail?.isWatching
+                }
+            })
+            steps.append(waitFor("\(c.name): the appended text shows") {
+                tabs[c.name]?.text.unicodeScalars.map(\.value) == c.shown.unicodeScalars.map(\.value)
+            })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                tab.toggleFollow()
+                expect(!tab.isFollowing, "\(c.name): Follow stopped")
+                expect(tab.text.unicodeScalars.map(\.value) == c.shown.unicodeScalars.map(\.value),
+                       "\(c.name): the tab shows the second BOM as U+FEFF", tab.text.debugDescription)
+                expect(tab.doc.encoding == .utf8BOM, "\(c.name): UTF-8 with BOM", "\(tab.doc.encoding)")
+                let all = Data(c.first + c.writes.flatMap { $0 })
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == all, "\(c.name): saved unedited, byte for byte", "saved \(saved): \([UInt8](got))")
             })
         }
         return steps
