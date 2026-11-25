@@ -92,7 +92,7 @@ final class EditorDocument {
         changeCount += 1
         updateEdited {
             $0.textChanged(to: currentText?())
-            $0.breaksChanged(to: lineBreaks)
+            $0.breaksChanged(to: lineBreaks, ending: lineEnding)
         }
     }
 
@@ -100,7 +100,7 @@ final class EditorDocument {
     /// some back, or restored a snapshot): unsaved unless they are the
     /// saved ones again (EditedState.breaksChanged).
     func noteBreaksChange() {
-        updateEdited { $0.breaksChanged(to: lineBreaks) }
+        updateEdited { $0.breaksChanged(to: lineBreaks, ending: lineEnding) }
     }
 
     /// Encoding or line endings changed: unsaved until written, whatever the text.
@@ -126,9 +126,9 @@ final class EditorDocument {
         guard !isDirty else { return }
         let text = currentText?()
         if let fingerprint, let text, fingerprint.length == text.length, fingerprint.length > edited.snapshotLimit {
-            edited.saved(fingerprint: fingerprint, breaks: lineBreaks)
+            edited.saved(fingerprint: fingerprint, breaks: lineBreaks, ending: lineEnding)
         } else {
-            edited.saved(text, breaks: lineBreaks)
+            edited.saved(text, breaks: lineBreaks, ending: lineEnding)
         }
     }
 
@@ -140,7 +140,7 @@ final class EditorDocument {
     /// The saved text is kept as chunk hashes, not a copy (checks).
     var keepsSavedFingerprint: Bool { edited.keepsFingerprint }
 
-    func markSaved() { edited.saved(currentText?(), breaks: lineBreaks); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
+    func markSaved() { edited.saved(currentText?(), breaks: lineBreaks, ending: lineEnding); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
     /// Restored from a session buffer: unsaved by definition.
     func markDirtyFromSession() {
         changeCount += 1

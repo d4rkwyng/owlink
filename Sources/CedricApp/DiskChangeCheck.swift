@@ -125,7 +125,7 @@ extension DevChecks {
                 expect(disk() == "clean reload\n" && !tab.doc.isDirty && !tab.doc.missingOnDisk && tab.diskBar?.isHidden == true,
                        "Save writes it back where it was", disk())
             },
-        ] + conflictWordingSteps(app) + ownFailedSaveSteps(app) + linkSteps(app))
+        ] + conflictWordingSteps(app) + ownFailedSaveSteps(app) + reloadEndingSteps(app) + linkSteps(app))
     }
 
     /// 0.5.4 QA (should round 2): the failed-save-to-conflict path through
@@ -171,6 +171,40 @@ extension DevChecks {
             waitFor("own failed save: the sheet is gone") { tab.window?.attachedSheet == nil },
             sync {
                 chmod(folder.path, 0o755)
+                tab.doc.markSaved()
+                tab.window?.performClose(nil)
+            },
+        ]
+    }
+
+    /// Sol round 2: an LF file rewritten as CRLF with the same text, the
+    /// owl's Reload, then ⌘Z: the same text with no odd breaks either way,
+    /// and the tab showed saved though ⌘S would write LF over the CRLF
+    /// file. The line ending a save writes counts toward unsaved too.
+    static func reloadEndingSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let url = write("reload-ending.txt", "a\nb\n")
+        var tab: EditorWindowController!
+        return [
+            sync {
+                guard let t = app.open(url) else { expect(false, "reload ending: opened"); return }
+                tab = t
+                sized(t)
+                focus(t)
+                rewriteElsewhere(url, "a\r\nb\r\n")
+                expect(t.reloadFromDisk(), "reload ending: reloaded")
+                expect(t.doc.lineEnding == .crlf && !t.doc.isDirty, "reload ending: CRLF now, saved",
+                       "\(t.doc.lineEnding) dirty=\(t.doc.isDirty)")
+                t.textView.undoManager?.undo()
+            },
+            sync {
+                expect(tab.text == "a\nb\n" && tab.doc.lineEnding == .lf, "reload ending: ⌘Z gives the LF text back",
+                       "\(tab.doc.lineEnding)")
+                expect(tab.doc.isDirty, "reload ending: …unsaved, since ⌘S would write LF over the CRLF file")
+                tab.textView.undoManager?.redo()
+            },
+            sync {
+                expect(tab.doc.lineEnding == .crlf && !tab.doc.isDirty, "reload ending: ⌘⇧Z: CRLF as on disk, saved again",
+                       "\(tab.doc.lineEnding) dirty=\(tab.doc.isDirty)")
                 tab.doc.markSaved()
                 tab.window?.performClose(nil)
             },

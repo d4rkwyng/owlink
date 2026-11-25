@@ -55,6 +55,12 @@ public struct EditedState {
     /// gave the saved text again, the tab clean, and autosave and closing
     /// skipped a change that a save writes (an LF where the CRLF was).
     private var savedBreaks: [Int] = []
+    /// The line ending a save writes for every other break, at the
+    /// baseline (nil: not given, not compared). Reloading an LF file
+    /// rewritten as CRLF with the same text, then ⌘Z, gave the same text
+    /// and no odd breaks either way: clean, though a save would now write
+    /// LF over the CRLF file (Sol round 2).
+    private var savedEnding: LineEnding?
     public private(set) var breaksDiffer = false
     /// Longer saved texts (UTF-16 units) are kept as a fingerprint.
     public let snapshotLimit: Int
@@ -81,9 +87,11 @@ public struct EditedState {
     /// Saved (or opened, or reloaded clean): `text` is the new baseline.
     /// Keeps an immutable copy, never the caller's mutable storage, or for
     /// a long text its fingerprint.
-    /// `breaks`: the text's odd line breaks as saved (nil: none).
-    public mutating func saved(_ text: NSString?, breaks: LineBreaks? = nil) {
+    /// `breaks`: the text's odd line breaks as saved (nil: none);
+    /// `ending`: the line ending it was saved with (nil: not compared).
+    public mutating func saved(_ text: NSString?, breaks: LineBreaks? = nil, ending: LineEnding? = nil) {
         savedBreaks = breaks?.others ?? []
+        savedEnding = breaks?.dominant ?? ending
         if let text, text.length > snapshotLimit {
             baseline(TextFingerprint(text, chunk: chunk))
         } else {
@@ -96,8 +104,9 @@ public struct EditedState {
 
     /// Saved, with the text's fingerprint already made (off the main
     /// thread, while opening). Its chunk length is used as it is.
-    public mutating func saved(fingerprint: TextFingerprint, breaks: LineBreaks? = nil) {
+    public mutating func saved(fingerprint: TextFingerprint, breaks: LineBreaks? = nil, ending: LineEnding? = nil) {
         savedBreaks = breaks?.others ?? []
+        savedEnding = breaks?.dominant ?? ending
         baseline(fingerprint)
     }
 
@@ -142,10 +151,14 @@ public struct EditedState {
         textDiffers = savedText.length != text.length || !savedText.isEqual(text)
     }
 
-    /// The odd line breaks may have changed (an edit, undo or redo):
-    /// unsaved while they aren't the saved ones, whatever the text says.
-    public mutating func breaksChanged(to breaks: LineBreaks?) {
-        breaksDiffer = (breaks?.others ?? []) != savedBreaks
+    /// The odd line breaks, or the line ending, may have changed (an
+    /// edit, undo or redo): unsaved while they aren't the saved ones,
+    /// whatever the text says. `ending`: what a save writes for the other
+    /// breaks (a mixed text's `dominant`, else the document's ending).
+    public mutating func breaksChanged(to breaks: LineBreaks?, ending: LineEnding? = nil) {
+        let now = breaks?.dominant ?? ending
+        let endingDiffers = savedEnding != nil && now != nil && now != savedEnding
+        breaksDiffer = (breaks?.others ?? []) != savedBreaks || endingDiffers
     }
 
     /// Encoding or line endings changed (applied on save).

@@ -149,4 +149,39 @@ import Testing
         long.breaksChanged(to: now)
         #expect(long.isDirty)
     }
+
+    /// The line ending a save writes counts too, not just the odd breaks:
+    /// an LF file rewritten as CRLF with the same text and reloaded, then
+    /// ⌘Z, had the same text and no odd breaks either way, and the tab
+    /// showed saved though ⌘S would write LF over the CRLF file (Sol round 2).
+    @Test func anotherLineEndingThanSavedIsUnsaved() {
+        var e = EditedState(savedText: "a\nb\n")
+        e.saved("a\nb\n" as NSString, breaks: nil, ending: .lf)
+        // Reloaded as CRLF: the new baseline.
+        e.textChanged(to: "a\nb\n")
+        e.saved("a\nb\n" as NSString, breaks: nil, ending: .crlf)
+        #expect(!e.isDirty)
+        // ⌘Z of the reload: same text, LF again.
+        e.textChanged(to: "a\nb\n")
+        e.breaksChanged(to: nil, ending: .lf)
+        #expect(!e.textDiffers)
+        #expect(e.isDirty, "a save would write LF over the CRLF file")
+        // ⌘⇧Z: CRLF, as on disk: clean.
+        e.breaksChanged(to: nil, ending: .crlf)
+        #expect(!e.isDirty)
+        // A mixed text's ending is its dominant one.
+        e.breaksChanged(to: LineBreaks(dominant: .lf, others: []), ending: .crlf)
+        #expect(e.isDirty)
+        e.breaksChanged(to: LineBreaks(dominant: .crlf, others: []), ending: .lf)
+        #expect(!e.isDirty)
+        // The fingerprinted (long) baseline too.
+        var long = EditedState(savedText: nil, snapshotLimit: 4, chunk: 4)
+        long.saved("abcdef\n" as NSString, breaks: nil, ending: .crlf)
+        long.breaksChanged(to: nil, ending: .lf)
+        #expect(long.isDirty)
+        // Saved as LF: clean.
+        long.saved("abcdef\n" as NSString, breaks: nil, ending: .lf)
+        long.breaksChanged(to: nil, ending: .lf)
+        #expect(!long.isDirty)
+    }
 }
