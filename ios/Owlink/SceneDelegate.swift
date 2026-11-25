@@ -8,10 +8,18 @@ import CedricCore
 final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     var window: UIWindow?
 
+    /// Set up a scene's window before anything is put in it. Its background
+    /// is the system background, not a window's default black, behind the
+    /// browser as an editor opens or closes.
+    static func configure(_ window: UIWindow) {
+        window.backgroundColor = EditorBarStyle.windowBackground
+    }
+
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
         guard let ws = scene as? UIWindowScene else { return }
         let browser = DocumentBrowserViewController()
         let w = UIWindow(windowScene: ws)
+        Self.configure(w)
         w.rootViewController = browser
         // Launch opens a file of its own (a URL from another app,
         // `-OwlinkOpen`), or reopens the last document: decided once per
