@@ -39,6 +39,9 @@ final class CloseFlashTests: XCTestCase {
     }
 
     private var windows: [UIWindow] = []
+    /// The window holds only the navigation controller's view, not the
+    /// controller: kept here so it (and its `presenter`) live until tearDown.
+    private var navs: [Nav] = []
 
     override func setUp() async throws {
         UserDefaults.standard.removeObject(forKey: AppSettings.Key.theme)
@@ -47,6 +50,7 @@ final class CloseFlashTests: XCTestCase {
     override func tearDown() async throws {
         for w in windows { w.isHidden = true; w.rootViewController = nil }
         windows = []
+        navs = []
         UserDefaults.standard.removeObject(forKey: AppSettings.Key.theme)
     }
 
@@ -70,6 +74,7 @@ final class CloseFlashTests: XCTestCase {
         window.addSubview(nav.view)
         if editor.view.window == nil { nav.view.addSubview(editor.view) }
         windows.append(window)
+        navs.append(nav)
         return (window, nav, editor, browser)
     }
 
@@ -134,31 +139,148 @@ final class CloseFlashTests: XCTestCase {
     /// the time the browser is asked to dismiss the editor.
     func testDismissEditorHandsTheWindowBackBeforeDismissing() {
         for theme in EditorTheme.allCases {
-            let (window, _, editor, browser) = editor(theme: theme)
-            editor.viewWillAppear(false)
-            editor.viewIsAppearing(false)
-            editor.viewDidAppear(false)
-            var done = false
-            editor.dismissEditor { done = true }
-            XCTAssertTrue(done, "\(theme)")
-            XCTAssertEqual(browser.styleAtDismiss, [.unspecified], "\(theme): window style as the dismiss starts")
-            assertOnPhone(window, "\(theme) after dismissEditor")
+            let (window, nav, editor, browser) = editor(theme: theme)
+            withExtendedLifetime(nav) {
+                XCTAssertTrue(editor.navigationController === nav, "\(theme): editor in its navigation controller")
+                XCTAssertTrue(nav.presentingViewController === browser, "\(theme): presented by the browser")
+                editor.viewWillAppear(false)
+                editor.viewIsAppearing(false)
+                editor.viewDidAppear(false)
+                XCTAssertEqual(window.overrideUserInterfaceStyle, themed(theme), "\(theme): window themed while open")
+                var done = false
+                editor.dismissEditor { done = true }
+                XCTAssertTrue(done, "\(theme)")
+                // Through the browser (the presenter), not the fallback.
+                XCTAssertEqual(browser.styleAtDismiss, [.unspecified], "\(theme): window style as the dismiss starts")
+                assertOnPhone(window, "\(theme) after dismissEditor")
+            }
         }
     }
 
     /// Covered by a sheet (Settings), not dismissed: the window keeps the
     /// theme, so the title keeps its colour under and after the sheet.
     func testASheetOverTheEditorKeepsTheWindowThemed() {
-        let (window, _, editor, _) = editor(theme: .cedricNight)
-        editor.viewWillAppear(false)
-        editor.viewIsAppearing(false)
-        editor.viewDidAppear(false)
-        editor.viewWillDisappear(true)
-        editor.viewDidDisappear(true)
-        XCTAssertEqual(window.overrideUserInterfaceStyle, .dark)
-        editor.viewWillAppear(true)
-        editor.viewDidAppear(true)
-        XCTAssertEqual(window.overrideUserInterfaceStyle, .dark)
+        let (window, nav, editor, _) = editor(theme: .cedricNight)
+        withExtendedLifetime(nav) {
+            XCTAssertTrue(editor.navigationController === nav)
+            editor.viewWillAppear(false)
+            editor.viewIsAppearing(false)
+            editor.viewDidAppear(false)
+            XCTAssertFalse(nav.isBeingDismissed, "covered, not dismissed")
+            editor.viewWillDisappear(true)
+            editor.viewDidDisappear(true)
+            XCTAssertEqual(window.overrideUserInterfaceStyle, .dark)
+            editor.viewWillAppear(true)
+            editor.viewDidAppear(true)
+            XCTAssertEqual(window.overrideUserInterfaceStyle, .dark)
+        }
+    }
+
+    /// The fixed themes: the window's style differs from the phone's
+    /// (unspecified) only for these, so a re-themed window shows.
+    private var fixedThemes: [EditorTheme] { EditorTheme.allCases.filter { $0 != .system } }
+
+    /// Settings (or Ask Cedric) is on its way out when the file is closed:
+    /// the editor is told it appeared only after the close has handed the
+    /// window back. The window stays on the phone's appearance; theming it
+    /// again would uncover the browser in the theme's style.
+    func testClosingWhileASheetIsDismissingDoesNotThemeTheWindowAgain() {
+        for theme in fixedThemes {
+            let (window, nav, editor, browser) = editor(theme: theme)
+            withExtendedLifetime(nav) {
+                editor.viewWillAppear(false)
+                editor.viewIsAppearing(false)
+                editor.viewDidAppear(false)
+                // The sheet comes up over the editor.
+                editor.viewWillDisappear(true)
+                editor.viewDidDisappear(true)
+                XCTAssertEqual(window.overrideUserInterfaceStyle, themed(theme), "\(theme): themed under the sheet")
+                // The sheet starts to go; the file is closed meanwhile.
+                editor.viewWillAppear(true)
+                editor.viewIsAppearing(true)
+                editor.dismissEditor {}
+                XCTAssertEqual(browser.styleAtDismiss, [.unspecified], "\(theme): window style as the dismiss starts")
+                // The sheet's dismissal ends: a late appearance.
+                editor.viewDidAppear(true)
+                XCTAssertFalse(editor.themesWindow, "\(theme): late viewDidAppear")
+                assertOnPhone(window, "\(theme) after a late viewDidAppear")
+                editor.updateEdited()
+                assertOnPhone(window, "\(theme) after a state change")
+            }
+        }
+    }
+
+    /// The editor's own dismissal under way (UIKit's close, not
+    /// `dismissEditor`) and an appearance call arrives: the window stays on
+    /// the phone's appearance.
+    func testALateAppearanceDuringTheDismissalLeavesTheWindowOnThePhone() {
+        for theme in fixedThemes {
+            let (window, nav, editor, _) = editor(theme: theme)
+            withExtendedLifetime(nav) {
+                editor.viewWillAppear(false)
+                editor.viewIsAppearing(false)
+                editor.viewDidAppear(false)
+                nav.dismissing = true
+                editor.viewWillDisappear(true)
+                assertOnPhone(window, "\(theme) as the close starts")
+                editor.viewDidAppear(true)
+                XCTAssertFalse(editor.themesWindow, "\(theme): late viewDidAppear")
+                assertOnPhone(window, "\(theme) after a late viewDidAppear")
+            }
+        }
+    }
+
+    /// A dismissal that is cancelled (the editor comes back to
+    /// viewDidAppear, no longer being dismissed): the window takes the
+    /// theme again, so the document title gets its colour back.
+    func testACancelledDismissalThemesTheWindowAgain() {
+        for theme in fixedThemes {
+            let (window, nav, editor, _) = editor(theme: theme)
+            withExtendedLifetime(nav) {
+                editor.viewWillAppear(false)
+                editor.viewIsAppearing(false)
+                editor.viewDidAppear(false)
+                nav.dismissing = true
+                editor.viewWillDisappear(true)
+                assertOnPhone(window, "\(theme) as the close starts")
+                // Cancelled: UIKit puts the editor back.
+                nav.dismissing = false
+                editor.viewWillAppear(true)
+                editor.viewIsAppearing(true)
+                editor.viewDidAppear(true)
+                XCTAssertTrue(editor.themesWindow, "\(theme)")
+                XCTAssertEqual(window.overrideUserInterfaceStyle, themed(theme), "\(theme): window themed again (title colour)")
+                XCTAssertEqual(window.traitOverrides.userInterfaceStyle, themed(theme), "\(theme): window trait again")
+                XCTAssertEqual(nav.overrideUserInterfaceStyle, themed(theme), "\(theme): editor themed")
+            }
+        }
+    }
+
+    /// A sheet's dismissal that is cancelled (Settings dragged down, then
+    /// let go): the editor was never being dismissed, so the window keeps
+    /// the theme throughout and has it once the sheet has gone.
+    func testACancelledSheetDismissalKeepsTheWindowThemed() {
+        for theme in fixedThemes {
+            let (window, nav, editor, _) = editor(theme: theme)
+            withExtendedLifetime(nav) {
+                editor.viewWillAppear(false)
+                editor.viewIsAppearing(false)
+                editor.viewDidAppear(false)
+                editor.viewWillDisappear(true)
+                editor.viewDidDisappear(true)
+                // Dragged down, then let go: back under the sheet.
+                editor.viewWillAppear(true)
+                editor.viewWillDisappear(true)
+                editor.viewDidDisappear(true)
+                XCTAssertEqual(window.overrideUserInterfaceStyle, themed(theme), "\(theme): themed under the sheet")
+                // The sheet goes.
+                editor.viewWillAppear(true)
+                editor.viewIsAppearing(true)
+                editor.viewDidAppear(true)
+                XCTAssertEqual(window.overrideUserInterfaceStyle, themed(theme), "\(theme): window themed (title colour)")
+                XCTAssertEqual(window.traitOverrides.userInterfaceStyle, themed(theme), "\(theme): window trait")
+            }
+        }
     }
 
     // MARK: The window behind the browser
@@ -176,5 +298,26 @@ final class CloseFlashTests: XCTestCase {
         XCTAssertGreaterThan(min(light.0, light.1, light.2), 0.9, "light mode: white, not black")
         let dark = rgb(.dark)
         XCTAssertLessThan(max(dark.0, dark.1, dark.2), 0.2, "dark mode: stays dark, no light flash")
+    }
+
+    /// The scene's window as `SceneDelegate` sets it up: its background is
+    /// white with the phone in light mode and dark in dark mode, not the
+    /// default (no colour, drawn black).
+    func testTheScenesWindowHasThePhonesBackground() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        SceneDelegate.configure(window)
+        windows.append(window)
+        func rgba(_ style: UIUserInterfaceStyle) -> (CGFloat, CGFloat, CGFloat, CGFloat)? {
+            guard let color = window.backgroundColor else { return nil }
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            color.resolvedColor(with: UITraitCollection(userInterfaceStyle: style)).getRed(&r, green: &g, blue: &b, alpha: &a)
+            return (r, g, b, a)
+        }
+        guard let light = rgba(.light) else { return XCTFail("light mode: window has no background (draws black)") }
+        XCTAssertEqual(light.3, 1, accuracy: 0.001, "light mode: opaque")
+        XCTAssertGreaterThan(min(light.0, light.1, light.2), 0.9, "light mode: white, not black")
+        guard let dark = rgba(.dark) else { return XCTFail("dark mode: window has no background") }
+        XCTAssertEqual(dark.3, 1, accuracy: 0.001, "dark mode: opaque")
+        XCTAssertLessThan(max(dark.0, dark.1, dark.2), 0.2, "dark mode: dark, no light flash")
     }
 }

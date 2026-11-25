@@ -343,7 +343,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         super.viewDidAppear(animated)
         // The editor now covers the browser: the scene-level title colour
         // (the window's interface style) goes on here, not as it slides in.
-        themesWindow = true
+        // Not when it is going: a sheet that finishes dismissing after the
+        // close has started (closing with Settings or Ask Cedric on its way
+        // out) calls this late, and theming the window again then would
+        // uncover the browser in the theme's style. A dismissal that was
+        // cancelled is no longer under way here, so the theme comes back.
+        themesWindow = !isLeaving
         applyBarStyle()
         EditorBarStyle.renderNavigationBarIfRequested(navigationController?.navigationBar)
         updateEdited()
@@ -2401,6 +2406,17 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// throughout from the navigation controller's own style.
     private(set) var themesWindow = false
 
+    /// Set once the editor has asked to be taken away (`dismissEditor`):
+    /// it never covers the browser again.
+    private var dismissRequested = false
+
+    /// The editor is on its way out: closed, asked to be dismissed, or in a
+    /// dismissal (its own or its navigation controller's). The window stays
+    /// on the phone's appearance from here on.
+    private var isLeaving: Bool {
+        closing || dismissRequested || isBeingDismissed || navigationController?.isBeingDismissed == true
+    }
+
     /// Title and bar tint follow the theme. A fixed theme also sets this
     /// window's interface style while the editor covers the browser;
     /// System leaves it unspecified so it tracks the phone, and never
@@ -3893,7 +3909,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Dismissing from the controller that presented the editor's
     /// navigation controller (the document browser) takes the whole stack.
     func dismissEditor(_ done: @escaping () -> Void) {
-        // The browser is on the phone's appearance before it is uncovered.
+        // The browser is on the phone's appearance before it is uncovered,
+        // and stays there if the editor is told it appeared after this.
+        dismissRequested = true
         handWindowBackToPhone()
         let shown: UIViewController = navigationController ?? self
         if let presenter = shown.presentingViewController {
