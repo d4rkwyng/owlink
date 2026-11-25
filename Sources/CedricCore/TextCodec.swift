@@ -542,16 +542,23 @@ public enum TextCodec {
         /// The "\n" written at byte `o` of `out` was `le`.
         mutating func note(_ le: LineEnding, at o: Int, in out: UnsafeMutablePointer<UInt8>) {
             guard le != dominant else { return }
-            if !ascii {
-                var u = units
-                for k in counted..<o {
-                    let c = out[k]
-                    if c & 0xC0 != 0x80 { u += c >= 0xF0 ? 2 : 1 }
-                }
-                units = u
-                counted = o
-            }
+            if !ascii { advance(to: o, in: out) }
             others.append(LineBreaks.entry(ascii ? o : units, le))
+        }
+
+        /// Counts the UTF-16 units of the bytes written up to `o`, from
+        /// where it last stopped. `lfOnly` calls it as it writes each run,
+        /// so a break noted near the end of a large non-ASCII file doesn't
+        /// read back over everything written before it.
+        mutating func advance(to o: Int, in out: UnsafeMutablePointer<UInt8>) {
+            guard o > counted else { return }
+            var u = units
+            for k in counted..<o {
+                let c = out[k]
+                if c & 0xC0 != 0x80 { u += c >= 0xF0 ? 2 : 1 }
+            }
+            units = u
+            counted = o
         }
     }
 
@@ -578,6 +585,9 @@ public enum TextCodec {
             }
             o += run
             i += run
+            // Counted while the run is fresh, not when the next odd break
+            // comes (it may be most of the file later).
+            if let rec = recording, !rec.ascii { recording?.advance(to: o, in: out) }
             if full { return nil }
             guard i < n else { break }
             guard o < capacity else { return nil }
