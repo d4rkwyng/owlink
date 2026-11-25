@@ -331,13 +331,25 @@ import Testing
         }.start()
         let inTime = done.wait(timeout: .now() + 3) == .success
         #expect(inTime, "the snapshot of a FIFO came back without a writer")
+        var finished = inTime
         if !inTime {
             // Let the stuck open (then read) finish: a writer that writes nothing.
             let w = Darwin.open(fifo.path, O_WRONLY | O_NONBLOCK)
             if w >= 0 { close(w) }
-            _ = done.wait(timeout: .now() + 5)
+            finished = done.wait(timeout: .now() + 5) == .success
         }
-        if case .success = outcome.result { Issue.record("a FIFO read as a file") }
+        // Read only once the thread has signalled it's done with it.
+        if finished {
+            switch outcome.result {
+            case .success?: Issue.record("a FIFO read as a file")
+            case .failure(let error)?:
+                let underlying = (error as? CocoaError)?.userInfo[NSUnderlyingErrorKey] as? POSIXError
+                #expect(underlying?.code == .EFTYPE, "refused as not a regular file: \(error)")
+            case nil: Issue.record("no outcome")
+            }
+        } else {
+            Issue.record("the snapshot of a FIFO never came back")
+        }
         // A regular file still reads, blocking reads and all.
         let file = dir.appendingPathComponent("plain.log")
         try Data("ok\n".utf8).write(to: file)
