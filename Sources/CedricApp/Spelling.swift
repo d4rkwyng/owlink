@@ -44,12 +44,23 @@ final class EditorSpelling {
         let on = Settings.shared.checkSpellingWhileTyping && !tab.extrasPaused && checksThisDocument
         let tv = tab.primaryTextView
         tv.spelling = self
+        Self.setChecking(tv, on: on, spells: true)
+        // A split's second pane never marks misspellings (they're the
+        // primary pane's) but has AppKit's checking types of its own:
+        // they go and come back with the primary pane's, each pane's
+        // set aside on its own view.
+        if let second = tab.splitEditor?.second.textView { Self.setChecking(second, on: on, spells: false) }
+    }
+
+    /// One view's checking. `spells`: continuous spell checking follows
+    /// `on` (the primary pane); otherwise it is left off.
+    private static func setChecking(_ tv: EditorTextView, on: Bool, spells: Bool) {
         // Back on: the checking types set aside below come back first.
         if on, let saved = tv.savedCheckingTypes {
             tv.enabledTextCheckingTypes = saved
             tv.savedCheckingTypes = nil
         }
-        if tv.isContinuousSpellCheckingEnabled != on { tv.isContinuousSpellCheckingEnabled = on }
+        if spells, tv.isContinuousSpellCheckingEnabled != on { tv.isContinuousSpellCheckingEnabled = on }
         // Off: nothing left to check, so no AppKit text-checking pass
         // (orthography, data detectors) about 1 s after every layout.
         // AppKit's automatic text completion (bit 13 of the default
