@@ -129,4 +129,66 @@ import Testing
         #expect(h.detail == "The file on disk changed since this tab last read or saved it. Reloading replaces your unsaved changes (you can undo it).")
         #expect(!(h.detail ?? "").contains("Another app"))
     }
+
+    /// 0.5.4 QA (fix round 2): ⌘S checked the file (through its link)
+    /// against the tab's stamp, then the writer resolved the link again: a
+    /// link pointed at another writable file in between had the save
+    /// replace that file. The writer now checks the file it finds against
+    /// the stamp ⌘S used, and nothing is written when it differs.
+    @Test func theWriterChecksTheFileItFindsAgainstTheTabsStamp() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-expect-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let a = dir.appendingPathComponent("a.md"), b = dir.appendingPathComponent("b.md")
+        let link = dir.appendingPathComponent("link.md")
+        try Data("aaa\n".utf8).write(to: a)
+        try Data("bbb\n".utf8).write(to: b)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "a.md")
+        let known = try #require(DiskStamp.of(link))
+        // Pointed at b after the tab's check, before the write.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "b.md")
+        var thrown: Error?
+        do { try DocumentWrite.write(Data("mine\n".utf8), to: link, expecting: known) } catch { thrown = error }
+        let error = try #require(thrown, "the save refused another file")
+        #expect(SaveFailure.cause(of: error) == .changedWhileSaving, "\(error)")
+        #expect(try Data(contentsOf: b) == Data("bbb\n".utf8), "b untouched")
+        #expect(try Data(contentsOf: a) == Data("aaa\n".utf8), "a untouched")
+        // Pointed back: the file it knows, written.
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "a.md")
+        try DocumentWrite.write(Data("mine\n".utf8), to: link, expecting: known)
+        #expect(try Data(contentsOf: a) == Data("mine\n".utf8))
+        // No stamp to expect (Save As, a copy): as before.
+        try DocumentWrite.write(Data("copy\n".utf8), to: b)
+        #expect(try Data(contentsOf: b) == Data("copy\n".utf8))
+    }
+
+    /// The same narrowed to the rename: another file put in the checked
+    /// file's place after the check (here, while the new text is written)
+    /// is left alone; the atomic save fails rather than replace it.
+    @Test func anotherFilePutInPlaceBeforeTheRenameIsLeftAlone() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-rename-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("doc.md")
+        try Data("old\n".utf8).write(to: url)
+        let theirs = dir.appendingPathComponent("theirs.md")
+        try Data("theirs\n".utf8).write(to: theirs)
+        var thrown: Error?
+        do {
+            try DocumentWrite.write(Data("mine\n".utf8), to: url, fileManager: .default, afterCheck: {
+                _ = rename(theirs.path, url.path)
+            })
+        } catch { thrown = error }
+        let error = try #require(thrown, "the save didn't replace the file put there")
+        #expect(SaveFailure.cause(of: error) == .changedWhileSaving, "\(error)")
+        #expect(try Data(contentsOf: url) == Data("theirs\n".utf8), "the other file is still there")
+        let left = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+        #expect(left == ["doc.md"], "no temporary file left: \(left)")
+        // A new file (none there when checked) still saves.
+        let fresh = dir.appendingPathComponent("fresh.md")
+        try DocumentWrite.write(Data("new\n".utf8), to: fresh)
+        #expect(try Data(contentsOf: fresh) == Data("new\n".utf8))
+    }
 }

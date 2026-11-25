@@ -130,9 +130,17 @@ public enum DocumentWrite {
     /// Returns the stamp of the file it wrote (from the open file, before
     /// the rename): the date, size and identity a tab should compare with
     /// later, not whatever the path shows by the time it asks.
+    ///
+    /// `expecting`: the stamp the tab knows the file by (its ⌘S conflict
+    /// check passed against it). The file the writer itself finds and
+    /// checks, through the open folder, must still match it, or nothing is
+    /// written (EBUSY, "replaced or changed while saving"): a link pointed
+    /// at another writable file after the tab's check otherwise had the
+    /// save go there. Nil (Save As, a copy, an export): no such check.
     @discardableResult
-    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws -> DiskStamp {
-        try write(data, to: url, fileManager: fm, afterCheck: nil)
+    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default,
+                             expecting: DiskStamp? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: fm, afterCheck: nil, expecting: expecting)
     }
 
     /// Failures the tests (and the app's check builds) inject into the
@@ -155,14 +163,14 @@ public enum DocumentWrite {
     /// `write(_:to:)` with `faults` injected into an in-place save (check
     /// builds: a save that fails part way through the file, in the app).
     @discardableResult
-    public static func write(_ data: Data, to url: URL, faults: Faults) throws -> DiskStamp {
-        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults)
+    public static func write(_ data: Data, to url: URL, faults: Faults, expecting: DiskStamp? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults, expecting: expecting)
     }
 
     /// `afterCheck`: tests only, runs between the check and the write.
     @discardableResult
     static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?,
-                      faults: Faults? = nil) throws -> DiskStamp {
+                      faults: Faults? = nil, expecting: DiskStamp? = nil) throws -> DiskStamp {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
@@ -175,8 +183,13 @@ public enum DocumentWrite {
             if let reason = FileWriteAccess.blocked(in: dir, name: name, checked: &checked) {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
+            // The file found here is the one the tab checked (a file that
+            // has gone since is written anew, as a save of a deleted file is).
+            if let expecting, checked.st_ino != 0, DiskStamp.changed(known: expecting, current: DiskStamp(checked)) {
+                throw writeError(EBUSY, url)
+            }
             afterCheck?()
-            if let stamp = try replace(name, in: dir, with: data, url: url) { return stamp }
+            if let stamp = try replace(name, in: dir, with: data, url: url, checked: checked) { return stamp }
             // The folder refuses a new file (0555, or search-only 0100):
             // write the checked file in place, through the same folder.
             guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
@@ -206,7 +219,7 @@ public enum DocumentWrite {
     /// Writes `data` to a new file in `dir` and renames it over `name`.
     /// The new file's stamp; nil, with nothing written, when the folder
     /// refuses a new file (`overwrite` then writes the checked file in place).
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> DiskStamp? {
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL, checked: stat) throws -> DiskStamp? {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
         guard fd >= 0 else {
@@ -237,9 +250,27 @@ public enum DocumentWrite {
             throw error
         }
         guard close(fd) == 0 else { throw writeError(errno, url) }
+        // Just before the rename: no other file put in the checked one's
+        // place meanwhile (EBUSY). Narrows the window to the rename itself.
+        guard nothingElseAt(name, in: dir, checked: checked) else { throw writeError(EBUSY, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
         return DiskStamp(written)
+    }
+
+    /// Whether what is at `name` now may be replaced by a save that
+    /// checked `checked` (`st_ino` 0: nothing was there): the same file,
+    /// gone, or something that holds no text (a FIFO, a socket). A link,
+    /// or a regular file other than the checked one (another app's file,
+    /// one a link was pointed at), may hold someone's data: not replaced.
+    static func nothingElseAt(_ name: String, in dir: Int32, checked: stat) -> Bool {
+        var now = stat()
+        guard fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0 else { return true }
+        switch now.st_mode & S_IFMT {
+        case S_IFLNK: return false
+        case S_IFREG: return checked.st_ino != 0 && now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
+        default: return true
+        }
     }
 
     /// The save into a folder that refuses a new file (a writable file
