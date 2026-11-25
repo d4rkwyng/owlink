@@ -253,6 +253,15 @@ import Testing
         #expect(fstatat(fd, "doc.md", &checked, AT_SYMLINK_NOFOLLOW) == 0)
         #expect(try DocumentWrite.nothingElseAt("doc.md", in: fd, checked: checked, url: url), "unchanged: may be replaced")
         #expect(try DocumentWrite.nothingElseAt("gone.md", in: fd, checked: checked, url: url), "ENOENT: gone, may be written")
+        // Injected, so it holds for any runner (root searches a 000 folder).
+        for code in [EACCES, EIO] {
+            var injected: Error?
+            do { _ = try DocumentWrite.nothingElseAt("doc.md", in: fd, checked: checked, url: url, failing: [code]) } catch { injected = error }
+            let error = try #require(injected, "an injected \(code) doesn't authorize the rename")
+            #expect(posixCode(error) == code, "\(error)")
+        }
+        // The real refusal too, where the folder's mode binds this user.
+        guard geteuid() != 0 else { return }
         #expect(chmod(dir.path, 0o000) == 0)
         var probe = stat()
         let refused = fstatat(fd, "doc.md", &probe, AT_SYMLINK_NOFOLLOW) != 0 ? errno : 0
