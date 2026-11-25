@@ -85,6 +85,12 @@ public struct LocalModelClient: Sendable {
     /// measured on (monotonic seconds). Tests put a virtual one in, so a
     /// stalled CI runner can't make a dribble look like a stall.
     var streamClock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// `withDeadline`'s wait for `timeout` seconds. Tests whose point isn't
+    /// the deadline put in one that never ends on its own, so a stalled CI
+    /// runner can't make an answer in time look late.
+    var deadlineSleep: @Sendable (TimeInterval) async throws -> Void = {
+        try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000))
+    }
 
     public init(baseURL: URL, timeout: TimeInterval = 20, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -189,12 +195,12 @@ public struct LocalModelClient: Sendable {
     /// cover the lookup; this does. At the deadline the work is cancelled
     /// (which cancels its URLSession task) and `.timedOut` is thrown.
     func withDeadline<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
-        let seconds = timeout
+        let seconds = timeout, sleep = deadlineSleep
         do {
             return try await withThrowingTaskGroup(of: T?.self) { group in
                 group.addTask { try await work() }
                 group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                    try await sleep(seconds)
                     return nil
                 }
                 defer { group.cancelAll() }
