@@ -246,6 +246,29 @@ import CedricCore
         #expect(c.last?.content.contains("/no_think") == false)
     }
 
+    /// Every request carries `requestTimeout` as its own URLSession timeout
+    /// when it's set (the tests that take time off the wall clock rely on
+    /// it), and its usual one when it isn't: `timeout` for a request or a
+    /// stream, 2 s for `enrich`'s best-effort lookups (here both of them:
+    /// LM Studio's list is missing, so Ollama's tags are asked too).
+    @Test(.timeLimit(.minutes(1))) func everyRequestCarriesItsOwnTimeout() async throws {
+        for override in [4321.5, nil] as [TimeInterval?] {
+            let server = StubServer()
+            server.json("/v1/models", ["data": [["id": "m"]]])
+            server.json("/v1/chat/completions", chatCompletion("ok"))
+            var client = LocalModelClient(baseURL: server.baseURL, timeout: 37, session: server.session).withoutRealDeadline()
+            client.requestTimeout = override
+            _ = try await client.listModels()
+            _ = try await client.chat(model: "m", messages: [], maxTokens: 1)
+            let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
+            #expect(acc.content == "ok")
+            let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
+            #expect(got == ["/v1/models \(override ?? 37)", "/api/v0/models \(override ?? 2)",
+                            "/api/tags \(override ?? 2)", "/v1/chat/completions \(override ?? 37)",
+                            "/v1/chat/completions \(override ?? 37)"])
+        }
+    }
+
     @Test(.timeLimit(.minutes(1))) func retriesWithoutSchemaOn400() async throws {
         let server = StubServer()
         let count = Box(0)

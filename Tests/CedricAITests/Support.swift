@@ -35,6 +35,7 @@ final class StubServer: @unchecked Sendable {
     private let lock = NSLock()
     private var routes: [String: Handler] = [:]
     private(set) var requests: [(path: String, body: Data?)] = []
+    private var timeouts: [(path: String, timeout: TimeInterval)] = []
 
     init() {
         port = Self.lock.withLock { Self.nextPort += 1; return Self.nextPort }
@@ -59,6 +60,8 @@ final class StubServer: @unchecked Sendable {
     }
 
     var recorded: [(path: String, body: Data?)] { lock.withLock { requests } }
+    /// Each request's own `timeoutInterval`, as the stub received it.
+    var recordedTimeouts: [(path: String, timeout: TimeInterval)] { lock.withLock { timeouts } }
 
     fileprivate static func server(for port: Int) -> StubServer? { lock.withLock { servers[port] } }
 
@@ -66,6 +69,7 @@ final class StubServer: @unchecked Sendable {
         let path = request.url?.path ?? ""
         let handler: Handler? = lock.withLock {
             requests.append((path, body))
+            timeouts.append((path, request.timeoutInterval))
             return routes[path]
         }
         return handler?(request, body) ?? Response(status: 404, body: Data())
