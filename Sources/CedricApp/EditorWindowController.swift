@@ -245,6 +245,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// Branch, change bars and GitHub links (GitIntegration.swift); made
     /// after the first frame, for files only.
     var gitState: GitTabState?
+    /// Every gitStateChanged() (a gutter and status bar redraw), for the checks.
+    var gitStateChanges = 0
     /// Which lines are in fenced code, for the Markdown editing keys
     /// (cached per line start; dropped from an edited line down).
     let fences = FenceIndex()
