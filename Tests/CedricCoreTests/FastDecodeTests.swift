@@ -223,6 +223,55 @@ import Testing
         same([0x00, 0x01, 0x02, 0x0A, 0x7F, 0x1B], as: all, "binary-looking")
     }
 
+    /// Malformed and truncated UTF-8 after one and after two leading
+    /// BOMs (the BOM branch of the decode, which random inputs rarely
+    /// reach with a bad payload): never text as any UTF-8, detected or
+    /// picked, whatever the BOMs; the 8-bit encodings still read them as
+    /// Foundation does (`same`), and so does every case's nil-ness.
+    /// Expected outright: nil as UTF-8 (`oneBOMOut` with no text), and
+    /// DocumentRead says it isn't text.
+    @Test func malformedAndTruncatedAfterBOMs() throws {
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        let all: [TextEncoding?] = [nil] + TextEncoding.allCases.map { $0 }
+        let payloads: [([UInt8], String)] = [
+            ([0x80] + Array("abc\n".utf8), "stray continuation first"),
+            (Array("ab".utf8) + [0xC3], "a 2-byte character cut at the end"),
+            (Array("ab".utf8) + [0xE2, 0x82], "a 3-byte character cut at the end"),
+            (Array("ab".utf8) + [0xF0, 0x9F, 0x98], "a 4-byte character cut at the end"),
+            ([0xE2, 0x82] + Array("\r\nx".utf8), "a 3-byte character cut before CRLF"),
+            ([0xC0, 0x80], "overlong NUL"),
+            (Array("a".utf8) + [0xED, 0xA0, 0x80] + Array("b".utf8), "a surrogate"),
+            ([0xF4, 0x90, 0x80, 0x80], "past U+10FFFF"),
+            ([0xFF, 0xFE] + Array("x".utf8), "FF FE after the BOM"),
+            ([0xEF, 0xBB], "a BOM cut short after the BOM"),
+            (Array("ok\r\n".utf8) + [0xE9] + Array("\n".utf8), "Latin-1 é in UTF-8 lines"),
+        ]
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fastdecode-bad-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for (payload, what) in payloads {
+            for (lead, n) in [(bom, "one BOM"), (bom + bom, "two BOMs")] {
+                let bytes = lead + payload, note = "\(what) after \(n)"
+                #expect(!Reference.isValidUTF8(Data(bytes.dropFirst(3))), "\(note): not UTF-8 after the first BOM")
+                // Detected (the BOM says UTF-8 with BOM), UTF-8 and UTF-8 with BOM picked.
+                for enc: TextEncoding? in [nil, .utf8, .utf8BOM] {
+                    #expect(TextCodec.decode(Data(bytes), as: enc) == nil, "\(note) as \(enc?.rawValue ?? "detected"): nil")
+                    #expect(TextCodec.decode(Data(bytes), as: enc, shareBytes: true) == nil,
+                            "\(note) as \(enc?.rawValue ?? "detected"), shared: nil")
+                    if Self.leadingBOMReadAsUTF8(bytes, as: enc) {
+                        oneBOMOut(bytes, as: enc, note, text: nil, ending: .lf)
+                    }
+                    let url = dir.appendingPathComponent("bad.txt")
+                    try Data(bytes).write(to: url)
+                    #expect(throws: DocumentRead.LoadError.self, "\(note) as \(enc?.rawValue ?? "detected"): not text") {
+                        try DocumentRead.read(url, encoding: enc)
+                    }
+                }
+                same(bytes, as: all, note)
+            }
+        }
+    }
+
     /// One long line (no break at all) and a long line split by CRLF, past
     /// the size where the text reads the file's bytes in place.
     @Test func hugeLines() {
