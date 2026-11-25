@@ -35,6 +35,12 @@ public final class FileTail: @unchecked Sendable {
     /// Tests only: how many of the next reset reads fail (as a read error
     /// would), on this tail alone.
     private var failingResetReads = 0
+    /// A truncation or replacement was seen and its reset read failed:
+    /// the next check resets whatever the size is then. 0.5.4 before
+    /// review 3 forgot it, so a file truncated and grown past the old
+    /// offset again before the next check had its new bytes from there
+    /// appended to the old text, stamped as current.
+    private var resetPending = false
 
     /// What the text shown after an event stands for.
     public struct Shown: Sendable, Equatable {
@@ -227,7 +233,7 @@ public final class FileTail: @unchecked Sendable {
         guard !stopped, let (fh, st) = try? Self.openRegular(url) else { return }
         defer { try? fh.close() }
         let size = UInt64(st.st_size), stamp = DiskStamp(st)
-        if stamp.identity != identity || size < offset {
+        if resetPending || stamp.identity != identity || size < offset {
             // Replaced or truncated: start over.
             let replaced = stamp.identity != identity
             if replaced || source == nil { watch() }
@@ -238,7 +244,12 @@ public final class FileTail: @unchecked Sendable {
             do {
                 if failingResetReads > 0 { failingResetReads -= 1; throw CocoaError(.fileReadUnknown) }
                 data = try fh.readToEnd() ?? Data()
-            } catch { return }
+            } catch {
+                // Still to do, however the file looks at the next check.
+                resetPending = true
+                return
+            }
+            resetPending = false
             // The new file is the one followed only once it is read: had
             // its identity been taken before a failed read, the next check
             // appended its bytes past the old offset to the old file's

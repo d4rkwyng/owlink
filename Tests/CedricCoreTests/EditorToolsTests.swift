@@ -834,6 +834,49 @@ import Testing
         #expect(last.1.stamp == DiskStamp.of(url))
     }
 
+    /// 0.5.4 QA review 3: a truncation (same inode) whose reset read
+    /// failed was forgotten. Grown past the old offset again before the
+    /// next check, the file's bytes from the old offset on were appended
+    /// to the old text and stamped as current. The reset stays pending
+    /// until a reset read succeeds.
+    @Test func aTruncationWhoseResetReadFailsIsResetAfterItRegrows() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old line one\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // Every reset read fails for now (the watcher may check too).
+        tail.failResetReads(1000)
+        let inode = DiskStamp.of(url)?.identity
+        #expect(truncate(url.path, 0) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.isEmpty, "the reset read failed: nothing shown yet")
+        // The same file grows past the old offset again.
+        try appendBytes(url, Array("NEW CONTENT, LONGER\n".utf8))
+        #expect(DiskStamp.of(url)?.identity == inode, "the same file")
+        tail.poll()
+        settle(tail, callbacks)
+        tail.failResetReads(0)
+        tail.poll()
+        settle(tail, callbacks)
+        let events = got.all
+        #expect(!events.contains { if case .appended = $0.0 { return true } else { return false } },
+                "no part of the regrown file appended to the old text: \(events.map(\.0))")
+        let last = try #require(events.last)
+        #expect(last.0 == .reset("NEW CONTENT, LONGER\n"), "the file whole, once it reads")
+        #expect(last.1.bytes == 20)
+        #expect(last.1.stamp == DiskStamp.of(url))
+    }
+
     /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
     /// (its bytes counted as read), and the next good append stamped the
     /// whole file's size: ⌘S then dropped the skipped bytes with no
