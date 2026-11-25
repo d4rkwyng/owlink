@@ -995,7 +995,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     func convertEncoding(to enc: TextEncoding) {
-        guard enc != doc.encoding else { return }
+        guard enc != doc.encoding else {
+            // The guess, picked: the user's now (as Keep), nothing to convert.
+            if doc.encodingGuessed { keepGuessedEncoding() }
+            return
+        }
         if !TextCodec.canEncode(textView.string, as: enc) {
             let a = NSAlert()
             a.messageText = String(localized: "Some characters can’t be represented in \(enc.displayName).")

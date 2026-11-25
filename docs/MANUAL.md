@@ -171,8 +171,9 @@ under a slim bar: "This file isn’t valid UTF-8, so Owlink opened it as
 Latin-1 (a guess)." The text is there and editable; the status bar says
 **Latin-1 (guessed)** (or Windows-1252, Mac Roman). **Reopen with
 Encoding…** on the bar, or **Format › Reopen with Encoding…** (⌥⇧⌘R),
-lists the encodings to read the file as again; **Keep** takes the guess
-as right. Either way the bar goes and "(guessed)" with it.
+lists the encodings to read the file as again; **Keep**, or picking the
+guessed encoding itself under the status bar's Save with Encoding, takes
+the guess as right. Either way the bar goes and "(guessed)" with it.
 
 Mixed line endings (some LF, some CRLF or CR) are shown as such: the
 status bar says **LF (mixed)** (the most common kind) and a bar says

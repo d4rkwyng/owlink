@@ -28,7 +28,8 @@ import CedricCore
 /// them; a tab closed unsaved and brought back with ⇧⌘T after its file
 /// was moved away keeps them (from what was kept, not the file); Revert
 /// to Saved after the file was rewritten with one kind, then ⌘Z: the
-/// edited text's own breaks again.
+/// edited text's own breaks again. Picking the guessed encoding from the
+/// status bar's Save with Encoding settles the guess, as Keep does.
 extension DevChecks {
     static func fileNoticesCheck(_ name: String, _ app: AppDelegate) -> Bool {
         guard name == "filenotices" else { return false }
@@ -204,7 +205,20 @@ extension DevChecks {
                 EditorWindowController.checkEncodingPicker = nil
                 s.window?.performClose(nil)
             },
-        ] + mixedSaveSteps(app))
+        ] + mixedSaveSteps(app) + [
+            sync {
+                // Save with Encoding › the guessed one: the user's now, as Keep.
+                guard let g = app.open(put("invalid-pick.txt", [0x6E, 0x61, 0xEF, 0x76, 0x65, 0x0A])) else { expect(false, "opened invalid-pick.txt"); return }
+                focus(g)
+                expect(g.doc.encodingGuessed && g.encodingBar?.isHidden == false, "a guessed encoding again, with its bar")
+                let item = g.statusBar.encodingButton.menu?.items.first { ($0.representedObject as? String) == "save:" + g.doc.encoding.rawValue }
+                expect(item != nil, "the status bar's Save with Encoding lists the guess")
+                if let item, let menu = item.menu { menu.performActionForItem(at: menu.index(of: item)) }
+                expect(!g.doc.encodingGuessed && g.encodingBar?.isHidden == true, "picking the guessed encoding settles it: the bar goes")
+                expect(g.statusBar.encodingButton.title == TextEncoding.latin1.displayName && !g.doc.isDirty,
+                       "…the status bar drops (guessed), nothing to save", g.statusBar.encodingButton.title)
+            },
+        ])
         return true
     }
 }
