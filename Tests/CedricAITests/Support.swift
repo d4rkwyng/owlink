@@ -339,3 +339,34 @@ func context(_ text: String = "let value = items.count + 1", gen: Int = 1, doc: 
                visibleRange: NSRange(location: 0, length: (text as NSString).length),
                selection: nil, documentID: doc, editGeneration: gen)
 }
+
+// MARK: - No real-time deadline
+
+extension LocalModelClient {
+    /// This client with a deadline (`withDeadline`) that never passes on
+    /// its own, and no timeout of URLSession's own on its requests
+    /// (`requestTimeout`): it only ends when the request does, so the client's own
+    /// logic (the answer, an error, the policy), not how long a busy CI
+    /// runner takes to schedule URLSession's work, decides the result. For
+    /// tests whose point isn't the deadline; they carry a `.timeLimit` so
+    /// a hang still ends. `asked` gets each deadline's length in seconds.
+    func withoutRealDeadline(_ asked: Locked<[TimeInterval]>? = nil) -> LocalModelClient {
+        var c = self
+        c.requestTimeout = .infinity
+        c.deadlineSleep = { seconds in
+            asked?.mutate { $0.append(seconds) }
+            while true { try await Task.sleep(nanoseconds: 3_600 * 1_000_000_000) }
+        }
+        return c
+    }
+}
+
+/// Time that never passes: `RedirectGuard.checkPeers` on it polls (really
+/// sleeping what it asks) until URLSession has reported the connection,
+/// however late that is on a busy runner. The test's `.timeLimit` bounds it.
+struct FrozenClock: OwlClock {
+    var now: TimeInterval { 0 }
+    func sleep(seconds: TimeInterval) async throws {
+        try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+    }
+}

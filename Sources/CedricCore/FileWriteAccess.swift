@@ -27,20 +27,50 @@ public enum FileWriteAccess {
     /// target, SafePaths.writeTarget) can't be written; nil when it can,
     /// or when it doesn't exist (a save creates it; the folder decides).
     public static func blocked(at url: URL, fileManager fm: FileManager = .default) -> Blocked? {
-        let path = SafePaths.writeTarget(for: url, fileManager: fm).path
+        blocked(target: SafePaths.writeTarget(for: url, fileManager: fm))
+    }
+
+    /// Why `target`, a path `SafePaths.writeTarget` already resolved,
+    /// can't be written; nil as for `blocked(at:)`.
+    static func blocked(target: URL) -> Blocked? {
+        let path = target.path
         var st = stat()
         guard stat(path, &st) == 0 else { return nil }
         if st.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) != 0 { return .locked }
         var fs = statfs()
         if statfs(path, &fs) == 0, fs.f_flags & UInt32(MNT_RDONLY) != 0 { return .readOnlyVolume }
-        if access(path, W_OK) != 0 {
-            switch errno {
-            case EROFS: return .readOnlyVolume
-            case EPERM: return .locked
-            default: return .permissions
-            }
-        }
+        if access(path, W_OK) != 0 { return accessRefusal(errno) }
         return nil
+    }
+
+    /// Why the entry `name` in the open folder `dir` can't be written;
+    /// nil as for `blocked(at:)`. The folder is the handle a save then
+    /// writes through (DocumentWrite), so a link on the way to it can't
+    /// be retargeted between the check and the write.
+    static func blocked(in dir: Int32, name: String) -> Blocked? {
+        var st = stat()
+        return blocked(in: dir, name: name, checked: &st)
+    }
+
+    /// As `blocked(in:name:)`; `checked` gets the file the check looked
+    /// at (`st_ino` 0 when there is none), so a write can make sure it
+    /// opened that same file.
+    static func blocked(in dir: Int32, name: String, checked st: inout stat) -> Blocked? {
+        st = stat()
+        guard fstatat(dir, name, &st, 0) == 0 else { st = stat(); return nil }
+        if st.st_flags & UInt32(UF_IMMUTABLE | SF_IMMUTABLE) != 0 { return .locked }
+        var fs = statfs()
+        if fstatfs(dir, &fs) == 0, fs.f_flags & UInt32(MNT_RDONLY) != 0 { return .readOnlyVolume }
+        if faccessat(dir, name, W_OK, 0) != 0 { return accessRefusal(errno) }
+        return nil
+    }
+
+    private static func accessRefusal(_ code: Int32) -> Blocked {
+        switch code {
+        case EROFS: return .readOnlyVolume
+        case EPERM: return .locked
+        default: return .permissions
+        }
     }
 
     /// The tab's bar: what is read-only and why.
@@ -84,10 +114,161 @@ public struct ReadOnlyFileError: LocalizedError, Equatable {
 public enum DocumentWrite {
     /// Writes `data` to the file a save through `url` replaces. Throws
     /// ReadOnlyFileError, leaving the file untouched, when it is read-only.
+    ///
+    /// The link is resolved once, its target's folder is opened, and the
+    /// check and the atomic write both go through that open folder: a new
+    /// file is written next to the target and renamed over it
+    /// (`renameat`), keeping the target's mode, ACL and extended
+    /// attributes. Resolving the link again for the write (0.5.3) let a
+    /// link retargeted in between have a writable file checked and a
+    /// read-only one replaced; writing by path (0.5.4 before review) still
+    /// let a link to a folder on the way be retargeted at a folder holding
+    /// a read-only file of the same name. A folder that refuses the new
+    /// file (0555) gets the checked file written in place instead, still
+    /// through the open folder (`overwrite`).
     public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws {
-        if let reason = FileWriteAccess.blocked(at: url, fileManager: fm) {
-            throw ReadOnlyFileError(url: url, reason: reason)
+        try write(data, to: url, fileManager: fm, afterCheck: nil)
+    }
+
+    /// `afterCheck`: tests only, runs between the check and the write.
+    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?) throws {
+        // Again only if the target became a link while it was resolved.
+        for _ in 0..<3 {
+            let target = SafePaths.writeTarget(for: url, fileManager: fm)
+            let name = target.lastPathComponent
+            let dir = try openFolder(target.deletingLastPathComponent().path, url: url)
+            defer { close(dir) }
+            var st = stat()
+            if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFLNK { continue }
+            var checked = stat()
+            if let reason = FileWriteAccess.blocked(in: dir, name: name, checked: &checked) {
+                throw ReadOnlyFileError(url: url, reason: reason)
+            }
+            afterCheck?()
+            if try replace(name, in: dir, with: data, url: url) { return }
+            // The folder refuses a new file (0555, or search-only 0100):
+            // write the checked file in place, through the same folder.
+            guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
+            try overwrite(name, in: dir, checked: checked, with: data, url: url)
+            return
         }
-        try data.write(to: SafePaths.writeTarget(for: url, fileManager: fm), options: .atomic)
+        throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
+    }
+
+    /// The folder a save checks and writes through. One this user may
+    /// write in but not read (0300) is opened for search only
+    /// (`O_SEARCH`), which is all `fstatat`, `openat` and `renameat`
+    /// need; so is one this user may only search (0100). A folder that
+    /// can't be opened even for search can't be passed through to reach
+    /// the file either, so the save fails with that error. 0.5.4 before
+    /// review then checked and wrote by path, and a folder on that path
+    /// replaced by a link in between had the check pass on a writable
+    /// file and the rename replace a read-only one elsewhere.
+    private static func openFolder(_ path: String, url: URL) throws -> Int32 {
+        var dir = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        if dir < 0, errno == EACCES || errno == EPERM {
+            dir = open(path, O_EXEC | O_DIRECTORY | O_CLOEXEC)
+        }
+        guard dir >= 0 else { throw writeError(errno, url) }
+        return dir
+    }
+
+    /// Writes `data` to a new file in `dir` and renames it over `name`.
+    /// False, with nothing written, when the folder refuses a new file
+    /// (`overwrite` then writes the checked file in place).
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
+        let temp = ".owlink-save-\(UUID().uuidString)"
+        let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
+        guard fd >= 0 else {
+            let code = errno
+            if code == EACCES || code == EPERM { return false }
+            throw writeError(code, url)
+        }
+        var renamed = false
+        defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
+        do {
+            // What an atomic save keeps of the file it replaces.
+            // Only a regular file's, and never a blocking open: a FIFO
+            // put there in between would stall a plain read open.
+            var st = stat()
+            if fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFREG {
+                _ = fchmod(fd, st.st_mode & 0o7777)
+                let old = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                if old >= 0 {
+                    _ = fcopyfile(old, fd, nil, copyfile_flags_t(COPYFILE_ACL | COPYFILE_XATTR))
+                    close(old)
+                }
+            }
+            try writeAll(data, to: fd, url: url)
+        } catch {
+            close(fd)
+            throw error
+        }
+        guard close(fd) == 0 else { throw writeError(errno, url) }
+        guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
+        renamed = true
+        return true
+    }
+
+    /// The save into a folder that refuses a new file (a writable file
+    /// in a 0555 folder): not atomic, but bound to the checked file. It
+    /// is opened for writing through the same open folder, never through
+    /// a link (`O_NOFOLLOW`), and only if it is still the file the check
+    /// looked at (device and inode) is it truncated and written. Opening
+    /// for writing is itself the kernel's permission check on that very
+    /// file, so a read-only file put in its place can't be opened, and a
+    /// different writable one fails the identity match: either way the
+    /// save fails with an error and nothing else is touched. The open
+    /// doesn't block (`O_NONBLOCK`): a FIFO put there with no reader
+    /// fails it (ENXIO) instead of stalling the save before the
+    /// regular-file check. (0.5.3 fell back to Foundation's atomic write
+    /// by path here.)
+    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
+        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw writeError(errno, url) }
+        do {
+            var st = stat()
+            guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
+            guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
+                throw writeError(EBUSY, url)
+            }
+            // The checked regular file: back to ordinary blocking writes.
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
+            guard ftruncate(fd, 0) == 0 else { throw writeError(errno, url) }
+            try writeAll(data, to: fd, url: url)
+        } catch {
+            close(fd)
+            throw error
+        }
+        guard close(fd) == 0 else { throw writeError(errno, url) }
+    }
+
+    private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {
+        try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+            guard let base = buf.baseAddress else { return }
+            var done = 0
+            while done < buf.count {
+                let n = Darwin.write(fd, base + done, buf.count - done)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    throw writeError(errno, url)
+                }
+                done += n
+            }
+        }
+    }
+
+    private static func writeError(_ code: Int32, _ url: URL) -> Error {
+        let kind: CocoaError.Code
+        switch code {
+        case EACCES, EPERM: kind = .fileWriteNoPermission
+        case ENOSPC, EDQUOT: kind = .fileWriteOutOfSpace
+        case EROFS: kind = .fileWriteVolumeReadOnly
+        case ENOENT, ENOTDIR: kind = .fileNoSuchFile
+        default: kind = .fileWriteUnknown
+        }
+        let underlying = POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) as NSError
+        return CocoaError(kind, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path, NSUnderlyingErrorKey: underlying])
     }
 }

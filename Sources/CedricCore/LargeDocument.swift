@@ -86,14 +86,35 @@ public enum LargeDocument {
         }
     }
 
-    /// The chunk of `line` holding `offset`.
+    /// The chunk of `line` holding `offset` (the line's end: the last chunk).
     public static func chunk(containing offset: Int, line: NSRange, in text: NSString, limit: Int) -> NSRange {
         guard line.length > limit else { return line }
-        var k = max(0, offset - line.location) / limit
-        // A boundary moved back for a composed sequence: offset may sit
-        // just before chunk k's start.
-        if k > 0, boundary(k, of: line, in: text, limit: limit) > offset { k -= 1 }
+        let n = (line.length + limit - 1) / limit
+        var k = min(max(0, offset - line.location) / limit, n - 1)
+        // Chunk k starts at or before offset (boundaries only move back).
+        // Chunk k+1's start moves back, never by a whole chunk, for a
+        // composed sequence it would cut: if offset is that sequence's
+        // start or inside it, offset is in chunk k+1. Picking chunk k
+        // there handed TextKit a chunk ending at offset, and its forward
+        // enumeration asked from offset again, forever: a hang on a long
+        // line with an emoji or an accent at a chunk boundary.
+        if k + 1 < n, boundary(k + 1, of: line, in: text, limit: limit) <= offset { k += 1 }
         let s = boundary(k, of: line, in: text, limit: limit)
         return NSRange(location: s, length: boundary(k + 1, of: line, in: text, limit: limit) - s)
+    }
+
+    /// A forward walk over chunks (the chunking content storage's
+    /// enumeration): where it goes after handing out `chunk`, asked for
+    /// from `offset`. Nil when `chunk` doesn't hold `offset`: the walk
+    /// would hand out an element that ends at or before where it was
+    /// asked from, or ask from the same offset again, so it stops.
+    public static func forwardStep(from offset: Int, chunk: NSRange) -> Int? {
+        NSLocationInRange(offset, chunk) ? NSMaxRange(chunk) : nil
+    }
+
+    /// A backward walk's step: the offset before `chunk`, asked for from
+    /// `offset`; nil when `chunk` doesn't hold `offset`.
+    public static func backwardStep(from offset: Int, chunk: NSRange) -> Int? {
+        NSLocationInRange(offset, chunk) ? chunk.location - 1 : nil
     }
 }

@@ -450,6 +450,11 @@ public struct OwlEditProposal: Sendable, Equatable {
     /// The edit validation's verdict (`OwlEditValidation`); clean unless
     /// the propose_edit handler or the quick action's block path set it.
     public var check: OwlEditCheck = .clean
+    /// The language and file type `check` was worked out for (`validate`,
+    /// `revalidated`); nil when not recorded. A different one in the tab
+    /// (the status-bar language changed) makes the verdict stale, as an
+    /// edit does.
+    public var checkedAs: OwlEditValidation.Target?
 
     public init(range: NSRange, original: String, replacement: String, reason: String,
                 firstLine: Int, lastLine: Int, generation: Int, anchor: Anchor = .lines) {

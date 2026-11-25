@@ -14,9 +14,18 @@ public enum ContextWindow {
     /// token. The 0.5.1 numbers (16 384 tokens → 24 000 units, 4096 →
     /// 6000) were 1.46 units per token with nothing held back for the
     /// answer; this keeps the reply reserve out first.
+    ///
+    /// Any Int is safe: the window is clamped to `maximumWindowTokens`
+    /// before the reserve is taken off and the rest multiplied (a server
+    /// reporting a window near Int.max trapped here in 0.5.3).
     public static func budgetUnits(contextTokens: Int) -> Int {
-        max(0, contextTokens - replyReserveTokens) * 3 / 2
+        let tokens = min(max(contextTokens, 0), maximumWindowTokens)
+        return max(0, tokens - replyReserveTokens) * 3 / 2
     }
+
+    /// The largest window worked out exactly (2^24 tokens, far above any
+    /// model's); a larger report counts as this.
+    public static let maximumWindowTokens = 1 << 24
 
     // MARK: Servers
 
@@ -28,7 +37,9 @@ public enum ContextWindow {
     /// that says nothing): the cap, as before 0.5.3.
     public static func serverBudget(contextTokens: Int?) -> Int {
         guard let contextTokens else { return serverCap }
-        return min(serverCap, budgetUnits(contextTokens: contextTokens))
+        // Clamped before any arithmetic: a window of serverCap tokens
+        // already gives more than the cap.
+        return min(serverCap, budgetUnits(contextTokens: min(contextTokens, serverCap)))
     }
 
     // MARK: Built-in (llama.cpp)

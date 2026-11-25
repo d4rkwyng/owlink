@@ -459,11 +459,15 @@ import CedricCore
         if case .failure(let e) = result { #expect(e as? LocalAIError == .cancelled) } else { Issue.record("not cancelled") }
     }
 
-    @Test func slowButInTimeStillAnswers() async throws {
+    // The answer comes back, not "in time" by the wall clock: the deadline
+    // never passes on its own, so a busy runner can't make it late.
+    @Test(.timeLimit(.minutes(1))) func slowButInTimeStillAnswers() async throws {
         let server = StubServer()
         server.json("/v1/chat/completions", chatCompletion("ok"), delay: 0.1)
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let asked = Locked<[TimeInterval]>([])
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline(asked)
         #expect(try await client.chat(model: "m", messages: [], maxTokens: 1).content == "ok")
+        #expect(asked.mutate { $0 } == [5], "one deadline, the client's timeout")
     }
 
     @Test func clientCancelsPromptly() async {

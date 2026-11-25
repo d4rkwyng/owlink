@@ -6,8 +6,11 @@ import Foundation
 ///
 /// The search, first hit wins:
 /// 1. the document's own folder, then each folder above it (up to
-///    `maxLevels`, never `/`, a top-level folder such as `/Users`, or the
-///    home folder itself), stopping at the opened folder when there is one;
+///    `maxLevels`), stopping at the opened folder when there is one, and
+///    at the first folder that may not be a vault root
+///    (`WikiVault.mayBeVaultRoot`: `/`, a top-level folder such as
+///    `/Users`, a volume such as `/Volumes/<disk>`, the home folder or a
+///    folder holding it), unless that is the opened folder;
 /// 2. at each of those folders, the site layouts' own roots as well:
 ///    `static/`, `public/`, `quartz/static/` and `content/` (Hugo, Jekyll,
 ///    Quartz and the like);
@@ -17,15 +20,19 @@ public enum PreviewRoot {
     public static let siteFolders = ["", "static", "public", "quartz/static", "content"]
     public static let maxLevels = 8
 
-    /// The folders to try, nearest first.
-    public static func searchFolders(from folder: URL, openedRoot: URL?) -> [URL] {
-        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
+    /// The folders to try, nearest first. The walk up has the vault walk's
+    /// bounds (S2, 0.5.2): before 0.5.4 it stopped only at the home folder
+    /// itself and top-level folders, so a document on a disk searched the
+    /// disk's root (`/Volumes/<disk>`) and one beside the home folder
+    /// searched the folder holding it.
+    public static func searchFolders(from folder: URL, openedRoot: URL?, home: URL? = nil) -> [URL] {
+        let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
         let rootPath = openedRoot?.standardizedFileURL.path
         var dirs: [URL] = []
         var dir = folder.standardizedFileURL
         for _ in 0..<maxLevels {
             let p = dir.path
-            if p == "/" || dir.pathComponents.count < 3 || (p == home && p != rootPath) { break }
+            if p != rootPath, !WikiVault.mayBeVaultRoot(dir, home: home) { break }
             dirs.append(dir)
             if p == rootPath { break }
             dir = dir.deletingLastPathComponent()
@@ -50,12 +57,12 @@ public enum PreviewRoot {
     /// `pages`: a link may also name a page (`/projects/intelbrew` is
     /// `projects/intelbrew.md` or `projects/intelbrew/index.md`).
     public static func resolve(_ path: String, from folder: URL, openedRoot: URL?, pages: Bool = false,
-                               fileManager fm: FileManager = .default) -> (root: URL, file: URL)? {
+                               fileManager fm: FileManager = .default, home: URL? = nil) -> (root: URL, file: URL)? {
         guard let parts = parts(of: path) else { return nil }
         let rel = parts.joined(separator: "/")
         var tries = [rel]
         if pages, (rel as NSString).pathExtension.isEmpty { tries += [rel + ".md", rel + "/index.md"] }
-        for dir in searchFolders(from: folder, openedRoot: openedRoot) {
+        for dir in searchFolders(from: folder, openedRoot: openedRoot, home: home) {
             for sub in siteFolders {
                 let root = sub.isEmpty ? dir : dir.appendingPathComponent(sub, isDirectory: true)
                 for t in tries {

@@ -561,6 +561,41 @@ import Testing
         #expect(gone == second && gone.state(text: "x", generation: 3) == .stale)
     }
 
+    /// A status-bar language change leaves the text (and its generation)
+    /// as it was. 0.5.3 kept the verdict worked out for the old language:
+    /// an edit proposed in Plain Text stayed clean after the tab became
+    /// JSON, and Apply could break valid JSON.
+    @Test func aLanguageChangeRedoesTheVerdictAtTheSameGeneration() throws {
+        let text = "{\"a\": 1, \"b\": 2}\n"
+        let s = OwlDocumentSnapshot(text: text, generation: 4, fileName: "notes.txt", language: "plain")
+        var byText = try OwlEditProposal.anchored(find: "\"b\": 2", replace: "\"b\": 2,", in: s).get()
+        var byLines = try #require(OwlEditProposal.lines(1, 1, with: "{\"a\": 1, \"b\": 2,}", in: s))
+        byText.validate(in: s, script: nil)
+        byLines.validate(in: s, script: nil)
+        #expect(byText.check == .clean && byLines.check == .clean, "Plain Text has no parser")
+        #expect(byText.checkedAs == OwlEditValidation.Target(language: "plain", fileName: "notes.txt"))
+        let live = text as NSString
+        for p in [byText, byLines] {
+            // Same language and file type: the verdict stands.
+            #expect(p.revalidated(text: live, generation: 4, language: "plain", fileName: "notes.txt", script: nil) == p)
+            // The tab is JSON now: the edit breaks it, Apply is off.
+            let json = p.revalidated(text: live, generation: 4, language: "json", fileName: "notes.txt", script: nil)
+            #expect(json.check.hardIssue?.check == .json, "\(p.anchor)")
+            #expect(json.checkedAs == OwlEditValidation.Target(language: "json", fileName: "notes.txt"))
+            #expect(!json.canApply(text: live, generation: 4))
+            // And back: checked again, clean.
+            let back = json.revalidated(text: live, generation: 4, language: "plain", fileName: "notes.txt", script: nil)
+            #expect(back.check == .clean && back.canApply(text: live, generation: 4))
+        }
+        // The file type alone (a rename to .plist, still Plain Text) is a different target too.
+        #expect(OwlEditValidation.Target(language: "plain", fileName: "a.plist") != OwlEditValidation.Target(language: "plain", fileName: "a.txt"))
+        #expect(OwlEditValidation.Target(language: "plain", fileName: "A.TXT") == OwlEditValidation.Target(language: "plain", fileName: "b.txt"))
+        // A verdict with nothing recorded is left as it was at its own generation.
+        var bare = try OwlEditProposal.anchored(find: "\"b\": 2", replace: "\"b\": 2,", in: s).get()
+        bare.check = OwlEditValidation.validate(bare, in: s, script: nil)
+        #expect(bare.revalidated(text: live, generation: 4, language: "json", fileName: "notes.txt", script: nil) == bare)
+    }
+
     // MARK: Codex regressions (0.5.3, fourth round)
 
     @Test func aSelfInitInsideAMissedRegexIsOnlyAWarning() {
@@ -600,6 +635,14 @@ import Testing
         #expect(OwlEditValidation.mentionsImportOrExport("const m = import('x');\n"))
         // Comments don't; nor does a longer word.
         #expect(!OwlEditValidation.mentionsImportOrExport("// import x\n/* export y */\nconst important = 1;\n"))
+        // Nor a comment inside a template interpolation (PR #15 review: it
+        // was merged into the string around it, and so counted).
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `${/* import */ 1}`;\n"))
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `a ${f(1) // export\n} b`;\n"))
+        #expect(!OwlEditValidation.mentionsImportOrExport("const s = `${`${/* export */ 2}`}`;\n"), "nested")
+        // The template's own text and code in the interpolation still count.
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = `${/* note */ import.meta.url}`;\n"))
+        #expect(OwlEditValidation.mentionsImportOrExport("const s = `import ${/* x */ 1}`;\n"))
         struct RejectsUnclosed: OwlScriptSyntaxChecker {
             func syntaxError(in script: String) -> OwlSyntaxError? {
                 script.contains("f(;") || script.contains("f(1;") ? OwlSyntaxError(message: "SyntaxError", line: 1) : nil
@@ -613,6 +656,11 @@ import Testing
         let h = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "// import\nf(1);\n", after: "// import\nf(1;\n",
                                            original: "1)", replacement: "1", script: RejectsUnclosed())
         #expect(h.hardIssue?.check == .script)
+        // `import` only in a comment inside an interpolation: the rejection stays hard.
+        let t = OwlEditValidation.validate(language: "javascript", fileName: "a.js", before: "const s = `${/* import */ 1}`;\nf(1);\n",
+                                           after: "const s = `${/* import */ 1}`;\nf(1;\n", original: "1)", replacement: "1",
+                                           script: RejectsUnclosed())
+        #expect(t.hardIssue?.check == .script)
     }
 
     @Test func anEscapedBracketInCSSIsOnlyAWarning() {

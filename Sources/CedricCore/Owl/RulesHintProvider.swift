@@ -4,6 +4,15 @@ import Foundation
 /// and on the document facts. Pure and fast (one pass over at most 8 KB).
 public struct RulesHintProvider: OwlFactsAwareProvider {
     public static let jsonID = "rules.json-format"
+
+    /// The long one-line JSON hint (only the file's start in view, no
+    /// range, no replacement): its Fix it checks and formats the whole
+    /// file. Not a stale replay of the in-view hint (`OwlCoordinator.replay`
+    /// strips its range and replacement but keeps the ID): that one's text
+    /// has changed, so it gets no Fix it at all.
+    public static func formatsWholeJSONFile(_ hint: OwlHint, isStale: Bool) -> Bool {
+        hint.id == jsonID && hint.replacement == nil && hint.range == nil && !isStale
+    }
     public static let mixedIndentID = "rules.mixed-indent"
     public static let reloadID = "rules.changed-on-disk"
     public static let saveCopyID = "rules.unsaved-long"
