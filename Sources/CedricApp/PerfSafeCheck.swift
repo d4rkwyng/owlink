@@ -168,12 +168,12 @@ extension DevChecks {
                 // Colour lines far down, then come back to the top.
                 tab.textView.scrollRangeToVisible(NSRange(location: (tab.text as NSString).length, length: 0))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("the end is coloured, in time") { tab.colorizer.isColored(tab.lineIndex.lineCount - 2) },
             sync {
                 expect(tab.colorizer.isColored(tab.lineIndex.lineCount - 2), "the end was coloured")
                 tab.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("back at the top, coloured, in time") { tab.colorizer.isColored(0) },
             sync {
                 let made = tab.colorizer.fullPasses
                 tab.setLanguage(.plain)
@@ -188,7 +188,11 @@ extension DevChecks {
                 colorsAreCurrent("Swift again: no stale colour")
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "dracula", theme: .dracula, system: nil))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("the theme change reaches the tab, in time") {
+                tab.palette.name.lowercased().contains("dracula")
+                    && (tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
+                        == NSColor(hex: tab.palette.color(for: .keyword))
+            },
             sync {
                 let p = tab.palette
                 expect(p.name.lowercased().contains("dracula"), "the theme changed", p.name)
@@ -205,7 +209,12 @@ extension DevChecks {
                 tab.textView.unmarkText()
                 tab.undoManager?.undo()
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            // (The committed "ka" stays: the edit has settled once the index
+            // matches the storage and the viewport is coloured again.)
+            waitFor("the marked text committed and settled, in time") {
+                !tab.textView.hasMarkedText() && tab.lineIndex.length == (tab.textView.textStorage?.length ?? -1)
+                    && tab.colorizer.isColored(0)
+            },
             sync {
                 tab.colorizer.recolorAll()
                 colorsAreCurrent("after marked text: no stale colour")
