@@ -252,7 +252,7 @@ final class ImageTabController: NSWindowController, NSWindowDelegate, NSMenuItem
         canvas.onSpace = { [weak self] in self?.togglePlaying(nil) }
         canvas.contextMenu = { [weak self] in self?.makeContextMenu() }
         scrollView.onResize = { [weak self] in self?.windowResized() }
-        scrollView.onDropFiles = { urls in for u in urls { (NSApp.delegate as? AppDelegate)?.open(u) } }
+        scrollView.onDropFiles = { urls in FileDrop.open(urls) }
         scrollView.registerForDraggedTypes([.fileURL])
         for b in [statusBar.languageButton, statusBar.encodingButton, statusBar.lineEndingButton] { b.isHidden = true }
         // Pause / Play for an animation, over the image's bottom-left corner.

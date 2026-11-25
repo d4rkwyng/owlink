@@ -165,7 +165,38 @@ Latin-1, Windows-1252 and Mac Roman, and LF/CRLF/CR, detected on open
 (a file that isn't UTF-8 is read as whichever 8-bit Western encoding
 makes sense of its accented letters and quotes) and shown in the status bar,
 with menus to convert (applied on save) or reopen with another encoding.
-Mixed line endings are shown as such and written as one kind on save.
+
+A file that isn't valid UTF-8 (and has no UTF-16 byte order mark) opens
+under a slim bar: "This file isn’t valid UTF-8, so Owlink opened it as
+Latin-1 (a guess)." The text is there and editable; the status bar says
+**Latin-1 (guessed)** (or Windows-1252, Mac Roman). **Reopen with
+Encoding…** on the bar, or **Format › Reopen with Encoding…** (⌥⇧⌘R),
+lists the encodings to read the file as again; **Keep**, or picking the
+guessed encoding itself under the status bar's Save with Encoding, takes
+the guess as right. Either way the bar goes and "(guessed)" with it.
+
+Mixed line endings (some LF, some CRLF or CR) are shown as such: the
+status bar says **LF (mixed)** (the most common kind) and a bar says
+"This file has mixed line endings (mostly LF)." Saving keeps each line
+break as it was, byte for byte: a break stays with its place in the text
+however you type or delete around it, and one you delete comes back as it
+was when you undo, before or after a save. A line break you type, or one a
+text tool rewrites, gets the most common kind; Convert Indentation, Indent
+and Outdent only change the spaces and tabs at the start of lines, so every
+break keeps its kind. (Delete the text between a CR and an LF and the CR
+is written as CRLF, so the two breaks don't read back as one.) A changed
+line break counts as an unsaved change even when the text looks the same:
+delete a CRLF and press Return in its place and the tab is unsaved until
+you save or undo. The status bar and the bar follow the breaks that are
+left: delete the last CRLF and the status says **LF** and the bar goes
+(undo brings both back); delete every LF and leave only CRLF and it says
+**CRLF**. Follow File keeps the breaks of the lines it adds, and
+of a new file after a rotation, so saving after you stop following writes
+them as the file has them. Unsaved text kept for the next launch or for
+Reopen Closed Tab keeps its line breaks too. **Convert to LF** on the bar (one undo
+step), or picking a line ending from the status bar or **Format › Line
+Endings**, writes them all as that kind from the next save; **Keep
+Mixed** just hides the bar.
 A file that looks binary (a NUL byte, or many control characters, in
 its first 8 KB; never UTF-16) opens with a bar, "This looks like a
 binary file", and nothing shown: **Open Anyway** shows it as text,
@@ -750,7 +781,12 @@ predates 0.3.0 and is unchanged: on a Mac where nothing but TextEdit
 opens text, Markdown, JSON and YAML files open in Owlink once it's
 installed, because Owlink names those types and TextEdit only claims
 "text". (On macOS 15, where .md files opened in nothing before, they now
-open in Owlink for the same reason.) The labelled types never open in Owlink unless you choose it.
+open in Owlink for the same reason.) For the other types in the list
+Owlink makes the same claims as 0.5.3, so macOS picks their app as it
+did with 0.5.3: on a clean macOS 26 Mac that is TextEdit, Safari,
+Console and so on until you choose Owlink. Owlink also claims plain
+text and source code in general at a low rank, so on a Mac with no
+other app for some type, macOS may pick Owlink for it.
 Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
@@ -759,11 +795,13 @@ Finder as type-coloured pages with white symbols and, in larger views, short
 type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
 HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
-- only for types you chose Owlink for, in Settings or with Get Info ›
-  Change All. A type that opens in Owlink without your choice (Markdown,
-  JSON, YAML on a Mac with no other editor) shows the generic page with a
-  white line and no label until you choose it; **Use Owlink for All Text Files**
-  does that for every type;
+- for types you chose Owlink for, in Settings or with Get Info ›
+  Change All (**Use Owlink for All Text Files** does that for every type),
+  and for Markdown, JSON and YAML when they open in Owlink without your
+  choice (a Mac with no other editor for them). A plain-text, XML, HTML,
+  CSS or log file that opens in Owlink without your choice (only where
+  TextEdit, Safari or Console doesn't take it) shows the generic page
+  with a white line and no label;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the
   text itself for many text files. Untick it to see the type icons;

@@ -42,8 +42,17 @@ final class Settings {
         set { defaults.set(newValue.rawValue, forKey: EditorTheme.defaultsKey); changed() }
     }
 
+    /// Set by a check: the font size for this run, not saved (as
+    /// `themeOverride`). Nil: the saved size.
+    var fontSizeOverride: CGFloat? {
+        didSet { if fontSizeOverride != oldValue { changed() } }
+    }
+
     var fontSize: CGFloat {
-        get { let v = defaults.double(forKey: "fontSize"); return v > 0 ? v : Self.defaultFontSize }
+        get {
+            if let fontSizeOverride { return fontSizeOverride }
+            let v = defaults.double(forKey: "fontSize"); return v > 0 ? v : Self.defaultFontSize
+        }
         set { defaults.set(min(72, max(6, newValue)), forKey: "fontSize"); changed() }
     }
 
@@ -121,8 +130,19 @@ final class Settings {
 
     /// View › Check Spelling While Typing: on by default.
     var checkSpellingWhileTyping: Bool {
-        get { defaults.object(forKey: "checkSpellingWhileTyping") as? Bool ?? true }
-        set { defaults.set(newValue, forKey: "checkSpellingWhileTyping"); changed() }
+        get { checkSpellingOverride ?? defaults.object(forKey: "checkSpellingWhileTyping") as? Bool ?? true }
+        set {
+            // The override's own didSet posts the change.
+            if checkSpellingOverride != nil { checkSpellingOverride = newValue; return }
+            defaults.set(newValue, forKey: "checkSpellingWhileTyping")
+            changed()
+        }
+    }
+
+    /// Set by a check: spelling on or off for this run, not saved (as
+    /// `fontSizeOverride`). Nil: the saved switch.
+    var checkSpellingOverride: Bool? {
+        didSet { if checkSpellingOverride != oldValue { changed() } }
     }
 
     /// Settings › "Check grammar in prose" (and Edit › Spelling and
@@ -322,15 +342,35 @@ final class Settings {
     /// Settings › Writing › "Use a prose font for Markdown and plain text"
     /// (0.4.1): off by default, so nothing changes until it is turned on.
     var useProseFont: Bool {
-        get { defaults.bool(forKey: "useProseFont") }
-        set { defaults.set(newValue, forKey: "useProseFont"); changed() }
+        get { useProseFontOverride ?? defaults.bool(forKey: "useProseFont") }
+        set {
+            // The override's own didSet posts the change.
+            if useProseFontOverride != nil { useProseFontOverride = newValue; return }
+            defaults.set(newValue, forKey: "useProseFont")
+            changed()
+        }
+    }
+
+    /// Set by a check: the prose font on or off for this run, not saved
+    /// (as `fontSizeOverride`). Nil: the saved switch.
+    var useProseFontOverride: Bool? {
+        didSet { if useProseFontOverride != oldValue { changed() } }
+    }
+
+    /// Set by a check: a prose font for this run, not saved (as
+    /// `fontSizeOverride`). Nil: the saved prose font.
+    var proseFontNameOverride: String? {
+        didSet { if proseFontNameOverride != oldValue { changed() } }
     }
 
     /// The prose font: a font's PostScript name, `ProseFont.systemSerif`
     /// (New York), or nil for the system font (SF Pro).
     var proseFontName: String? {
-        get { defaults.string(forKey: "proseFontName") }
+        get { proseFontNameOverride ?? defaults.string(forKey: "proseFontName") }
         set {
+            // The override's own didSet posts the change (nil there ends
+            // the override: back to the saved font).
+            if proseFontNameOverride != nil { proseFontNameOverride = newValue; return }
             if let newValue { defaults.set(newValue, forKey: "proseFontName") } else { defaults.removeObject(forKey: "proseFontName") }
             changed()
         }

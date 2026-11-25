@@ -10,7 +10,8 @@ import CedricCore
 /// won't write over it and Apply stays off. Reload (the Changed on disk
 /// bar) and Revert to Saved on a dirty tab whose file went 0444 take the
 /// file's text, stay read-only and undo back to the unsaved edits. A
-/// Finder-locked file is read-only too.
+/// Finder-locked file is read-only too. Then a save that fails says why
+/// (SaveFailureCheck.swift).
 extension DevChecks {
     static func readOnlyCheck(_ name: String, _ app: AppDelegate) -> Bool {
         guard name == "readonly" else { return false }
@@ -30,7 +31,8 @@ extension DevChecks {
         let mine = "disk one mine\n", theirs = "disk two, longer\n"
         var reloadTab: EditorWindowController?
         func becomeKey() { tab.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: tab.window)) }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 tab.window?.makeFirstResponder(tab.textView)
@@ -107,6 +109,9 @@ extension DevChecks {
                 type(" mine")
                 expect(r.text == mine && r.doc.isDirty, "reload: unsaved edits typed", r.text)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Its own run-loop turn: Undo groups by event.
                 guard let r = reloadTab else { return }
@@ -170,7 +175,10 @@ extension DevChecks {
                 // Leave nothing unsaved or read-only behind.
                 chmod(file.path, 0o644)
             },
-        ])
+        ]
+        steps += steps2
+        steps += saveFailureSteps(app)
+        run(steps)
         return true
     }
 }

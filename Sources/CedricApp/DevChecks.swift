@@ -12,6 +12,9 @@ import CedricCore
 ///   CEDRIC_CHECK_OUT=/dir      where snapshots go (default: the temp folder)
 @MainActor
 enum DevChecks {
+    /// One check step: it does its work, then calls `next`.
+    typealias Step = (@escaping () -> Void) -> Void
+
     static var passed = 0, failed = 0
     static var out = URL(fileURLWithPath: NSTemporaryDirectory())
     static var dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -166,7 +169,7 @@ enum DevChecks {
 
     /// Runs `steps` one after another, `gap` seconds apart (each step may
     /// be async: it calls `next` when done).
-    static func run(_ steps: [(@escaping () -> Void) -> Void], gap: Double = 0.3, quit: Bool = false) {
+    static func run(_ steps: [Step], gap: Double = 0.3, quit: Bool = false) {
         var i = 0
         func step() {
             guard i < steps.count else { if quit { finishAndQuit() } else { finish() }; return }
@@ -237,8 +240,11 @@ enum DevChecks {
         case "readable": readableWidthCheck(app)
         case "writingrestore": writingRestoreCheck(app)
         case "settings": settingsCheck(app)
+        case "splittyping": splitTypingCheck(app)
+        case "perfsafe": perfSafeCheck(app)
+        case "spell": spellTypesCheck(app)
         default:
-            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !bigFileCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
+            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
         }
     }
 
@@ -354,7 +360,8 @@ enum DevChecks {
             expect(false, "src/main.swift opens"); finish(); return
         }
         main.window?.setContentSize(NSSize(width: 1300, height: 720))
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 main.window?.makeKeyAndOrderFront(nil)
                 key("f", [.command, .shift])
@@ -406,6 +413,9 @@ enum DevChecks {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 let t = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "strings.swift" }
                 expect(t != nil, "clicking a result opens the file")
@@ -443,7 +453,9 @@ enum DevChecks {
                 }
                 p.startSearch()
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     // MARK: Compare
@@ -517,7 +529,8 @@ enum DevChecks {
             fh.write(Data(s.utf8))
             fh.closeFile()
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 key("t", [.command, .option])
@@ -555,6 +568,9 @@ enum DevChecks {
                 fh.closeFile()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { next() }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync { expect(tab.text == "restarted after truncate\n", "truncate reloads the file", tab.text) },
             { next in
                 try? FileManager.default.moveItem(at: log, to: dir.appendingPathComponent("app.log.1"))
@@ -587,7 +603,365 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ])
+        ]
+        steps += steps2
+        steps += followHeldBytes(app)
+        steps += followLineBreaks(app)
+        steps += bomPerVersion(app)
+        steps += bomHeldBinaryReload(app)
+        steps += bomAppended(app)
+        run(steps)
+    }
+
+    /// 0.5.4 QA (should round 2): Follow's appended text came with every
+    /// break as LF, and a rotation kept the previous file's odd breaks, so
+    /// an edit and ⌘S after Follow stopped rewrote the file's endings.
+    /// Each append and reset now brings its own breaks.
+    static func followLineBreaks(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let grows = write("follow-crlf-append.log", "one\n")
+        let rotates = write("follow-rotate.log", "p\nq\r\nr\n")
+        var tabs: [String: EditorWindowController] = [:]
+        func bytes(_ u: URL) -> String { String(decoding: (try? Data(contentsOf: u)) ?? Data(), as: UTF8.self) }
+        /// Stops Follow, types `s` at the end, saves: the file's bytes.
+        func stopTypeSave(_ name: String, _ url: URL, _ want: String) {
+            guard let tab = tabs[name] else { expect(false, "\(name): has its tab"); return }
+            tab.toggleFollow()
+            focus(tab)
+            tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+            type("!")
+            let saved = tab.save()
+            expect(saved && bytes(url) == want, "\(name): saved after Follow, each break as the file has it",
+                   "saved \(saved): \(bytes(url).debugDescription)")
+        }
+        return [
+            sync {
+                guard let tab = app.open(grows) else { expect(false, "follow-crlf-append.log opens"); return }
+                tabs["append"] = tab
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                let fh = try! FileHandle(forWritingTo: grows)
+                fh.seekToEndOfFile()
+                fh.write(Data("two\r\nthree\n".utf8))
+                fh.closeFile()
+                tab.tail?.poll()
+            },
+            waitFor("append: the CRLF line shows") { tabs["append"]?.text == "one\ntwo\nthree\n" },
+            sync {
+                // The notices know the file is mixed now (review 3: they
+                // kept the state from before the append).
+                let last = tabs["append"]?.lastLineEndingShown
+                expect(last?.mixed == true && last?.ending == .lf, "append: the mixed-endings notice follows the appended CRLF",
+                       "\(String(describing: last))")
+            },
+            sync { stopTypeSave("append", grows, "one\ntwo\r\nthree\n!") },
+            sync {
+                guard let tab = app.open(rotates) else { expect(false, "follow-rotate.log opens"); return }
+                tabs["rotate"] = tab
+                expect(tab.doc.mixedLineEndings, "rotate: the first file is mixed")
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                // Rotated to a plain LF file (another inode).
+                let next = dir.appendingPathComponent("follow-rotate.next")
+                try? Data("x\ny\nz\n".utf8).write(to: next)
+                _ = rename(next.path, rotates.path)
+                tab.tail?.poll()
+            },
+            waitFor("rotate: the new file shows") { tabs["rotate"]?.text == "x\ny\nz\n" },
+            sync {
+                expect(tabs["rotate"]?.doc.mixedLineEndings == false, "rotate: the new file's breaks, not the old file's")
+                stopTypeSave("rotate", rotates, "x\ny\nz\n!")
+            },
+        ]
+    }
+
+    /// 0.5.4 release review 5: whether a file has a UTF-8 BOM is up to
+    /// each version's own bytes. A tab that read a BOM kept UTF-8 with
+    /// BOM through Reload, so the save of a version without one added it;
+    /// Follow's rotation kept the tab's encoding, adding or dropping one.
+    /// Each case: the file replaced (another inode), the tab reloads or
+    /// follows it, then "!" typed at the end and ⌘S: the new version's
+    /// bytes and the "!", BOM as the new version has it. The "unedited"
+    /// cases save with nothing typed: the new version byte for byte.
+    static func bomPerVersion(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        let cases: [(name: String, first: Data, then: Data)] = [
+            ("follow BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("follow none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("reload BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("reload none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("follow unedited BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("follow unedited none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("reload unedited BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("reload unedited none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var urls: [String: URL] = [:]
+        func replace(_ url: URL, _ bytes: Data) {
+            let next = url.appendingPathExtension("next")
+            try? bytes.write(to: next)
+            _ = rename(next.path, url.path)
+        }
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-version-\(i).log")
+            try? c.first.write(to: url)
+            urls[c.name] = url
+            let follows = c.name.hasPrefix("follow")
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                expect(tab.doc.encoding == (c.first.starts(with: bom) ? .utf8BOM : .utf8), "\(c.name): the first version's BOM",
+                       "\(tab.doc.encoding)")
+                if follows {
+                    tab.toggleFollow()
+                    _ = tab.tail?.isWatching
+                    replace(url, c.then)
+                    tab.tail?.poll()
+                } else {
+                    replace(url, c.then)
+                    tab.reloadIfChangedOnDisk()
+                }
+            })
+            steps.append(waitFor("\(c.name): the new version shows") { tabs[c.name]?.text == "b\n" })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                let want: TextEncoding = c.then.starts(with: bom) ? .utf8BOM : .utf8
+                expect(tab.doc.encoding == want, "\(c.name): the new version's BOM, not the old one's", "\(tab.doc.encoding)")
+                if follows { tab.toggleFollow() }
+                if c.name.contains("unedited") {
+                    expect(!tab.doc.isDirty, "\(c.name): nothing to save but the file as it is")
+                    let saved = tab.save()
+                    let got = (try? Data(contentsOf: url)) ?? Data()
+                    expect(saved && got == c.then, "\(c.name): saved unedited, the new version byte for byte",
+                           "saved \(saved): \([UInt8](got))")
+                    return
+                }
+                focus(tab)
+                tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+                type("!")
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == c.then + Data("!".utf8), "\(c.name): saved with the new version's BOM",
+                       "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
+    }
+
+    /// 0.5.4 release review 6: a tab holding a binary-looking file (not
+    /// shown, before Open Anyway) reloads a new version: it takes that
+    /// version's format with its text (doc.apply in reloadClean's held
+    /// branch, 9238eb7). Open Anyway, Allow Editing, ⌘S with nothing
+    /// typed: the new version byte for byte (BOM and breaks as it has
+    /// them). Before 9238eb7 the old version's encoding and breaks stayed.
+    static func bomHeldBinaryReload(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        // A NUL makes the first version look binary; a file with a BOM
+        // never does, so the BOM can only come with the new version.
+        let cases: [(name: String, first: Data, then: Data, shown: String)] = [
+            ("held none -> BOM+CRLF", Data("a\0\n".utf8), bom + Data("b\0\r\nc\r\n".utf8), "b\0\nc\n"),
+            ("held CRLF -> LF", Data("a\0\r\nz\r\n".utf8), Data("b\0\nc\n".utf8), "b\0\nc\n"),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-held-\(i).bin")
+            try? c.first.write(to: url)
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                expect(tab.binaryHeldText != nil, "\(c.name): the first version is held as binary",
+                       "\(String(describing: tab.binary).prefix(40))")
+                let next = url.appendingPathExtension("next")
+                try? c.then.write(to: next)
+                _ = rename(next.path, url.path)
+                tab.reloadIfChangedOnDisk()
+            })
+            steps.append(waitFor("\(c.name): the new version is held") { tabs[c.name]?.binaryHeldText == c.shown })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                let want: TextEncoding = c.then.starts(with: bom) ? .utf8BOM : .utf8
+                expect(tab.doc.encoding == want, "\(c.name): held, the new version's BOM", "\(tab.doc.encoding)")
+                tab.binaryBar?.button.performClick(nil)
+                expect(tab.binary == .readOnly && tab.text == c.shown, "\(c.name): Open Anyway shows the new version",
+                       tab.text.debugDescription)
+                tab.binaryBar?.button.performClick(nil)
+                expect(tab.binary == .editable, "\(c.name): Allow Editing")
+                expect(!tab.doc.isDirty, "\(c.name): clean before save")
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == c.then, "\(c.name): saved unedited, the new version byte for byte",
+                       "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
+    }
+
+    /// 0.5.4 release review 6: BOMs that come as Follow appends, each
+    /// write read on its own. A BOM after bytes already shown is text
+    /// (U+FEFF): the tab shows it, and ⌘S with nothing typed after Follow
+    /// stops writes the file byte for byte. At d3d28d1 the append was
+    /// decoded by Foundation, which drops a leading U+FEFF on macOS 26,
+    /// and the save wrote three bytes fewer.
+    static func bomAppended(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF], x = Array("x".utf8)
+        let cases: [(name: String, first: [UInt8], writes: [[UInt8]], shown: String)] = [
+            ("append: BOM, then BOM+x", bom, [bom + x], "\u{FEFF}x"),
+            ("append: empty, BOM, then BOM+x", [], [bom, bom + x], "\u{FEFF}x"),
+            ("append: BOM+text, then a BOM split 1+3", bom + Array("a\n".utf8), [[0xEF], [0xBB, 0xBF] + x], "a\n\u{FEFF}x"),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-append-\(i).log")
+            try? Data(c.first).write(to: url)
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                for w in c.writes {
+                    let fh = try! FileHandle(forWritingTo: url)
+                    fh.seekToEndOfFile()
+                    fh.write(Data(w))
+                    fh.closeFile()
+                    // Read before the next write: each its own append.
+                    tab.tail?.poll()
+                    _ = tab.tail?.isWatching
+                }
+            })
+            steps.append(waitFor("\(c.name): the appended text shows") {
+                tabs[c.name]?.text.unicodeScalars.map(\.value) == c.shown.unicodeScalars.map(\.value)
+            })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                tab.toggleFollow()
+                expect(!tab.isFollowing, "\(c.name): Follow stopped")
+                expect(tab.text.unicodeScalars.map(\.value) == c.shown.unicodeScalars.map(\.value),
+                       "\(c.name): the tab shows the second BOM as U+FEFF", tab.text.debugDescription)
+                expect(tab.doc.encoding == .utf8BOM, "\(c.name): UTF-8 with BOM", "\(tab.doc.encoding)")
+                let all = Data(c.first + c.writes.flatMap { $0 })
+                expect(!tab.doc.isDirty, "\(c.name): clean before save")
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == all, "\(c.name): saved unedited, byte for byte", "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
+    }
+
+    /// Waits (polling every 50 ms, at most `seconds`) for `cond`; a
+    /// timeout is a failed check named `what`, and the run goes on.
+    static func waitFor(_ what: String, _ seconds: Double = 5, _ cond: @escaping () -> Bool) -> (@escaping () -> Void) -> Void {
+        { next in
+            let deadline = Date().addingTimeInterval(seconds)
+            @MainActor func poll() {
+                if cond() { next(); return }
+                guard Date() < deadline else { expect(false, "\(what) (waited \(seconds) s)"); next(); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } }
+            }
+            poll()
+        }
+    }
+
+    /// Codex 0.5.4 review 2: a UTF-16 file with an odd byte count (the
+    /// writer mid-character) followed and then stopped: the tab showed
+    /// only the whole characters but was stamped with the whole file, so
+    /// ⌘S wrote it back without the last byte. Now the stamp covers only
+    /// the bytes shown and ⌘S asks. Once for Follow started on the odd
+    /// file, once for an odd append while following.
+    /// Review 3: the stamp is the one the tail read the bytes at, not the
+    /// path's when the event reaches the main thread (a same-size file
+    /// put there in between); and stopping Follow catches up off the
+    /// main thread.
+    static func followHeldBytes(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let u16 = { (s: String) in Data([0xFF, 0xFE]) + s.data(using: .utf16LittleEndian)! }
+        let started = dir.appendingPathComponent("odd-start.log"), appended = dir.appendingPathComponent("odd-append.log")
+        let raced = dir.appendingPathComponent("raced.log")
+        try? u16("one\n").write(to: started)
+        try? u16("one\n").write(to: appended)
+        try? Data("one\n".utf8).write(to: raced)
+        let odd = u16("one\nab").dropLast()   // half of "b"
+        var tabs: [String: EditorWindowController] = [:]
+        func addBytes(_ url: URL, _ bytes: Data) {
+            let fh = try! FileHandle(forWritingTo: url)
+            fh.seekToEndOfFile()
+            fh.write(bytes)
+            fh.closeFile()
+        }
+        /// Opens and follows `url` (its watcher armed before the step ends).
+        func follow(_ url: URL, _ name: String, before: () -> Void = {}) {
+            guard let tab = app.open(url) else { expect(false, "\(name) opens"); return }
+            tabs[name] = tab
+            before()
+            tab.toggleFollow()
+            _ = tab.tail?.isWatching   // its queue has run start()
+        }
+        /// Stop following, ⌘S: nothing written, the conflict sheet asks.
+        func stopAndSave(_ name: String, _ url: URL, _ want: String, _ onDisk: Data) {
+            guard let tab = tabs[name] else { expect(false, "\(name): has its tab"); return }
+            tab.toggleFollow()
+            expect(!tab.isFollowing, "\(name): Follow stopped")
+            expect(tab.text == want, "\(name): the tab shows what Follow showed", tab.text.debugDescription)
+            let saved = tab.save()
+            let now = (try? Data(contentsOf: url)) ?? Data()
+            expect(!saved && now == onDisk, "\(name): ⌘S doesn't write over bytes it never showed",
+                   "saved \(saved), \(now.count) bytes, want \(onDisk.count)")
+            expect(tab.window?.attachedSheet != nil || tab.diskBar != nil, "\(name): …it says the file differs")
+            if let sheet = tab.window?.attachedSheet { tab.window?.endSheet(sheet) }
+        }
+        let tail = odd.suffix(odd.count - u16("one\n").count)
+        return [
+            sync {
+                // Opened whole; the writer then adds "a" and half of "b".
+                follow(started, "started odd") { addBytes(started, tail) }
+                expect(tabs["started odd"]?.isFollowing == true && tabs["started odd"]?.text == "one\na",
+                       "Follow on an odd UTF-16 file shows the whole characters", (tabs["started odd"]?.text).debugDescription)
+            },
+            sync { stopAndSave("started odd", started, "one\na", odd) },
+            sync {
+                follow(appended, "appended odd")
+                expect(tabs["appended odd"]?.text == "one\n", "following the even file")
+                addBytes(appended, tail)
+            },
+            waitFor("appended odd: the whole characters show") { tabs["appended odd"]?.text == "one\na" },
+            sync { stopAndSave("appended odd", appended, "one\na", odd) },
+            sync {
+                // An append read by the tail, then (before its event
+                // reaches the main thread) the file rewritten in place at
+                // the same size: no event of its own (nothing appended),
+                // a new date. (FileTailTests race an atomic replace.)
+                follow(raced, "raced")
+                guard let tab = tabs["raced"], let t = tab.tail else { return }
+                addBytes(raced, Data("two\n".utf8))
+                t.poll()
+                _ = t.isWatching   // read and queued for the main thread
+                let read = DiskStamp.of(raced)
+                let fh = try! FileHandle(forWritingTo: raced)
+                fh.write(Data("ONE\nTWO\n".utf8))
+                fh.closeFile()
+                // Both writes can fall in one clock tick: the date moved on
+                // as a later write's would.
+                try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: raced.path)
+                expect(DiskStamp.changed(known: read, current: DiskStamp.of(raced)), "raced: the rewrite is a change on disk")
+            },
+            waitFor("raced: the append shows") { tabs["raced"]?.text == "one\ntwo\n" },
+            sync {
+                // Stopped and saved in one turn: the catch-up read (off
+                // the main thread) can't have landed.
+                stopAndSave("raced", raced, "one\ntwo\n", Data("ONE\nTWO\n".utf8))
+                expect(tabs["raced"]?.catchUpReads == 1, "raced: stopping Follow reads the file off the main thread",
+                       "\(tabs["raced"]?.catchUpReads ?? -1)")
+            },
+            waitFor("raced: the catch-up shows the file now") {
+                tabs["raced"]?.catchUpReads == 0 && tabs["raced"]?.text == "ONE\nTWO\n"
+            },
+            sync {
+                guard let tab = tabs["raced"] else { return }
+                expect(!tab.doc.isDirty && tab.diskBar == nil, "raced: …clean, no bar")
+                expect(tab.save(), "raced: ⌘S after the catch-up saves")
+            },
+        ]
     }
 
     // MARK: Open Recent

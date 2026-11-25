@@ -13,7 +13,7 @@ import CedricCore
         #expect(ModelPicker.parameterCount(fromID: "text-embedding-nomic-embed-text-v1.5") == nil)
     }
 
-    @Test func discoveryPicksTheSmallCoderQwen() async throws {
+    @Test(.timeLimit(.minutes(1))) func discoveryPicksTheSmallCoderQwen() async throws {
         let server = StubServer()
         server.json("/v1/models", ["data": [
             ["id": "qwen/qwen3.6-35b-a3b"], ["id": "qwen/qwen3.8-27b"],
@@ -24,7 +24,7 @@ import CedricCore
             ["id": "qwen2.5-coder-1.5b-instruct", "type": "llm", "quantization": "4bit", "state": "not-loaded"],
             ["id": "text-embedding-nomic-embed-text-v1.5", "type": "embeddings"],
         ]])
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         let report = await client.testConnection()
         #expect(report.error == nil)
         #expect(report.models.count == 6)
@@ -54,14 +54,14 @@ import CedricCore
         #expect(ModelPicker.pickSmallQwen(big) == nil)
     }
 
-    @Test func ollamaTagsGiveSizes() async throws {
+    @Test(.timeLimit(.minutes(1))) func ollamaTagsGiveSizes() async throws {
         let server = StubServer()
         server.json("/v1/models", ["data": [["id": "qwen2.5-coder:1.5b"]]])
         server.json("/api/tags", ["models": [[
             "name": "qwen2.5-coder:1.5b", "model": "qwen2.5-coder:1.5b", "size": 986_000_000,
             "details": ["parameter_size": "1.5B", "quantization_level": "Q4_K_M"],
         ]]])
-        let models = try await LocalModelClient(baseURL: server.baseURL, session: server.session).listModels()
+        let models = try await LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline().listModels()
         #expect(models.first?.sizeBytes == 986_000_000)
         #expect(models.first?.sizeLabel == "1.5B · Q4_K_M · 1.0 GB")
     }
@@ -112,10 +112,10 @@ import CedricCore
         #expect(await !LocalEndpointPolicy.resolvesPrivately("no-such-host.invalid"), "unresolvable: refused")
     }
 
-    @Test func redirectToAnotherHostIsNotFollowed() async throws {
+    @Test(.timeLimit(.minutes(1))) func redirectToAnotherHostIsNotFollowed() async throws {
         let server = StubServer()
         server.json("/v1/models", ["data": [["id": "m"]]])
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         // The guard itself: a redirect elsewhere gets nil, same host goes on.
         let g = LocalModelClient.RedirectGuard()
         let task = server.session.dataTask(with: URLRequest(url: server.baseURL.appendingPathComponent("chat/completions")))
@@ -130,11 +130,11 @@ import CedricCore
         _ = try await client.listModels()
     }
 
-    @Test func responseSizeIsCapped() async {
+    @Test(.timeLimit(.minutes(1))) func responseSizeIsCapped() async {
         let server = StubServer()
         let big = String(repeating: "x", count: LocalModelClient.maxResponseBytes + 10)
         server.json("/v1/chat/completions", ["choices": [["message": ["content": big]]]])
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         await #expect(throws: LocalAIError.transport("response too large")) {
             _ = try await client.chat(model: "m", messages: [], maxTokens: 1)
         }
@@ -142,41 +142,41 @@ import CedricCore
 
     // Ask Cedric's streaming request goes through the same endpoint rules.
 
-    @Test func chatStreamStreamsServerSentEvents() async throws {
+    @Test(.timeLimit(.minutes(1))) func chatStreamStreamsServerSentEvents() async throws {
         let server = StubServer()
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\r\n\r\n"
             + ": keep-alive\n"
             + "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"stop\"}]}\n\n"
             + "data: [DONE]\n"
         server.route("/v1/chat/completions") { _, _ in StubServer.Response(body: Data(sse.utf8)) }
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         let seen = Locked("")
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { t in seen.mutate { $0 += t } }
         #expect(acc.content == "Hello")
         #expect(seen.mutate { $0 } == "Hello")
     }
 
-    @Test func chatStreamTotalIsCapped() async {
+    @Test(.timeLimit(.minutes(1))) func chatStreamTotalIsCapped() async {
         let server = StubServer()
         // Many small events, no Content-Length: only the streamed total can catch it.
         let chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"" + String(repeating: "x", count: 1000) + "\"}}]}\n\n"
         let body = Data(String(repeating: chunk, count: LocalModelClient.maxResponseBytes / chunk.utf8.count + 2).utf8)
         #expect(body.count > LocalModelClient.maxResponseBytes)
         server.route("/v1/chat/completions") { _, _ in StubServer.Response(body: body) }
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         await #expect(throws: LocalAIError.transport("response too large")) {
             _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
         }
     }
 
-    @Test func chatStreamChecksTheNameResolvesPrivately() async {
+    @Test(.timeLimit(.minutes(1))) func chatStreamChecksTheNameResolvesPrivately() async {
         let server = StubServer()
         server.json("/v1/chat/completions", ["choices": [["message": ["content": "hi"]]]])
         // A bare name passes the name check but must still resolve to a
         // private address; this one doesn't resolve at all.
         let url = URL(string: "http://cedric-no-such-host-\(server.port):\(server.port)/v1")!
         #expect(LocalEndpointPolicy.isAllowed(url))
-        let client = LocalModelClient(baseURL: url, session: server.session)
+        let client = LocalModelClient(baseURL: url, session: server.session).withoutRealDeadline()
         await #expect(throws: LocalAIError.endpointNotLocal("cedric-no-such-host-\(server.port)")) {
             _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
         }
@@ -203,10 +203,10 @@ import CedricCore
 // one-minute lookups) unless the deadline under test ends it. The two
 // dribble tests run on virtual time instead (`StreamClock`, Support.swift).
 @Suite(.timely) struct RequestTests {
-    @Test func sendsOnlyCappedContextLanguageAndFileName() async throws {
+    @Test(.timeLimit(.minutes(1))) func sendsOnlyCappedContextLanguageAndFileName() async throws {
         let server = StubServer()
         server.json("/v1/chat/completions", chatCompletion(#"{"hints":[]}"#))
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         let provider = LocalModelHintProvider(client: client, model: "qwen2.5-coder-1.5b-instruct")
         let head = "// HEAD-MARKER\n"
         let big = head + String(repeating: "let value = compute(input) // é\n", count: 1_000) + "// TAIL-MARKER"
@@ -246,7 +246,43 @@ import CedricCore
         #expect(c.last?.content.contains("/no_think") == false)
     }
 
-    @Test func retriesWithoutSchemaOn400() async throws {
+    /// Every request carries `requestTimeout` as its own URLSession timeout
+    /// when it's set (the tests that take time off the wall clock rely on
+    /// it): `send` and both of `enrich`'s lookups (LM Studio's list is
+    /// missing here, so Ollama's tags are asked too).
+    ///
+    /// Few requests per test, one after another, and no short real timer:
+    /// on a starved pool each request can wait seconds for a thread (with
+    /// ten in one test, one run took the whole minute).
+    @Test(.timeLimit(.minutes(1))) func discoveryCarriesRequestTimeout() async throws {
+        let server = StubServer()
+        server.json("/v1/models", ["data": [["id": "m"]]])
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3_700, session: server.session).withoutRealDeadline()
+        client.requestTimeout = 4_321.5
+        let models = try await client.listModels()
+        #expect(models.map(\.id) == ["m"])
+        let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
+        #expect(got == ["/v1/models 4321.5", "/api/v0/models 4321.5", "/api/tags 4321.5"])
+    }
+
+    /// The same for a chat and a streamed chat; without `requestTimeout`
+    /// they keep `timeout` (an hour, so it can't fire here either).
+    @Test(.timeLimit(.minutes(1)), arguments: [4_321.5, nil] as [TimeInterval?])
+    func chatCarriesRequestTimeout(_ override: TimeInterval?) async throws {
+        let server = StubServer()
+        server.json("/v1/chat/completions", chatCompletion("ok"))
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3_700, session: server.session).withoutRealDeadline()
+        client.requestTimeout = override
+        let reply = try await client.chat(model: "m", messages: [], maxTokens: 1)
+        let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
+        #expect(reply.content == "ok")
+        #expect(acc.content == "ok")
+        let want = override ?? 3_700
+        let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
+        #expect(got == ["/v1/chat/completions \(want)", "/v1/chat/completions \(want)"])
+    }
+
+    @Test(.timeLimit(.minutes(1))) func retriesWithoutSchemaOn400() async throws {
         let server = StubServer()
         let count = Box(0)
         server.route("/v1/chat/completions") { _, body in
@@ -255,7 +291,7 @@ import CedricCore
             if obj?["response_format"] != nil { return .init(status: 400, body: Data()) }
             return .init(body: try! JSONSerialization.data(withJSONObject: chatCompletion("ok")))
         }
-        let client = LocalModelClient(baseURL: server.baseURL, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, session: server.session).withoutRealDeadline()
         let r = try await client.chat(model: "m", messages: [], maxTokens: 10, jsonSchema: HintPrompt.schema)
         #expect(r.content == "ok")
         #expect(count.value == 2)
@@ -310,10 +346,10 @@ import CedricCore
     /// 33.1 s against a 30 s first-byte deadline (`timeout`); the stub has
     /// the client's deadline loop look at the clock at that point, so a
     /// first-byte deadline that ended the whole stream, or an idle limit
-    /// that a chunk didn't reset, fails this every time. Why 30 s: URLSession
-    /// also uses `timeout` as a real-time limit between chunks, so it must
-    /// stay far above any stall of the runner.
-    @Test func chatStreamSlowDribbleOutlivesTheFirstByteDeadline() async throws {
+    /// that a chunk didn't reset, fails this every time. URLSession's own
+    /// real-time limit between chunks is off (`requestTimeout`), so no
+    /// stall of the runner can end it either.
+    @Test(.timeLimit(.minutes(1))) func chatStreamSlowDribbleOutlivesTheFirstByteDeadline() async throws {
         let clock = StreamClock()
         let server = StubServer()
         server.route("/v1/chat/completions") { _, _ in
@@ -322,6 +358,8 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 2.0
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
+        client.requestTimeout = .infinity
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
         #expect(clock.now - start > 32, "ran past the first-byte deadline")
@@ -335,7 +373,7 @@ import CedricCore
     /// against a 2 s idle limit, exactly; the body takes about 38 s (past
     /// the 30 s first-byte deadline too), so an idle limit that only
     /// newlines reset fails this every time.
-    @Test func chatStreamNewlineFreeDribbleDoesNotTimeOut() async throws {
+    @Test(.timeLimit(.minutes(1))) func chatStreamNewlineFreeDribbleDoesNotTimeOut() async throws {
         let body = Data(#"{"choices":[{"message":{"role":"assistant","content":"slow and steady"}}]}"#.utf8)
         let chunks = stride(from: 0, to: body.count, by: 2).map { body.subdata(in: $0..<min(body.count, $0 + 2)) }
         let clock = StreamClock()
@@ -346,6 +384,8 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 2.0
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
+        client.requestTimeout = .infinity
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
         #expect(chunks.count >= 36)
@@ -356,34 +396,65 @@ import CedricCore
 
     /// Data started, then stopped: the idle limit ends it, with the text so
     /// far shown and `.timedOut` thrown.
-    @Test func chatStreamStallAfterFirstByteHitsTheIdleLimit() async {
+    ///
+    /// Virtual time (`StreamClock`): on the wall clock a CI runner stalled
+    /// for 23 s made this take 23.3 s (run 45676438347). Now the text
+    /// comes 4 s in, and the clock only moves on once `onText` has had
+    /// both deltas: the chunk ends with the newline of the second, so by
+    /// then the reader has taken (and touched on) every byte of it. Then
+    /// the stall is exactly 4 s, past the 0.3 s idle limit but inside the
+    /// 30 s first-byte wait, and the stub holds `[DONE]` until the deadline
+    /// loop has decided at that instant: an idle limit that didn't fire
+    /// finds time left, gets `[DONE]` and an answer, not `.timedOut`. No
+    /// URLSession timeout of its own (`requestTimeout`).
+    @Test(.timeLimit(.minutes(1))) func chatStreamStallAfterFirstByteHitsTheIdleLimit() async {
+        let clock = StreamClock()
         let server = StubServer()
+        // "data: {w0}\n\ndata: {w1}\n": no byte after the line that yields "w1 ".
+        let text = Self.deltas(2).dropLast().reduce(Data(), +).dropLast()
         server.route("/v1/chat/completions") { _, _ in
-            StubServer.Response(body: Self.deltas(2).dropLast().reduce(Data(), +), chunks: [Data("data: [DONE]\n".utf8)], every: 3600)
+            StubServer.Response(body: Data(), chunks: [Data(text), Data("data: [DONE]\n".utf8)],
+                                every: 4, clock: clock, heard: [1: "w0 w1 "])
         }
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 0.3
+        client.streamClock = clock.read
+        client.streamTouched = clock.touched
+        client.requestTimeout = .infinity
         let seen = Locked("")
-        let start = Date()
+        let start = clock.now
         await #expect(throws: LocalAIError.timedOut) {
-            _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { t in seen.mutate { $0 += t } }
+            _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { t in
+                seen.mutate { $0 += t }
+                clock.hear(t)
+            }
         }
-        let took = Date().timeIntervalSince(start)
-        #expect(took < 10, "idle limit, not the 30 s first-byte wait")
+        let took = clock.now - start
+        #expect(took == 8, "ended at the stall's virtual instant: idle limit, not the 30 s first-byte wait")
         #expect(seen.mutate { $0 } == "w0 w1 ")
     }
 
     /// The first byte gets `timeout`, not the (shorter) idle limit: a model
     /// reading a long prompt is not cut off.
-    @Test func chatStreamFirstByteGetsTheLongerWait() async throws {
+    ///
+    /// Virtual time (`StreamClock`): on the wall clock a 23 s stall of a CI
+    /// runner ran past the 10 s too (run 45676438347). Now the wait is
+    /// exactly 0.6 s, and the stub holds the answer until the deadline loop
+    /// has found time left then (it never sends it otherwise): a 0.2 s idle
+    /// limit applied to the first byte ends it with `.timedOut`. No
+    /// URLSession timeout of its own (`requestTimeout`). The 0.2 s idle
+    /// limit against the 0.6 s wait is what this checks.
+    @Test(.timeLimit(.minutes(1))) func chatStreamFirstByteGetsTheLongerWait() async throws {
+        let clock = StreamClock()
         let server = StubServer()
         server.route("/v1/chat/completions") { _, _ in
-            StubServer.Response(body: Data(), chunks: [Self.deltas(1).reduce(Data(), +)], every: 0.6)
+            StubServer.Response(body: Data(), chunks: [Self.deltas(1).reduce(Data(), +)], every: 0.6, clock: clock)
         }
-        // 10 s, not 5: room for a stalled runner. The 0.2 s idle limit
-        // against the 0.6 s wait is what this checks.
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 10, session: server.session)
         client.streamIdleLimit = 0.2
+        client.streamClock = clock.read
+        client.streamTouched = clock.touched
+        client.requestTimeout = .infinity
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
         #expect(acc.content == "w0 ")
     }

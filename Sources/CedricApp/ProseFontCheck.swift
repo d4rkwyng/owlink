@@ -22,7 +22,8 @@ extension DevChecks {
         for t in [prose, code, plain] { sized(t) }
         func isMono(_ t: EditorWindowController) -> Bool { t.textView.font?.isFixedPitch == true }
         func storageFont(_ t: EditorWindowController) -> NSFont? { t.textView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont }
-        return [
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let d = UserDefaults.standard
                 for k in ["useProseFont", "proseFontName", "proseFontSize"] { d.removeObject(forKey: k) }
@@ -73,6 +74,9 @@ extension DevChecks {
                 app.zoomReset(nil)
                 expect(prose.textView.font?.pointSize == 18, "Actual Size puts it back")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Language change: code font in Swift, prose font back in Markdown.
                 prose.setLanguage(.swift)
@@ -137,5 +141,7 @@ extension DevChecks {
                 for t in [prose, code, plain] { t.window?.close() }
             },
         ]
+        steps += steps2
+        return steps
     }
 }

@@ -31,7 +31,7 @@ extension DevChecks {
         var pane: DefaultEditorPane? { SettingsWindowController.shared?.defaultEditor }
         func wait(_ cond: @escaping () -> Bool, _ then: @escaping () -> Void) {
             var n = 0
-            func poll() { if cond() || n > 50 { then() } else { n += 1; DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: poll) } }
+            @MainActor func poll() { if cond() || n > 50 { then() } else { n += 1; DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } } } }
             poll()
         }
         run([

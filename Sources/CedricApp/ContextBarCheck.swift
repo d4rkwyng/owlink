@@ -46,7 +46,8 @@ extension DevChecks {
             expect(tab.text == start, "one ⌘Z undoes \(id)", tab.text.debugDescription)
         }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 expect(Settings.contextBarDefault, "View › Show Context Bar is on by default (UX review #3)")
@@ -109,6 +110,9 @@ extension DevChecks {
                 clickButton("checkbox")
                 expect(tab.text == "hello world\nTitle line\n- [ ] a\n- [ ] b\n- [ ] c\n", "Checkbox on 3 lines", tab.text.debugDescription)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 clickButton("checkbox")
                 expect(tab.text == "hello world\nTitle line\n- [x] a\n- [x] b\n- [x] c\n", "again: checked", tab.text.debugDescription)
@@ -171,6 +175,9 @@ extension DevChecks {
                 if tab.text != before { undo() }
                 expect(tab.text == start, "the preview-focused Bold click is one undo step", tab.text.debugDescription)
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             snapshot("contextbar-preview.png"),
             sync {
                 key("p", [.command, .option])
@@ -241,6 +248,9 @@ extension DevChecks {
                 print(String(format: "check: contextbar icon contrast light %.2f", r))
                 expect(r >= 3, "icons reach 3:1 on the light bar", String(format: "%.2f", r))
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             snapshot("contextbar-light.png"),
             sync {
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "dark", theme: .dark, system: nil))
@@ -288,7 +298,9 @@ extension DevChecks {
                 if let b { click(b, at: NSPoint(x: b.bounds.midX, y: b.bounds.midY)) }
                 expect(fresh.text.contains("**world**"), "a click on Bold works on that tab", fresh.text.debugDescription)
             },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 
     /// Keystrokes into the Markdown tab, bar hidden and shown in

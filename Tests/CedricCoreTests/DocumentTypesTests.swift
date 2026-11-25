@@ -14,10 +14,45 @@ import UniformTypeIdentifiers
         #expect(Set(all.map(\.icon)).count == all.count)
         let claims = DocumentTypes.all.flatMap(\.contentTypes)
         #expect(Set(claims).count == claims.count, "no content type is in two labelled rows")
-        // The catch-all keeps 0.2.x's list exactly (same defaults after the update).
-        #expect(DocumentTypes.catchAll.contentTypes == ["public.text", "public.plain-text", "public.source-code", "public.script",
-                                                        "public.json", "public.yaml", "public.html", "public.xml", "public.css",
-                                                        "net.daringfireball.markdown", "public.log", "public.data"])
+    }
+
+    /// Claim parity with 0.5.3 (what this test can check; which app macOS
+    /// then picks is Launch Services' call): every content type is claimed
+    /// by the same kind of row at the same rank as in 0.5.3, except that
+    /// MD, JSON and YAML now hold their Alternate claim themselves (so
+    /// Finder draws their icon), instead of the catch-all. TXT, XML, HTML
+    /// and CSS stay None with their claim in the catch-all: as Alternate
+    /// rows of their own (1653a51), xml and css went from Safari to Owlink
+    /// on a clean macOS 26 VM.
+    @Test func ranksKeep0_5_3ButMdJsonYaml() {
+        // 0.2.x's one Text entry, which 0.5.3 kept as the catch-all.
+        let v02 = ["public.text", "public.plain-text", "public.source-code", "public.script", "public.json", "public.yaml",
+                   "public.html", "public.xml", "public.css", "net.daringfireball.markdown", "public.log", "public.data"]
+        let moved = ["net.daringfireball.markdown", "public.json", "public.yaml"]
+        #expect(DocumentTypes.all.filter { $0.rank == .alternate }.map(\.label) == ["MD", "JSON", "YAML"])
+        #expect(DocumentTypes.catchAll.rank == .alternate)
+        #expect(DocumentTypes.catchAll.contentTypes == v02.filter { !moved.contains($0) })
+        let alternate = DocumentTypes.declared.filter { $0.rank == .alternate }.flatMap(\.contentTypes)
+        #expect(alternate.sorted() == v02.sorted(), "Alternate claims are 0.2.x's twelve, each once")
+
+        // 0.5.3: labelled rows all None, catch-all Alternate. A claim is
+        // (UTI, labelled or catch-all, rank).
+        struct Claim: Hashable { let uti: String; let labelled: Bool; let rank: DocumentFileType.Rank }
+        let labelled053 = ["public.plain-text", "net.daringfireball.markdown", "public.json", "public.yaml", "public.swift-source",
+                           "public.python-script", "com.netscape.javascript-source", "com.microsoft.typescript",
+                           "public.shell-script", "public.zsh-script", "public.bash-script", "com.apple.log", "public.log",
+                           "public.comma-separated-values-text", "public.xml", "public.html", "public.css", "public.toml",
+                           "com.microsoft.ini", "org.iso.sql", "com.microsoft.powershell-script"]
+        var want = Set(labelled053.map { Claim(uti: $0, labelled: true, rank: .none) })
+            .union(v02.map { Claim(uti: $0, labelled: false, rank: .alternate) })
+        for u in moved {
+            want.remove(Claim(uti: u, labelled: true, rank: .none))
+            want.remove(Claim(uti: u, labelled: false, rank: .alternate))
+            want.insert(Claim(uti: u, labelled: true, rank: .alternate))
+        }
+        let got = DocumentTypes.declared.flatMap { t in t.contentTypes.map { Claim(uti: $0, labelled: t.label != "*", rank: t.rank) } }
+        #expect(got.count == Set(got).count, "no row claims a type twice")
+        #expect(Set(got) == want)
     }
 
     @Test func infoPlistSourceMatchesTheModel() throws {

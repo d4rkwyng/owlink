@@ -77,7 +77,7 @@ extension AppDelegate: NSMenuDelegate {
 
     @objc func openRecentItem(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        open(url)
+        open(url, background: true)
     }
 
     @objc func clearRecentMenu(_ sender: Any?) {
@@ -284,6 +284,13 @@ extension EditorWindowController {
             setEditable(true)
             window?.subtitle = ""
             recheckWriteAccess()
+            // The tab's stamp counts only the bytes Follow showed: bytes it
+            // held back (half a character, a trailing CR) or never got to
+            // show differ from it, so ⌘S asks rather than writing over
+            // them. Catch up off the main thread (a big live log): a clean
+            // tab reloads when the read is done; a file that can't be read
+            // shows the "Changed on disk" bar.
+            reloadIfChangedOnDisk(inBackground: true)
             return
         }
         guard let url = doc.fileURL else { NSSound.beep(); return }
@@ -295,25 +302,40 @@ extension EditorWindowController {
             a.addButton(withTitle: String(localized: "Cancel"))
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
-        let data: Data
-        do { data = try Data(contentsOf: url) } catch { showError(error); return }
-        if let d = TextCodec.decode(data, as: doc.encoding) {
-            doc.apply(d)
-            setText(d.text)
+        // The stamp from the descriptor the bytes are read through, taken
+        // before reading: never that of a file put in its place after.
+        let data: Data, stamp: DiskStamp
+        do { (data, stamp) = try FileTail.readStamped(url) } catch { showError(error); return }
+        // The tail's own decode: a UTF-16 character cut in half at the end
+        // (the writer still busy) is left for the first append, which
+        // starts from `used`. Not text: the tab, its edits and its stamp
+        // stay as they were and Follow doesn't start.
+        guard let (d, used) = FileTail.decodeWhole(data, as: doc.encoding) else {
+            showError(EditorDocument.LoadError.notText(url))
+            return
         }
+        doc.apply(d)
+        setText(d.text)
         doc.markSaved()
-        doc.fileModified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        // Stamped as the bytes shown, not the whole file: a half character
+        // left for the first append isn't in this tab's text.
+        doc.noteDisk(stamp.showing(UInt64(used)))
         updateTitle()
         setEditable(false)
-        // setText already dropped cards when the buffer was replaced. If the
-        // file could not be decoded, the ones still up were proposed against
-        // an editable tab and would keep showing Apply until the next edit.
+        // setText dropped the cards proposed against the editable buffer;
+        // refresh any still up so none shows Apply on a read-only tab.
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         window?.subtitle = String(localized: "Following")
         scrollToBottom()
         let me = WeakRef(self)
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(data.count)) { e in
-            MainActor.assumeIsolated { me.value?.tailEvent(e) }
+        // From the read shown: a file put in its place before the tail
+        // watches is a reset, not an append to this text.
+        // The bytes left out (a held CR, half a character) are read: a
+        // file cut below them is a reset.
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), held: UInt64(data.count - used),
+                         startedFrom: stamp,
+                         lineEnding: d.lineEnding) { (e: FileTail.Event, shown: FileTail.Shown) in
+            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }
         }
         tail = t
         t.start()
@@ -326,19 +348,42 @@ extension EditorWindowController {
         return clip.bounds.maxY >= textView.frame.maxY - lineHeight
     }
 
-    func tailEvent(_ e: FileTail.Event) {
+    /// `shown`: what the text now stands for, as the tail read it: the
+    /// stamp of those bytes (FileTail.Shown.stamp; not the path's stamp
+    /// now, which may be a file put there after the read), and their line
+    /// breaks, so a save after Follow stops writes each as the file has it.
+    func tailEvent(_ e: FileTail.Event, shown: FileTail.Shown) {
         guard tail != nil, let storage = textView.textStorage else { return }
         let atBottom = isScrolledToBottom
         switch e {
         case .appended(let s):
             // Not a user edit (no didChangeText): the tab stays clean, the
             // line index and colouring update from the storage edit.
+            let before = (ending: doc.lineEnding, mixed: doc.mixedLineEndings)
+            let at = storage.length
             storage.beginEditing()
             storage.append(NSAttributedString(string: s, attributes: baseAttributes()))
             storage.endEditing()
+            // Its breaks of another kind than the text's most common one.
+            if let odd = shown.lineBreaks { doc.appendFollowedBreaks(odd, at: at) }
+            // The mixed-endings notice follows the breaks (0.5.4 QA review
+            // 3: it kept saying what the text was before the append).
+            if doc.lineEnding != before.ending || doc.mixedLineEndings != before.mixed {
+                refreshFileNotices()
+            } else {
+                refreshLineEndingNoticeIfChanged()
+            }
             // A followed log can grow past the auto-review cap.
             updateAutoReviewCap(newText: false)
         case .reset(let s):
+            // The new content's own line endings, never the previous file's
+            // (a rotation): set before the text, which they describe.
+            if let le = shown.lineEnding { doc.lineEnding = le }
+            doc.lineBreaks = shown.lineBreaks
+            // And its own encoding: UTF-8 with a BOM or without, as the
+            // new file has it (FileTail.Shown.encoding), so a save after
+            // Follow stops neither adds the old file's BOM nor drops its own.
+            if let enc = shown.encoding { doc.encoding = enc }
             setText(s)
         }
         // A reset drops cards inside setText. An append is not a user edit,
@@ -347,7 +392,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.fileModified = doc.fileURL.flatMap { (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        doc.noteDisk(shown.stamp)
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {

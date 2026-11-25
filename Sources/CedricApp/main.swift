@@ -348,6 +348,9 @@ func buildMainMenu() -> NSMenu {
         submenu(String(localized: "Encoding"), TextEncoding.allCases.map {
             item($0.displayName, #selector(AppDelegate.pickEncodingMenu(_:)), represented: $0.rawValue)
         }),
+        // The encodings to read the file as again (FileNotices.swift): the
+        // same picker as the "isn’t valid UTF-8" bar's button.
+        item(String(localized: "Reopen with Encoding…"), #selector(AppDelegate.reopenWithEncodingMenu(_:)), "r", [.command, .option, .shift]),
         submenu(String(localized: "Line Endings"), LineEnding.allCases.map {
             item($0.displayName, #selector(AppDelegate.pickLineEndingMenu(_:)), represented: $0.rawValue)
         }),

@@ -65,7 +65,8 @@ extension DevChecks {
             return box
         }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 // Unsaved typing in the open tab: the replace must edit this buffer, not the file behind it.
@@ -142,6 +143,9 @@ extension DevChecks {
                     expect(struck, "…with the removed text struck through")
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync { tab.window?.appearance = NSAppearance(named: .aqua); panel.table.reloadData(); panel.table.expandItem(nil, expandChildren: true) },
             snapshot("replaceinfiles-preview-light.png"),
             sync { tab.window?.appearance = NSAppearance(named: .darkAqua); panel.table.reloadData(); panel.table.expandItem(nil, expandChildren: true) },
@@ -202,6 +206,9 @@ extension DevChecks {
                 expect(panel.nodes.first { $0.relativePath == "latin.txt" }?.children.allSatisfy(\.checked) == true, "boxes are locked while writing")
             },
             snapshot("replaceinfiles-writing.png"),
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             until("the writes land", timeout: 10) { !ReplaceInFiles.writing && !panel.replacing },
             sync {
                 ReplaceInFiles.writeDelayForChecks = 0
@@ -262,6 +269,9 @@ extension DevChecks {
                        "\(files.sorted())")
                 expect(panel.summary.stringValue.contains("in 4 files"), "…and the undo's report stays", panel.summary.stringValue)
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 // Find users see the panel as before: no Replace row once Replace is off.
                 click(panel.replaceBox, at: NSPoint(x: 4, y: panel.replaceBox.bounds.midY))
@@ -304,7 +314,9 @@ extension DevChecks {
                 tab.noticeBar?.button("Dismiss")?.performClick(nil)
                 expect(tab.noticeBar?.isHidden == true, "hidden panel: Dismiss closes it")
             },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 
     /// A Phase 0 menu item: it exists, has its shortcut (if any) and

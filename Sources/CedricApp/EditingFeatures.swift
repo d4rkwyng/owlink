@@ -26,6 +26,9 @@ final class EditingState {
     var countsGeneration = 0
     /// The newest background count asked for; older ones are dropped.
     var countsRequest = 0
+    /// How many times updateCounts read the whole text (the checks show
+    /// cached and lines-only counts never do).
+    var countsTextReads = 0
 
     /// View › Writing Mode for this tab (WritingMode.swift): off by default.
     var writing = WritingModeState()
@@ -242,24 +245,33 @@ extension EditorWindowController {
     func updateCounts() {
         editing.countsTimer = nil
         let sel = textView.selectedRange()
-        let ns = textView.string as NSString
+        // Lines only (past the cap) and cached counts come from the line
+        // index and the cache: the text itself (a bridge of the whole
+        // string) only for a count that reads it.
         if sel.length > 0 {
-            if sel.length > Self.immediateCountLimit, sel.length <= TextStats.maxCounted {
+            if sel.length > TextStats.maxCounted {
+                showSelectedLines(sel)
+                return
+            }
+            let ns = countsText()
+            if sel.length > Self.immediateCountLimit {
                 countInBackground(ns, range: sel, selection: true)
                 return
             }
-            if let c = TextStats.count(ns, range: sel) {
-                showCounts(c, selection: true)
-            } else {
-                let a = lineIndex.line(containing: sel.location), b = lineIndex.line(containing: max(sel.location, NSMaxRange(sel) - 1))
-                showLinesOnly(b - a + 1, selection: true)
-            }
+            if let c = TextStats.count(ns, range: sel) { showCounts(c, selection: true) } else { showSelectedLines(sel) }
             return
         }
         if let cached = editing.documentCounts {
             if let c = cached { showCounts(c, selection: false) } else { showDocumentLines() }
             return
         }
+        // The storage's length is the text's, without the text.
+        if (textView.textStorage?.length ?? lineIndex.length) > TextStats.maxCounted {
+            editing.documentCounts = .some(nil)
+            showDocumentLines()
+            return
+        }
+        let ns = countsText()
         if ns.length > Self.immediateCountLimit, ns.length <= TextStats.maxCounted {
             countInBackground(ns, range: NSRange(location: 0, length: ns.length), selection: false)
             return
@@ -267,6 +279,12 @@ extension EditorWindowController {
         let counts = TextStats.count(ns, range: NSRange(location: 0, length: ns.length))
         editing.documentCounts = .some(counts)
         if let c = counts { showCounts(c, selection: false) } else { showDocumentLines() }
+    }
+
+    /// The whole text, for a count that reads it (counted for the checks).
+    private func countsText() -> NSString {
+        editing.countsTextReads &+= 1
+        return textView.string as NSString
     }
 
     /// Big ranges (50 K to 1 M units) are counted off the main thread, on
@@ -305,6 +323,13 @@ extension EditorWindowController {
     private func showLinesOnly(_ n: Int, selection: Bool) {
         let s = plural(n, String(localized: "line"), String(localized: "lines"))
         statusBar.counts.stringValue = selection ? String(localized: "Selected: \(s)") : s
+    }
+
+    /// The lines a selection touches, from the line index: one ending
+    /// just after a newline doesn't touch the next line.
+    private func showSelectedLines(_ sel: NSRange) {
+        let a = lineIndex.line(containing: sel.location), b = lineIndex.line(containing: max(sel.location, NSMaxRange(sel) - 1))
+        showLinesOnly(b - a + 1, selection: true)
     }
 
     private func showDocumentLines() {
@@ -407,6 +432,18 @@ extension EditorWindowController {
         // one after, so each sets them once the text is back.
         if plan.registerBookmarkBefore { registerBookmarks(before, setNow: true) }
         var changed = false
+        // A mixed file's breaks through an edit that keeps every line
+        // (Convert Indentation, Indent, Outdent): each stays as it was
+        // (LineBreakTracking.swift), rather than all becoming the most
+        // common kind, which a save then wrote.
+        keptLineBreaks = nil
+        if plan.replaceText, let breaks = doc.lineBreaks, breaks.isMixed {
+            let ns = storage.string as NSString
+            if NSMaxRange(range) <= ns.length, LineBreaks.keepsLines(ns.substring(with: range) as NSString, replacement as NSString) {
+                keptLineBreaks = (range, breaks.kinds(in: range, of: ns))
+            }
+        }
+        defer { keptLineBreaks = nil }
         if plan.replaceText, textView.shouldChangeText(in: range, replacementString: replacement) {
             storage.beginEditing()
             storage.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: baseAttributes()))

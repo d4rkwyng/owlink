@@ -127,7 +127,8 @@ extension DevChecks {
             tv.insertText(text, replacementRange: tv.selectedRange())
             tv.setSelectedRange(NSRange(location: caret, length: 0))
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 for (sel, name, key, mods) in [(#selector(AppDelegate.addNextOccurrenceMenu(_:)), "Add Next Occurrence", "d", NSEvent.ModifierFlags.command),
@@ -204,6 +205,9 @@ extension DevChecks {
                 type("x")
                 expect(tab.text == "    onex\n    twox\n    thrxee\n    fouxr\n", "x at every caret", tab.text.debugDescription)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 backspace()
                 expect(tab.text == "    one\n    two\n    three\n    four\n", "Backspace removes them", tab.text.debugDescription)
@@ -278,6 +282,9 @@ extension DevChecks {
                        NSPasteboard.general.string(forType: .string) ?? "-")
                 escape()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             // Dead key: ⌥E then E at 3 carets → é at each.
             sync { put("a\nb\nc\n", caret: 1) },
             sync {
@@ -349,6 +356,9 @@ extension DevChecks {
             },
             // Informational: typing at 100 carets (perf-check gets the real metric on the 6 MB log).
             sync { put(String(repeating: "let value = compute(value) // padding text\n", count: 400), caret: 4) },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 key("d", [.command])
                 key("g", [.control, .command])
@@ -407,6 +417,8 @@ extension DevChecks {
                 escape()
                 tab.doc.markSaved()
             },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 }

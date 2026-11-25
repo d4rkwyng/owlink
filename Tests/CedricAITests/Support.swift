@@ -19,6 +19,11 @@ final class StubServer: @unchecked Sendable {
         /// client's logic, not how busy the runner is, decides whether a
         /// deadline passes. See `StreamClock`.
         var clock: StreamClock? = nil
+        /// On virtual time: chunk `i` is held, and the clock doesn't move
+        /// to it, until the client's `onText` has delivered `heard[i]` in
+        /// all (`StreamClock.hear`). So the clock can't move on while the
+        /// reader is still parsing (and touching on) the chunk before.
+        var heard: [Int: String] = [:]
     }
     typealias Handler = @Sendable (URLRequest, Data?) -> Response
 
@@ -30,6 +35,7 @@ final class StubServer: @unchecked Sendable {
     private let lock = NSLock()
     private var routes: [String: Handler] = [:]
     private(set) var requests: [(path: String, body: Data?)] = []
+    private var timeouts: [(path: String, timeout: TimeInterval)] = []
 
     init() {
         port = Self.lock.withLock { Self.nextPort += 1; return Self.nextPort }
@@ -54,6 +60,8 @@ final class StubServer: @unchecked Sendable {
     }
 
     var recorded: [(path: String, body: Data?)] { lock.withLock { requests } }
+    /// Each request's own `timeoutInterval`, as the stub received it.
+    var recordedTimeouts: [(path: String, timeout: TimeInterval)] { lock.withLock { timeouts } }
 
     fileprivate static func server(for port: Int) -> StubServer? { lock.withLock { servers[port] } }
 
@@ -61,6 +69,7 @@ final class StubServer: @unchecked Sendable {
         let path = request.url?.path ?? ""
         let handler: Handler? = lock.withLock {
             requests.append((path, body))
+            timeouts.append((path, request.timeoutInterval))
             return routes[path]
         }
         return handler?(request, body) ?? Response(status: 404, body: Data())
@@ -113,15 +122,25 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     /// `response` on virtual time, in step with the client:
     /// - the headers wait until the client's deadline loop has read the
     ///   clock (it is running);
-    /// - each chunk but the last waits until the client has read it (the
-    ///   watch was touched at the chunk's virtual time), so the stub never
-    ///   runs ahead of a stalled reader and makes a gap the client never saw;
-    /// - before the last chunk, the deadline loop reads the clock once more,
-    ///   at the full virtual length of the answer: a deadline that passed
-    ///   (first byte, or an idle limit a chunk didn't reset) is seen there,
-    ///   whatever the real timing, and ends the stream with `.timedOut`.
-    /// Any of those reads that doesn't come in time (30 s for the deadline
-    /// loop, 10 s for a touch; both far above a runner's stalls) fails the
+    /// - each chunk but the last waits until the client has read a byte of
+    ///   it and stored the touch (`streamTouched`: after `last` is set, with
+    ///   the bytes read so far and the time stored), at the chunk's virtual
+    ///   time. A touch the reader has read the clock for but not stored, or
+    ///   a late one for an earlier chunk (too few bytes), doesn't count. So
+    ///   the stub never runs ahead of a stalled reader and makes a gap the
+    ///   client never saw;
+    /// - a chunk with a `heard` entry waits, before the clock moves to it,
+    ///   until `onText` has delivered that text;
+    /// - the last chunk waits until the deadline loop has read the clock
+    ///   twice at the full virtual length of the answer. The loop only
+    ///   reads again after it found time left (`remaining() > 0`, then a
+    ///   sleep); a deadline that passed (first byte, or an idle limit a
+    ///   chunk didn't reset) ends the loop at the first read, the stream
+    ///   ends with `.timedOut`, and the last chunk is never sent (the load
+    ///   is cancelled while the stub waits). So the client has decided at
+    ///   that instant before the last chunk can race its decision.
+    /// Any of those that doesn't come in time (30 s for the deadline loop,
+    /// 10 s for a touch or text; all far above a runner's stalls) fails the
     /// load at once with `URLError(.resourceUnavailable)`. The stub never
     /// plays on out of step, so virtual time can't jump past a deadline
     /// the client hasn't seen, and a reader that doesn't start its deadline
@@ -137,29 +156,44 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
                                    httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         proto.client?.urlProtocol(proto, didReceive: http, cacheStoragePolicy: .notAllowed)
         if !response.body.isEmpty { proto.client?.urlProtocol(proto, didLoad: response.body) }
+        var sent = response.body.count
         for (i, chunk) in response.chunks.enumerated() {
             // Real time only to keep chunks apart: 20 ms > the 10 ms in
             // which `StreamWatch` takes bytes as one chunk.
             do { try await Task.sleep(nanoseconds: 20_000_000) } catch { return }
+            if let want = response.heard[i] {
+                let heard = await clock.wait(atMost: 10) { $0.heard == want }
+                if Task.isCancelled { return }
+                guard heard else { return fail(proto, "onText never delivered \(want.debugDescription) before chunk \(i)") }
+            }
             clock.advance(response.every)
             let last = i == response.chunks.count - 1
             if last {
+                // Counted after the advance: both reads are at the final time.
                 let seen = clock.deadlineReads
-                let sampled = await clock.wait(atMost: 30) { $0.deadlineReads > seen }
+                let decided = await clock.wait(atMost: 30) { $0.deadlineReads >= seen + 2 }
+                // A deadline that passed: the client cancels the load
+                // (stopLoading) and the last chunk is never sent.
                 if Task.isCancelled { return }
-                // The deadline loop never saw the final time: the last
-                // chunk is withheld and the load fails, so the test
-                // can't pass without that check having run.
-                guard sampled else { return fail(proto, "the deadline loop didn't read the clock before the last chunk") }
+                // The deadline loop never found time left at the final
+                // time, nor ended the stream: the last chunk is withheld
+                // and the load fails, so the test can't pass without that
+                // check having run.
+                guard decided else { return fail(proto, "the deadline loop didn't find time left before the last chunk") }
             }
-            let touched = clock.touchReads
+            let before = sent, at = clock.now
             proto.client?.urlProtocol(proto, didLoad: chunk)
+            sent += chunk.count
             if !last {
                 // Not touched: fail here rather than advance the clock past
-                // a gap the reader never saw.
-                let read = await clock.wait(atMost: 10) { $0.touchReads > touched }
+                // a gap the reader never saw. Only a stored touch on a byte
+                // of this chunk, at its time, counts.
+                let read = await clock.wait(atMost: 10) {
+                    guard let c = $0.lastTouch else { return false }
+                    return c.bytesRead > before && c.at >= at
+                }
                 if Task.isCancelled { return }
-                guard read else { return fail(proto, "chunk \(i) was never read (no touch)") }
+                guard read else { return fail(proto, "chunk \(i) was never read (no stored touch)") }
             }
         }
         proto.client?.urlProtocolDidFinishLoading(proto)
@@ -266,12 +300,27 @@ final class StreamClock: @unchecked Sendable {
 
     func advance(_ dt: TimeInterval) { lock.withLock { t += dt } }
 
-    /// Polls (real time) until `cond` holds, the task is cancelled, or
-    /// `atMost` seconds pass; whether `cond` held.
+    private var _lastTouch: (at: TimeInterval, bytesRead: Int)?
+    /// The client's latest stored touch of its watch (`touched`).
+    var lastTouch: (at: TimeInterval, bytesRead: Int)? { lock.withLock { _lastTouch } }
+    /// For `streamTouched`: called after the watch has stored the touch.
+    var touched: @Sendable (TimeInterval, Int) -> Void {
+        { [self] at, n in self.lock.withLock { self._lastTouch = (at, n) } }
+    }
+
+    private var _heard = ""
+    /// All the text `onText` has delivered (`hear`).
+    var heard: String { lock.withLock { _heard } }
+    /// For a test's `onText`: lets the stub hold a chunk until this text
+    /// is in (`StubServer.Response.heard`).
+    func hear(_ text: String) { lock.withLock { _heard += text } }
+
+    /// Polls (real, monotonic time) until `cond` holds, the task is
+    /// cancelled, or `atMost` seconds pass; whether `cond` held.
     func wait(atMost: TimeInterval, _ cond: (StreamClock) -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(atMost)
+        let end = ContinuousClock.now.advanced(by: .milliseconds(Int64(atMost * 1000)))
         while !cond(self) {
-            if Task.isCancelled || Date() > end { return false }
+            if Task.isCancelled || ContinuousClock.now > end { return false }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         return true
@@ -344,8 +393,10 @@ func context(_ text: String = "let value = items.count + 1", gen: Int = 1, doc: 
 
 extension LocalModelClient {
     /// This client with a deadline (`withDeadline`) that never passes on
-    /// its own, and no timeout of URLSession's own on its requests
-    /// (`requestTimeout`): it only ends when the request does, so the client's own
+    /// its own, a stream clock that doesn't move (so a stream's first-byte,
+    /// idle and cap limits never pass either), and no timeout of
+    /// URLSession's own on its requests (`requestTimeout`): it only ends
+    /// when the request does, so the client's own
     /// logic (the answer, an error, the policy), not how long a busy CI
     /// runner takes to schedule URLSession's work, decides the result. For
     /// tests whose point isn't the deadline; they carry a `.timeLimit` so
@@ -353,6 +404,7 @@ extension LocalModelClient {
     func withoutRealDeadline(_ asked: Locked<[TimeInterval]>? = nil) -> LocalModelClient {
         var c = self
         c.requestTimeout = .infinity
+        c.streamClock = { 0 }
         c.deadlineSleep = { seconds in
             asked?.mutate { $0.append(seconds) }
             while true { try await Task.sleep(nanoseconds: 3_600 * 1_000_000_000) }

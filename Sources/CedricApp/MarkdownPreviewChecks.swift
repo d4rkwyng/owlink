@@ -100,7 +100,8 @@ extension DevChecks {
         func jsItem() -> NSMenuItem? { menuItem(action: #selector(AppDelegate.togglePreviewJavaScript(_:))) }
         func scrollY(_ then: @escaping @MainActor (Double) -> Void) { previewJS(tab, "window.scrollY") { then(($0 as? Double) ?? (($0 as? Int).map(Double.init) ?? -1)) } }
         var loadsBefore = 0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 key("p", [.command, .option])
@@ -160,6 +161,9 @@ extension DevChecks {
                        tab.previewPane?.header.appearance?.name.rawValue ?? "-")
             },
             snapshot("previewbar-light.png"),
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 webFrame = tab.previewPane?.renderer.view.frame ?? .zero
                 buttonFrames = frames()
@@ -226,6 +230,9 @@ extension DevChecks {
                 expect(bar?.window === tab.previewWindow?.window, "the bar goes with it into its window")
                 expectDetachedInFront(tab, app, "previewbar, Detach on the bar")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             { next in
                 guard let w = tab.previewWindow?.window else { next(); return }
                 snapshot("previewbar-detached-window-light.png", window: w)(next)
@@ -277,7 +284,9 @@ extension DevChecks {
                 if let z = cbar?.buttons[.zoomIn] { press(z); press(z) }
                 expect(abs((g?.zoom ?? 0) - 1.25) < 0.001 && (g?.table.rowHeight ?? 0) > h0, "Zoom + enlarges the grid", "zoom=\(g?.zoom ?? 0) row=\(g?.table.rowHeight ?? 0)")
             },
-        ], gap: 0.4)
+        ]
+        steps += steps3
+        run(steps, gap: 0.4)
     }
 
     /// A static site's page (Quartz, Hugo): `/images/…` root-absolute
@@ -346,7 +355,8 @@ extension DevChecks {
         let p = { tab.preview }
         var loadsBefore = 0, swapsBefore = 0
         var scrollY = 0.0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 key("p", [.command, .option])
@@ -416,6 +426,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             // Preview → editor: a scroll the user makes in the preview.
             { next in
                 previewJS(tab, "window.__cedricQuietUntil = 0; window.scrollTo(0, document.documentElement.scrollHeight / 4); window.__cedricLineAt(window.scrollY + 8)") { v in
@@ -487,6 +500,9 @@ extension DevChecks {
                     }
                 }
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
             // revealed, other schemes ignored, a web link asks and never
@@ -572,6 +588,9 @@ extension DevChecks {
                     }
                 }
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             // Detached: still swapped in place.
             sync {
                 focus(tab)
@@ -594,7 +613,9 @@ extension DevChecks {
             },
             { next in perfBigMarkdown(app, tab, next) },
             sync { for t in app.tabs { t.doc.markSaved() } },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 
     /// Waits (polling, up to `seconds`) until the element with `id` is in
@@ -755,7 +776,8 @@ extension DevChecks {
             tab.previewBarAction(.home)
             waitForPreview(tab, contains: "jump text", "This Document returns to the live document")(next)
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "the unique section", "the preview shows the document"),
             // Same page: stays on the live document, no tab, heading in view.
@@ -810,6 +832,9 @@ extension DevChecks {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 1,
                        "with JavaScript on, script re-clicking a declined web link doesn't ask again",
@@ -868,6 +893,9 @@ extension DevChecks {
                 }
                 poll()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
             sync { livePage = p()?.webView.url },
             click("spoof"),
@@ -927,6 +955,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             click("wiki part"),
             waitForAnchor(tab, id: "part", "a [[other#Part]] wikilink opens at the heading",
                           when: { p()?.isHome == false && noTab() }),
@@ -971,7 +1002,9 @@ extension DevChecks {
                 if !t.previewVisible { t.togglePreview() }
             },
             { next in if let b = blank { waitForPreview(b, contains: "the far section", "an untitled document's preview shows it")(next) } else { expect(false, "untitled tab"); next() } },
-        ] + ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
+        ]
+        steps += steps4
+        steps += ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
             { next in
                 guard let b = blank else { next(); return }
                 expect(b.preview?.webView.url?.absoluteString == "about:blank", "\(text): the page is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
@@ -1000,9 +1033,12 @@ extension DevChecks {
                     }
                 }
             },
-        ] } + [
+        ] }
+        let steps5: [Step] = [
             sync { for t in app.tabs { t.doc.markSaved() } },
-        ])
+        ]
+        steps += steps5
+        run(steps)
     }
 
     /// A 1 MB Markdown file with the preview open: the main thread's time
@@ -1175,7 +1211,8 @@ extension DevChecks {
         let saved = pb.string(forType: .string)
         let pdfURL = dir.appendingPathComponent("out/report.pdf")
         try? FileManager.default.createDirectory(at: pdfURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(swift)
                 for a in [#selector(AppDelegate.exportHTMLMenu(_:)), #selector(AppDelegate.exportPDFMenu(_:)),
@@ -1233,6 +1270,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             // Obsidian syntax leaves the app: wikilinks and embeds by relative
             // path (no cedric-doc: links), notes inlined, unresolved as text.
             { next in
@@ -1301,6 +1341,8 @@ extension DevChecks {
                 if let saved { pb.setString(saved, forType: .string) }
                 for t in [tab, swift] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

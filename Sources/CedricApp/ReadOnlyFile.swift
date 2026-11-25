@@ -33,7 +33,7 @@ extension EditorWindowController {
 
     /// Runs `replace` with the panes editable for a read-only file, so a
     /// replacement the user asked for from disk (Reload, Revert to Saved,
-    /// Reload Theirs) gets past `shouldChangeText` and registers for Undo;
+    /// Reload from Disk) gets past `shouldChangeText` and registers for Undo;
     /// typing, Find/Replace and Apply stay refused. Read-only again after.
     /// Only the file's read-only state is lifted: binary text and Follow
     /// File stay as they are.

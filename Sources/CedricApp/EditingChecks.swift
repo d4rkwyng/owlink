@@ -233,7 +233,8 @@ extension DevChecks {
         sized(tab)
         func caretTo(line: Int) { tab.textView.setSelectedRange(NSRange(location: tab.lineIndex.starts[line] + 1, length: 0)) }
         var marks: [Int] { tab.editing.bookmarks.lines }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 caretTo(line: 1)
@@ -287,6 +288,9 @@ extension DevChecks {
                 key(down, [.control, .command])
                 expect(marks == [5], "⌃⌘↓ takes the bookmark along", "\(marks)")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Bookmark All Matches on the word under the caret ("todo").
                 key(f2Key, [.command, .shift])
@@ -321,7 +325,10 @@ extension DevChecks {
                 click(g, at: NSPoint(x: g.bounds.width - 10, y: p.y))
                 expect(marks.isEmpty, "and a second click removes it", "\(marks)")
             },
-        ] + bookmarksThroughBigEdits(app))
+        ]
+        steps += steps2
+        steps += bookmarksThroughBigEdits(app)
+        run(steps)
     }
 
     /// Edits made in one go keep the bookmarks on lines whose text
@@ -579,7 +586,8 @@ extension DevChecks {
         let broken = app.open(write("broken.json", String(full.dropLast(3)) + "\n"))!
         sized(tab)
         var said: String?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let w = tab.owlContextWindow()
                 expect(!w.isWholeDocument, "the owl sees only the start of the file", "\((w.context.text as NSString).length)")
@@ -602,7 +610,190 @@ extension DevChecks {
                 expect(broken.text == String(full.dropLast(3)) + "\n", "a file that isn't valid JSON as a whole is left alone")
                 expect(said != nil, "and the reason is given", said ?? "-")
             },
-        ], gap: 0.6)
+        ]
+        steps += steps1
+        steps += staleJSONHintSteps(app)
+        run(steps, gap: 0.6)
+    }
+
+    /// "Looks like JSON. Format it?" shown again from Recent hints after
+    /// the text changed (0.5.4 QA #12): still one-line JSON, the question
+    /// with a Fix it that formats the text as it is now; not JSON any
+    /// more, a past hint that asks nothing (OK, Don't show again).
+    static func staleJSONHintSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let first = #"{"a":1,"b":[1,2]}"#, second = #"{"a":2,"b":[3,4],"c":"x"}"#
+        var tab: EditorWindowController!
+        var shown: OwlCoordinator.Shown?
+        func titles() -> [String] { tab.owl?.bubble?.buttons.map(\.title) ?? [] }
+        func replace(_ text: String) {
+            tab.textView.setSelectedRange(NSRange(location: 0, length: (tab.text as NSString).length))
+            tab.textView.insertText(text, replacementRange: tab.textView.selectedRange())
+        }
+        var steps: [Step] = []
+        let steps1: [Step] = [
+            sync {
+                guard let t = app.open(write("stale.json", first)) else { expect(false, "stale JSON: opened stale.json"); return }
+                tab = t
+                sized(t)
+                t.setOwlVisible(true)
+                let w = t.owlContextWindow()
+                let hub = OwlHub.shared
+                guard let hint = RulesHintProvider().check(w.context, facts: t.owlFacts(wholeDocument: w.isWholeDocument))
+                        .first(where: { $0.id == RulesHintProvider.jsonID }) else { expect(false, "stale JSON: the rules offer to format it"); return }
+                hub.coordinator.markShown(hint, documentID: t.doc.id, context: w.context)
+                shown = hub.coordinator.recent.first { $0.hint.id == RulesHintProvider.jsonID && $0.documentID == t.doc.id }
+                expect(shown != nil && t.owl != nil, "stale JSON: the hint is under Recent hints")
+                focus(t)
+                replace(second)
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(tab.text == second, "stale JSON: the text changed, still one-line JSON", tab.text)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: checked again off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let owl = tab?.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: still JSON, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(titles().first == String(localized: "Fix it"), "stale JSON: …with a Fix it that works", "\(titles())")
+                owl.bubble?.buttons.first { $0.title == String(localized: "Fix it") }?.performClick(nil)
+            },
+            sync {
+                guard let tab else { return }
+                expect(tab.text == JSONFormatter.prettyIfMinified(second), "stale JSON: Fix it formatted the text as it is now", tab.text)
+                replace("not JSON any more\n")
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (not JSON)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                let title = owl.presentedHint?.hint.title ?? "-"
+                expect(title == "Looked like JSON (the text has changed since).", "stale JSON: not JSON now, a past hint", title)
+                expect(!title.contains("?"), "stale JSON: …that asks nothing", title)
+                expect(titles() == [String(localized: "OK"), String(localized: "Don’t show again")], "stale JSON: …OK and Don’t show again",
+                       "\(titles())")
+                expect(owl.presentedHint?.documentRange == nil, "stale JSON: …and no range")
+                owl.bubble?.buttons.first { $0.title == String(localized: "OK") }?.performClick(nil)
+                expect(owl.bubble == nil, "stale JSON: OK closes it")
+                // Codex round 2: the JSON kept as the start of a longer,
+                // invalid text still matched its range and offered to format it.
+                replace(first + " and more")
+            },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (JSON then more)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: JSON then more text, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(!titles().contains(String(localized: "Fix it")), "stale JSON: …no Fix it for the start of it", "\(titles())")
+                owl.hideBubble()
+                // Still one-line JSON when asked, edited while it is checked: not offered for text that has gone.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+            },
+            waitFor("stale JSON: the check comes back (edited meanwhile)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: edited while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(owl.presentedHint?.hint.replacement == nil, "stale JSON: …with nothing to apply")
+                owl.hideBubble()
+                // Sol round 3: the long one-line file's hint (no range),
+                // past the length checked again, had its shape checked over
+                // the whole file in the click. Off the main thread now too.
+                let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+                OwlHub.shared.coordinator.markShown(longLine, documentID: tab.doc.id)
+                guard let rangeless = OwlHub.shared.coordinator.recent.first(where: {
+                    $0.hint.id == RulesHintProvider.jsonID && $0.documentID == tab.doc.id }) else {
+                    expect(false, "stale JSON: the long file's hint is under Recent hints"); return
+                }
+                expect(rangeless.hint.range == nil, "stale JSON: the long file's hint has no range")
+                replace("[" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]")
+                expect((tab.text as NSString).length > RulesHintProvider.replayJSONLimit, "stale JSON: the long file is past the recheck length")
+                owl.showAgain(rangeless, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: the long file's hint is checked off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the long file's check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: the long file still JSON-shaped, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // 0.5.4 QA review 3: the check coming back compared the
+                // whole text with its copy on the main thread. Now the
+                // tab's text revision: any change while it is checked,
+                // even one that ends at the same text, makes it a past hint.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+                replace(second)
+                expect(tab.text == second, "stale JSON: edited and back to the same text")
+            },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
+            waitFor("stale JSON: the check comes back (edited and back)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle,
+                       "stale JSON: edited while checked, even back to the same text, a past hint", owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Text added the way Follow File adds it (the storage, no
+                // user edit, the tab stays clean) while it is checked.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                let storage = tab.textView.textStorage!
+                storage.beginEditing()
+                storage.append(NSAttributedString(string: "\n", attributes: tab.baseAttributes()))
+                storage.endEditing()
+            },
+            waitFor("stale JSON: the check comes back (appended)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: appended to while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // The whole buffer replaced (a reload, a Follow reset) by the same text.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                tab.setText(second)
+                expect(tab.text == second, "stale JSON: the buffer replaced by the same text")
+            },
+            waitFor("stale JSON: the check comes back (replaced)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: buffer replaced while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Untouched while checked: still asks.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (untouched)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: untouched while checked, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                tab.setOwlVisible(false)
+                tab.doc.markSaved()
+                tab.window?.performClose(nil)
+            },
+        ]
+        steps += steps3
+        return steps
     }
 
     // MARK: Colouring stays right after edits
@@ -826,7 +1017,8 @@ extension DevChecks {
         let big = app.open(write("big.txt", String(repeating: "lorem ipsum dolor\n", count: 70_000)))! // 1.26 M: lines only
         sized(tab)
         var label: String { tab.statusBar.counts.stringValue }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: 0, length: 0))
@@ -845,7 +1037,9 @@ extension DevChecks {
                 mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
                 type("x")
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("a 72 K document is counted after a pause, in time", 5) {
+                mid.statusBar.counts.stringValue == "12,000 words · 6,000 lines · 72,001 characters"
+            },
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "12,000 words · 6,000 lines · 72,001 characters", "a 72 K document is counted after a pause", l)
@@ -861,7 +1055,12 @@ extension DevChecks {
                 let ms = Date().timeIntervalSince(t0) * 1000
                 expect(ms < 15, "counting ~1 M characters doesn't hold up the main thread", String(format: "%.1f ms", ms))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
+            waitFor("~1 M characters counted, in time", 10) {
+                mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters"
+            },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "180,000 words · 36,000 lines · 972,000 characters", "and the counts arrive", l)
@@ -876,8 +1075,68 @@ extension DevChecks {
                 big.textView.setSelectedRange(NSRange(location: 0, length: 20 * 18))
                 let l3 = big.statusBar.counts.stringValue
                 expect(l3 == "Selected: 60 words · 20 lines · 360 characters", "a small selection in a big document is counted", l3)
+                // 0.5.4: lines-only and cached counts never read the text.
+                // Past the cap, the document's lines-only state is cached.
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                // (Review: the text read itself is counted, so the old eager
+                // bridge would fail these.) A small selection reads it: the
+                // counter is live.
+                var reads = big.editing.countsTextReads
+                big.textView.setSelectedRange(NSRange(location: 0, length: 18))
+                expect(big.editing.countsTextReads == reads + 1, "a small selection's count reads the text",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                big.editing.documentCounts = nil
+                reads = big.editing.countsTextReads
+                big.updateCounts()
+                var cachedLinesOnly = false
+                if case .some(.none) = big.editing.documentCounts { cachedLinesOnly = true }
+                expect(cachedLinesOnly && big.statusBar.counts.stringValue == "70,000 lines", "over the cap: lines only, cached as such",
+                       big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "over the cap, not cached: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.updateCounts()
+                big.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                expect(big.editing.countsTextReads == reads && big.statusBar.counts.stringValue == "70,000 lines",
+                       "over the cap, cached: the text isn't read", "\(big.editing.countsTextReads - reads) reads")
+                // A selection over the cap: the lines it touches, from the index
+                // ("x" was typed at the start: line 1 is 19 units long).
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "a selection over the cap: its lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18 - 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "…ending before a newline: the same lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 1, length: 19 + 59_999 * 18 + 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,001 lines", "…one unit into the next line: one more",
+                       big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "selections over the cap: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
+                // Exactly the cap: counted (after a pause, off the main thread).
+                big.textView.setSelectedRange(NSRange(location: 1, length: TextStats.maxCounted))
+                // The cached document counts come back at once with no selection.
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 27))
+                let midReads = mid.editing.countsTextReads
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                mid.updateCounts()
+                expect(mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters", "cached counts, at once",
+                       mid.statusBar.counts.stringValue)
+                expect(mid.editing.countsTextReads == midReads, "cached counts: the text isn't read",
+                       "\(mid.editing.countsTextReads - midReads) reads")
+            },
+            // The cap-sized count runs off the main thread: wait for it (bounded).
+            waitFor("a selection of exactly the cap is counted, in time", 10) {
+                big.statusBar.counts.stringValue == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters"
+            },
+            sync {
+                // 1,000,000 units of "lorem ipsum dolor\n" (18 each): 55,555
+                // lines and "lorem ipsu", 166,667 words over 55,556 lines.
+                let l4 = big.statusBar.counts.stringValue
+                expect(l4 == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters", "a selection of exactly the cap is counted", l4)
                 for t in [tab, mid, big] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

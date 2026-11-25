@@ -787,7 +787,7 @@ extension LocalModelClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = timeout
+        request.timeoutInterval = requestTimeout ?? timeout
         // `timeout` covers the name check and the wait for the first byte
         // of the answer (a slow model reads a long prompt first); after
         // that, at most `streamIdleLimit` between bytes, and `streamCap`
@@ -858,7 +858,11 @@ extension LocalModelClient {
                 // Not a lock per byte (a 2 MB answer adds up): bytes of one
                 // chunk arrive together, a new chunk comes after a gap.
                 let tick = mach_absolute_time()
-                if tick &- lastTouch > StreamWatch.touchGapTicks { lastTouch = tick; watch.touch() }
+                if tick &- lastTouch > StreamWatch.touchGapTicks {
+                    lastTouch = tick
+                    let at = watch.touch()
+                    streamTouched?(at, total)
+                }
                 if total > Self.maxResponseBytes {
                     bytes.task.cancel()
                     throw LocalAIError.transport("response too large")
@@ -918,10 +922,12 @@ final class StreamWatch: @unchecked Sendable {
         return 10_000_000 * UInt64(tb.denom) / UInt64(max(1, tb.numer))
     }()
 
-    /// Data arrived.
-    func touch() {
+    /// Data arrived. The time stored as `last`.
+    @discardableResult
+    func touch() -> TimeInterval {
         let t = now()
         lock.withLock { last = t }
+        return t
     }
 
     /// Seconds until the stream is given up (≤ 0: now).

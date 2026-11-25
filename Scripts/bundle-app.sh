@@ -134,17 +134,21 @@ cp Scripts/cedric "$APP/Contents/Resources/cedric"
 chmod +x "$APP/Contents/Resources/cedric"
 
 # The text file types (Resources/document-types.txt, which explains the
-# ranks): one document type each with its icon, LSHandlerRank None (they
-# never make Owlink a default; Settings › Default editor for… or Get Info
-# does, when the user asks), the catch-all "Text" type at Alternate as in
-# 0.2.x, and an imported declaration for the few types macOS lacks.
+# ranks): one document type each with its icon and the row's LSHandlerRank
+# (Alternate for MD, JSON, YAML and the catch-all, which hold 0.2.x's
+# claims; None otherwise, so Settings › Default editor for… or Get Info
+# makes Owlink a default for those only when the user asks), and an
+# imported declaration for the few types macOS lacks. The rows are read by
+# Scripts/doc-types-rows.sh, as DocumentTypes.swift and doctypes-check.sh
+# read them (exactly six fields, whitespace at the ends ignored, a last
+# row without a newline still read).
 TEXT_TYPES=""
 IMPORTED_TYPES=""
-while IFS='|' read -r label icon name utis decl; do
-    case "$label" in ''|'#'*) continue ;; esac
+DOC_ROWS=$(Scripts/doc-types-rows.sh Resources/document-types.txt) || { echo "bundle-app.sh: Resources/document-types.txt is malformed" >&2; exit 1; }
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    IFS='|' read -r label icon name utis decl rank <<<"$line"
     [ -f "Resources/DocIcons/$icon.icns" ] || { echo "bundle-app.sh: missing Resources/DocIcons/$icon.icns" >&2; exit 1; }
-    rank=None
-    [ "$label" = "*" ] && rank=Alternate
     items=""
     IFS=',' read -ra U <<<"$utis"
     for u in "${U[@]}"; do items+="                <string>$u</string>
@@ -184,7 +188,7 @@ $items            </array>
         </dict>
 "
     fi
-done < Resources/document-types.txt
+done <<<"$DOC_ROWS"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

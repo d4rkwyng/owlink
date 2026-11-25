@@ -307,6 +307,290 @@ import Testing
                 "no temporary or new file is left")
     }
 
+    /// The recovery copies named `name` left in the temporary folder.
+    func recoveryCopies(named name: String) -> [String] {
+        let tmp = NSTemporaryDirectory()
+        let dirs = (try? FileManager.default.contentsOfDirectory(atPath: tmp)) ?? []
+        return dirs.filter { $0.hasPrefix("owlink-recovery-") }
+            .map { (tmp as NSString).appendingPathComponent($0) + "/" + name }
+            .filter { FileManager.default.fileExists(atPath: $0) }
+    }
+
+    /// An in-place save whose write fails after part of the new text is on
+    /// disk (injected EIO) puts the file back byte for byte from its
+    /// recovery copy, longer and shorter, and deletes the copy. 0.5.4
+    /// before QA truncated first; the round-1 fix restored from memory
+    /// and ignored a failed restore.
+    @Test func aWriteThatFailsAfterAPrefixIsPutBackFromTheRecoveryCopy() throws {
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+        let name = "doc-\(UUID().uuidString).md"
+        let url = try file(name)
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        let longer = Data(repeating: UInt8(ascii: "n"), count: 200_000)
+        let shorter = Data("short\n".utf8)
+        for (data, after) in [(longer, 50_000), (longer, 100_000), (shorter, shorter.count)] {
+            var thrown: Error?
+            do {
+                try DocumentWrite.write(data, to: url, fileManager: .default, afterCheck: nil,
+                                        faults: .init(failWriteAfter: after))
+            } catch { thrown = error }
+            #expect(thrown is CocoaError, "the save fails with an error the user sees")
+            #expect((thrown as NSError?)?.userInfo["OwlinkRecoveryCopy"] == nil)
+            #expect(try Data(contentsOf: url) == original, "\(data.count) bytes failing after \(after): every original byte, and the length")
+        }
+        #expect(recoveryCopies(named: name).isEmpty, "the recovery copy is deleted once the file is back")
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == [name])
+
+        // And a save that works leaves no copy either.
+        #expect(chmod(dir.path, 0o555) == 0)
+        try DocumentWrite.write(longer, to: url)
+        #expect(try Data(contentsOf: url) == longer)
+        #expect(recoveryCopies(named: name).isEmpty)
+    }
+
+    /// If putting the file back fails too, the recovery copy is kept and
+    /// the error's recovery suggestion says where it is.
+    @Test func aFailedRestoreKeepsTheRecoveryCopyAndSaysWhere() throws {
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ 1) })
+        let name = "doc-\(UUID().uuidString).md"
+        let url = try file(name)
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        var thrown: Error?
+        do {
+            try DocumentWrite.write(Data(repeating: 0x6E, count: 200_000), to: url, fileManager: .default, afterCheck: nil,
+                                    faults: .init(failWriteAfter: 50_000, failRestore: true))
+        } catch { thrown = error }
+        let error = try #require(thrown as NSError?)
+        let copy = try #require(error.userInfo["OwlinkRecoveryCopy"] as? String)
+        defer { try? FileManager.default.removeItem(atPath: (copy as NSString).deletingLastPathComponent) }
+        #expect(error.localizedRecoverySuggestion?.contains(copy) == true, "the alert shows where the copy is")
+        #expect(copy.hasPrefix(NSTemporaryDirectory()) && copy.hasSuffix("/" + name))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: copy)) == original, "the copy is the file as it was")
+        var st = stat()
+        #expect(stat((copy as NSString).deletingLastPathComponent, &st) == 0 && st.st_mode & 0o777 == 0o700, "in a private folder")
+        #expect(recoveryCopies(named: name) == [copy])
+    }
+
+    /// A file-size limit (RLIMIT_FSIZE) in a child process, since the
+    /// limit and SIGXFSZ's disposition are process-wide. With the app's
+    /// launch setup (`catchFileSizeSignal`), a save larger than the limit
+    /// is refused before writing; one that hits the limit part way (the
+    /// check skipped) gets EFBIG, not SIGXFSZ, and is put back. Either
+    /// way the child lives and the file keeps every original byte. 0.5.4
+    /// before QA truncated first: 74,893 bytes became the first 100,000
+    /// of the new text.
+    /// Two children: one makes the app-handler saves, the other only the
+    /// counted bypass save, so the SIGXFSZ it waits for can only be that
+    /// write's (a late signal from an earlier bypass write in the same
+    /// process could have passed for it).
+    @Test func aFileSizeLimitInAChildProcessLeavesTheFileAsItWas() throws {
+        if let path = ProcessInfo.processInfo.environment["OWLINK_FSIZE_CHILD"] {
+            Self.fileSizeChild(URL(fileURLWithPath: path),
+                               counted: ProcessInfo.processInfo.environment["OWLINK_FSIZE_COUNTED"] == "1")
+        }
+        let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
+        let url = try file("doc.md")
+        let dir = url.deletingLastPathComponent()
+        try original.write(to: url)
+        defer { _ = chmod(dir.path, 0o755); cleanUp(url) }
+        #expect(chmod(dir.path, 0o555) == 0)
+
+        let args = CommandLine.arguments
+        let bundle = try #require(args.firstIndex(of: "--test-bundle-path").map { args[$0 + 1] },
+                                  "run by swiftpm-testing-helper: \(args)")
+        for counted in [false, true] {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: args[0])
+            child.arguments = ["--test-bundle-path", bundle, "--filter", "aFileSizeLimitInAChildProcessLeavesTheFileAsItWas",
+                               bundle, "--testing-library", "swift-testing"]
+            child.environment = ProcessInfo.processInfo.environment.merging(["OWLINK_FSIZE_CHILD": url.path,
+                                                                             "OWLINK_FSIZE_COUNTED": counted ? "1" : "0"]) { $1 }
+            let out = Pipe()
+            child.standardOutput = out
+            child.standardError = out
+            try child.run()
+            // Bounded: a child that hangs is ended, and the test fails, rather
+            // than waiting for EOF for ever.
+            final class Collected: @unchecked Sendable { var data = Data() }
+            let collected = Collected()
+            let readDone = DispatchSemaphore(value: 0)
+            let reader = out.fileHandleForReading
+            Thread {
+                collected.data = reader.readDataToEndOfFile()
+                readDone.signal()
+            }.start()
+            let inTime = readDone.wait(timeout: .now() + 60) == .success
+            var readFinished = inTime
+            if !inTime {
+                child.terminate()
+                readFinished = readDone.wait(timeout: .now() + 10) == .success
+            }
+            #expect(inTime, "the child finished within 60 s")
+            // Its exit is bounded too: SIGKILL if it outlives its output.
+            func exited(within seconds: Double) -> Bool {
+                let end = Date(timeIntervalSinceNow: seconds)
+                while child.isRunning, Date() < end { usleep(10_000) }
+                return !child.isRunning
+            }
+            var gone = exited(within: 10)
+            if !gone {
+                _ = kill(child.processIdentifier, SIGKILL)
+                gone = exited(within: 10)
+            }
+            // The buffer is the reader's until it signals; never read before.
+            try #require(gone, "the child exited")
+            try #require(readFinished, "the child's output was read to its end")
+            let output = (counted ? "counted child: " : "saves child: ") + String(decoding: collected.data, as: UTF8.self)
+            #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
+            #expect(child.terminationStatus == 0, "\(output)")
+            #expect(output.contains("fsize child: ok"), "\(output)")
+            #expect(try Data(contentsOf: url) == original, "the file keeps every original byte, and its length")
+        }
+        #expect(chmod(dir.path, 0o755) == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["doc.md"])
+    }
+
+    /// The child's half: exits 0 printing "fsize child: ok", else 1.
+    /// `counted`: only the bypass save with the counting handler, the one
+    /// write past the limit this process makes; else the app-handler saves.
+    static func fileSizeChild(_ url: URL, counted only: Bool) -> Never {
+        DocumentWrite.catchFileSizeSignal()
+        var failures: [String] = []
+        guard let original = try? Data(contentsOf: url) else { print("fsize child: can't read"); exit(1) }
+        var limit = rlimit(rlim_cur: 100_000, rlim_max: 0)
+        var old = rlimit()
+        _ = getrlimit(RLIMIT_FSIZE, &old)
+        limit.rlim_max = old.rlim_max
+        guard setrlimit(RLIMIT_FSIZE, &limit) == 0 else { print("fsize child: can't lower RLIMIT_FSIZE"); exit(1) }
+        let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
+        // The app's handler: neither ignored nor the default (which ends
+        // the process).
+        var current = sigaction()
+        _ = sigaction(SIGXFSZ, nil, &current)
+        let handler = unsafeBitCast(current.__sigaction_u.__sa_handler, to: Int.self)
+        if handler == unsafeBitCast(SIG_IGN, to: Int.self) || handler == unsafeBitCast(SIG_DFL, to: Int.self) {
+            failures.append("catchFileSizeSignal installed no handler")
+        }
+        // The saves child runs with the app's handler; the counted child
+        // swaps in one that reports each signal (signal-safely: one byte
+        // down a pipe), to see the bypass really meets the kernel's limit.
+        // Its one save is the only write past the limit in its process, so
+        // a signal counted is that save's.
+        var pipeFDs: [Int32] = [-1, -1]
+        guard pipe(&pipeFDs) == 0 else { print("fsize child: no pipe"); exit(1) }
+        for fd in pipeFDs { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+        fileSizeSignalPipe = pipeFDs[1]
+        /// The signals caught since last asked: none taken until the first
+        /// byte comes or `seconds` pass (bounded; 0: no wait), then every
+        /// byte there is. On whichever thread the handler ran.
+        func signalsCaught(waiting seconds: Int = 0) -> Int {
+            let end = ContinuousClock.now + .seconds(seconds)
+            var ready = pollfd(fd: pipeFDs[0], events: Int16(POLLIN), revents: 0)
+            while seconds > 0 {
+                let left = end - ContinuousClock.now
+                guard left > .zero else { break }
+                let ms = Int32(min(1_000, max(1, left.components.seconds * 1_000 + left.components.attoseconds / 1_000_000_000_000_000)))
+                let r = poll(&ready, 1, ms)
+                if r > 0 { break }
+                if r < 0, errno != EINTR { break }
+            }
+            var n = 0, byte: UInt8 = 0
+            while read(pipeFDs[0], &byte, 1) == 1 { n += 1 }
+            return n
+        }
+        // The saves run on the main thread. A write's SIGXFSZ is sent to
+        // the process, and Darwin hands it to a thread that doesn't block
+        // it: never a test's own thread (a Swift concurrency / dispatch
+        // worker), and in practice the main one, but which thread, and
+        // when, isn't promised. Made from a worker, the handler ran on
+        // the main thread whenever that was next scheduled, and an
+        // immediate check after the save, under load, came first (CI: "no
+        // SIGXFSZ was caught"). So the check waits for the handler's byte
+        // (bounded) and takes it from any thread: what it proves is that
+        // the write met the kernel's limit, not where the signal landed.
+        let saves = {
+            var current = sigset_t()
+            _ = pthread_sigmask(SIG_BLOCK, nil, &current)
+            if sigismember(&current, SIGXFSZ) != 0 { failures.append("the saving thread blocks SIGXFSZ") }
+            for (skip, counting) in only ? [(true, true)] : [(false, false), (true, false)] {
+                if counting {
+                    var action = sigaction()
+                    action.__sigaction_u.__sa_handler = { _ in
+                        var b: UInt8 = 1
+                        _ = write(fileSizeSignalPipe, &b, 1)
+                    }
+                    sigemptyset(&action.sa_mask)
+                    _ = sigaction(SIGXFSZ, &action, nil)
+                    if signalsCaught() != 0 { failures.append("counted: a SIGXFSZ came before the counted save") }
+                }
+                do {
+                    try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
+                                            faults: .init(skipSizeLimit: skip))
+                    failures.append("skip=\(skip): the save succeeded")
+                } catch {
+                    let posix = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError)?.code
+                    if posix != Int(EFBIG) { failures.append("skip=\(skip): \(error), not EFBIG") }
+                    // The bypass must reach the write past the limit itself:
+                    // the writer says it wrote into the file, and the kernel's
+                    // SIGXFSZ came and was caught (not refused earlier).
+                    if skip {
+                        if DocumentWrite.fileLeft(by: error) == nil { failures.append("skip=true: refused before writing") }
+                        if counting {
+                            if signalsCaught(waiting: 5) == 0 { failures.append("skip=true: no SIGXFSZ was caught within 5 s") }
+                        }
+                    } else if DocumentWrite.fileLeft(by: error) != nil {
+                        failures.append("skip=false: wrote before refusing")
+                    }
+                }
+                if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
+            }
+        }
+        if Thread.isMainThread { saves() } else { DispatchQueue.main.sync(execute: saves) }
+        DocumentWrite.catchFileSizeSignal()
+        // A program started from here (git, as Git.run starts it) gets
+        // SIGXFSZ's default action back: an ignored SIGXFSZ was inherited.
+        let script = url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("xfsz-\(getpid()).sh")
+        let body = "#!/bin/sh\nkill -XFSZ $$\necho survived\n"
+        if FileManager.default.createFile(atPath: script.path, contents: Data(body.utf8), attributes: [.posixPermissions: 0o755]) {
+            GitRunner.override = script.path
+            let r = GitRunner.run(["status"], cwd: url.deletingLastPathComponent().deletingLastPathComponent(), timeout: 10)
+            GitRunner.override = nil
+            try? FileManager.default.removeItem(at: script)
+            if r == nil { failures.append("git child: didn't start") }
+            if r?.text.contains("survived") == true { failures.append("git child: SIGXFSZ was ignored in it (inherited)") }
+        } else {
+            failures.append("git child: no script")
+        }
+        print(failures.isEmpty ? "fsize child: ok" : "fsize child: \(failures)")
+        exit(failures.isEmpty ? 0 : 1)
+    }
+
+    /// The in-place save is refused, before anything is written, when the
+    /// volume has less room than the whole new text (`f_bavail` blocks of
+    /// `f_bsize`), and an absurd report counts as room.
+    @Test func theInPlaceSaveNeedsRoomForTheWholeText() {
+        var fs = statfs()
+        fs.f_bsize = 4096
+        fs.f_bavail = 10
+        #expect(DocumentWrite.enoughSpace(for: 40_960, in: fs))
+        #expect(!DocumentWrite.enoughSpace(for: 40_961, in: fs))
+        #expect(DocumentWrite.enoughSpace(for: 0, in: fs))
+        fs.f_bavail = 0
+        #expect(!DocumentWrite.enoughSpace(for: 1, in: fs))
+        fs.f_bavail = .max
+        fs.f_bsize = .max
+        #expect(DocumentWrite.enoughSpace(for: .max, in: fs))
+    }
+
     /// Folders that can't be opened for reading: 0300 (write and search)
     /// saves with the usual replace through a search-only handle, and
     /// 0100 (search only, so it also refuses new files) saves in place.
@@ -483,5 +767,70 @@ import Testing
         #expect(FileWriteAccess.windowTitle("a.md", readOnly: true) == "a.md — Read-Only")
         #expect(EditedIndicator.windowTitle(displayName: FileWriteAccess.windowTitle("a.md", readOnly: true), isDirty: true)
                 == "a.md — Read-Only •", "the unsaved mark stays last")
+    }
+}
+
+/// The fsize child's write end for its counting SIGXFSZ handler: set once
+/// before that handler is installed, then only read (by it), in a child
+/// process of its own.
+nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
+
+/// The recovery copy's byte copy (DocumentWrite.copyBytes), 4 MB at a
+/// time: every byte, for sizes around and across the chunk, a count short
+/// of the file (that many bytes), past its end (what there is, and a
+/// recovery copy refused with nothing left behind), and none.
+@Suite struct RecoveryCopyChunkTests {
+    @Test func copiesEveryByteAcrossChunks() throws {
+        let chunk = DocumentWrite.copyChunk
+        #expect(chunk == 1 << 22)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-copy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var rng = SystemRandomNumberGenerator()
+        for size in [0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 12_345] {
+            let bytes = Data((0..<size).map { _ in UInt8.random(in: 0...255, using: &rng) })
+            let src = dir.appendingPathComponent("src-\(size)")
+            try bytes.write(to: src)
+            let fd = open(src.path, O_RDONLY)
+            #expect(fd >= 0)
+            defer { close(fd) }
+            for count in Set([0, size / 2, size, size + 7, chunk + 3]) {
+                let dst = dir.appendingPathComponent("dst-\(size)-\(count)")
+                let out = open(dst.path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+                #expect(out >= 0)
+                let copied = try DocumentWrite.copyBytes(from: fd, to: out, count: count, url: src)
+                close(out)
+                let expected = bytes.prefix(count)
+                #expect(copied == expected.count, "size \(size) count \(count): copied \(copied)")
+                #expect(try Data(contentsOf: dst) == expected, "size \(size) count \(count): the bytes")
+            }
+            // A recovery copy of all of it: the same bytes, a private file.
+            let copy = try DocumentWrite.makeRecoveryCopy(of: fd, count: size, name: "copy", url: src)
+            #expect(try Data(contentsOf: copy) == bytes)
+            try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
+            // Asked for more than the file has: refused, nothing left behind.
+            // (Other suites make recovery folders meanwhile: this one is
+            // known by its copy's unique name.)
+            let unique = "copy-\(UUID().uuidString)"
+            #expect(throws: (any Error).self) { try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: unique, url: src) }
+            let tmp = NSTemporaryDirectory()
+            let left = try FileManager.default.contentsOfDirectory(atPath: tmp).filter { $0.hasPrefix("owlink-recovery-") }
+                .filter { FileManager.default.fileExists(atPath: (tmp as NSString).appendingPathComponent("\($0)/\(unique)")) }
+            #expect(left.isEmpty, "no recovery copy left: \(left)")
+            // Again in a folder of this test's own: refused as a short
+            // source (EBUSY), and neither the copy nor its (empty)
+            // recovery folder is left.
+            let parent = dir.appendingPathComponent("parent-\(size)")
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+            var code: Int32?
+            do {
+                _ = try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: "copy", url: src, parent: parent.path)
+            } catch {
+                code = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError).map { Int32($0.code) }
+            }
+            #expect(code == EBUSY, "a short source: EBUSY, got \(String(describing: code))")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: parent.path).isEmpty,
+                    "nothing left in the parent: \((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? [])")
+        }
     }
 }

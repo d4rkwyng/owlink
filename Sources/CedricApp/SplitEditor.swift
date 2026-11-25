@@ -147,6 +147,8 @@ extension EditorWindowController {
         outer.insertArrangedSubview(s.view, at: index)
         Self.restoreDividers(positions, in: outer)
         splitEditor = s
+        // Its checking types follow the primary pane's (spelling off: none).
+        spelling.apply()
         // The status items follow the split as they follow the editor alone.
         s.view.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(editorColumnMoved(_:)),

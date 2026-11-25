@@ -264,7 +264,8 @@ extension DevChecks {
         var settings: SettingsWindowController? { SettingsWindowController.shared }
         func allSubviews(_ v: NSView?) -> [NSView] { guard let v else { return [] }; return v.subviews + v.subviews.flatMap { allSubviews($0) } }
         func disk(_ t: EditorWindowController) -> String { (try? String(contentsOf: t.doc.fileURL!, encoding: .utf8)) ?? "-" }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let appMenu = NSApp.mainMenu?.items.first?.submenu
                 let services = appMenu?.items.first { $0.title == "Services" }
@@ -335,6 +336,9 @@ extension DevChecks {
                 s.changed(s.theme)
                 expect(UserDefaults.standard.string(forKey: EditorTheme.defaultsKey) == EditorTheme.light.rawValue, "the theme popup sets the theme")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             snapshot("settings.png", window: settings?.window),
             sync {
                 settings?.window?.close()
@@ -387,6 +391,9 @@ extension DevChecks {
                 type("q")
                 _ = a.save()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 key("z", [.command])
             },
@@ -413,7 +420,9 @@ extension DevChecks {
                 expect(app.tabs.count == before - 2, "⇧⌘W closes the window's tabs", "\(before) → \(app.tabs.count)")
                 expect(a.window?.isVisible == true && b.window != nil, "the other window stays")
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 
     // MARK: Keep / Delete Lines Matching, bookmarked lines
@@ -497,13 +506,22 @@ extension DevChecks {
     static func encodings(_ app: AppDelegate) {
         let url = dir.appendingPathComponent("mac.txt")
         // "café, don’t" in Mac Roman.
-        try? (Data("caf".utf8) + Data([0x8E]) + Data(", don".utf8) + Data([0xD5]) + Data("t\n".utf8)).write(to: url)
+        // Appended in parts: as one `Data + Data + ...` it took 150-170 ms to type-check.
+        var macRoman = Data("caf".utf8)
+        macRoman.append(0x8E)
+        macRoman.append(contentsOf: Data(", don".utf8))
+        macRoman.append(0xD5)
+        macRoman.append(contentsOf: Data("t\n".utf8))
+        try? macRoman.write(to: url)
         let tab = app.open(url)!
         sized(tab)
         run([
             sync {
                 focus(tab)
                 expect(tab.text == "café, don’t\n", "a Mac Roman file opens as such", tab.text)
+                // Not UTF-8: a guess until kept (FileNotices.swift); Keep on its bar.
+                expect(tab.statusBar.encodingButton.title == "Mac Roman (guessed)", "…marked as a guess", tab.statusBar.encodingButton.title)
+                if let b = tab.encodingBar?.button("Keep") { click(b, at: NSPoint(x: b.bounds.midX, y: b.bounds.midY)) }
                 expect(tab.doc.encoding == .macRoman && tab.statusBar.encodingButton.title == "Mac Roman",
                        "the status bar says Mac Roman", tab.statusBar.encodingButton.title)
                 choose(#selector(AppDelegate.pickEncodingMenu(_:)), TextEncoding.windows1252.rawValue)
@@ -549,7 +567,8 @@ extension DevChecks {
         let outside = dir.appendingPathComponent("cedric-wait.outside").path
         FileManager.default.createFile(atPath: outside, contents: nil)
         var tab: EditorWindowController?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 openURL(app, "cedric://open?path=\(enc(file.path))&line=3&col=7&wait=\(enc(marker))")
                 tab = app.tabs.first { $0.doc.fileURL?.standardizedFileURL == file.standardizedFileURL }
@@ -630,6 +649,9 @@ extension DevChecks {
                        app.tabs.last?.text ?? "-")
                 expect(!FileManager.default.fileExists(atPath: tmp), "and deletes its temp file")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // The token travels in a 0600 hand-off file, never on argv
                 // (security review 0.2.1), and rotates.
@@ -663,7 +685,9 @@ extension DevChecks {
                        "the token rotates (new value, still 0600)")
             },
             sync { cliScriptWithCustomTMPDIR(app) },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     /// The bundled `cedric` script itself, run with TMPDIR pointing

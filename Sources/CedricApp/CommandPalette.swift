@@ -445,10 +445,13 @@ final class CommandPalette: NSObject, NSTextFieldDelegate, NSTableViewDataSource
     /// Return on a file row: its tab (opened, or selected if open), shown
     /// in the sidebar, the text focused.
     static func openFile(_ url: URL) {
-        guard let app = NSApp.delegate as? AppDelegate, let tab = app.open(url) else { return }
-        tab.window?.makeKeyAndOrderFront(nil)
-        tab.window?.makeFirstResponder(tab.textView)
-        if let s = FolderSidebar.shared, s.isShown { s.reveal(tab.doc.fileURL) }
+        guard let app = NSApp.delegate as? AppDelegate else { return }
+        // A big file opens in the background: the same, when its tab is ready.
+        app.open(url, background: true) { tab in
+            tab.window?.makeKeyAndOrderFront(nil)
+            tab.window?.makeFirstResponder(tab.textView)
+            if let s = FolderSidebar.shared, s.isShown { s.reveal(tab.doc.fileURL) }
+        }
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy sel: Selector) -> Bool {
