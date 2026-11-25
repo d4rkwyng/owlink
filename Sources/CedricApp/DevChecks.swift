@@ -624,6 +624,13 @@ enum DevChecks {
                 tab.tail?.poll()
             },
             waitFor("append: the CRLF line shows") { tabs["append"]?.text == "one\ntwo\nthree\n" },
+            sync {
+                // The notices know the file is mixed now (review 3: they
+                // kept the state from before the append).
+                let last = tabs["append"]?.lastLineEndingShown
+                expect(last?.mixed == true && last?.ending == .lf, "append: the mixed-endings notice follows the appended CRLF",
+                       "\(String(describing: last))")
+            },
             sync { stopTypeSave("append", grows, "one\ntwo\r\nthree\n!") },
             sync {
                 guard let tab = app.open(rotates) else { expect(false, "follow-rotate.log opens"); return }

@@ -356,12 +356,20 @@ extension EditorWindowController {
         case .appended(let s):
             // Not a user edit (no didChangeText): the tab stays clean, the
             // line index and colouring update from the storage edit.
+            let before = (ending: doc.lineEnding, mixed: doc.mixedLineEndings)
             let at = storage.length
             storage.beginEditing()
             storage.append(NSAttributedString(string: s, attributes: baseAttributes()))
             storage.endEditing()
             // Its breaks of another kind than the text's most common one.
             if let odd = shown.lineBreaks { doc.appendFollowedBreaks(odd, at: at) }
+            // The mixed-endings notice follows the breaks (0.5.4 QA review
+            // 3: it kept saying what the text was before the append).
+            if doc.lineEnding != before.ending || doc.mixedLineEndings != before.mixed {
+                refreshFileNotices()
+            } else {
+                refreshLineEndingNoticeIfChanged()
+            }
             // A followed log can grow past the auto-review cap.
             updateAutoReviewCap(newText: false)
         case .reset(let s):
