@@ -45,13 +45,45 @@ enum MenuBar {
     /// Owlink's Settings… menu, in place of the app menu's `.preferences`.
     static let settingsMenuIdentifier = UIMenu.Identifier("net.cyduck.owlink.settings")
 
-    /// A rebuild was asked for because the app menu had no Settings… item
-    /// yet (asked once per process: on a system without that item the
-    /// rebuild finds none again, and Settings… stays in the Cedric menu).
-    @MainActor private(set) static var rebuiltForAppSettings = false
-    /// Asks UIKit for that rebuild (the tests count instead).
-    @MainActor static var requestRebuild: @MainActor () -> Void = {
-        DispatchQueue.main.async { MainActor.assumeIsolated { UIMenuSystem.main.setNeedsRebuild() } }
+    /// The app menu's `.preferences` was seen and replaced by Owlink's
+    /// Settings…: no more rebuilds are asked for on its account.
+    @MainActor private(set) static var appSettingsReplaced = false
+    /// Rebuilds asked for so far because the app menu had no Settings…
+    /// item yet. Each build that still finds none asks for another (and
+    /// a scene becoming active asks too), until one finds it or this
+    /// reaches `maxAppSettingsRebuilds`: on a system that never adds the
+    /// item, Settings… stays in the Cedric menu and the asking stops.
+    @MainActor private(set) static var appSettingsRebuilds = 0
+    /// The cap on those rebuilds (with `rebuildDelay`'s back-off, about a
+    /// minute of trying).
+    static let maxAppSettingsRebuilds = 12
+    /// How long after build `attempt` (1, 2, …) the next one is asked
+    /// for: a quarter second, doubling, at most eight seconds. Not the
+    /// next main-queue turn: the system's item may come later than that.
+    static func rebuildDelay(attempt: Int) -> TimeInterval {
+        min(0.25 * pow(2, Double(max(attempt, 1) - 1)), 8)
+    }
+    /// Asks UIKit for a rebuild, `attempt` being its number (the tests
+    /// record instead).
+    @MainActor static var requestRebuild: @MainActor (_ attempt: Int) -> Void = { attempt in
+        DispatchQueue.main.asyncAfter(deadline: .now() + rebuildDelay(attempt: attempt)) {
+            MainActor.assumeIsolated { UIMenuSystem.main.setNeedsRebuild() }
+        }
+    }
+
+    /// Asks for one more rebuild if `.preferences` hasn't been replaced
+    /// yet and the cap isn't reached.
+    @MainActor private static func rebuildForAppSettingsIfNeeded() {
+        guard !appSettingsReplaced, appSettingsRebuilds < maxAppSettingsRebuilds else { return }
+        appSettingsRebuilds += 1
+        requestRebuild(appSettingsRebuilds)
+    }
+
+    /// A scene became active: a later point in the app's life at which
+    /// the system's app menu may have its Settings… item by now. Asks for
+    /// a rebuild if it still hasn't been replaced (within the same cap).
+    @MainActor static func sceneDidActivate() {
+        rebuildForAppSettingsIfNeeded()
     }
 
     @MainActor static func build(_ builder: any UIMenuBuilder) {
@@ -59,14 +91,18 @@ enum MenuBar {
     }
 
     /// 0.5.2 (18): ⌘, over Ask Cedric's sheet opened the system Settings
-    /// app on a second launch. The app menu's own "Owlink Settings…"
-    /// (orderFrontPreferencesPanel:, ⌘,) wins whenever our ⌘, is not in
-    /// its place: `hasAppSettings` was read once, and a menu built before
-    /// the system added `.preferences` left that item, and its ⌘,, to the
-    /// system. Now `.preferences` is replaced whole when it is there, and
-    /// when it isn't, the menu is built again once so a later system item
-    /// is replaced too. (The responders' ⌘, — `settingsKey()` — is the
-    /// other half.)
+    /// app on a second launch. The recording shows the system Settings
+    /// app coming up; it does not show when the app menu's `.preferences`
+    /// ("Owlink Settings…", ⌘,) appeared, nor that it was the item that
+    /// took ⌘, — replacing its children may already have been enough if
+    /// the system's command was one of them. The likely cause, from the
+    /// code: `hasAppSettings` was read once, so a menu built before the
+    /// system added `.preferences` never put our ⌘, in its place. Now
+    /// `.preferences` is replaced whole whenever a build finds it, and
+    /// while no build has found it, builds are asked for again (with a
+    /// back-off, and when a scene becomes active, up to a cap) until one
+    /// finds and replaces it. (The responders' ⌘, — `settingsKey()` —
+    /// is the other half, and stays whatever the menu does.)
     @MainActor static func apply(to builder: some Editing) {
         let hasAppSettings = builder.menu(for: .preferences) != nil
         let all = insertions(hasFind: builder.menu(for: .find) != nil, hasSpelling: builder.menu(for: .spelling) != nil,
@@ -81,20 +117,24 @@ enum MenuBar {
             case .replacing(let id): builder.replace(menu: id, with: i.menu)
             }
         }
-        if !hasAppSettings, !rebuiltForAppSettings {
-            rebuiltForAppSettings = true
-            requestRebuild()
+        if hasAppSettings {
+            appSettingsReplaced = true
+        } else {
+            rebuildForAppSettingsIfNeeded()
         }
     }
 
-    /// For the tests: as at launch, no rebuild asked for yet.
-    @MainActor static func resetRebuildForTesting() { rebuiltForAppSettings = false }
+    /// For the tests: as at launch, nothing replaced, no rebuild asked for.
+    @MainActor static func resetRebuildForTesting() {
+        appSettingsReplaced = false
+        appSettingsRebuilds = 0
+    }
 
     /// ⌘, for the responders that stay in the chain whatever has the keys
     /// (the editor's navigation controller, Ask Cedric's sheet): Owlink's
     /// Settings, ahead of the system's ⌘, (the system Settings app). No
     /// title, so it is not listed a second time next to the menu's.
-    static func settingsKey() -> UIKeyCommand {
+    @MainActor static func settingsKey() -> UIKeyCommand {
         let key = UIKeyCommand(input: ",", modifierFlags: .command, action: #selector(EditorViewController.showSettings))
         key.wantsPriorityOverSystemBehavior = true
         return key

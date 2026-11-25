@@ -17,6 +17,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
                 UserDefaults.standard.removeObject(forKey: k)
             }
         }
+        // ⌘, Settings…: a scene becoming active is a later point at which
+        // the app menu may have its own Settings… item to be replaced
+        // (0.5.2 (18); see MenuBar.apply).
+        NotificationCenter.default.addObserver(forName: UIScene.didActivateNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { MenuBar.sceneDidActivate() }
+        }
         return true
     }
 
