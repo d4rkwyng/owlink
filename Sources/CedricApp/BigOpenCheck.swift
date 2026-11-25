@@ -83,18 +83,18 @@ extension DevChecks {
 
         func waitForTab(_ next: @escaping () -> Void) {
             let deadline = DevHooks.now() + 60
-            func poll() {
+            @MainActor func poll() {
                 if !arrived.isEmpty || DevHooks.now() > deadline { next(); return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } }
             }
             poll()
         }
 
         func waitForAll(_ next: @escaping () -> Void) {
             let deadline = DevHooks.now() + 60
-            func poll() {
+            @MainActor func poll() {
                 if app.backgroundOpens.isEmpty || DevHooks.now() > deadline { next(); return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } }
             }
             poll()
         }

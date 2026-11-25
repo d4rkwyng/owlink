@@ -662,7 +662,7 @@ enum DevChecks {
             @MainActor func poll() {
                 if cond() { next(); return }
                 guard Date() < deadline else { expect(false, "\(what) (waited \(seconds) s)"); next(); return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } }
             }
             poll()
         }

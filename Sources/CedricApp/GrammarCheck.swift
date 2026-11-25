@@ -34,7 +34,7 @@ extension DevChecks {
         func wait(_ seconds: Double, until: @escaping () -> Bool) -> (@escaping () -> Void) -> Void {
             { next in
                 let end = Date().addingTimeInterval(seconds)
-                func poll() { if until() || Date() > end { next() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: poll) } }
+                @MainActor func poll() { if until() || Date() > end { next() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } } } }
                 poll()
             }
         }

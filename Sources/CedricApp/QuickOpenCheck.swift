@@ -42,7 +42,7 @@ extension DevChecks {
         func wait(_ ok: @escaping () -> Bool) -> (@escaping () -> Void) -> Void {
             { next in
                 var n = 0
-                func poll() { if ok() || n > 60 { next() } else { n += 1; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll) } }
+                @MainActor func poll() { if ok() || n > 60 { next() } else { n += 1; DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } } }
                 poll()
             }
         }
