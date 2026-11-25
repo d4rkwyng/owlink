@@ -44,6 +44,8 @@ extension DevChecks {
         sized(tab)
         final class Timings: @unchecked Sendable { var ms: [String: Double] = [:] }
         let timings = Timings()
+        final class Viewport: @unchecked Sendable { var range: NSRange?; var reported = 0 }
+        let viewport = Viewport()
         func timed(_ name: String, _ f: () -> Void) {
             mark(name)
             let t0 = DevHooks.now()
@@ -199,6 +201,66 @@ extension DevChecks {
             sync {
                 mark("checks")
                 expect(tab.owl?.owlFaded == false, "caret out of view: the owl is back", "faded \(String(describing: tab.owl?.owlFaded))")
+            },
+            // The caret at the viewport's end: the start of the next chunk,
+            // not laid out. The owl's look takes the caret's place from what
+            // is laid out and lays nothing more out (firstRect laid that
+            // chunk out on the main thread: 0.5.4 QA, Codex review).
+            sync {
+                mark("scroll to the top")
+                let clip = tab.primaryPane.scrollView.contentView
+                clip.scroll(to: .zero)
+                tab.primaryPane.scrollView.reflectScrolledClipView(clip)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                mark("caret at the viewport's end")
+                let tv = tab.primaryTextView
+                guard let owl = tab.owl, let vr = tv.viewportCharacterRange, let tlm = tv.textLayoutManager,
+                      let tcm = tlm.textContentManager else { expect(false, "a laid-out viewport and the owl"); return }
+                let end = NSMaxRange(vr), length = (tab.text as NSString).length
+                expect(end < length - 4096, "the viewport ends before the line does", "\(vr) of \(length)")
+                tv.setSelectedRange(NSRange(location: end, length: 0))
+                let doc = tcm.documentRange.location
+                guard let next = tcm.location(doc, offsetBy: end), let after = tcm.location(next, offsetBy: 4096),
+                      let unlaid = NSTextRange(location: next, end: after) else {
+                    expect(false, "the next chunk's place"); return
+                }
+                tlm.invalidateLayout(for: unlaid)
+                func nextLaidOut() -> Bool {
+                    var laid = false
+                    tlm.enumerateTextLayoutFragments(from: next, options: []) { frag in
+                        laid = frag.state == .layoutAvailable && frag.rangeInElement.location.compare(next) != .orderedDescending
+                        return false
+                    }
+                    return laid
+                }
+                expect(!nextLaidOut(), "the chunk after the viewport isn't laid out")
+                let looks = owl.caretLooks
+                owl.caretMoved()
+                expect(owl.caretLooks > looks, "the owl looked at the caret at the viewport's end")
+                expect(!nextLaidOut(), "…and laid nothing out past the viewport for it")
+            },
+            // A viewport pass that lays out the same characters elsewhere (a
+            // small scroll within the chunks laid out) is heard: the owl
+            // looks again from it (NSView.layout() alone missed it).
+            sync {
+                mark("small scroll")
+                let tv = tab.primaryTextView
+                tv.setSelectedRange(NSRange(location: 0, length: 0))
+                viewport.range = tv.viewportCharacterRange
+                viewport.reported = tv.viewportLayoutsReported
+                let clip = tab.primaryPane.scrollView.contentView
+                clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + 6))
+                tab.primaryPane.scrollView.reflectScrolledClipView(clip)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                let tv = tab.primaryTextView
+                expect(tv.viewportCharacterRange == viewport.range, "a small scroll lays out the same characters",
+                       "\(String(describing: viewport.range)) → \(String(describing: tv.viewportCharacterRange))")
+                expect(tv.viewportLayoutsReported > viewport.reported, "…and that viewport pass is heard",
+                       "\(tv.viewportLayoutsReported - viewport.reported) passes")
                 for (k, v) in timings.ms.sorted(by: { $0.key < $1.key }) { print(String(format: "check: note: %@ %.0f ms", k, v)) }
                 tab.doc.markSaved()
             },

@@ -177,18 +177,75 @@ final class EditorTextView: NSTextView {
         return NSRange(location: start, length: max(0, offset(of: vr.endLocation) - start))
     }
 
-    /// Called after a layout pass in which TextKit laid out a different
-    /// viewport (the owl rechecks the caret from the fragments just laid
-    /// out: its viewport answer can lag a scroll or a split resize).
+    /// Called after TextKit laid out a different viewport: other
+    /// characters, or the same ones somewhere else (a scroll or a resize
+    /// within one chunk of a long line). The owl rechecks the caret from
+    /// the fragments just laid out: its viewport answer can lag a scroll
+    /// or a split resize.
     var onViewportLayout: (() -> Void)?
-    private var lastLaidOutViewport: NSRange?
+    private var lastLaidOutViewport: (range: NSRange?, bounds: CGRect)?
+    /// Viewport passes reported (checks).
+    private(set) var viewportLayoutsReported = 0
 
     override func layout() {
         super.layout()
-        let vr = viewportCharacterRange
-        guard vr != lastLaidOutViewport else { return }
-        lastLaidOutViewport = vr
+        viewportLaidOut()
+    }
+
+    /// TextKit's own word that a viewport pass is over (macOS 27 declares
+    /// it; NSTextView, the controller's delegate, has had it before). It
+    /// can run outside NSView.layout(): a scroll lays out the new viewport
+    /// without one.
+    override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
+        if Self.superHasDidLayout { super.textViewportLayoutControllerDidLayout(controller) }
+        viewportLaidOut()
+    }
+
+    private static let superHasDidLayout = NSTextView.instancesRespond(to: #selector(NSTextView.textViewportLayoutControllerDidLayout(_:)))
+
+    private func viewportLaidOut() {
+        guard let tlm = textLayoutManager else { return }
+        let now = (range: viewportCharacterRange, bounds: tlm.textViewportLayoutController.viewportBounds)
+        if let last = lastLaidOutViewport, last.range == now.range, last.bounds == now.bounds { return }
+        lastLaidOutViewport = now
+        viewportLayoutsReported += 1
         onViewportLayout?()
+    }
+
+    /// The caret's rect at `offset` (view coordinates), from the layout
+    /// fragments TextKit has already laid out for the viewport; nil when
+    /// the caret isn't in one, or isn't in the visible rect. Never asks
+    /// for layout: firstRect lays out up to the caret, and a caret at the
+    /// start of the next, unlaid chunk of a long line had it lay out (and
+    /// estimate) on the main thread.
+    func laidOutCaretRect(at offset: Int) -> NSRect? {
+        guard let tlm = textLayoutManager, let vr = tlm.textViewportLayoutController.viewportRange else { return nil }
+        let vStart = self.offset(of: vr.location), vEnd = self.offset(of: vr.endLocation)
+        guard offset >= vStart, offset <= vEnd else { return nil }
+        // The fragment holding the caret: the one it is inside, else the
+        // laid-out one it ends (the caret at the viewport's end).
+        var hit: (frag: NSTextLayoutFragment, local: Int)?
+        tlm.enumerateTextLayoutFragments(from: vr.location, options: []) { frag in
+            let start = self.offset(of: frag.rangeInElement.location)
+            guard start <= offset, start < vEnd || start == offset && hit == nil else { return false }
+            let end = self.offset(of: frag.rangeInElement.endLocation)
+            if offset < end {
+                hit = frag.state == .layoutAvailable ? (frag, offset - start) : nil
+                return false
+            }
+            if offset == end, frag.state == .layoutAvailable { hit = (frag, offset - start) }
+            return end <= offset && end < vEnd
+        }
+        guard let (frag, local) = hit else { return nil }
+        let lines = frag.textLineFragments
+        guard let line = lines.first(where: { NSLocationInRange(local, $0.characterRange) }) ?? lines.last(where: { NSMaxRange($0.characterRange) == local })
+        else { return nil }
+        let at = line.locationForCharacter(at: local)
+        let box = line.typographicBounds
+        let origin = frag.layoutFragmentFrame.origin
+        let rect = NSRect(x: origin.x + box.minX + at.x + textContainerOrigin.x, y: origin.y + box.minY + textContainerOrigin.y,
+                          width: 1, height: max(1, box.height))
+        return rect.intersects(visibleRect) ? rect : nil
     }
 
     /// The layout fragment at the top of the visible rect (laid out if

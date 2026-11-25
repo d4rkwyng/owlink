@@ -640,10 +640,14 @@ final class OwlController: NSObject, NSPopoverDelegate {
         // TextKit's viewport can lag (a scroll, a split resize):
         // paneLayoutChanged looks again once the new one is laid out.
         // Inside it, firstRect is answered from fragments already laid out.
+        // The viewport's end is the start of the next chunk, maybe not laid
+        // out: asking firstRect there laid it out on the main thread. So in
+        // chunks the rect comes only from fragments already laid out
+        // (laidOutCaretRect), and none is out of view.
         let offscreen = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
         let caret: NSRect
-        if tv.contentStorage?.chunkLimit != nil, !(tv.viewportCharacterRange.map { NSLocationInRange(caretAt, NSRange(location: $0.location, length: $0.length + 1)) } ?? false) {
-            caret = offscreen
+        if tv.contentStorage?.chunkLimit != nil {
+            caret = tv.laidOutCaretRect(at: caretAt).map { overlay.convert($0, from: tv) } ?? offscreen
         } else {
             // No rect: the caret is clipped out of the pane (a split just
             // shrank it under the caret). Out of view, not "don't know":
