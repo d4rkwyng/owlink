@@ -423,7 +423,9 @@ import Testing
         #expect(first.text == "ab" && used == 6)
         let events = Events()
         let callbacks = DispatchQueue(label: "t")
-        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(used), callbackQueue: callbacks) { events.add($0) }
+        // As the app starts it: the half character counts as read, held.
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(used), held: UInt64(data.count - used),
+                            callbackQueue: callbacks, stamped: { e, _ in events.add(e) })
         tail.start()
         defer { tail.stop() }
         settle(tail, callbacks)
