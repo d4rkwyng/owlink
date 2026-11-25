@@ -266,22 +266,50 @@ public enum TextCodec {
     /// `read` forever, on the large-open queue or a synchronous restore.
     /// So the open doesn't wait (O_NONBLOCK), the opened file is checked
     /// (fstat), and only then are reads made blocking again.
-    public static func snapshot(of url: URL) throws -> Data {
+    ///
+    /// `maxBytes`: a file larger than this when opened (its size by the
+    /// opened descriptor, not a size seen earlier), or one that grows past
+    /// it while read, is refused (`fileReadTooLarge`, `isTooLarge`) with
+    /// no more than `maxBytes + 1` bytes ever held: Find in Files' size
+    /// limit came from its directory walk, so a file that grew or was
+    /// replaced since was read whole however large.
+    public static func snapshot(of url: URL, maxBytes: Int? = nil) throws -> Data {
+        try snapshotStamped(of: url, maxBytes: maxBytes).data
+    }
+
+    /// `snapshot(of:maxBytes:)` and the stamp of the file it read, from
+    /// the same open descriptor (`fstat` before the read): a stamp taken
+    /// from the path could be another file's (a link retargeted, an
+    /// atomic replace) than the bytes read.
+    public static func snapshotStamped(of url: URL, maxBytes: Int? = nil) throws -> (data: Data, stamp: DiskStamp) {
         let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
         guard fd >= 0 else { throw readError(url, errno) }
         defer { close(fd) }
         var st = stat()
         guard fstat(fd, &st) == 0 else { throw readError(url, errno) }
         guard st.st_mode & S_IFMT == S_IFREG else { throw notRegularFile(url) }
+        let limit = maxBytes.map { max($0, 0) }
+        if let limit, Int(st.st_size) > limit { throw tooLarge(url) }
         let flags = fcntl(fd, F_GETFL)
         guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw readError(url, errno) }
-        // Room for the size it has now; more if it grows while read.
-        var capacity = max(Int(st.st_size), 0) + 1
+        return (try readAll(fd, url: url, sizeHint: Int(st.st_size), limit: limit), DiskStamp(st))
+    }
+
+    /// Everything left to read from `fd`, into memory of its own: room for
+    /// `sizeHint` bytes, more if the file grows while read, but never more
+    /// than `limit + 1` (enough to see it is too large: `tooLarge`).
+    static func readAll(_ fd: Int32, url: URL, sizeHint: Int, limit: Int?) throws -> Data {
+        let ceiling = limit.map { $0 + 1 } ?? Int.max
+        var capacity = min(max(sizeHint, 0) + 1, ceiling)
         guard var buffer = malloc(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
         var count = 0
         while true {
             if count == capacity {
-                capacity *= 2
+                if capacity >= ceiling {
+                    free(buffer)
+                    throw tooLarge(url)
+                }
+                capacity = capacity > ceiling / 2 ? ceiling : capacity * 2
                 guard let grown = realloc(buffer, capacity) else {
                     free(buffer)
                     throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path])
@@ -298,7 +326,24 @@ public enum TextCodec {
             }
             count += n
         }
+        if let limit, count > limit {
+            free(buffer)
+            throw tooLarge(url)
+        }
         return Data(bytesNoCopy: buffer, count: count, deallocator: .free)
+    }
+
+    /// What tests run around a read (`readText`, Find in Files): `before`
+    /// just before a file's bytes are read, `after` once they're read and
+    /// before they're decoded, to swap or change the file there. Passed
+    /// per call or per search, never kept globally: tests run in parallel.
+    public struct ReadHooks: Sendable {
+        public var before: (@Sendable (URL) -> Void)?
+        public var after: (@Sendable (URL) -> Void)?
+        public init(before: (@Sendable (URL) -> Void)? = nil, after: (@Sendable (URL) -> Void)? = nil) {
+            self.before = before
+            self.after = after
+        }
     }
 
     /// The file at `url` read (`snapshot(of:)`, bytes of its own) and
@@ -311,18 +356,31 @@ public enum TextCodec {
     /// truncated meanwhile faulted on the pages past its end. A path
     /// swapped for a FIFO since it was checked is refused, not waited on
     /// (reading it mapped blocked Reload or the search for good).
-    public static func readText(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> DecodedText? {
-        beforeReadForTesting?(url)
-        let data = try snapshot(of: url)
-        afterReadForTesting?(url)
-        return decode(data, as: encoding, shareBytes: shareBytes)
+    public static func readText(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false,
+                                hooks: ReadHooks? = nil) throws -> DecodedText? {
+        try readTextStamped(at: url, as: encoding, shareBytes: shareBytes, hooks: hooks).text
     }
 
-    /// Tests only: run just before a file's bytes are read and after
-    /// they're read, before they're decoded (`readText`, Find in Files),
-    /// to swap or change the file there.
-    nonisolated(unsafe) public static var beforeReadForTesting: ((URL) -> Void)?
-    nonisolated(unsafe) public static var afterReadForTesting: ((URL) -> Void)?
+    /// `readText` and the stamp of the file the bytes came from (the same
+    /// descriptor: `snapshotStamped`).
+    public static func readTextStamped(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false,
+                                       hooks: ReadHooks? = nil) throws -> (text: DecodedText?, stamp: DiskStamp) {
+        hooks?.before?(url)
+        let (data, stamp) = try snapshotStamped(of: url)
+        hooks?.after?(url)
+        return (decode(data, as: encoding, shareBytes: shareBytes), stamp)
+    }
+
+    /// Too large to read (`snapshot`'s `maxBytes`).
+    static func tooLarge(_ url: URL) -> CocoaError {
+        CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path, NSURLErrorKey: url,
+                                                 NSUnderlyingErrorKey: POSIXError(.EFBIG)])
+    }
+
+    /// Whether `error` is `snapshot` refusing a file over its `maxBytes`.
+    public static func isTooLarge(_ error: Error) -> Bool {
+        (error as? CocoaError)?.code == .fileReadTooLarge
+    }
 
     /// A FIFO, device or directory where a file was expected.
     static func notRegularFile(_ url: URL) -> CocoaError {

@@ -145,39 +145,12 @@ final class EditorDocument {
         if was, !isDirty { unsavedSince = nil }
     }
 
-    enum LoadError: Error, LocalizedError {
-        case unreadable(URL, Error)
-        case notText(URL)
-        var errorDescription: String? {
-            switch self {
-            case .unreadable(let u, let e): return String(localized: "Couldn’t open “\(u.lastPathComponent)”: \(e.localizedDescription)")
-            case .notText(let u): return String(localized: "“\(u.lastPathComponent)” isn’t text in a supported encoding.")
-            }
-        }
-    }
+    typealias LoadError = DocumentRead.LoadError
 
-    /// Reads and decodes a file; returns the LF-normalised text and the
-    /// file's stamp. The stamp is taken before the bytes are read: if the
-    /// file changes (or a link is pointed elsewhere) in between, the next
-    /// check sees a change rather than missing one.
-    /// The bytes are always read into memory of their own (not mapped:
-    /// TextCodec.readText), so the file changing meanwhile changes nothing
-    /// already read. `shareBytes`: a large ASCII file's text reads them in
-    /// place (TextCodec.decode), for opening into a tab.
+    /// Reads and decodes a file into a tab: the text and the stamp of the
+    /// file it came from, both from one open descriptor (DocumentRead).
     nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> (DecodedText, DiskStamp?) {
-        if let kind = SpecialFile.kind(atPath: url.path) {
-            throw LoadError.unreadable(url, NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey:
-                String(localized: "It is \(kind), not a regular file.")]))
-        }
-        let stamp = DiskStamp.of(url)
-        let read: DecodedText?
-        do {
-            read = try TextCodec.readText(at: url, as: encoding, shareBytes: shareBytes)
-        } catch {
-            throw LoadError.unreadable(url, error)
-        }
-        guard let decoded = read else { throw LoadError.notText(url) }
-        return (decoded, stamp)
+        try DocumentRead.read(url, encoding: encoding, shareBytes: shareBytes)
     }
 
     func apply(_ d: DecodedText) {

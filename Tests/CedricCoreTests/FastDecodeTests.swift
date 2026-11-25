@@ -377,40 +377,71 @@ import Testing
         // Same size, one CRLF still there, a lone CR added, the needle gone.
         let rewrite = Data("zzzzz\r\r\n".utf8)
         #expect(rewrite.count == 8)
-        func rewriteInPlace(_ url: URL) {
-            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path,
-                  let h = try? FileHandle(forUpdating: file) else { return }
-            try? h.seek(toOffset: 0)
-            try? h.write(contentsOf: rewrite)
-            try? h.synchronize()
-            try? h.close()
+        // Each rewrite must really happen: one that failed silently would
+        // let the assertions below pass on the old bytes.
+        final class Rewrites: @unchecked Sendable {
+            let lock = NSLock()
+            var done = 0
+            var failures: [String] = []
+            func note(_ error: Error?) {
+                lock.lock(); defer { lock.unlock() }
+                if let error { failures.append("\(error)") } else { done += 1 }
+            }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return done }
+            var errors: [String] { lock.lock(); defer { lock.unlock() }; return failures }
         }
-        defer { TextCodec.afterReadForTesting = nil }
+        let rewrites = Rewrites()
+        let rewriteInPlace: @Sendable (URL) -> Void = { url in
+            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path else { return }
+            do {
+                let h = try FileHandle(forUpdating: file)
+                try h.seek(toOffset: 0)
+                try h.write(contentsOf: rewrite)
+                try h.synchronize()
+                try h.close()
+                rewrites.note(nil)
+            } catch {
+                rewrites.note(error)
+            }
+        }
+        func rewritten() throws -> Bool { try Data(contentsOf: file).prefix(8) == rewrite }
+        let after = TextCodec.ReadHooks(after: rewriteInPlace)
 
-        TextCodec.afterReadForTesting = rewriteInPlace
-        let d = try TextCodec.readText(at: file)
+        let d = try TextCodec.readText(at: file, hooks: after)
+        #expect(rewrites.count == 1 && rewrites.errors.isEmpty, "rewritten after the read: \(rewrites.errors)")
+        #expect(try rewritten(), "the file on disk changed")
         #expect(d?.text.hasPrefix("needle\nabcdef\n") == true, "the text of the bytes as read")
         #expect(d?.lineEnding == .crlf)
         #expect(d?.mixedLineEndings == false, "no lone CR noted that the bytes read don't have")
         #expect(d?.lineBreaks == nil)
 
+        // The way a tab reads a file (open, Reload): the same.
         try bytes.write(to: file)
-        var hits: [FileSearchResult] = []
-        TextCodec.afterReadForTesting = rewriteInPlace
-        _ = try FileSearch(FileSearchOptions(root: dir, query: "needle")).run { hits.append($0) }
-        #expect(hits.map(\.line) == [1], "Find in Files searched the bytes as read")
-        TextCodec.afterReadForTesting = nil
+        let (doc, stamp) = try DocumentRead.read(file, hooks: after)
+        #expect(rewrites.count == 2 && rewrites.errors.isEmpty, "rewritten after the document's read: \(rewrites.errors)")
+        #expect(try rewritten(), "the file on disk changed")
+        #expect(doc.text.hasPrefix("needle\nabcdef\n"), "the document's text is the bytes as read")
+        #expect(doc.mixedLineEndings == false && doc.lineBreaks == nil, "no lone CR noted from the rewrite")
+        #expect(stamp?.size == bytes.count)
+
+        try bytes.write(to: file)
+        final class Hits: @unchecked Sendable { var lines: [Int] = [] }
+        let hits = Hits()
+        // Errors come out: a search that failed isn't "no hits".
+        _ = try FileSearch(FileSearchOptions(root: dir, query: "needle"), readHooks: after).run { hits.lines.append($0.line) }
+        #expect(rewrites.count == 3 && rewrites.errors.isEmpty, "rewritten after the search's read: \(rewrites.errors)")
+        #expect(try rewritten(), "the file on disk changed")
+        #expect(hits.lines == [1], "Find in Files searched the bytes as read")
 
         // Checked as a file, swapped for a FIFO just before the read: Reload
         // and the search come back (refused, skipped) instead of waiting
         // for a writer forever. A watchdog opens the FIFO for writing so
         // a stuck read ends and the test fails rather than hangs.
-        defer { TextCodec.beforeReadForTesting = nil }
-        func swapForFIFO(_ url: URL) {
+        let swapForFIFO = TextCodec.ReadHooks(before: { url in
             guard url.standardizedFileURL.resolvingSymlinksInPath().path == path else { return }
             try? FileManager.default.removeItem(at: file)
             _ = mkfifo(file.path, 0o600)
-        }
+        })
         func comesBack(_ what: String, _ body: @escaping @Sendable () -> Void) -> Bool {
             let done = DispatchSemaphore(value: 0)
             Thread { body(); done.signal() }.start()
@@ -421,12 +452,11 @@ import Testing
             _ = done.wait(timeout: .now() + 5)
             return false
         }
-        final class Box: @unchecked Sendable { var error: Error?; var hits = -1 }
+        final class Box: @unchecked Sendable { var error: Error?; var hits = -1; var searchError: Error? }
         let box = Box()
         try bytes.write(to: file)
-        TextCodec.beforeReadForTesting = swapForFIFO
         let readBack = comesBack("Reload") {
-            do { _ = try TextCodec.readText(at: file) } catch { box.error = error }
+            do { _ = try TextCodec.readText(at: file, hooks: swapForFIFO) } catch { box.error = error }
         }
         if readBack {
             // Refused as what it is: Foundation's read said "you don't have
@@ -437,12 +467,99 @@ import Testing
 
         try? FileManager.default.removeItem(at: file)
         try bytes.write(to: file)
-        TextCodec.beforeReadForTesting = swapForFIFO
         let searchBack = comesBack("Find in Files") {
             var n = 0
-            _ = try? FileSearch(FileSearchOptions(root: dir, query: "needle")).run { _ in n += 1 }
+            do {
+                _ = try FileSearch(FileSearchOptions(root: dir, query: "needle"), readHooks: swapForFIFO).run { _ in n += 1 }
+            } catch {
+                box.searchError = error
+            }
             box.hits = n
         }
-        if searchBack { #expect(box.hits == 0) }
+        if searchBack {
+            #expect(box.searchError == nil, "the search itself didn't fail: \(String(describing: box.searchError))")
+            #expect(box.hits == 0)
+        }
+    }
+
+    /// Find in Files' size limit holds for the file as opened and as read,
+    /// not only the size its directory walk saw: a file that grew (or was
+    /// replaced by a larger one) since was read whole, however large
+    /// (0.5.4 QA, triage round 2).
+    @Test func findInFilesSizeLimitHoldsOnTheFileAsRead() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-limit-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("grows.log")
+        try Data("needle\n".utf8).write(to: file)
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        let big = Data(("needle\n" + String(repeating: "x", count: 64 * 1024)).utf8)
+        final class Grown: @unchecked Sendable { var count = 0 }
+        let grown = Grown()
+        let grow = TextCodec.ReadHooks(before: { url in
+            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path else { return }
+            if (try? big.write(to: file)) != nil { grown.count += 1 }
+        })
+        var hits = 0
+        let search = FileSearch(FileSearchOptions(root: dir, query: "needle", maxFileSize: 1024), readHooks: grow)
+        let summary = try search.run { _ in hits += 1 }
+        #expect(grown.count == 1, "the file grew after the walk, before the read")
+        #expect(hits == 0, "the grown file wasn't searched")
+        #expect(summary.skippedLarge == 1, "it counts as too large")
+        #expect(summary.filesSearched == 0)
+
+        // At open: the size by the opened descriptor.
+        #expect(throws: CocoaError.self) { try TextCodec.snapshot(of: file, maxBytes: 1024) }
+        do {
+            _ = try TextCodec.snapshot(of: file, maxBytes: 1024)
+        } catch {
+            #expect(TextCodec.isTooLarge(error))
+        }
+        #expect(try TextCodec.snapshot(of: file, maxBytes: big.count) == big, "at the limit it reads")
+        // While read: a size seen at open that is less than the bytes there
+        // (the file grew in between) never lets more than limit + 1 in.
+        let fd = Darwin.open(file.path, O_RDONLY | O_CLOEXEC)
+        #expect(fd >= 0)
+        defer { close(fd) }
+        do {
+            let data = try TextCodec.readAll(fd, url: file, sizeHint: 8, limit: 1024)
+            Issue.record("read \(data.count) bytes past a 1024-byte limit")
+        } catch {
+            #expect(TextCodec.isTooLarge(error), "refused as too large: \(error)")
+        }
+        _ = lseek(fd, 0, SEEK_SET)
+        #expect(try TextCodec.readAll(fd, url: file, sizeHint: 8, limit: nil) == big, "unlimited, it grows to fit")
+    }
+
+    /// A tab's read takes the file's stamp from the descriptor its bytes
+    /// come from. From the path, before the read, a file replaced in
+    /// between (an atomic save by another app, a link retargeted) gave the
+    /// old file's stamp with the new file's text, so the next check saw
+    /// no change (0.5.4 QA, follow round 2).
+    @Test func documentReadStampIsTheFileItRead() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-stamp-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("doc.txt")
+        try Data("old text\n".utf8).write(to: file)
+        let oldStamp = try #require(DiskStamp.of(file))
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        let replacement = Data("a different, longer text\n".utf8)
+        final class Swapped: @unchecked Sendable { var ok = false }
+        let swapped = Swapped()
+        let replace = TextCodec.ReadHooks(before: { url in
+            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path else { return }
+            let other = dir.appendingPathComponent("other.txt")
+            // Another inode put in its place, as an atomic save does.
+            swapped.ok = (try? replacement.write(to: other)) != nil && rename(other.path, file.path) == 0
+        })
+        let (d, stamp) = try DocumentRead.read(file, hooks: replace)
+        #expect(swapped.ok, "the file was replaced before the read")
+        let now = try #require(DiskStamp.of(file))
+        #expect(d.text == "a different, longer text\n")
+        #expect(now.identity != oldStamp.identity, "another file")
+        #expect(stamp?.identity == now.identity, "the stamp is the file the text came from")
+        #expect(stamp?.size == replacement.count)
+        #expect(!DiskStamp.changed(known: stamp, current: now))
     }
 }

@@ -89,7 +89,13 @@ public final class FileSearch: @unchecked Sendable {
     private let lock = NSLock()
     private var _cancelled = false
 
-    public init(_ options: FileSearchOptions) { self.options = options }
+    /// Tests only: run around each file's read (TextCodec.ReadHooks).
+    public let readHooks: TextCodec.ReadHooks?
+
+    public init(_ options: FileSearchOptions, readHooks: TextCodec.ReadHooks? = nil) {
+        self.options = options
+        self.readHooks = readHooks
+    }
 
     public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
     public func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
@@ -163,9 +169,17 @@ public final class FileSearch: @unchecked Sendable {
             // it's decoded gave text and line endings from other bytes. And
             // a regular file still: one swapped for a FIFO since the walk
             // blocked the search for good.
-            TextCodec.beforeReadForTesting?(url)
-            guard let data = try? TextCodec.snapshot(of: url) else { continue }
-            TextCodec.afterReadForTesting?(url)
+            // The size limit again on the file as opened and as read: it
+            // may have grown, or been replaced, since the walk.
+            readHooks?.before?(url)
+            let data: Data
+            do {
+                data = try TextCodec.snapshot(of: url, maxBytes: options.maxFileSize)
+            } catch {
+                if TextCodec.isTooLarge(error) { skip(.tooLarge) }
+                continue
+            }
+            readHooks?.after?(url)
             if Self.looksBinary(data) { skip(.binary); continue }
             guard let decoded = TextCodec.decode(data) else { skip(.binary); continue }
             summary.filesSearched += 1
