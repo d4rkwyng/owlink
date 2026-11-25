@@ -193,11 +193,19 @@ import Testing
         let closed = json(OwlCoordinator.replay(shown, document: nil), document: nil)
         #expect(closed.hint.title == "Looked like JSON." && closed.isStale && RulesHintProvider.isPastJSONHint(closed.hint))
 
-        // Other hints and the long one-line file's hint (never stale) are left alone.
+        // The long one-line file's hint (no range, never stale) is checked
+        // again too (0.5.4 QA, should round 2: it asked "Format it?" over
+        // "x", and Fix it then said the file isn't JSON). Other hints are
+        // left alone.
         let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
         c.markShown(longLine, documentID: doc, context: window(minified, doc: doc).context)
         let l = OwlCoordinator.replay(try #require(c.recent.first), document: "x" as NSString)
-        #expect(json(l, document: "x" as NSString) == l)
+        let lx = json(l, document: "x" as NSString)
+        #expect(lx != l && RulesHintProvider.isPastJSONHint(lx.hint) && lx.hint.replacement == nil, "\"x\": a past hint, no question")
+        #expect(!RulesHintProvider.formatsWholeJSONFile(lx.hint, isStale: lx.isStale))
+        let lj = json(l, document: minified as NSString)
+        #expect(!lj.isStale && lj.hint.replacement == JSONFormatter.prettyIfMinified(minified)
+                && lj.documentRange == NSRange(location: 0, length: (minified as NSString).length), "still JSON: the question, for the text now")
         c.markShown(Self.doubled, documentID: doc, context: window(Self.text, doc: doc).context)
         let d = OwlCoordinator.replay(try #require(c.recent.first), document: "changed" as NSString)
         #expect(d.isStale && json(d, document: "changed" as NSString) == d)
@@ -277,5 +285,56 @@ import Testing
             let s = OwlCoordinator.spokenRecent(time: "t", title: title, detail: "More.")
             #expect(!s.contains("?.") && !s.contains("..") && !s.contains("!.") && !s.contains("….") , "\(s)")
         }
+    }
+
+    /// 0.5.4 QA (should round 2): past the length checked again, the long
+    /// one-line file's hint keeps its question only while the text still
+    /// has one-line JSON's shape (its Fix it parses the whole file before
+    /// formatting); plain text there is a past hint.
+    @Test func aLongRangelessJSONHintKeepsItsQuestionOnlyForJSONShapedText() throws {
+        let (c, _) = make([])
+        let doc = UUID()
+        let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+        c.markShown(longLine, documentID: doc, context: window("[1]", doc: doc).context)
+        let shown = try #require(c.recent.first)
+        let long = (" [" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]\n") as NSString
+        #expect(long.length > RulesHintProvider.replayJSONLimit)
+        let r = OwlCoordinator.replay(shown, document: long)
+        #expect(RulesHintProvider.replayJSON(r, document: long) == .ready(r), "JSON-shaped: the question, Fix it checks the file")
+        #expect(RulesHintProvider.formatsWholeJSONFile(r.hint, isStale: r.isStale))
+        for text in [String(repeating: "plain text ", count: 7000), "[" + String(repeating: "1,\n", count: 30_000) + "1]",
+                     "{" + String(repeating: "a", count: 70_000) + "]"] {
+            let ns = text as NSString
+            #expect(ns.length > RulesHintProvider.replayJSONLimit)
+            #expect(RulesHintProvider.replayJSON(OwlCoordinator.replay(shown, document: ns), document: ns)
+                    == .ready(RulesHintProvider.pastJSON(closed: false, source: "rules")), "\(text.prefix(12))…: past")
+        }
+    }
+
+    /// 0.5.4 QA (should round 2): Fix it checked that the hint's range
+    /// still held its text with Swift's `==` (canonical equivalence: "Å"
+    /// matched "A" + ring, and the fix wrote the old scalar back), and for
+    /// the JSON hint not that the range was still the whole document (text
+    /// typed after the JSON while the bubble showed had the JSON prefix
+    /// formatted and the rest left).
+    @Test func aFixStillAppliesOnlyToTheSameUnitsAndJSONToTheWholeText() {
+        let json = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?",
+                           range: NSRange(location: 0, length: 9), replacement: "{\n  \"a\" : \"\u{C5}\"\n}", source: "rules")
+        let text = "{\"a\":\"\u{C5}\"}"
+        let all = NSRange(location: 0, length: (text as NSString).length)
+        #expect(RulesHintProvider.stillApplies(json, range: all, expected: text, in: text as NSString))
+        // The same text, decomposed: equal to Swift, not the same units.
+        let decomposed = "{\"a\":\"A\u{30A}\"}"
+        #expect(decomposed == text, "the case is real")
+        let wholeDecomposed = NSRange(location: 0, length: (decomposed as NSString).length)
+        #expect(!RulesHintProvider.stillApplies(json, range: wholeDecomposed, expected: text, in: decomposed as NSString))
+        // Text added after the JSON: the range still holds it, not the whole text.
+        let grown = (text + " trailing") as NSString
+        #expect(grown.substring(with: all) == text)
+        #expect(!RulesHintProvider.stillApplies(json, range: all, expected: text, in: grown))
+        // Another hint's range inside a longer text applies as before.
+        let other = OwlHint(id: RulesHintProvider.duplicateWordID, kind: .fix, title: "x", source: "rules")
+        #expect(RulesHintProvider.stillApplies(other, range: NSRange(location: 0, length: 3), expected: "the", in: "the the end"))
+        #expect(!RulesHintProvider.stillApplies(other, range: NSRange(location: 0, length: 3), expected: "the", in: "th"))
     }
 }

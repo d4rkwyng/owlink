@@ -759,7 +759,8 @@ final class OwlController: NSObject, NSPopoverDelegate {
                 self.pendingRechecks -= 1
                 // Another bubble came (or went) meanwhile: that one stays.
                 guard self.replayToken == token, let tab = self.tab else { return }
-                let current = tab.textView.string == text
+                // The same UTF-16 units, not just an equivalent spelling.
+                let current = (tab.textView.string as NSString).isEqual(to: text)
                 self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
             }
         }
@@ -994,7 +995,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         guard let p = presented, let range = p.range, let expected = p.expected, let rep = p.hint.replacement,
               let tv = tab?.textView, let storage = tv.textStorage else { return false }
         let ns = tv.string as NSString
-        guard NSMaxRange(range) <= ns.length, ns.substring(with: range) == expected else {
+        guard RulesHintProvider.stillApplies(p.hint, range: range, expected: expected, in: ns) else {
             NSSound.beep()
             return false
         }
