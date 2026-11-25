@@ -118,6 +118,9 @@ final class GitTabState {
     /// Every refresh that finished (checks wait on it).
     private(set) var refreshCount = 0
     private(set) var diffCount = 0
+    /// Every clear, and the ones that had state to drop and redrew (checks).
+    private(set) var clears = 0
+    private(set) var clearNotices = 0
     /// The last refresh found no repository (or no usable git).
     private(set) var notInGit = false
     /// The repository's config asks git to run programs, so Cedric runs no
@@ -157,6 +160,10 @@ final class GitTabState {
     }
 
     private func clear() {
+        // Nothing to drop (a large document, a file outside any
+        // repository): no gutter or status bar redraw.
+        let had = status != nil || refused || baseText != nil || baseBlob != nil || repo != nil || relativePath != nil || observer != nil || !changes.isEmpty
+        clears += 1
         status = nil
         refused = false
         baseText = nil
@@ -167,6 +174,8 @@ final class GitTabState {
         repo = nil
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        guard had else { return }
+        clearNotices += 1
         tab?.gitStateChanged()
     }
 

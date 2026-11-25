@@ -79,6 +79,9 @@ extension DevChecks {
         var hostile: URL?
         var hostileTab: EditorWindowController?
         var offTab: EditorWindowController?
+        var plainTab: EditorWindowController?
+        var bigTab: EditorWindowController?
+        var notices: (tab: Int, hostile: Int, plain: Int) = (0, 0, 0)
         var hostileOpened = Date.distantFuture
         let savedSetting = UserDefaults.standard.object(forKey: "showGitChanges")
         func restoreSetting() { UserDefaults.standard.set(savedSetting, forKey: "showGitChanges") }
@@ -201,6 +204,26 @@ extension DevChecks {
                 expect(p.gitState?.repo == nil && p.gitState?.changes.isEmpty == true, "and no repository or marks")
                 expect(menuItem("Copy GitHub Link").map { !app.validateMenuItem($0) } ?? false, "Copy GitHub Link is disabled there")
                 expect(menuItem("Compare with Last Commit").map { !app.validateMenuItem($0) } ?? false, "and Compare with Last Commit")
+                expect((p.gitState?.clears ?? 0) > 0 && p.gitState?.clearNotices == 0, "outside git: the clear had nothing to drop, no redraw",
+                       "clears \(p.gitState?.clears ?? -1) notices \(p.gitState?.clearNotices ?? -1)")
+                plainTab = p
+                // A large document in the repository: no git at all, and no redraw for it.
+                var rng = SystemRandomNumberGenerator()
+                let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+                bigTab = app.open(write("repo/src/big.txt", "big\n" + String((0..<636_000).map { _ in alphabet[Int(rng.next() % 64)] }) + "\n"))
+                if let b = bigTab { sized(b); focus(b) }
+            },
+            wait("the large document's git start") { (bigTab?.gitState?.clears ?? 0) > 0 },
+            sync {
+                let b = bigTab
+                expect(b?.isLargeDocument == true, "big.txt is a large document")
+                expect(b?.gitState?.refreshCount == 0 && b?.gitState?.repo == nil, "a large document: git never ran",
+                       "\(b?.gitState?.refreshCount ?? -1)")
+                expect(b?.gitState?.clearNotices == 0, "a large document: the clear had nothing to drop, no redraw",
+                       "clears \(b?.gitState?.clears ?? -1) notices \(b?.gitState?.clearNotices ?? -1)")
+                expect(b?.statusBar.gitButton.isHidden == true, "a large document: no branch label")
+                b?.doc.markSaved()
+                b?.window?.close()
                 hostile = makeHostileRepo()
                 hostileTab = app.open(hostile!)
                 if let h = hostileTab { sized(h); focus(h) }
@@ -241,6 +264,7 @@ extension DevChecks {
                     expect(!after.isEmpty, "control: plain git status there does run them", "\(after.sorted())")
                 }
                 // The setting off: no git process at all for a new tab.
+                notices = (tab.gitState?.clearNotices ?? -1, hostileTab?.gitState?.clearNotices ?? -1, plainTab?.gitState?.clearNotices ?? -1)
                 Settings.shared.showGitChanges = false
                 offTab = app.open(write("repo/src/other.swift", "x\n"))
                 if let o = offTab { sized(o); focus(o) }
@@ -252,6 +276,12 @@ extension DevChecks {
                        "\(offTab?.gitState?.refreshCount ?? -1)")
                 expect(offTab?.statusBar.gitButton.isHidden == true, "and no branch label")
                 expect(tab.gitState?.status == nil && tab.statusBar.gitButton.isHidden, "an open tab drops its git info")
+                expect(tab.gitState?.clearNotices == notices.tab + 1, "…and that clear redrew it once",
+                       "\(tab.gitState?.clearNotices ?? -1) vs \(notices.tab)")
+                expect(hostileTab?.gitState?.clearNotices == notices.hostile + 1 && hostileTab?.statusBar.gitButton.isHidden == true,
+                       "the refused repository's tab drops Git info off, redrawn once", "\(hostileTab?.gitState?.clearNotices ?? -1) vs \(notices.hostile)")
+                expect(plainTab?.gitState?.clearNotices == notices.plain && notices.plain == 0, "the file outside git: still no redraw",
+                       "\(plainTab?.gitState?.clearNotices ?? -1)")
                 Settings.shared.showGitChanges = true
             },
             wait("git back on") { (offTab?.gitState?.refreshCount ?? 0) > 0 && offTab?.gitState?.status != nil },
