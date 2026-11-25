@@ -344,6 +344,14 @@ final class EditorNavigationController: UINavigationController {
         return super.target(forAction: action, withSender: sender)
     }
 
+    /// ⌘, Settings… for the editor and every sheet over it (they hand
+    /// their commands to this controller): Owlink's Settings ahead of the
+    /// system's ⌘,, which opens the system Settings app, even before the
+    /// menu bar has its own (0.5.2 (18)).
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + [MenuBar.settingsKey()]
+    }
+
     override var childForStatusBarHidden: UIViewController? { topViewController }
     override var childForHomeIndicatorAutoHidden: UIViewController? { topViewController }
     override var childForScreenEdgesDeferringSystemGestures: UIViewController? { topViewController }

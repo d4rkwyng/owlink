@@ -221,6 +221,14 @@ extension EditorViewController {
 final class AskSheetHost: UIHostingController<AskCedricView> {
     var onGone: (() -> Void)?
 
+    /// ⌘, here too: with the sheet (or its field) holding the keys, the
+    /// system's ⌘, opened the system Settings app (0.5.2 (18)). It goes
+    /// up the chain to the editor's navigation controller, which hands it
+    /// to the editor's `showSettings` (see `EditorCommandRouting`).
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + [MenuBar.settingsKey()]
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         if isBeingDismissed || presentingViewController == nil {

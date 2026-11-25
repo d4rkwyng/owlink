@@ -9,7 +9,9 @@ enum MenuBar {
     /// Where a menu goes in the system's main menu.
     enum Place: Equatable {
         case startOf(UIMenu.Identifier), endOf(UIMenu.Identifier), after(UIMenu.Identifier)
-        /// In place of the menu's own children.
+        /// In place of the menu itself (`replace(menu:with:)`), not only
+        /// its children: nothing of the system's menu (its own command,
+        /// its ⌘,) is left behind.
         case replacing(UIMenu.Identifier)
     }
 
@@ -18,9 +20,57 @@ enum MenuBar {
         let place: Place
     }
 
-    static func build(_ builder: any UIMenuBuilder) {
+    /// What `build` does to the system's menus: `UIMenuBuilder`'s calls,
+    /// behind a protocol so the snapshot tests can record them.
+    @MainActor protocol Editing {
+        func menu(for identifier: UIMenu.Identifier) -> UIMenu?
+        func remove(menu identifier: UIMenu.Identifier)
+        func insertChild(_ menu: UIMenu, atStartOfMenu identifier: UIMenu.Identifier)
+        func insertChild(_ menu: UIMenu, atEndOfMenu identifier: UIMenu.Identifier)
+        func insertSibling(_ menu: UIMenu, afterMenu identifier: UIMenu.Identifier)
+        func replace(menu identifier: UIMenu.Identifier, with menu: UIMenu)
+    }
+
+    /// The app's own builder.
+    @MainActor struct BuilderEditing: Editing {
+        let builder: any UIMenuBuilder
+        func menu(for identifier: UIMenu.Identifier) -> UIMenu? { builder.menu(for: identifier) }
+        func remove(menu identifier: UIMenu.Identifier) { builder.remove(menu: identifier) }
+        func insertChild(_ menu: UIMenu, atStartOfMenu identifier: UIMenu.Identifier) { builder.insertChild(menu, atStartOfMenu: identifier) }
+        func insertChild(_ menu: UIMenu, atEndOfMenu identifier: UIMenu.Identifier) { builder.insertChild(menu, atEndOfMenu: identifier) }
+        func insertSibling(_ menu: UIMenu, afterMenu identifier: UIMenu.Identifier) { builder.insertSibling(menu, afterMenu: identifier) }
+        func replace(menu identifier: UIMenu.Identifier, with menu: UIMenu) { builder.replace(menu: identifier, with: menu) }
+    }
+
+    /// Owlink's Settings… menu, in place of the app menu's `.preferences`.
+    static let settingsMenuIdentifier = UIMenu.Identifier("net.cyduck.owlink.settings")
+
+    /// A rebuild was asked for because the app menu had no Settings… item
+    /// yet (asked once per process: on a system without that item the
+    /// rebuild finds none again, and Settings… stays in the Cedric menu).
+    @MainActor private(set) static var rebuiltForAppSettings = false
+    /// Asks UIKit for that rebuild (the tests count instead).
+    @MainActor static var requestRebuild: @MainActor () -> Void = {
+        DispatchQueue.main.async { MainActor.assumeIsolated { UIMenuSystem.main.setNeedsRebuild() } }
+    }
+
+    @MainActor static func build(_ builder: any UIMenuBuilder) {
+        apply(to: BuilderEditing(builder: builder))
+    }
+
+    /// 0.5.2 (18): ⌘, over Ask Cedric's sheet opened the system Settings
+    /// app on a second launch. The app menu's own "Owlink Settings…"
+    /// (orderFrontPreferencesPanel:, ⌘,) wins whenever our ⌘, is not in
+    /// its place: `hasAppSettings` was read once, and a menu built before
+    /// the system added `.preferences` left that item, and its ⌘,, to the
+    /// system. Now `.preferences` is replaced whole when it is there, and
+    /// when it isn't, the menu is built again once so a later system item
+    /// is replaced too. (The responders' ⌘, — `settingsKey()` — is the
+    /// other half.)
+    @MainActor static func apply(to builder: some Editing) {
+        let hasAppSettings = builder.menu(for: .preferences) != nil
         let all = insertions(hasFind: builder.menu(for: .find) != nil, hasSpelling: builder.menu(for: .spelling) != nil,
-                             hasAppSettings: builder.menu(for: .preferences) != nil)
+                             hasAppSettings: hasAppSettings)
         // Owlink's own Format menu (Markdown) replaces the system's.
         builder.remove(menu: .format)
         for i in all {
@@ -28,9 +78,26 @@ enum MenuBar {
             case .startOf(let id): builder.insertChild(i.menu, atStartOfMenu: id)
             case .endOf(let id): builder.insertChild(i.menu, atEndOfMenu: id)
             case .after(let id): builder.insertSibling(i.menu, afterMenu: id)
-            case .replacing(let id): builder.replaceChildren(ofMenu: id) { _ in i.menu.children }
+            case .replacing(let id): builder.replace(menu: id, with: i.menu)
             }
         }
+        if !hasAppSettings, !rebuiltForAppSettings {
+            rebuiltForAppSettings = true
+            requestRebuild()
+        }
+    }
+
+    /// For the tests: as at launch, no rebuild asked for yet.
+    @MainActor static func resetRebuildForTesting() { rebuiltForAppSettings = false }
+
+    /// ⌘, for the responders that stay in the chain whatever has the keys
+    /// (the editor's navigation controller, Ask Cedric's sheet): Owlink's
+    /// Settings, ahead of the system's ⌘, (the system Settings app). No
+    /// title, so it is not listed a second time next to the menu's.
+    static func settingsKey() -> UIKeyCommand {
+        let key = UIKeyCommand(input: ",", modifierFlags: .command, action: #selector(EditorViewController.showSettings))
+        key.wantsPriorityOverSystemBehavior = true
+        return key
     }
 
     /// In the order they are applied. `hasFind` / `hasSpelling`: the
@@ -203,13 +270,16 @@ enum MenuBar {
                                     input: ",", modifierFlags: .command)
         // ⌘, Settings…: iPadOS's app menu has its own "Owlink Settings…"
         // on ⌘, (orderFrontPreferencesPanel:), which opens Owlink's page in
-        // the system Settings app. It took ⌘, over ours, so ⌘, left Owlink. Ours takes its place there, ahead of the system's
-        // behavior; without that item (older systems) it stays in the
-        // Cedric menu. Settings… is in the menu bar once either way.
+        // the system Settings app. It took ⌘, over ours, so ⌘, left Owlink. Ours takes its place there (the whole
+        // `.preferences` menu, see `apply`), ahead of the system's
+        // behavior; without that item (older systems, or a menu built
+        // before the system added it: `apply` builds again) it stays in
+        // the Cedric menu. Settings… is in the menu bar once either way.
         settings.wantsPriorityOverSystemBehavior = true
         if hasAppSettings {
             out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript]), place: .after(.view)))
-            out.append(Insertion(menu: UIMenu(options: .displayInline, children: [settings]), place: .replacing(.preferences)))
+            out.append(Insertion(menu: UIMenu(title: "", identifier: settingsMenuIdentifier, options: .displayInline, children: [settings]),
+                                 place: .replacing(.preferences)))
         } else {
             out.append(Insertion(menu: UIMenu(title: "Cedric", children: [ask, explain, rewrite, check, checkScript, settings]), place: .after(.view)))
         }
