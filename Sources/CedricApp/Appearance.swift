@@ -42,8 +42,17 @@ final class Settings {
         set { defaults.set(newValue.rawValue, forKey: EditorTheme.defaultsKey); changed() }
     }
 
+    /// Set by a check: the font size for this run, not saved (as
+    /// `themeOverride`). Nil: the saved size.
+    var fontSizeOverride: CGFloat? {
+        didSet { if fontSizeOverride != oldValue { changed() } }
+    }
+
     var fontSize: CGFloat {
-        get { let v = defaults.double(forKey: "fontSize"); return v > 0 ? v : Self.defaultFontSize }
+        get {
+            if let fontSizeOverride { return fontSizeOverride }
+            let v = defaults.double(forKey: "fontSize"); return v > 0 ? v : Self.defaultFontSize
+        }
         set { defaults.set(min(72, max(6, newValue)), forKey: "fontSize"); changed() }
     }
 
