@@ -718,7 +718,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         nonisolated(unsafe) var certificate = false
         DispatchQueue.concurrentPerform(iterations: 3) { k in
             switch k {
-            case 0: if !d.looksBinary { index = LineIndex(ns) }
+            case 0: if !d.looksBinary { index = LineIndex(ns, expectedLineCount: d.newlineCount.map { $0 + 1 }) }
             case 1: if !d.looksBinary, ns.length > EditedState.snapshotLimit { print = TextFingerprint(ns) }
             default:
                 language = LanguageChoice.forFile(named: name, content: text)

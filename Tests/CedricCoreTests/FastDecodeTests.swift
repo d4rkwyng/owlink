@@ -583,3 +583,36 @@ import Testing
         #expect(!DiskStamp.changed(known: stamp, current: now))
     }
 }
+
+/// DecodedText.newlineCount, the line index's reservation hint: the "\n"
+/// count of the decoded text for UTF-8 (LF, CRLF and lone CR each one,
+/// at every position around the scan's 8-byte words, shared bytes and
+/// copies alike); nil for the encodings decoded by Foundation.
+@Suite struct NewlineCountHintTests {
+    @Test func countsTheDecodedNewlines() {
+        var inputs: [[UInt8]] = [[], Array("x".utf8), Array("a\n".utf8), Array("a\r\nb\rc\n".utf8), Array("\r\r\n\n\r".utf8),
+                                 Array("é\r\nü\n😀\r".utf8), [0xEF, 0xBB, 0xBF] + Array("bom\r\nline\n".utf8)]
+        for brk in [[UInt8]([10]), [13, 10], [13]] {
+            for at in 0..<20 {
+                inputs.append(Array(repeating: 0x61, count: at) + brk + Array(repeating: 0x62, count: 19 - at) + brk)
+            }
+        }
+        // Long enough to share its bytes / use the ASCII malloc path.
+        let big = String(repeating: "line of text\n", count: TextCodec.sharedBytesMinimum / 13 + 1)
+        inputs.append(Array(big.utf8))
+        inputs.append(Array(big.replacingOccurrences(of: "\n", with: "\r\n").utf8))
+        for bytes in inputs {
+            for share in [false, true] {
+                guard let d = TextCodec.decode(Data(bytes), shareBytes: share) else { Issue.record("decodes"); continue }
+                let actual = (d.text as NSString).components(separatedBy: "\n").count - 1
+                #expect(d.newlineCount == actual, "\(bytes.prefix(24)) share \(share): \(d.newlineCount ?? -1) vs \(actual)")
+                let hinted = LineIndex(d.text as NSString, expectedLineCount: d.newlineCount.map { $0 + 1 })
+                #expect(hinted.starts == LineIndex(d.text as NSString).starts && hinted.lineCount == actual + 1)
+            }
+        }
+        let utf16 = TextCodec.decode(Data([0xFF, 0xFE, 0x61, 0x00, 0x0A, 0x00]))
+        #expect(utf16?.text == "a\n" && utf16?.newlineCount == nil)
+        let latin1 = TextCodec.decode(Data([0x61, 0xE9, 0x0A]), as: .latin1)
+        #expect(latin1?.text == "aé\n" && latin1?.newlineCount == nil)
+    }
+}

@@ -89,6 +89,10 @@ public struct DecodedText: Sendable {
     /// save writes each back as it was (LineBreaks). Made in the same pass
     /// that turns CR and CRLF into LF, not a pass of its own.
     public var lineBreaks: LineBreaks?
+    /// UTF-8 only: how many "\n" the text has, from the decode's own scan
+    /// (LF, CRLF and CR, each now one LF), for LineIndex's reservation.
+    /// A hint: bytes that changed while being read can make it wrong.
+    public var newlineCount: Int?
 }
 
 public enum TextCodec {
@@ -498,7 +502,8 @@ public enum TextCodec {
             }
         }
         return DecodedText(text: text, encoding: encoding, lineEnding: ending, mixedLineEndings: mixed, looksBinary: binary,
-                           lineBreaks: breaks.map { LineBreaks(dominant: ending, others: $0.others) })
+                           lineBreaks: breaks.map { LineBreaks(dominant: ending, others: $0.others) },
+                           newlineCount: scan.lf + scan.crlf + scan.cr)
     }
 
     /// All-ASCII `data` as a string that reads its bytes in place (kept

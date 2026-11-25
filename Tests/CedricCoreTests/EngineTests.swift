@@ -39,6 +39,95 @@ import Testing
         }
     }
 
+    /// The UTF-16 loop's line starts, built the way `init` did before the
+    /// ASCII fast path: the reference the fast path must equal.
+    private static func loopStarts(_ text: NSString) -> [Int] {
+        var starts = [0]
+        LineIndex.scanNewlines(text, in: NSRange(location: 0, length: text.length)) { starts.append($0) }
+        return starts
+    }
+
+    /// The same text as a native Swift string, an 8-bit NSString copied
+    /// from bytes, a mutable copy and (long enough for `Data` to keep its
+    /// bytes on the heap, as the ≥ 16 MiB decodes that use it do) one
+    /// reading the bytes in place.
+    private static func asciiForms(_ s: String) -> [NSString] {
+        let bytes = Array(s.utf8)
+        var forms: [NSString] = [s as NSString, NSString(string: s), NSMutableString(string: s)]
+        if let copied = NSString(bytes: bytes, length: bytes.count, encoding: String.Encoding.ascii.rawValue) { forms.append(copied) }
+        if bytes.count >= 64, let shared = TextCodec.sharedASCII(Data(bytes)) { forms.append(shared as NSString) }
+        return forms
+    }
+
+    /// The ASCII `memchr` paths (the bytes in place, and copies of them
+    /// for text reading a file's bytes in place) give exactly the line
+    /// starts of the UTF-16 loop: empty, no newline, a trailing newline,
+    /// newlines only, dense, longer than the loop's 64 K chunk and the
+    /// copy's 1 M chunk with newlines on their edges. Non-ASCII text
+    /// takes the loop, with the same starts.
+    @Test(.offPool) func asciiFastPathMatchesTheUTF16Loop() {
+        func edged(_ chunk: Int) -> String {
+            var s = String(repeating: "a", count: chunk - 1) + "\n"   // a newline last in the first chunk
+            s += "\n" + String(repeating: "b", count: chunk - 2) + "\n"   // first, and last, in the next
+            return s + String(repeating: "c\nd", count: 20_000) + "tail"
+        }
+        let ascii = ["", "x", "no newline here", "trailing\n", "\n", "\n\n\n", "a\nb\nc", "\nlead",
+                     String(repeating: "\n", count: 200_000), String(repeating: "ab\n", count: 70_000),
+                     String(repeating: "q", count: 3 * 65536 + 17), edged(65536), edged(LineIndex.asciiChunk),
+                     String(repeating: "x", count: LineIndex.asciiChunk) + "\n",
+                     "nul\u{0}byte\nand\tcontrol\u{1}\nescape\u{1B}[0m\n" + String(repeating: "pad ", count: 20)]
+        var pointerSeen = 0, bytesSeen = 0
+        for s in ascii {
+            for text in Self.asciiForms(s) {
+                let reference = Self.loopStarts(text)
+                var viaPointer = [0]
+                if LineIndex.scanASCIIPointer(text, { viaPointer.append($0) }) {
+                    pointerSeen += 1
+                    #expect(viaPointer == reference, "pointer path, \(text.length) units")
+                } else {
+                    #expect(viaPointer == [0], "no pointer: nothing reported")
+                }
+                var viaBytes = [0]
+                let scanned = LineIndex.scanASCIIBytes(text) { viaBytes.append($0) }
+                if text.length > 0 { bytesSeen += 1 }
+                #expect(scanned == text.length && viaBytes == reference, "byte-copy path, \(scanned) of \(text.length) units")
+                var viaPrefix = [0]
+                #expect(LineIndex.scanASCIIPrefix(text) { viaPrefix.append($0) } == text.length && viaPrefix == reference,
+                        "8-bit ASCII is scanned whole, \(text.length) units")
+                let idx = LineIndex(text)
+                #expect(idx.starts == reference, "init, \(text.length) units")
+                #expect(idx.length == text.length)
+                let newlines = reference.count - 1
+                for hint in [0, 1, newlines + 1, newlines + 7] {
+                    let hinted = LineIndex(text, expectedLineCount: hint)
+                    #expect(hinted.starts == reference && hinted.length == text.length, "hint \(hint)")
+                }
+            }
+        }
+        #expect(pointerSeen >= ascii.count - 1 && bytesSeen >= ascii.count - 1, "pointer \(pointerSeen), byte copies \(bytesSeen)")
+        // A large decode's text (the bytes in place, no NUL after them):
+        // no pointer, so the byte copies.
+        let big = edged(LineIndex.asciiChunk)
+        let shared = TextCodec.sharedASCII(Data(big.utf8))! as NSString
+        #expect(!LineIndex.scanASCIIPointer(shared) { _ in })
+        #expect(LineIndex.scanASCIIPrefix(shared) { _ in } == shared.length)
+
+        // Not ASCII (UTF-16 storage, an attributed string's): not
+        // scanned as bytes at all; the UTF-16 loop, the same starts.
+        let wide = ["é\n", "naïve\nline\n", "😀\n😀", "a\nб\nc\n", String(repeating: "ü\n", count: 40_000) + "€",
+                    "ascii first\n" + String(repeating: "x", count: 65536) + "\nthen é\n"]
+        for s in wide {
+            for text in [s as NSString, NSString(string: s), NSMutableString(string: s), NSMutableAttributedString(string: s).string as NSString, NSMutableAttributedString(string: s).mutableString] {
+                var seen: [Int] = []
+                #expect(LineIndex.scanASCIIPrefix(text) { seen.append($0) } == 0, "non-ASCII takes the loop")
+                #expect(seen.isEmpty)
+                let reference = Self.loopStarts(text)
+                #expect(LineIndex(text).starts == reference)
+                #expect(LineIndex(text, expectedLineCount: reference.count).starts == reference)
+            }
+        }
+    }
+
     /// The scratch buffer is sized to the range: empty ranges report
     /// nothing, and every range (inside one chunk, across chunk edges,
     /// at the end) reports the newlines a character walk finds.
@@ -59,7 +148,6 @@ import Testing
         }
     }
 }
-
 
 @Suite struct HighlightEngineTests {
     @Test func absoluteOffsetsForRequestedLines() {
