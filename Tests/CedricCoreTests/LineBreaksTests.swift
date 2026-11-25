@@ -367,3 +367,118 @@ struct SplitMix {
         return z ^ (z >> 31)
     }
 }
+
+/// 0.5.4 QA, should round 2 leftovers: breaks through edits that keep
+/// every line, what the status says once kinds are gone, appends, and
+/// noting odd breaks against a kind that isn't LF in text with no CR.
+@Suite struct LineBreaksKeepTests {
+    /// The tab's edit, as LineBreakTracking makes it: `kinds` read before
+    /// it when it keeps every line, `replace`, then `place`.
+    func edit(_ text: inout NSString, _ breaks: inout LineBreaks, _ range: NSRange, _ with: String) {
+        let keeps = LineBreaks.keepsLines(text.substring(with: range) as NSString, with as NSString)
+        let kinds = keeps ? breaks.kinds(in: range, of: text) : nil
+        breaks.replace(range, newLength: (with as NSString).length)
+        text = text.replacingCharacters(in: range, with: with) as NSString
+        if let kinds { breaks.place(kinds, newlinesIn: NSRange(location: range.location, length: (with as NSString).length), of: text) }
+    }
+
+    /// Convert Indentation (and Indent, Outdent) rewrite whole lines'
+    /// leading whitespace as one edit over all of them: every odd break in
+    /// it went, and the next save wrote the whole file as the most common
+    /// kind. A break is the one it was when its line is.
+    @Test func convertIndentationKeepsEveryBreak() throws {
+        let file = "a\r\n    b\n\tc\r\n        d\r\n".utf8
+        let d = try #require(TextCodec.decode(Data(file)))
+        var breaks = try #require(d.lineBreaks)
+        var text = d.text as NSString
+        let all = NSRange(location: 0, length: text.length)
+        let converted = LineOperations.convertIndentation(text as String, from: Indentation(usesTabs: false, width: 4),
+                                                          to: Indentation(usesTabs: true, width: 4))
+        #expect(converted != text as String)
+        edit(&text, &breaks, all, converted)
+        let out = TextCodec.encode(breaks.output(text as String), encoding: .utf8, lineEnding: .lf)
+        #expect(out == Data("a\r\n\tb\n\tc\r\n\t\td\r\n".utf8), "each line's break as it was")
+        #expect(breaks.counts == [1, 0, 0] || breaks.counts == [0, 1, 0] || breaks.counts.reduce(0, +) == breaks.others.count)
+    }
+
+    /// Only whitespace at a line's ends may change; anything else (a
+    /// sort, a line added or joined) is a rewrite, whose breaks become the
+    /// most common kind, as before.
+    @Test func onlyWhitespaceAtTheEndsKeepsLines() {
+        #expect(LineBreaks.keepsLines("  a\nb  \n", "\ta\nb\n"))
+        #expect(!LineBreaks.keepsLines("a\nb\n", "b\na\n"), "a sort moves lines")
+        #expect(!LineBreaks.keepsLines("a\nb\n", "a b\n"), "a join removes a break")
+        #expect(!LineBreaks.keepsLines("a\nb\n", "a\nx\nb\n"))
+        #expect(!LineBreaks.keepsLines("a b\n", "ab\n"), "inside a line is a change")
+
+        var text = "x\r\ny\nz\r\n" as NSString
+        let d = TextCodec.decode(Data((text as String).utf8))!
+        var breaks = d.lineBreaks!
+        text = d.text as NSString
+        edit(&text, &breaks, NSRange(location: 0, length: text.length), "y\nx\nz\n")
+        #expect(TextCodec.encode(breaks.output(text as String), encoding: .utf8, lineEnding: .lf) == Data("y\r\nx\r\nz\r\n".utf8),
+                "a sort's breaks are the most common kind")
+    }
+
+    /// The status and the mixed bar say what is left: all the dominant
+    /// breaks deleted is one kind (the odd one), not "LF (mixed)"; the last
+    /// odd break deleted is the dominant kind alone.
+    @Test func summaryIsWhatIsLeft() {
+        var b = LineBreaks(dominant: .lf, others: [LineBreaks.entry(3, .crlf), LineBreaks.entry(7, .crlf)])
+        #expect(b.counts == [0, 2, 0])
+        #expect(b.summary(newlines: 5) == (.lf, true))
+        #expect(b.summary(newlines: 3) == (.crlf, true), "two CRLF and one LF: mostly CRLF")
+        #expect(b.summary(newlines: 2) == (.crlf, false), "no LF left: CRLF, not mixed")
+        #expect(b.isMixed)
+        b.replace(NSRange(location: 3, length: 1), newLength: 0)
+        b.replace(NSRange(location: 6, length: 1), newLength: 0)
+        #expect(b.others.isEmpty && b.counts == [0, 0, 0])
+        #expect(b.summary(newlines: 4) == (.lf, false))
+        #expect(b.summary(newlines: 0) == (.lf, false), "no break at all: the file's own")
+        // Ties go to the file's own kind.
+        let tie = LineBreaks(dominant: .crlf, others: [LineBreaks.entry(1, .lf)])
+        #expect(tie.summary(newlines: 2) == (.crlf, true))
+        // Counts follow restore too.
+        var r = LineBreaks(dominant: .lf, others: [LineBreaks.entry(1, .cr)])
+        let gone = r.replace(NSRange(location: 0, length: 2), newLength: 0)
+        #expect(r.counts == [0, 0, 0])
+        _ = r.restore(gone, at: 0, within: NSRange(location: 0, length: 2), in: "a\n")
+        #expect(r.counts == [0, 0, 1])
+    }
+
+    /// Follow File's appends: their odd breaks after the text's own.
+    @Test func appendShiftsTheAddedBreaks() {
+        var b = LineBreaks(dominant: .lf, others: [LineBreaks.entry(1, .crlf)])
+        b.append(LineBreaks(dominant: .lf, others: [LineBreaks.entry(2, .crlf), LineBreaks.entry(5, .cr)]), at: 4)
+        #expect(b.others == [LineBreaks.entry(1, .crlf), LineBreaks.entry(6, .crlf), LineBreaks.entry(9, .cr)])
+        #expect(b.counts == [0, 2, 1])
+    }
+
+    /// Noting against CRLF in text with no CR at all (an append of LF
+    /// lines to a CRLF file): each LF is odd. It returned the text early
+    /// and noted none.
+    @Test func lfOnlyTextNotesItsBreaksAgainstCRLF() {
+        var rec: TextCodec.BreakRecorder? = TextCodec.BreakRecorder(dominant: .crlf, ascii: false)
+        let out = TextCodec.normalizeLineEndings("é\nb\n", recording: &rec)
+        #expect(out == "é\nb\n")
+        #expect(rec?.others == [LineBreaks.entry(1, .lf), LineBreaks.entry(3, .lf)])
+    }
+
+    /// Offsets of odd breaks in non-ASCII text, counted as each run is
+    /// written (no reading back over the text before each break).
+    @Test func nonASCIIOffsetsCountedAsWritten() throws {
+        var bytes = Data()
+        var expected: [Int] = []
+        var units = 0
+        for i in 0..<2000 {
+            let line = i % 3 == 0 ? "é😀 line \(i)" : "ascii \(i)"
+            bytes.append(Data(line.utf8))
+            units += (line as NSString).length
+            if i % 7 == 0 { bytes.append(Data("\r\n".utf8)); expected.append(LineBreaks.entry(units, .crlf)) } else { bytes.append(0x0A) }
+            units += 1
+        }
+        let d = try #require(TextCodec.decode(bytes))
+        #expect(d.lineEnding == .lf)
+        #expect(d.lineBreaks?.others == expected)
+    }
+}

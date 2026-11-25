@@ -181,10 +181,19 @@ status bar says **LF (mixed)** (the most common kind) and a bar says
 break as it was, byte for byte: a break stays with its place in the text
 however you type or delete around it, and one you delete comes back as it
 was when you undo, before or after a save. A line break you type, or one a
-text tool rewrites, gets the most common kind. (Delete the text between a
-CR and an LF and the CR is written as CRLF, so the two breaks don't read
-back as one.) Unsaved text kept for the next launch or for Reopen Closed
-Tab keeps its line breaks too. **Convert to LF** on the bar (one undo
+text tool rewrites, gets the most common kind; Convert Indentation, Indent
+and Outdent only change the spaces and tabs at the start of lines, so every
+break keeps its kind. (Delete the text between a CR and an LF and the CR
+is written as CRLF, so the two breaks don't read back as one.) A changed
+line break counts as an unsaved change even when the text looks the same:
+delete a CRLF and press Return in its place and the tab is unsaved until
+you save or undo. The status bar and the bar follow the breaks that are
+left: delete the last CRLF and the status says **LF** and the bar goes
+(undo brings both back); delete every LF and leave only CRLF and it says
+**CRLF**. Follow File keeps the breaks of the lines it adds, and
+of a new file after a rotation, so saving after you stop following writes
+them as the file has them. Unsaved text kept for the next launch or for
+Reopen Closed Tab keeps its line breaks too. **Convert to LF** on the bar (one undo
 step), or picking a line ending from the status bar or **Format › Line
 Endings**, writes them all as that kind from the next save; **Keep
 Mixed** just hides the bar.

@@ -402,6 +402,114 @@ extension DevChecks {
                 expect(bytes(target) == b("one!\r\ntwo\nthree\rfour\r\n"), "…saved: its own breaks", show(bytes(target)))
                 close(t)
             },
+            // Revert, ⌘Z, ⌘⇧Z, ⌘Z: the edited text's breaks every time (the
+            // redo's record read the map after its text change had taken
+            // the breaks out, and the next ⌘Z set that stripped map).
+            sync {
+                guard let t = open("revert-cycle.txt", "one\r\ntwo\nthree\rfour\r\n") else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 3, length: 0))
+                type("!")
+            },
+            sync {
+                guard let t = tab else { return }
+                try? Data(b("plain\nlf\n")).write(to: t.doc.fileURL!)
+                app.revertToSaved(nil)
+            },
+            sync { tab?.textView.undoManager?.undo() },
+            sync { tab?.textView.undoManager?.redo() },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "plain\nlf\n" && !t.doc.mixedLineEndings, "Revert, ⌘Z, ⌘⇧Z: the file's text, one kind",
+                       t.text.debugDescription)
+                t.textView.undoManager?.undo()
+            },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "one!\ntwo\nthree\nfour\n" && t.doc.mixedLineEndings, "…⌘Z again: the edited text, mixed",
+                       t.text.debugDescription)
+                let target = dir.appendingPathComponent("revert-cycle-saved.txt")
+                try? FileManager.default.removeItem(at: target)
+                EditorWindowController.checkSaveAsURL = target
+                t.saveAs()
+                expect(bytes(target) == b("one!\r\ntwo\nthree\rfour\r\n"), "…saved: still its own breaks", show(bytes(target)))
+                close(t)
+            },
+            // Convert Indentation rewrites every line's leading whitespace in
+            // one edit: each break stays its own (all of them became LF).
+            sync {
+                guard let t = open("indent-mixed.txt", "a\r\n    b\n\tc\r\n        d\r\n") else { return }
+                tab = t
+                t.doc.indentation = Indentation(usesTabs: false, width: 4)
+                t.convertIndentation(toTabs: true)
+                expect(t.text == "a\n\tb\n\tc\n\t\td\n", "converted to tabs", t.text.debugDescription)
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("a\r\n\tb\n\tc\r\n\t\td\r\n"), "Convert Indentation keeps each break",
+                       show(bytes(t.doc.fileURL!)))
+                t.textView.undoManager?.undo()
+            },
+            sync {
+                guard let t = tab else { return }
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("a\r\n    b\n\tc\r\n        d\r\n"), "…⌘Z and save: the file's bytes",
+                       show(bytes(t.doc.fileURL!)))
+                close(t)
+            },
+            // The odd CRLF deleted and Return typed in its place: the same
+            // text, another break. Unsaved (it was clean, and autosave and
+            // closing skipped it), until undone.
+            sync {
+                guard let t = open("dirty-break.txt", "a\r\nb\nc\n") else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 2, length: 0))
+                key("\u{7f}")
+            },
+            sync { key("\r") },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "a\nb\nc\n", "the CRLF deleted and Return typed back: the saved text", t.text.debugDescription)
+                expect(t.doc.isDirty && t.window?.isDocumentEdited == true, "…but unsaved: the break is an LF now",
+                       "dirty \(t.doc.isDirty)")
+                t.textView.undoManager?.undo()
+            },
+            sync { tab?.textView.undoManager?.undo() },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "a\nb\nc\n" && !t.doc.isDirty, "…undone: the CRLF back, saved again", "dirty \(t.doc.isDirty)")
+                close(t)
+            },
+            // The status bar and the mixed bar follow the breaks there are.
+            sync {
+                guard let t = open("last-odd.txt", "a\r\nb\nc\n") else { return }
+                tab = t
+                expect(t.lineEndingBar?.isHidden == false, "mixed: the bar shows")
+                t.textView.setSelectedRange(NSRange(location: 2, length: 0))
+                key("\u{7f}")
+                let title = t.statusBar.lineEndingButton.itemTitle(at: 0)
+                expect(title == LineEnding.lf.displayName, "the last odd break gone: the status says LF, not mixed", title)
+                expect(t.lineEndingBar?.isHidden != false, "…and the mixed bar goes")
+                t.textView.undoManager?.undo()
+            },
+            sync {
+                guard let t = tab else { return }
+                let title = t.statusBar.lineEndingButton.itemTitle(at: 0)
+                expect(title.contains("(mixed)"), "⌘Z: mixed again in the status", title)
+                expect(t.lineEndingBar?.isHidden == false, "…and the bar is back", t.lineEndingBar?.label.stringValue ?? "no bar")
+                close(t)
+            },
+            sync {
+                // Mostly LF, one CRLF: every LF deleted leaves only the CRLF.
+                guard let t = open("all-odd.txt", "a\nb\nc\r\nd") else { return }
+                tab = t
+                delete(t, NSRange(location: 1, length: 3))
+                let title = t.statusBar.lineEndingButton.itemTitle(at: 0)
+                expect(t.text == "ac\nd", "the LF breaks deleted", t.text.debugDescription)
+                expect(title == LineEnding.crlf.displayName, "only CRLF left: the status says so, not \"LF (mixed)\"", title)
+                expect(t.lineEndingBar?.isHidden != false, "…and there is no mixed bar")
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("ac\r\nd"), "…saved with its CRLF", show(bytes(t.doc.fileURL!)))
+                close(t)
+            },
         ]
     }
 }

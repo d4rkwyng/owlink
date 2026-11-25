@@ -214,6 +214,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     var undoInserted: [NSRange] = []
     /// Reload's ⌘Z: the line breaks the text it brings back had.
     var pendingBreakSnapshot: (LineEnding, LineBreaks?)?
+    /// The line endings the status bar and the mixed bar last showed
+    /// (`lineEndingShown`): an edit or undo that changes them refreshes the bar.
+    var lastLineEndingShown: (ending: LineEnding, mixed: Bool)?
+    /// A whole-line edit about to be made that keeps every line
+    /// (LineBreaks.keepsLines): the range it replaces and its breaks' kinds.
+    var keptLineBreaks: (range: NSRange, kinds: [LineEnding])?
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// Background catch-up reads (reloadIfChangedOnDisk(inBackground:))
@@ -669,6 +675,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         setGuttersNeedDisplay()
         editingTextChanged()
         updateStatus()
+        refreshLineEndingNoticeIfChanged()
         schedulePreview()
         outlineTextChanged()
         // Before the owl hears of the edit: a paste may take it over the cap.
@@ -890,10 +897,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         let encTitle = doc.encodingGuessed ? String(localized: "\(doc.encoding.shortName) (guessed)") : doc.encoding.displayName
         StatusBar.fill(statusBar.encodingButton, title: encTitle, items: encItems,
                        target: self, action: #selector(pickEncoding(_:)))
-        let leTitle = doc.mixedLineEndings ? String(localized: "\(doc.lineEnding.displayName) (mixed)") : doc.lineEnding.displayName
+        let shown = lineEndingShown
+        let leTitle = shown.mixed ? String(localized: "\(shown.ending.displayName) (mixed)") : shown.ending.displayName
         StatusBar.fill(statusBar.lineEndingButton, title: leTitle,
                        items: [(String(localized: "Convert Line Endings To"), nil, false)]
-                        + LineEnding.allCases.map { ($0.displayName, $0.rawValue, $0 == doc.lineEnding) },
+                        + LineEnding.allCases.map { ($0.displayName, $0.rawValue, $0 == shown.ending) },
                        target: self, action: #selector(pickLineEnding(_:)))
     }
 
@@ -1312,8 +1320,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             }
             guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
-            // ⌘Z gives the old text its own breaks back.
-            registerLineBreaksSnapshotUndo(breaksBefore)
+            // ⌘Z gives the old text its own breaks back, ⌘⇧Z these.
+            registerLineBreaksSnapshotUndo(restoring: breaksBefore, redoing: (doc.lineEnding, doc.lineBreaks))
             doc.noteDisk(mod)
             doc.markSaved()
             resetPreviewTrust()

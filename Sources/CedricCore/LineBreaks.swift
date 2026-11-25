@@ -22,15 +22,42 @@ public struct LineBreaks: Sendable, Equatable {
     public let dominant: LineEnding
     /// Each break that isn't `dominant`: the UTF-16 offset of its "\n" in
     /// the text, shifted left 2, plus its kind (`code`); ascending.
-    public private(set) var others: [Int]
+    public private(set) var others: [Int] {
+        didSet { if others.isEmpty { counts = [0, 0, 0] } }
+    }
+    /// How many of `others` are each kind (by `code`), kept with every
+    /// change to `others`, so `summary` costs nothing per keystroke.
+    public private(set) var counts: [Int] = [0, 0, 0]
 
     public init(dominant: LineEnding, others: [Int] = []) {
         self.dominant = dominant
         self.others = others
+        for e in others { counts[e & 3] += 1 }
     }
 
-    /// Still more than one kind (some break isn't `dominant`).
+    /// Some break isn't `dominant`. Not by itself "mixed": every break
+    /// may be odd once the dominant ones are deleted (`summary`).
     public var isMixed: Bool { !others.isEmpty }
+
+    /// What the text's `newlines` breaks are now: the most common kind,
+    /// and whether more than one kind is left. All the dominant breaks
+    /// deleted and only odd ones left is one kind, not mixed (the status
+    /// said "LF (mixed)" for a file now all CRLF); the last odd break gone
+    /// is the dominant kind alone.
+    public func summary(newlines: Int) -> (ending: LineEnding, mixed: Bool) {
+        var byKind = counts
+        byKind[Self.code(dominant)] += max(0, newlines - others.count)
+        let kinds = byKind.filter { $0 > 0 }.count
+        guard kinds > 1 else {
+            // One kind (or no break at all: the file's own).
+            let only = byKind.firstIndex(where: { $0 > 0 }).map(Self.kind) ?? dominant
+            return (only, false)
+        }
+        // Ties go to the file's own kind, then LF, CRLF, CR.
+        var best = Self.code(dominant)
+        for c in [0, 1, 2] where byKind[c] > byKind[best] { best = c }
+        return (Self.kind(best), true)
+    }
 
     static func code(_ le: LineEnding) -> Int {
         switch le { case .lf: return 0; case .crlf: return 1; case .cr: return 2 }
@@ -72,6 +99,7 @@ public struct LineBreaks: Sendable, Equatable {
         let start = index(from: old.location)
         let end = index(from: NSMaxRange(old))
         let removed = others[start..<end].map { $0 - (old.location << 2) }
+        for e in others[start..<end] { counts[e & 3] -= 1 }
         let delta = newLength - old.length
         if delta != 0 {
             let shift = delta << 2
@@ -91,9 +119,79 @@ public struct LineBreaks: Sendable, Equatable {
             guard NSLocationInRange(at, within), at < text.length, text.character(at: at) == 10 else { left.append(r); continue }
             let i = index(from: at)
             if i < others.count, others[i] >> 2 == at { continue }
-            if Self.kind(r & 3) != dominant { others.insert(Self.entry(at, Self.kind(r & 3)), at: i) }
+            if Self.kind(r & 3) != dominant {
+                others.insert(Self.entry(at, Self.kind(r & 3)), at: i)
+                counts[r & 3] += 1
+            }
         }
         return left
+    }
+
+    /// Text was added at the end (`offset`, its start: Follow File):
+    /// `added`'s breaks, by offsets in that text, follow. Its own dominant
+    /// kind must be this one's (only its odd breaks are kept).
+    public mutating func append(_ added: LineBreaks, at offset: Int) {
+        guard !added.others.isEmpty else { return }
+        let shifted = added.others.map { $0 + (offset << 2) }
+        if let last = others.last, last >> 2 >= offset { return }
+        others.append(contentsOf: shifted)
+        for e in shifted { counts[e & 3] += 1 }
+    }
+
+    /// Whether replacing `old` with `new` keeps every line, only changing
+    /// the spaces and tabs at its start or end (Convert Indentation,
+    /// Indent, Outdent, trimming trailing whitespace): the same number of
+    /// breaks, and each line the same once those are set aside. Then each
+    /// break is still the one it was (`kinds`, `place`), not a new one.
+    public static func keepsLines(_ old: NSString, _ new: NSString) -> Bool {
+        let a = old.components(separatedBy: "\n"), b = new.components(separatedBy: "\n")
+        guard a.count == b.count else { return false }
+        let blank = CharacterSet(charactersIn: " \t")
+        for (x, y) in zip(a, b) where x != y {
+            if x.trimmingCharacters(in: blank) != y.trimmingCharacters(in: blank) { return false }
+        }
+        return true
+    }
+
+    /// How each "\n" in `range` of `text` (the text before an edit) is
+    /// written, in order.
+    public func kinds(in range: NSRange, of text: NSString) -> [LineEnding] {
+        var out: [LineEnding] = []
+        var at = range.location
+        let end = NSMaxRange(range)
+        var i = index(from: at)
+        while at < end {
+            let found = text.range(of: "\n", options: .literal, range: NSRange(location: at, length: end - at))
+            guard found.location != NSNotFound else { break }
+            while i < others.count, others[i] >> 2 < found.location { i += 1 }
+            out.append(i < others.count && others[i] >> 2 == found.location ? Self.kind(others[i] & 3) : dominant)
+            at = found.location + 1
+        }
+        return out
+    }
+
+    /// An edit that kept every line (`keepsLines`) replaced the text in
+    /// `range` (now, in `text`): its breaks, in order, are `kinds` again
+    /// (what `kinds` read before the edit). `replace` took them out.
+    public mutating func place(_ kinds: [LineEnding], newlinesIn range: NSRange, of text: NSString) {
+        var at = range.location
+        let end = NSMaxRange(range)
+        var k = 0
+        var added: [Int] = []
+        while at < end, k < kinds.count {
+            let found = text.range(of: "\n", options: .literal, range: NSRange(location: at, length: end - at))
+            guard found.location != NSNotFound else { break }
+            let le = kinds[k]
+            k += 1
+            at = found.location + 1
+            if le != dominant { added.append(Self.entry(found.location, le)) }
+        }
+        guard !added.isEmpty else { return }
+        // `replace` left none inside `range`: they go in as one block.
+        let i = index(from: range.location)
+        guard i == index(from: end) else { return }
+        others.insert(contentsOf: added, at: i)
+        for e in added { counts[e & 3] += 1 }
     }
 
     /// `text` (every break "\n") with each break as this file has it:

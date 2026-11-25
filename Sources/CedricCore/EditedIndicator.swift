@@ -49,6 +49,13 @@ public struct EditedState {
     public private(set) var formatChanged = false
     /// Unsaved whatever the text says (session buffer, missing file).
     public private(set) var forced = false
+    /// A mixed file's odd line breaks at the baseline (LineBreaks.others;
+    /// empty when none), and whether they differ now: the text has every
+    /// break as LF, so a CRLF deleted and Return typed back in its place
+    /// gave the saved text again, the tab clean, and autosave and closing
+    /// skipped a change that a save writes (an LF where the CRLF was).
+    private var savedBreaks: [Int] = []
+    public private(set) var breaksDiffer = false
     /// Longer saved texts (UTF-16 units) are kept as a fingerprint.
     public let snapshotLimit: Int
     /// The fingerprint's chunk length.
@@ -66,7 +73,7 @@ public struct EditedState {
         saved(savedText.map { NSString(string: $0) })
     }
 
-    public var isDirty: Bool { textDiffers || formatChanged || forced }
+    public var isDirty: Bool { textDiffers || breaksDiffer || formatChanged || forced }
 
     /// Whether the saved text is kept as a fingerprint (not a copy).
     public var keepsFingerprint: Bool { savedPrint != nil }
@@ -74,7 +81,9 @@ public struct EditedState {
     /// Saved (or opened, or reloaded clean): `text` is the new baseline.
     /// Keeps an immutable copy, never the caller's mutable storage, or for
     /// a long text its fingerprint.
-    public mutating func saved(_ text: NSString?) {
+    /// `breaks`: the text's odd line breaks as saved (nil: none).
+    public mutating func saved(_ text: NSString?, breaks: LineBreaks? = nil) {
+        savedBreaks = breaks?.others ?? []
         if let text, text.length > snapshotLimit {
             baseline(TextFingerprint(text, chunk: chunk))
         } else {
@@ -87,7 +96,10 @@ public struct EditedState {
 
     /// Saved, with the text's fingerprint already made (off the main
     /// thread, while opening). Its chunk length is used as it is.
-    public mutating func saved(fingerprint: TextFingerprint) { baseline(fingerprint) }
+    public mutating func saved(fingerprint: TextFingerprint, breaks: LineBreaks? = nil) {
+        savedBreaks = breaks?.others ?? []
+        baseline(fingerprint)
+    }
 
     private mutating func baseline(_ print: TextFingerprint) {
         savedText = nil
@@ -98,6 +110,7 @@ public struct EditedState {
 
     private mutating func clearFlags() {
         textDiffers = false
+        breaksDiffer = false
         formatChanged = false
         forced = false
     }
@@ -127,6 +140,12 @@ public struct EditedState {
         }
         guard let savedText, let text else { textDiffers = true; return }
         textDiffers = savedText.length != text.length || !savedText.isEqual(text)
+    }
+
+    /// The odd line breaks may have changed (an edit, undo or redo):
+    /// unsaved while they aren't the saved ones, whatever the text says.
+    public mutating func breaksChanged(to breaks: LineBreaks?) {
+        breaksDiffer = (breaks?.others ?? []) != savedBreaks
     }
 
     /// Encoding or line endings changed (applied on save).

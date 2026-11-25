@@ -111,3 +111,42 @@ import Testing
         #expect(t.isDirty)
     }
 }
+
+/// 0.5.4 QA, should round 2: the text has every break as LF, so a CRLF
+/// deleted and Return typed back at the same place was the saved text
+/// again: the tab clean, and autosave and closing skipped a change a save
+/// writes. The breaks count toward unsaved too.
+@Suite struct EditedStateBreaksTests {
+    @Test func aChangedBreakIsUnsavedUntilItIsBackOrSaved() {
+        let saved = LineBreaks(dominant: .lf, others: [LineBreaks.entry(1, .crlf)])
+        var e = EditedState(savedText: "a\nb\n")
+        e.saved("a\nb\n" as NSString, breaks: saved)
+        #expect(!e.isDirty)
+        // The CRLF deleted, an LF typed back: same text, other breaks.
+        var now = saved
+        now.replace(NSRange(location: 1, length: 1), newLength: 0)
+        now.replace(NSRange(location: 1, length: 0), newLength: 1)
+        e.textChanged(to: "a\nb\n")
+        e.breaksChanged(to: now)
+        #expect(!e.textDiffers)
+        #expect(e.isDirty, "the break changed: unsaved")
+        // Undo gives the CRLF back: clean again.
+        e.breaksChanged(to: saved)
+        #expect(!e.isDirty)
+        // Saved with the LF: that is the baseline now.
+        e.breaksChanged(to: now)
+        e.saved("a\nb\n" as NSString, breaks: now)
+        #expect(!e.isDirty)
+        e.breaksChanged(to: now)
+        #expect(!e.isDirty)
+        // No odd break either way is the same as none at all.
+        var plain = EditedState(savedText: "x")
+        plain.breaksChanged(to: LineBreaks(dominant: .lf))
+        #expect(!plain.isDirty)
+        // A fingerprinted (long) baseline keeps its breaks too.
+        var long = EditedState(savedText: nil, snapshotLimit: 4, chunk: 4)
+        long.saved("abcdef\n" as NSString, breaks: saved)
+        long.breaksChanged(to: now)
+        #expect(long.isDirty)
+    }
+}

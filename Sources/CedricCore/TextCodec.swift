@@ -608,7 +608,10 @@ public enum TextCodec {
         var copy = text
         return copy.withUTF8 { b -> String in
             let raw = UnsafeRawBufferPointer(b)
-            guard let base = raw.baseAddress, memchr(base, 13, raw.count) != nil else { return text }
+            // No CR: nothing to convert, and nothing to note unless LF
+            // isn't the kind to note against (an append to a CRLF file).
+            guard let base = raw.baseAddress,
+                  memchr(base, 13, raw.count) != nil || (recording != nil && recording?.dominant != .lf) else { return text }
             // Room for every byte: LF-only text is never longer.
             return String(unsafeUninitializedCapacity: raw.count) {
                 lfOnly(raw, into: $0.baseAddress!, capacity: raw.count, recording: &recording) ?? raw.count

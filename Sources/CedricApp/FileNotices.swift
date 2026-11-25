@@ -38,9 +38,11 @@ extension EditorWindowController {
         } else {
             encodingBar?.isHidden = true
         }
-        if doc.mixedLineEndings, doc.lineBreaks != nil, !lineEndingNoticeKept, !quiet {
+        let shown = lineEndingShown
+        lastLineEndingShown = shown
+        if shown.mixed, doc.lineBreaks != nil, !lineEndingNoticeKept, !quiet {
             let bar = noticeBar(\.lineEndingBar, symbol: "arrow.turn.down.left")
-            let le = doc.lineEnding
+            let le = shown.ending
             bar.show(String(localized: "This file has mixed line endings (mostly \(le.displayName))."), buttons: [
                 (Self.convertLineEndingsTitle(le), { [weak self] in self?.convertLineEndingsWithUndo(to: le) }),
                 (Self.lineEndingNoticeKeep, { [weak self] in self?.keepMixedLineEndings() }),

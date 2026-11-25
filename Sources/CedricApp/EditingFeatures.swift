@@ -407,6 +407,18 @@ extension EditorWindowController {
         // one after, so each sets them once the text is back.
         if plan.registerBookmarkBefore { registerBookmarks(before, setNow: true) }
         var changed = false
+        // A mixed file's breaks through an edit that keeps every line
+        // (Convert Indentation, Indent, Outdent): each stays as it was
+        // (LineBreakTracking.swift), rather than all becoming the most
+        // common kind, which a save then wrote.
+        keptLineBreaks = nil
+        if plan.replaceText, let breaks = doc.lineBreaks, breaks.isMixed {
+            let ns = storage.string as NSString
+            if NSMaxRange(range) <= ns.length, LineBreaks.keepsLines(ns.substring(with: range) as NSString, replacement as NSString) {
+                keptLineBreaks = (range, breaks.kinds(in: range, of: ns))
+            }
+        }
+        defer { keptLineBreaks = nil }
         if plan.replaceText, textView.shouldChangeText(in: range, replacementString: replacement) {
             storage.beginEditing()
             storage.replaceCharacters(in: range, with: NSAttributedString(string: replacement, attributes: baseAttributes()))
