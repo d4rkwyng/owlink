@@ -1352,6 +1352,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if case .held = binary {
             // Not shown yet (Open Anyway): only what it will show changes.
             binary = .held(d.text)
+            // With its own format (encoding, BOM, line breaks), never the
+            // version before's: Open Anyway shows this text, and a save
+            // after Allow Editing wrote it in the old file's format.
+            doc.apply(d)
             doc.noteDisk(newMod)
             return
         }
