@@ -138,17 +138,17 @@ chmod +x "$APP/Contents/Resources/cedric"
 # (Alternate for MD, JSON, YAML and the catch-all, which hold 0.2.x's
 # claims; None otherwise, so Settings › Default editor for… or Get Info
 # makes Owlink a default for those only when the user asks), and an
-# imported declaration for the few types macOS lacks. A row must have
-# exactly six fields, as DocumentTypes.swift and doctypes-check.sh require.
+# imported declaration for the few types macOS lacks. The rows are read by
+# Scripts/doc-types-rows.sh, as DocumentTypes.swift and doctypes-check.sh
+# read them (exactly six fields, whitespace at the ends ignored, a last
+# row without a newline still read).
 TEXT_TYPES=""
 IMPORTED_TYPES=""
+DOC_ROWS=$(Scripts/doc-types-rows.sh Resources/document-types.txt) || { echo "bundle-app.sh: Resources/document-types.txt is malformed" >&2; exit 1; }
 while IFS= read -r line; do
-    case "$line" in ''|'#'*) continue ;; esac
-    pipes="${line//[^|]/}"
-    [ "${#pipes}" -eq 5 ] || { echo "bundle-app.sh: document-types.txt row '$line': needs exactly 6 fields, has $(( ${#pipes} + 1 ))" >&2; exit 1; }
+    [ -n "$line" ] || continue
     IFS='|' read -r label icon name utis decl rank <<<"$line"
     [ -f "Resources/DocIcons/$icon.icns" ] || { echo "bundle-app.sh: missing Resources/DocIcons/$icon.icns" >&2; exit 1; }
-    case "$rank" in None|Alternate) ;; *) echo "bundle-app.sh: document-types.txt row $label: rank must be None or Alternate, not '$rank'" >&2; exit 1 ;; esac
     items=""
     IFS=',' read -ra U <<<"$utis"
     for u in "${U[@]}"; do items+="                <string>$u</string>
@@ -188,7 +188,7 @@ $items            </array>
         </dict>
 "
     fi
-done < Resources/document-types.txt
+done <<<"$DOC_ROWS"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

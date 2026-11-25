@@ -41,6 +41,31 @@ for line in open(src):
         continue
     label, icon, name, utis, decl, rank = f
     rows.append((label, icon, name, utis.split(','), decl, rank))
+# bundle-app.sh's reader (Scripts/doc-types-rows.sh) reads the same rows,
+# also from a copy with whitespace after each row (a space, a tab, a CR)
+# and no newline after the last: it rejected the first and skipped the
+# last row without a word.
+import subprocess, tempfile
+want = ['|'.join((l, i, n, ','.join(u), d, r)) for l, i, n, u, d, r in rows]
+def rows_by_bash(path):
+    p = subprocess.run(['Scripts/doc-types-rows.sh', path], capture_output=True, text=True)
+    return p.returncode, p.stdout.splitlines(), p.stderr.strip()
+code, got, err = rows_by_bash(src)
+check(code == 0 and got == want, f"bundle-app.sh's reader reads the rows as Python does ({code} {err})")
+with open(src) as f:
+    lines = f.read().split('\n')
+odd = []
+for k, l in enumerate(lines):
+    s = l.strip()
+    odd.append(l if not s or s.startswith('#') else l + ['  ', '\t', ' \r'][k % 3])
+with tempfile.NamedTemporaryFile('w', suffix='.txt', delete=False) as t:
+    t.write('\n'.join(odd).rstrip('\n'))
+    oddpath = t.name
+try:
+    code, got, err = rows_by_bash(oddpath)
+    check(code == 0 and got == want, f"…and with whitespace after rows and no final newline ({code} {err}, {len(got)} of {len(want)} rows)")
+finally:
+    os.unlink(oddpath)
 docs = pl.get('CFBundleDocumentTypes', [])
 by_name = {d.get('CFBundleTypeName'): d for d in docs}
 for label, icon, name, utis, decl, rank in rows:
@@ -60,10 +85,12 @@ check(not any(d.get('LSHandlerRank') in ('Owner', 'Default') or 'LSHandlerRank' 
 check(not any('CFBundleTypeIconSystemGenerated' in d for d in docs), "no CFBundleTypeIconSystemGenerated")
 claims = [u for label, icon, name, utis, decl, rank in rows if label != '*' for u in utis]
 check(len(claims) == len(set(claims)), "no content type is in two labelled types")
-# Alternate claims are exactly 0.2.x's Text entry's, each once, so no
-# default changes. Only MD, JSON and YAML hold theirs in their labelled
-# row (Finder shows that row's icon); a labelled row at Alternate for
-# public.xml or public.css took them from Safari on a clean macOS 26 VM.
+# Alternate claims are exactly 0.2.x's Text entry's, each once: claim
+# parity with 0.5.3 (the same content types at the same ranks), which is
+# all this checks; which app macOS picks is Launch Services' call. Only
+# MD, JSON and YAML hold theirs in their labelled row (Finder shows that
+# row's icon); a labelled row at Alternate for public.xml or public.css
+# took them from Safari on a clean macOS 26 VM (1653a51).
 labelled_alt = sorted(name for label, icon, name, utis, decl, rank in rows if label != '*' and rank == 'Alternate')
 check(labelled_alt == ['JSON', 'Markdown', 'YAML'], f"Alternate labelled rows are exactly MD, JSON, YAML: {labelled_alt}")
 alt = [u for d in docs if d.get('CFBundleTypeName') in text_names and d.get('LSHandlerRank') == 'Alternate'
