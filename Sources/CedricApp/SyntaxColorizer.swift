@@ -52,12 +52,36 @@ final class SyntaxColorizer {
         // or by applyAppearance); restyling 636 K characters would cost a
         // full relayout.
         if paused { return }
+        // Text just set (open, reload) or restyled by a theme change is
+        // in the text colour already, one run of it: restyling it again
+        // cost a full pass (9.5 ms on 10 MB). Any token colour, or another
+        // text colour, and the pass runs.
         if storage.length > 0, !tv.hasMarkedText() {
-            storage.beginEditing()
-            storage.addAttribute(.foregroundColor, value: foreground, range: NSRange(location: 0, length: storage.length))
-            storage.endEditing()
+            if Self.isWhollyColored(storage, foreground) {
+                fullPassesSkipped &+= 1
+            } else {
+                storage.beginEditing()
+                storage.addAttribute(.foregroundColor, value: foreground, range: NSRange(location: 0, length: storage.length))
+                storage.endEditing()
+                fullPasses &+= 1
+            }
         }
         colorViewport()
+    }
+
+    /// For the checks: whole-text recolour passes made and skipped.
+    private(set) var fullPasses = 0
+    private(set) var fullPassesSkipped = 0
+
+    /// Every character of `storage` has `color` as its foreground: one
+    /// run of it from the start to the end. Stops at the first other
+    /// colour (a token's, near the start in coloured text).
+    static func isWhollyColored(_ storage: NSAttributedString, _ color: NSColor) -> Bool {
+        let all = NSRange(location: 0, length: storage.length)
+        guard all.length > 0 else { return true }
+        var run = NSRange(location: 0, length: 0)
+        let first = storage.attribute(.foregroundColor, at: 0, longestEffectiveRange: &run, in: all) as? NSColor
+        return run == all && first == color
     }
 
     /// After an edit: lines `firstLine...lastLine` (after the edit) changed;
