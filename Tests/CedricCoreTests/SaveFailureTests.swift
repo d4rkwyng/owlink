@@ -70,7 +70,7 @@ import Testing
         let error = try #require(thrown)
         #expect(SaveFailure.cause(of: error) == .notAFile, "\(error)")
         expectPlain(SaveFailure.text(for: error, saving: url, offer: .saveAs), name: "fifo.md",
-                    reason: "is not a regular file any more (it is a pipe or a device)")
+                    reason: "is not a regular file any more (it is a pipe, a socket or a device)")
     }
 
     @Test func eachCauseHasPlainWords() {
@@ -80,7 +80,8 @@ import Testing
         }
         let cases: [(Error, SaveFailure.Cause, String)] = [
             (posix(EBUSY), .changedWhileSaving, "replaced or changed while Owlink was saving it"),
-            (posix(ENXIO), .notAFile, "it is a pipe or a device"),
+            (posix(ENXIO), .notAFile, "it is a pipe, a socket or a device"),
+            (posix(EISDIR), .folder, "is a folder now, not a file"),
             (posix(ENOSPC, .fileWriteOutOfSpace), .outOfSpace, "isn’t enough space on the disk"),
             (CocoaError(.fileWriteOutOfSpace), .outOfSpace, "isn’t enough space on the disk"),
             (posix(EDQUOT, .fileWriteOutOfSpace), .outOfSpace, "isn’t enough space on the disk"),
@@ -114,8 +115,11 @@ import Testing
         let url = URL(fileURLWithPath: "/tmp/f/locked.md")
         for reason in [FileWriteAccess.Blocked.permissions, .locked, .readOnlyVolume] {
             let t = SaveFailure.text(for: ReadOnlyFileError(url: url, reason: reason), saving: url, offer: .saveAs)
-            #expect(t.message == "“locked.md” is read-only.")
-            #expect(t.detail == FileWriteAccess.notice(reason, name: "locked.md"))
+            // 0.5.4 QA (should round 2): a locked file's headline says
+            // locked, and the detail says the text is still in the tab, as
+            // every other save failure does.
+            #expect(t.message == (reason == .locked ? "“locked.md” is locked." : "“locked.md” is read-only."))
+            #expect(t.detail == FileWriteAccess.notice(reason, name: "locked.md") + " Your text is still in this tab.")
             #expect(t.detail.contains("Save As"))
         }
     }
@@ -142,7 +146,7 @@ import Testing
             let copy = SaveFailure.text(for: error, saving: url, offer: .saveCopy)
             let export = SaveFailure.text(for: error, saving: url, offer: .none)
             for t in [copy, export] {
-                #expect(t.message == "“locked.html” is read-only.")
+                #expect(t.message == (reason == .locked ? "“locked.html” is locked." : "“locked.html” is read-only."))
                 #expect(!t.detail.contains("Save As"), "\(reason): \(t.detail)")
                 #expect(t.detail.contains("Your text is still in this tab"), "\(t.detail)")
                 #expect(t.detail.hasPrefix(reason == .readOnlyVolume ? "“locked.html” is on a read-only volume." : "“locked.html” is "), "\(t.detail)")

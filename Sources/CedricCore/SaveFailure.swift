@@ -13,6 +13,8 @@ public enum SaveFailure {
         case changedWhileSaving
         /// Not a regular file: a pipe, a socket or a device (ENXIO, EOPNOTSUPP…).
         case notAFile
+        /// A folder where the file was (EISDIR).
+        case folder
         /// The disk (or this user's quota) is full.
         case outOfSpace
         /// Bigger than the volume or the file-size limit allows (EFBIG).
@@ -76,7 +78,8 @@ public enum SaveFailure {
     private static func cause(posix code: Int32, _ ns: NSError) -> Cause {
         switch code {
         case EBUSY: return .changedWhileSaving
-        case ENXIO, EOPNOTSUPP, ENOTSUP, ESPIPE, EISDIR, ENODEV: return .notAFile
+        case EISDIR: return .folder
+        case ENXIO, EOPNOTSUPP, ENOTSUP, ESPIPE, ENODEV: return .notAFile
         case ENOSPC, EDQUOT: return .outOfSpace
         case EFBIG: return .tooBig
         case EROFS: return .readOnlyVolume
@@ -98,8 +101,10 @@ public enum SaveFailure {
         let reason: String
         switch cause {
         case .readOnly(let blocked) where offer == .saveAs:
-            // The same words as ⌘S on a file that is read-only already.
-            return Text(message: String(localized: "“\(name)” is read-only."), detail: FileWriteAccess.notice(blocked, name: name))
+            // The same words as ⌘S on a file that is read-only already, and
+            // like every other failure, that the text is still in the tab.
+            return Text(message: readOnlyMessage(blocked, name: name),
+                        detail: FileWriteAccess.notice(blocked, name: name) + " " + String(localized: "Your text is still in this tab."))
         case .readOnly(let blocked):
             // A copy or an export: no "use Save As" (Codex round 2), the
             // alert's own action follows.
@@ -109,11 +114,13 @@ public enum SaveFailure {
             case .locked: why = String(localized: "“\(name)” is locked (you can unlock it in the Finder’s Get Info).")
             case .readOnlyVolume: why = String(localized: "“\(name)” is on a read-only volume.")
             }
-            return Text(message: String(localized: "“\(name)” is read-only."), detail: why + " " + next(offer))
+            return Text(message: readOnlyMessage(blocked, name: name), detail: why + " " + next(offer))
         case .changedWhileSaving:
             reason = String(localized: "“\(name)” was replaced or changed while Owlink was saving it, so Owlink stopped rather than write over it.")
         case .notAFile:
-            reason = String(localized: "“\(name)” is not a regular file any more (it is a pipe or a device), so Owlink can’t save into it.")
+            reason = String(localized: "“\(name)” is not a regular file any more (it is a pipe, a socket or a device), so Owlink can’t save into it.")
+        case .folder:
+            reason = String(localized: "“\(name)” is a folder now, not a file, so Owlink can’t save into it.")
         case .outOfSpace:
             reason = String(localized: "There isn’t enough space on the disk to save “\(name)”.")
         case .tooBig:
@@ -130,6 +137,12 @@ public enum SaveFailure {
             reason = said
         }
         return Text(message: String(localized: "Couldn’t save “\(name)”."), detail: reason + " " + next(offer))
+    }
+
+    /// The bold line for a read-only file: "is locked" for a locked one
+    /// (unlocking it is the fix, not permissions).
+    private static func readOnlyMessage(_ blocked: FileWriteAccess.Blocked, name: String) -> String {
+        blocked == .locked ? String(localized: "“\(name)” is locked.") : String(localized: "“\(name)” is read-only.")
     }
 
     /// What is left, and what the alert's button does.
