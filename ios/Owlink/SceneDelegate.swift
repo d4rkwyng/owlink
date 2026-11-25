@@ -174,9 +174,8 @@ enum TestLaunch {
         return true
     }
 
-    #if DEBUG
+    /// For the tests (any configuration): lets the next launch claim it again.
     @MainActor static func resetFreshSampleClaim() { freshSampleConsumed = false }
-    #endif
 
     /// `-OwlinkFreshSample`: puts the bundled `sample` at `url` as if it
     /// were new. An earlier test's unsaved text for that document (its
@@ -209,6 +208,7 @@ enum TestLaunch {
             }
         } catch {
             if fm.fileExists(atPath: staged.path) { try? fm.removeItem(at: staged) }
+            restoreOriginalIfRelocated(error: error, to: url, fileManager: fm)
             NSLog("Owlink: -OwlinkFreshSample couldn't put %@ at %@ (%@); its recovery record is kept",
                   sample.path, url.path, String(describing: error))
             return false
@@ -217,6 +217,19 @@ enum TestLaunch {
         let clear = { for path in paths { recovery.clear(documentPath: path) } }
         if let queue { queue.sync(execute: clear) } else { clear() }
         return true
+    }
+
+    /// A failed `replaceItemAt` can leave the original moved aside (named
+    /// in the error's `NSFileOriginalItemLocationKey`) with nothing at
+    /// `url`; this puts it back so the document is never lost. (The key is
+    /// documented in NSFileManager.h but not exported as a symbol.)
+    static let originalItemLocationKey = "NSFileOriginalItemLocationKey"
+
+    static func restoreOriginalIfRelocated(error: Error, to url: URL, fileManager fm: FileManager = .default) {
+        guard !fm.fileExists(atPath: url.path),
+              let original = (error as NSError).userInfo[originalItemLocationKey] as? URL,
+              fm.fileExists(atPath: original.path) else { return }
+        try? fm.moveItem(at: original, to: url)
     }
 }
 
