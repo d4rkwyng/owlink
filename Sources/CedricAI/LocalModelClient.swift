@@ -91,6 +91,10 @@ public struct LocalModelClient: Sendable {
     var deadlineSleep: @Sendable (TimeInterval) async throws -> Void = {
         try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000))
     }
+    /// What `send` gives URLSession as the request's own timeout (the wait
+    /// between packets); nil: `timeout`. Tests that take the overall
+    /// deadline off the wall clock take this one off too.
+    var requestTimeout: TimeInterval? = nil
 
     public init(baseURL: URL, timeout: TimeInterval = 20, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -312,7 +316,7 @@ public struct LocalModelClient: Sendable {
 
     private func send(_ request: URLRequest) async throws -> Data {
         var request = request
-        request.timeoutInterval = timeout
+        request.timeoutInterval = requestTimeout ?? timeout
         do {
             let (data, response) = try await fetch(request)
             guard let http = response as? HTTPURLResponse else { throw LocalAIError.badResponse }
