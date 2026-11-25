@@ -187,6 +187,17 @@ final class SettingsAndCloseTests: XCTestCase {
         rebuilds += count
     }
 
+    /// The pending retry's timer fires (UIKit's rebuild recorded, not
+    /// done). Returns whether it asked UIKit for a rebuild.
+    @discardableResult private func fireRetry() -> Bool {
+        var asked = false
+        let saved = MenuBar.rebuildMenus
+        MenuBar.rebuildMenus = { asked = true }
+        MenuBar.firePendingRetryForTesting()
+        MenuBar.rebuildMenus = saved
+        return asked
+    }
+
     /// 0.5.2 (18): with the app menu's Settings… there, the whole
     /// `.preferences` menu is replaced by Owlink's (not only its children,
     /// which could leave the system's ⌘, to open the system Settings app),
@@ -235,6 +246,9 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertEqual(again.replaced.filter { $0.0 == .preferences }.count, 1)
         XCTAssertTrue(again.settingsInserted.isEmpty)
         // Still none (a system without that item): no endless rebuilds.
+        // (The first build's retry is still pending, so this build asks
+        // for no other; that retry, when it fires, rebuilds, since this
+        // build has no Settings…: testPresentThenAbsentAppMenuSettingsRetriesAgain.)
         applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
         XCTAssertEqual(rebuilds, 1)
     }
@@ -252,6 +266,8 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertTrue(first.replaced.isEmpty)
         XCTAssertEqual(first.settingsInserted.count, 1)
         XCTAssertEqual(rebuilds, 1, "no rebuild asked for without the app menu's Settings…")
+        // The retry fires and asks UIKit for the rebuild.
+        XCTAssertTrue(fireRetry(), "the pending retry didn't ask for a rebuild")
         // The rebuild: still no Settings… in the app menu.
         let second = RecordingBuilder(present: [.find, .spelling, .format])
         applyMenuBar(second, rebuilds: &rebuilds)
@@ -272,7 +288,8 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertTrue(third.settingsInserted.isEmpty, "Settings… is in the menu bar twice")
         XCTAssertTrue(MenuBar.appSettingsReplaced)
         XCTAssertEqual(rebuilds, 2, "a rebuild was asked for after Settings… was replaced")
-        // Replaced: later builds and a scene becoming active ask for none.
+        // Replaced: later builds and a scene becoming active ask for none
+        // (no second retry next to the one still pending).
         applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
         var activations = 0
         let saved = MenuBar.requestRebuild
@@ -298,6 +315,7 @@ final class SettingsAndCloseTests: XCTestCase {
             let b = RecordingBuilder(present: [.find, .spelling, .format])
             MenuBar.apply(to: b)
             XCTAssertEqual(b.settingsInserted.count, 1)
+            fireRetry() // the next build is the rebuild it asks for
         }
         MenuBar.sceneDidActivate()
         XCTAssertEqual(attempts, Array(1...MenuBar.maxAppSettingsRebuilds))
@@ -316,6 +334,9 @@ final class SettingsAndCloseTests: XCTestCase {
         defer { MenuBar.resetRebuildForTesting() }
         var rebuilds = 0
         applyMenuBar(RecordingBuilder(present: [.find, .spelling, .format]), rebuilds: &rebuilds)
+        // Its retry has fired (and its rebuild hasn't come, or still had
+        // no Settings…): none is pending when the scene becomes active.
+        fireRetry()
         var activations = 0
         let saved = MenuBar.requestRebuild
         MenuBar.requestRebuild = { _ in activations += 1 }
@@ -326,6 +347,109 @@ final class SettingsAndCloseTests: XCTestCase {
         applyMenuBar(later, rebuilds: &rebuilds)
         XCTAssertEqual(later.replaced.filter { $0.0 == .preferences }.count, 1)
         XCTAssertTrue(MenuBar.appSettingsReplaced)
+    }
+
+    /// Astra's hole (0.5.2 (18) review, round 2): replaced once was
+    /// recorded for the life of the process, so a later build without
+    /// `.preferences` (the Cedric menu's Settings… back, the system's
+    /// item gone) never retried, and a system item added after it took
+    /// ⌘, again. Now the current build decides: present → absent starts
+    /// the retries again, and the late `.preferences` is replaced.
+    func testPresentThenAbsentAppMenuSettingsRetriesAgain() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var rebuilds = 0
+        let present = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        applyMenuBar(present, rebuilds: &rebuilds)
+        XCTAssertEqual(present.replaced.filter { $0.0 == .preferences }.count, 1)
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
+        XCTAssertEqual(rebuilds, 0)
+        XCTAssertFalse(MenuBar.retryPendingForTesting)
+        // A later build without it: Settings… in the Cedric menu, and a retry.
+        let absent = RecordingBuilder(present: [.find, .spelling, .format])
+        applyMenuBar(absent, rebuilds: &rebuilds)
+        XCTAssertTrue(absent.replaced.isEmpty)
+        XCTAssertEqual(absent.settingsInserted.count, 1)
+        XCTAssertFalse(MenuBar.appSettingsReplaced, "replaced stuck from an earlier build")
+        XCTAssertEqual(rebuilds, 1, "present → absent didn't start the retries again")
+        XCTAssertTrue(fireRetry(), "the retry after present → absent didn't ask for a rebuild")
+        XCTAssertEqual(MenuBar.appSettingsRebuilds, 1)
+        // Still absent on that rebuild: the next retry.
+        applyMenuBar(RecordingBuilder(present: [.find, .spelling, .format]), rebuilds: &rebuilds)
+        XCTAssertEqual(rebuilds, 2)
+        XCTAssertTrue(fireRetry())
+        // The late `.preferences`: replaced whole, nothing more asked for.
+        let late = RecordingBuilder(present: [.preferences, .find, .spelling, .format])
+        applyMenuBar(late, rebuilds: &rebuilds)
+        let prefs = late.replaced.filter { $0.0 == .preferences }
+        XCTAssertEqual(prefs.count, 1, "the late app menu Settings… wasn't replaced")
+        XCTAssertEqual(prefs.first?.1.identifier, MenuBar.settingsMenuIdentifier)
+        XCTAssertTrue(late.settingsInserted.isEmpty, "Settings… is in the menu bar twice")
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
+        XCTAssertEqual(rebuilds, 2)
+        XCTAssertFalse(MenuBar.retryPendingForTesting)
+    }
+
+    /// Sol's must-fix (0.5.2 (18) review, round 2): the cap counted
+    /// timers queued, so a burst of builds and scene activations queued
+    /// overlapping timers and spent the budget at once. Now a burst
+    /// before the first timer fires leaves one retry pending; the budget
+    /// is spent by retries delivered, one at a time, on the doubling
+    /// back-off up to its eight-second plateau; and a retry whose time
+    /// comes after `.preferences` was replaced does nothing.
+    func testABurstOfBuildsAndActivationsLeavesOneRetryPending() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var scheduled: [Int] = []
+        let saved = MenuBar.requestRebuild
+        MenuBar.requestRebuild = { scheduled.append($0) }
+        defer { MenuBar.requestRebuild = saved }
+        // The burst, before any timer fires.
+        for _ in 0..<5 {
+            MenuBar.apply(to: RecordingBuilder(present: [.find, .spelling, .format]))
+            MenuBar.sceneDidActivate()
+        }
+        XCTAssertEqual(scheduled, [1], "overlapping retries were scheduled")
+        XCTAssertTrue(MenuBar.retryPendingForTesting)
+        XCTAssertEqual(MenuBar.appSettingsRebuilds, 0, "a retry counted before it was delivered")
+        // Delivered one at a time: each fire, then its rebuild (and another
+        // burst) schedules exactly the next, until the cap.
+        for n in 1...MenuBar.maxAppSettingsRebuilds {
+            XCTAssertTrue(fireRetry(), "retry \(n) didn't ask for a rebuild")
+            XCTAssertEqual(MenuBar.appSettingsRebuilds, n)
+            XCTAssertFalse(MenuBar.retryPendingForTesting)
+            for _ in 0..<3 {
+                MenuBar.apply(to: RecordingBuilder(present: [.find, .spelling, .format]))
+                MenuBar.sceneDidActivate()
+            }
+        }
+        XCTAssertEqual(scheduled, Array(1...MenuBar.maxAppSettingsRebuilds))
+        XCTAssertFalse(MenuBar.retryPendingForTesting, "a retry past the cap")
+        XCTAssertFalse(fireRetry())
+        // The back-off: a quarter second, doubling, then eight seconds.
+        XCTAssertEqual(scheduled.map { MenuBar.rebuildDelay(attempt: $0) },
+                       [0.25, 0.5, 1, 2, 4, 8, 8, 8, 8, 8, 8, 8])
+        XCTAssertEqual(MenuBar.rebuildDelay(attempt: 40), 8)
+    }
+
+    /// A retry pending when a build replaces `.preferences` does nothing
+    /// when its time comes: no rebuild, not counted.
+    func testARetryAfterReplacementDoesNotRebuild() {
+        MenuBar.resetRebuildForTesting()
+        defer { MenuBar.resetRebuildForTesting() }
+        var rebuilds = 0
+        applyMenuBar(RecordingBuilder(present: [.find, .spelling, .format]), rebuilds: &rebuilds)
+        XCTAssertEqual(rebuilds, 1)
+        XCTAssertTrue(MenuBar.retryPendingForTesting)
+        // Another build (the system's own) finds and replaces it first.
+        applyMenuBar(RecordingBuilder(present: [.preferences, .find, .spelling, .format]), rebuilds: &rebuilds)
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
+        XCTAssertFalse(fireRetry(), "a retry after replacement asked for a rebuild")
+        XCTAssertEqual(MenuBar.appSettingsRebuilds, 0, "a skipped retry was counted")
+        XCTAssertFalse(MenuBar.retryPendingForTesting)
+        XCTAssertEqual(rebuilds, 1)
+        MenuBar.sceneDidActivate()
+        XCTAssertFalse(MenuBar.retryPendingForTesting, "becoming active scheduled a retry with Settings… replaced")
     }
 
     /// ⌘, is also on the responders that stay in the chain whatever holds

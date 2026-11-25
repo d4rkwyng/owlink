@@ -1283,10 +1283,12 @@ final class OwlinkUITests: XCTestCase {
             primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
             openAsk(app, sheet: true)
             waitForAskSheetToSettle(app)
-            // Odd launches: the Ask field holds the keys (it took a plain
+            // Launches 1, 2, 3, 5 and 7 (launch 2 among them: the failing
+            // one): the Ask field holds the keys (it took a plain
             // character, so it is first responder) when ⌘, comes, still
-            // the launch's first shortcut. Even launches: the sheet as opened.
-            let fieldFocused = launchNumber % 2 == 1
+            // the launch's first shortcut. Launches 4, 6 and 8: the sheet
+            // as opened, nothing typed.
+            let fieldFocused = launchNumber == 2 || launchNumber % 2 == 1
             if fieldFocused {
                 let field = app.descendants(matching: .any)["ask.field"].firstMatch
                 XCTAssertTrue(field.waitForExistence(timeout: 5), "launch \(launchNumber): no Ask field")
