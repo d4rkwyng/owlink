@@ -135,15 +135,28 @@ public enum DocumentWrite {
         try write(data, to: url, fileManager: fm, afterCheck: nil)
     }
 
-    /// Failures the tests inject into the in-place save (`overwrite`).
-    struct Faults {
+    /// Failures the tests (and the app's check builds) inject into the
+    /// in-place save (`overwrite`).
+    public struct Faults: Sendable {
         /// Write this many bytes of the new text, then fail with EIO.
-        var failWriteAfter: Int?
+        public var failWriteAfter: Int?
         /// Fail putting the file back with EIO.
-        var failRestore = false
+        public var failRestore = false
         /// Skip the file-size limit check, so the kernel's limit is hit
         /// part way through the write.
-        var skipSizeLimit = false
+        public var skipSizeLimit = false
+        public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false) {
+            self.failWriteAfter = failWriteAfter
+            self.failRestore = failRestore
+            self.skipSizeLimit = skipSizeLimit
+        }
+    }
+
+    /// `write(_:to:)` with `faults` injected into an in-place save (check
+    /// builds: a save that fails part way through the file, in the app).
+    @discardableResult
+    public static func write(_ data: Data, to url: URL, faults: Faults) throws -> DiskStamp {
+        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults)
     }
 
     /// `afterCheck`: tests only, runs between the check and the write.

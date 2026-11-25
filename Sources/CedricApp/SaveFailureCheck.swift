@@ -60,6 +60,11 @@ extension DevChecks {
                 guard let tab else { return }
                 sheetButton(tab, "Cancel")?.performClick(nil)
                 expect(tab.text == "mine one\n" && tab.doc.isDirty, "save failure: Cancel keeps the text, unsaved", tab.text)
+            },
+            // ⌘S only once the alert has gone: with a sheet still attached
+            // AppKit may not send it to the tab.
+            waitFor("save failure: the alert is dismissed") { tab?.window?.attachedSheet == nil },
+            sync {
                 // Codex round 2: and Save As… from the same alert saves it elsewhere.
                 key("s", [.command])
             },

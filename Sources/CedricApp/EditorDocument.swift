@@ -206,6 +206,10 @@ final class EditorDocument {
         return TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding)
     }
 
+    /// Checks only (DevEnvironment.checksEnabled): a fault for the next
+    /// save to hit, once (an in-place save that fails part way).
+    static var checkWriteFaults: DocumentWrite.Faults?
+
     /// Writes `text` to `url` in this document's encoding and line ending.
     func write(_ text: String, to url: URL) throws {
         guard let data = encoded(text) else {
@@ -215,7 +219,13 @@ final class EditorDocument {
         // Through a symbolic link: replace its target (keeping the link and
         // the target's permissions), not the link itself; never a read-only
         // file (FileWriteAccess: permissions, locked, read-only volume).
-        let stamp = try DocumentWrite.write(data, to: url)
+        let stamp: DiskStamp
+        if DevEnvironment.checksEnabled, let faults = Self.checkWriteFaults {
+            Self.checkWriteFaults = nil
+            stamp = try DocumentWrite.write(data, to: url, faults: faults)
+        } else {
+            stamp = try DocumentWrite.write(data, to: url)
+        }
         fileURL = url
         noteDisk(stamp)
         lastSavedStamp = stamp

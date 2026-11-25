@@ -125,7 +125,56 @@ extension DevChecks {
                 expect(disk() == "clean reload\n" && !tab.doc.isDirty && !tab.doc.missingOnDisk && tab.diskBar?.isHidden == true,
                        "Save writes it back where it was", disk())
             },
-        ] + conflictWordingSteps(app) + linkSteps(app))
+        ] + conflictWordingSteps(app) + ownFailedSaveSteps(app) + linkSteps(app))
+    }
+
+    /// 0.5.4 QA (should round 2): the failed-save-to-conflict path through
+    /// the tab, not only the writer: a save in place (the folder refuses
+    /// a new file) that fails part way is recorded by the tab
+    /// (`failedSaveStamp`), and the next ⌘S's sheet says Owlink's own save
+    /// didn't finish.
+    static func ownFailedSaveSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let url = write("own-failed/own.txt", "original text\n")
+        let folder = url.deletingLastPathComponent()
+        // Older than the failed save's own write, so that write is a change.
+        try? FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: url.path)
+        var tab: EditorWindowController!
+        func detail() -> String { sheetTexts(tab).dropFirst().joined(separator: " ") }
+        return [
+            sync {
+                guard let t = app.open(url) else { expect(false, "own failed save: opened own.txt"); return }
+                tab = t
+                sized(t)
+                focus(t)
+                t.textView.setSelectedRange(NSRange(location: 13, length: 0))
+                type(" and more")
+                expect(chmod(folder.path, 0o555) == 0, "own failed save: the folder refuses new files")
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failWriteAfter: 4)
+                key("s", [.command])
+            },
+            sync {
+                expect(EditorDocument.checkWriteFaults == nil, "own failed save: the save hit the fault")
+                expect(sheetTexts(tab).first == "Couldn’t save “own.txt”.", "own failed save: the save failed and says so",
+                       sheetTexts(tab).joined(separator: " | "))
+                expect(tab.doc.failedSaveStamp != nil, "own failed save: the tab recorded how its save left the file")
+                expect((try? String(contentsOf: url, encoding: .utf8)) == "original text\n", "own failed save: …the file put back")
+                sheetButton(tab, "Cancel")?.performClick(nil)
+            },
+            waitFor("own failed save: the alert is gone") { tab.window?.attachedSheet == nil },
+            sync { key("s", [.command]) },
+            sync {
+                expect(detail().hasPrefix("Owlink’s last save of it from this tab didn’t finish"),
+                       "own failed save: the next ⌘S says Owlink's own save didn't finish", detail())
+                expect(!detail().contains("another app"), "own failed save: …not another app", detail())
+                sheetButton(tab, "Cancel")?.performClick(nil)
+            },
+            waitFor("own failed save: the sheet is gone") { tab.window?.attachedSheet == nil },
+            sync {
+                chmod(folder.path, 0o755)
+                tab.doc.markSaved()
+                tab.window?.performClose(nil)
+            },
+        ]
     }
 
     /// The sheet says what Owlink knows: changed since this tab saved it,
