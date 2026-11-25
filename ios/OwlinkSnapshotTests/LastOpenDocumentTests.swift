@@ -36,7 +36,7 @@ final class LastOpenDocumentTests: XCTestCase {
         let d = defaults()
         XCTAssertNil(d.object(forKey: AppSettings.Key.reopenFilesFromLastSession))
         XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d))
-        XCTAssertTrue(SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: nil))
+        XCTAssertTrue(SessionReopenPolicy.shouldReopen(explicit: nil))
         d.set(false, forKey: AppSettings.Key.reopenFilesFromLastSession)
         XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
         d.set(true, forKey: AppSettings.Key.reopenFilesFromLastSession)
@@ -45,6 +45,35 @@ final class LastOpenDocumentTests: XCTestCase {
 
     func testKeyIsSharedWithTheMac() {
         XCTAssertEqual(AppSettings.Key.reopenFilesFromLastSession, "reopenFilesFromLastSession")
+        XCTAssertEqual(AppSettings.Key.reopenFilesFromLastSession, SessionReopenPolicy.key)
+    }
+
+    /// A launch argument (`-reopenFilesFromLastSession NO`) arrives as a
+    /// string: it counts, as on the Mac (ccdb2d8). Before, `as? Bool` read
+    /// it as unset, so reopen stayed on.
+    func testLaunchArgumentStringsCount() {
+        let d = defaults()
+        d.set("NO", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
+        d.set("YES", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d))
+        d.removeObject(forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertTrue(AppSettings.reopenFilesFromLastSession(in: d), "unset: on")
+    }
+
+    /// Grok 4.7 review (0.5.2 parity, NIT 3): the Settings toggle shows
+    /// what launch reads. An `@AppStorage` Bool read the launch argument's
+    /// string as unset (on) while launch read it as off.
+    func testSettingsToggleReadsAsLaunchDoes() {
+        let d = defaults()
+        d.set("NO", forKey: AppSettings.Key.reopenFilesFromLastSession)
+        XCTAssertNil(d.object(forKey: AppSettings.Key.reopenFilesFromLastSession) as? Bool, "what @AppStorage saw: unset, so on")
+        XCTAssertFalse(AppSettings.reopenFilesFromLastSession(in: d))
+        XCTAssertEqual(AppSettings.reopenFilesFromLastSession(in: d), SessionReopenPolicy.shouldReopen(in: d))
+        XCTAssertTrue(AppSettings.setReopenFilesFromLastSession(true, in: d))
+        XCTAssertTrue(SessionReopenPolicy.shouldReopen(in: d))
+        XCTAssertFalse(AppSettings.setReopenFilesFromLastSession(false, in: d))
+        XCTAssertFalse(SessionReopenPolicy.shouldReopen(in: d))
     }
 
     // MARK: Store

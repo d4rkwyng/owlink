@@ -44,6 +44,13 @@ final class BlobProtocol: URLProtocol, @unchecked Sendable {
         /// 4). A real dropped connection comes after bytes the app has
         /// already received, which is what the test is about.
         var dropWhen: (@Sendable () -> Bool)?
+        /// Stop sending after this many bytes until the test sets it to nil
+        /// (`update`) or the task stops (pause, cancel); at most 60 s. A
+        /// test that pauses or cancels mid-download needs the download not
+        /// to finish first: unheld, the whole body arrives in well under a
+        /// second, and a runner that stalls the test that long finds the
+        /// partial already installed and gone (macos-26 CI).
+        var holdAfter: Int?
     }
     private static let lock = NSLock()
     nonisolated(unsafe) private static var blobs: [String: Blob] = [:]
@@ -97,6 +104,12 @@ final class BlobProtocol: URLProtocol, @unchecked Sendable {
             var sent = 0
             while sent < body.count {
                 if stopped.value { return }
+                if let hold = blob.holdAfter, sent >= hold {
+                    let deadline = Date().addingTimeInterval(60)
+                    while !stopped.value, Date() < deadline,
+                          Self.lock.withLock({ Self.blobs[url.path]?.holdAfter }) != nil { Thread.sleep(forTimeInterval: 0.001) }
+                    if stopped.value { return }
+                }
                 if let drop = blob.dropAfter, sent >= drop {
                     if let ready = blob.dropWhen {
                         let deadline = Date().addingTimeInterval(5)
@@ -171,7 +184,7 @@ func randomBlob(_ n: Int) -> Data {
         let old = try #require(catalog.model(id: "qwen2.5-coder-3b-instruct-q4_k_m"))
         #expect(!old.isDefault)
         #expect(old.license.contains("non-commercial"))
-        #expect(old.summary.hasPrefix("Non-commercial licence"))
+        #expect(old.summary.hasPrefix("Non-commercial license"))
         for m in catalog.models where m.license.lowercased().contains("non-commercial") { #expect(!m.isDefault) }
     }
 
@@ -280,12 +293,15 @@ func randomBlob(_ n: Int) -> Data {
     @Test func pauseKeepsThePartialAndResumeUsesRange() async throws {
         let body = randomBlob(400_000)
         let model = testModel(body: body)
-        BlobProtocol.serve(model.url.path, .init(data: body, chunk: 4096, delay: 0.003))
+        // Held at 40,960 bytes (ten chunks) until resumed below, so the
+        // pause always lands mid-download however long the runner stalls.
+        BlobProtocol.serve(model.url.path, .init(data: body, chunk: 4096, delay: 0, holdAfter: 40_960))
         let dir = tempDir()
         let store = ModelStore(directory: dir)
         let dl = downloader(dir)
         try await dl.start(model)
-        #expect(await eventually { store.partialBytes(model) > 40_000 })
+        // Can't overrun now, so a generous window: it returns once the held bytes are written.
+        #expect(await eventually(seconds: 30) { store.partialBytes(model) >= 40_960 })
         await dl.pause(model)
         let paused = await dl.waitUntilSettled(model)
         guard case .paused(let got, let total) = paused else { Issue.record("not paused: \(paused)"); return }
@@ -294,7 +310,7 @@ func randomBlob(_ n: Int) -> Data {
         // A fresh downloader (as after a relaunch) sees the partial.
         let again = downloader(dir)
         #expect(await again.state(of: model) == .paused(received: got, total: Int64(body.count)))
-        BlobProtocol.update(model.url.path) { $0.delay = 0 }
+        BlobProtocol.update(model.url.path) { $0.holdAfter = nil }
         try await again.start(model)
         #expect(await again.waitUntilSettled(model) == .installed)
         #expect(BlobProtocol.ranges(model.url.path) == [nil, "bytes=\(got)-"])
@@ -340,12 +356,13 @@ func randomBlob(_ n: Int) -> Data {
     @Test func cancelDeletesThePartial() async throws {
         let body = randomBlob(400_000)
         let model = testModel(body: body)
-        BlobProtocol.serve(model.url.path, .init(data: body, chunk: 4096, delay: 0.003))
+        // Held at 20,480 bytes (five chunks): the cancel always lands mid-download.
+        BlobProtocol.serve(model.url.path, .init(data: body, chunk: 4096, delay: 0, holdAfter: 20_480))
         let dir = tempDir()
         let store = ModelStore(directory: dir)
         let dl = downloader(dir)
         try await dl.start(model)
-        #expect(await eventually { store.partialBytes(model) > 20_000 })
+        #expect(await eventually(seconds: 30) { store.partialBytes(model) >= 20_480 })
         await dl.cancel(model)
         #expect(await dl.waitUntilSettled(model) == .notDownloaded)
         #expect(!FileManager.default.fileExists(atPath: store.partialURL(for: model).path))

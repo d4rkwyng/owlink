@@ -7,7 +7,7 @@ The iOS app lives in `ios/` and builds on the same `CedricCore` and
 |---|---|
 | Project | `ios/Owlink.xcodeproj`, scheme **Owlink** |
 | Bundle ID | `app.owlink.ios` |
-| Version | 0.5.1 (15), set in `ios/Scripts/gen-xcodeproj.py` |
+| Version | 0.5.2 (18), set in `ios/Scripts/gen-xcodeproj.py` |
 | Devices | iPhone and iPad (universal), iOS 17 or later |
 | Signing | Automatic, team `V868MD2SHX` |
 
@@ -16,6 +16,82 @@ The project file is generated: edit `ios/Scripts/gen-xcodeproj.py` and run
 in Xcode (a change made in Xcode is lost the next time the script runs).
 Source files can be added in Xcode or Finder: `ios/Owlink`,
 `ios/OwlinkUITests` and `Tests/*` are synchronized folders.
+
+## New in 0.5.2 (16)
+
+Brings the shared code up to Mac Owlink 0.5.2 (tag v0.5.2) and matches
+its changes where they apply on iOS:
+
+- **Web links always ask first.** A tap on a web link in the preview no
+  longer opens the page in the preview's own browser: it asks first, and
+  only Open hands it to Safari (or your default browser). The question
+  names the site on a line of its own (a name in non-Latin look-alike
+  letters is shown as its plain-ASCII form and flagged), points out a
+  user name placed before the site to disguise it, and has Cancel as its
+  default; one question at a time. Redirects, refreshes, forms and frames
+  can't load a web page in the preview either, and a link to a place in
+  the page needs a real `#` in the page itself. **Open in Browser** is
+  gone from the preview, with the in-preview browser.
+- **Linked documents load from their real location.** A document opened
+  through a symbolic link takes its type (Markdown or HTML) and its
+  folder for images and links from the file that was checked and read.
+- **Obsidian vault bounds.** A stray `.obsidian` folder in the app's own
+  container or above it never becomes the vault; a vault found inside a
+  folder you granted follows the same rules. A granted folder with no
+  vault in it is still the vault, as an opened folder is on the Mac.
+- **Reopen files from last session** reads its setting as the Mac does,
+  so a `-reopenFilesFromLastSession NO` launch argument turns it off.
+  It was already on unless turned off in Owlink; unsaved text from the
+  last session is still offered at launch when it doesn't reopen.
+- **Edited** already followed the text, as the Mac's new unsaved mark
+  does: it clears on save, on Revert, and on undo back to the saved
+  text. A test now covers it.
+- Shared speed tests hold this thread's CPU time, scaled by how busy the
+  machine is, to their bounds (best of several tries), so they no longer
+  fail on a loaded Mac or simulator without loosening what they check.
+
+Not on iOS: the Mac's • tab and title mark (iOS shows "Edited"), Finder
+document icons, and the Mac's multi-tab session (unsaved untitled tabs,
+Reopen Closed Tab).
+
+Build 18 (from a device check of build 17):
+
+- **A shorter ••• menu, file actions first.** Seven rows in three groups,
+  the way document apps lead (Pages, Notes, Runestone): Save and Share &
+  Export › (Share…, a copy of the document for another app or person,
+  Print…, Export as HTML…, Export as PDF…); Find › (Find, Find and
+  Replace, Find TODOs, Mark All, Clear Marks), Preview › (View › for a
+  document without a preview: Wrap Lines, Show Invisibles, Readable
+  Width) and Ask Cedric; More › and Settings. An iPhone adds Edit / Done
+  first when its button doesn't fit the bar. More › has View ›, Go to
+  Line…, Open Quickly…, Statistics…, Cedric's checks, Writing Mode,
+  Language, Indentation, Bookmarks, Folding, Encoding and Line Endings,
+  Revert and Restore Previous Version. Nothing that was reachable is gone,
+  and the iPad menu bar and its shortcuts are unchanged.
+- **Front matter on the Mac** (shared code): a preview closed and reopened
+  at once shows the block as it was left even when reading it back is
+  slow, and that read no longer holds up previews in other tabs.
+
+Build 17 (fixes from a device check of build 16):
+
+- **The ••• menu is tidied.** Focus Preview is in it once, in its Preview
+  submenu beside Preview and Open Preview in New Window, on iPhone and
+  iPad at any width (bar buttons that don't fit no longer add themselves
+  to the menu a second time). The menu is in groups: view and preview;
+  Save, Print and Export; find, marks and navigation; then the rest.
+- **The format bar hides under Ask Cedric.** The Markdown format bar
+  leaves the keyboard while the Ask Cedric sheet is up and comes back,
+  as it was, when the sheet closes (Done, swipe down, or any other way).
+- **US English spellings** throughout: Summarize, color, center, license.
+- **Settings opens without Ask Cedric.** ⌘, and the menu bar's Settings…
+  (and the other menu-bar commands) reach the editor with nothing in it
+  selected, and from a sheet over it; Settings opens on top of Ask
+  Cedric, which stays open.
+- **The back button works again** whatever is shown over the document:
+  closing takes the editor away with any sheet over it.
+- **Front matter is collapsed in the preview.** YAML front matter is one
+  line, "Front matter · title"; a tap opens it, nested values as nested
+  tables and lists, and the preview remembers whether you left it open.
 
 ## New in 0.5.1 (15)
 
@@ -54,7 +130,7 @@ sidebar), Finder document icons, and the Mac's multi-tab session restore
 
 ## New in 0.4.6 (14)
 
-- **Code folding**, as on the Mac: the ⋯ menu's Folding submenu (and iPad
+- **Code folding**, as on the Mac: the ⋯ menu's More › Folding submenu (and iPad
   Text › Folding), fold marks in the line-number gutter, and a "⋯ N lines"
   pill that unfolds. Folded text is only hidden; save, undo, find, copy,
   print and export see all of it.
@@ -69,12 +145,12 @@ Details for both are under What it does below.
 
 - Text menu and touch line commands, indentation conversion, and cancellable keep/delete lines matching.
 - Settings › Editor sets the default indent for files without detected indentation.
-- This document's Indent Using Spaces/Tabs and Tab Width are in the ⋯ menu (Indentation) and apply until the document is closed or reloaded.
+- This document's Indent Using Spaces/Tabs and Tab Width are in the ⋯ menu (More › Indentation) and apply until the document is closed or reloaded.
 - Read-only CSV and TSV grid preview in the editor palette: pinned header, zoom, sortable columns (a third tap restores file order), VoiceOver sort state, and field navigation back into the text.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line
   ending are detected and written back unchanged (the core's `TextCodec`).
-- Syntax colouring (the core's highlighter), the seven themes including
+- Syntax coloring (the core's highlighter), the seven themes including
   Dracula, font size, wrap, and **Show Line Numbers** (on by default).
   Settings can pick the monospaced editor font (SF Mono or another installed
   monospaced family); the choice is remembered.
@@ -99,9 +175,9 @@ Details for both are under What it does below.
 - Show Invisibles marks spaces, tabs and line endings without changing the text, even on long lines.
 - Highlight occurrences (on by default) and matching brackets (always on, as on the Mac), using the current theme without repainting all occurrences on each caret move.
 - Find and replace (`⌘F`, `⌥⌘F`, or the magnifier and the ⋯ menu).
-- Mark All / Clear Marks (the ⋯ menu, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
-- Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
-- Code folding (0.4.6), as on the Mac: Fold, Unfold, Fold All, Unfold All and Fold to Level 1–3 are in the ⋯ menu's Folding submenu (and on iPad Text › Folding, with `⌥⌘←`, `⌥⌘→`, `⌥⇧⌘←` and `⌥⇧⌘→`). Languages that fold show ▾ beside each foldable line in the gutter and ▸ on a folded one; tap it to fold or unfold, or tap the "⋯ N lines" pill. Folded text is only hidden: save, undo, find, copy, print and export see all of it, and arrow keys step over a fold. Plain text, CSV, diffs, batch, .reg, HTML and XML don't fold, and a large document turns folding off. Folds aren't kept when the document closes.
+- Mark All / Clear Marks (the ⋯ menu's Find ›, the find navigator's options menu, and on iPad Edit › Find with `⌃⌘M` / `⌃⇧⌘M`) mark every occurrence of the selection or the word under the caret, as on the Mac, until cleared; the count shows in the status bar.
+- Bookmark Line, Next/Previous Bookmark and Clear Bookmarks are in the ⋯ menu's More › Bookmarks (and on iPad Text › Bookmarks, with `⌘F2`, `F2`, `⇧F2` and `⇧⌘F2`); markers are drawn in the line-number gutter, and a tap on a line number toggles that line.
+- Code folding (0.4.6), as on the Mac: Fold, Unfold, Fold All, Unfold All and Fold to Level 1–3 are in the ⋯ menu's More › Folding submenu (and on iPad Text › Folding, with `⌥⌘←`, `⌥⌘→`, `⌥⇧⌘←` and `⌥⇧⌘→`). Languages that fold show ▾ beside each foldable line in the gutter and ▸ on a folded one; tap it to fold or unfold, or tap the "⋯ N lines" pill. Folded text is only hidden: save, undo, find, copy, print and export see all of it, and arrow keys step over a fold. Plain text, CSV, diffs, batch, .reg, HTML and XML don't fold, and a large document turns folding off. Folds aren't kept when the document closes.
 - Offline Text Tools: Explain Regex and Decode Selection in the edit menu,
   and Find TODOs in the edit and document menus. Results stay on the device.
 - Statistics: word count in the status line, document and selection counts,
@@ -145,11 +221,14 @@ Details for both are under What it does below.
   Links browse in the preview (attached and detached), with **Back**,
   **Forward** and **This Document**: a Markdown or HTML file the link
   rules allow renders there under the same policy (JavaScript off, strict
-  CSP); http(s) opens in an isolated preview web view (own process pool,
-  nothing stored, no app scripts, handlers or `cedric-doc:`); other text
-  files open in the editor; a linked file is checked and read by its
-  resolved path. **Open in Browser** asks first, showing the
-  full URL; mailto and `⌘`-click ask too. Nothing a link names is launched.
+  CSP); other text files open in the editor; a linked file is checked and
+  read by its resolved path, which also gives its kind and folder. A web
+  page never loads in the preview (0.5.2): a tap (or `⌘`-tap) on a web or
+  mail link asks first, naming the site on its own line (a non-ASCII name
+  as its punycode, flagged; a user name before the `@` called out), with
+  Cancel as the default, and only Open hands it to the system. Redirects,
+  refreshes, forms and frames can't load another page. Nothing a link
+  names is launched.
   A link with a heading fragment (`other.md#part`, `page.html#sec`,
   `[[other#Part]]`) opens that document in the preview at the heading, and
   Back / Forward return to it.
@@ -249,7 +328,7 @@ hint is asked for an empty or near-empty document (`HintPrompt.hasEnoughText`).
   device". iPhones (and iPads without an M chip) are offered the small
   models (up to 2B parameters, about 1.1 GB); M-series iPads also the 3–4B
   ones. Downloads come from huggingface.co only when asked, show the full
-  bundled licence text first (Confirm once its end has been on screen;
+  bundled license text first (Confirm once its end has been on screen;
   `-OwlinkShowLicence <id|first>` shows the sheet in Debug builds), are checked against their SHA-256, and are kept out of iCloud
   backups. Before loading, the app checks `os_proc_available_memory()` and
   refuses with a message rather than being killed for using too much memory.

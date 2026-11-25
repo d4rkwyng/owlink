@@ -22,7 +22,7 @@
     {
       "id": "qwen2.5-coder-3b-instruct-q4_k_m",
       "name": "Qwen2.5 Coder 3B",
-      "summary": "Non-commercial licence. Good code hints, about 2 GB of memory.",
+      "summary": "Non-commercial license. Good code hints, about 2 GB of memory.",
       "family": "qwen2.5-coder",
       "parametersB": 3.1,
       "quantization": "Q4_K_M",

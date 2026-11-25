@@ -1,5 +1,6 @@
 import UIKit
 import UniformTypeIdentifiers
+import os
 import SwiftUI
 import CedricCore
 import CedricAI
@@ -41,6 +42,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     let invisiblesOverlay = InvisiblesOverlay()
     lazy var regexFind = RegexFind(editor: self)
     var contextBar: MarkdownContextBar?
+    /// The Ask Cedric sheet is up: the format bar is off the keyboard.
+    var contextBarHiddenForAsk = false
     private(set) var lineIndex = LineIndex()
     let markdownFenceIndex = FenceIndex()
     /// Left inset of the text before line numbers claim any of it.
@@ -189,7 +192,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// Ask Cedric as a sheet (compact width).
     private weak var askSheet: UIViewController?
     private var askPanelWidth: NSLayoutConstraint?
-    private var askModel: AskCedricModel?
+    private(set) var askModel: AskCedricModel?
     private var splitTrailing: NSLayoutConstraint!
     /// The split's bottom: on the status line, or (Focus Preview, the status
     /// line hidden) on the safe area's bottom.
@@ -221,9 +224,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         self?.textView.undoManager?.redo()
     }
     /// Save, in the bar while "Save automatically" is off.
-    private lazy var saveItem = barItem(String(localized: "Save"), "square.and.arrow.down", "editor.save") { [weak self] in
-        self?.saveDocument()
-    }
+    private lazy var saveItem: UIBarButtonItem = {
+        let i = barItem(String(localized: "Save"), "square.and.arrow.down", "editor.save") { [weak self] in
+            self?.saveDocument()
+        }
+        // Save is in the ••• menu's file group already.
+        i.menuRepresentation = Self.notInOverflowMenu
+        return i
+    }()
     /// Unsaved text from a crash, for this document.
     enum Recovery {
         /// Ask Restore / Discard when the editor appears.
@@ -664,6 +672,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         })
         find.accessibilityIdentifier = "editor.find"
         find.title = String(localized: "Find")
+        // Collapsed into the ••• menu (a narrow bar), Find would be a row of
+        // its own there; the menu's Find submenu has it already.
+        find.menuRepresentation = Self.notInOverflowMenu
         // Cedric himself is the owl in the editor's corner (OwlSprite), not
         // a small bar icon; Ask Cedric is also in the overflow menu.
         var items = [find]
@@ -680,6 +691,9 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             p.menu = UIMenu(children: [UIDeferredMenuElement.uncached { [weak self] done in
                 done(self?.previewMenuItems() ?? [])
             }])
+            // Collapsed into the ••• menu (a narrow bar), the eye would add
+            // its own Preview submenu there; the menu has one already.
+            p.menuRepresentation = Self.notInOverflowMenu
             items.append(p)
             let f = UIBarButtonItem(image: UIImage(systemName: "arrow.up.left.and.arrow.down.right"), primaryAction: UIAction { [weak self] _ in
                 self?.toggleFocusPreview()
@@ -687,6 +701,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             f.title = String(localized: "Focus Preview")
             f.accessibilityLabel = String(localized: "Focus Preview")
             f.accessibilityIdentifier = "editor.focusPreview"
+            // Not again in the ••• menu: Focus Preview is in its Preview submenu.
+            f.menuRepresentation = Self.notInOverflowMenu
             items.append(f)
         }
         if focusOn {
@@ -698,6 +714,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             done.accessibilityHint = String(localized: "Leaves Focus Preview and shows the text.")
             done.accessibilityIdentifier = "editor.focusDone"
             if #available(iOS 27.0, *) { done.visibilityPriority = .high }
+            navigationItem.pinnedTrailingGroup = nil
             navigationItem.rightBarButtonItems = [done]
             updateEdited()
             navigationItem.additionalOverflowItems = UIDeferredMenuElement.uncached { [weak self] done in
@@ -705,15 +722,37 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             }
             return
         }
-        // Which stay when a vertical bar (iPhone Duo) runs out of room.
-        if #available(iOS 27.0, *) {
+        // Which stay when the bar runs out of room (an iPhone's, a vertical
+        // iPhone Duo's): Edit / Done, Find and Save. Undo and Redo give way
+        // first (to the ••• menu): with them equal, a 402-pt iPhone kept
+        // the two (disabled in read mode) and hid Edit, so a file opened
+        // read-only showed no way to edit it. Collapsed, the two are one
+        // row of the menu (historyMenuRow, Undo's), with Edit / Done in it
+        // too: Redo never goes before Undo, nor Edit before both, so the
+        // row is there whenever one of them has gone. Before iOS 27 there
+        // are no priorities: UIKit may collapse any of them in any order,
+        // so each keeps its own entry (updateHistoryMenuRow).
+        if Self.barPrioritiesInForce, #available(iOS 27.0, *) {
             items.forEach { $0.visibilityPriority = .standard }
-            for i in [find, undoItem, redoItem, saveItem, editItem] { i.visibilityPriority = .high }
+            undoItem.visibilityPriority = .standard
+            redoItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.standard.rawValue + 1)
+            for i in [find, saveItem] { i.visibilityPriority = .high }
+            // Edit / Done above all: the way out of read mode (iPhone's default).
+            editItem.visibilityPriority = UIBarButtonItemVisibilityPriority(rawValue: UIBarButtonItemVisibilityPriority.high.rawValue + 1)
         }
         // Undo and Redo first (leading), then Save, Find, Preview, and
         // Edit / Done at the trailing end.
-        items.insert(contentsOf: [undoItem, redoItem], at: 0)
-        if let edit = configuredEditItem() { items.append(edit) }
+        let edit = configuredEditItem()
+        if Self.pinsHistory {
+            // An iPad: Undo, Redo and Edit / Done pinned at the trailing
+            // edge, never collapsed into the ••• menu, which stays seven
+            // rows (no history row there, Codex b18 re-check 2).
+            navigationItem.pinnedTrailingGroup = historyGroup(edit)
+        } else {
+            navigationItem.pinnedTrailingGroup = nil
+            items.insert(contentsOf: [undoItem, redoItem], at: 0)
+            if let edit { items.append(edit) }
+        }
         navigationItem.rightBarButtonItems = items.reversed()
         updateEdited()
         // The rest in the system's own overflow menu (the ellipsis is
@@ -789,22 +828,103 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             exportHTML.attributes = .disabled
             exportPDF.attributes = .disabled
         }
-        var first: [UIMenuElement] = [print, exportHTML, exportPDF, save, replace] + markActions() + [goTo, quickly, todos, statistics, wrap, invisibles, readable, fixTyposAction(), ask, check]
-        if let checkScript = checkScriptAction() { first.append(checkScript) }
-        if hasEditorPreview {
-            let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
-                self?.toggleFocusPreview()
-            }
-            focus.accessibilityIdentifier = "editor.menu.focusPreview"
-            first.insert(focus, at: 0)
-            // Stays in this menu whatever the bar has room for (the bar's
-            // own Focus Preview button drops off a narrow iPhone bar).
-            if let detach = detachPreviewAction() { first.insert(detach, at: 1) }
+        // Seven rows, in three groups, the way document apps lead (Pages,
+        // Notes, Runestone: file actions first, Settings last): Save, Share
+        // & Export › | Find ›, Preview › (View › without a preview), Ask
+        // Cedric | More ›, Settings. The bar's buttons that collapse into
+        // the menu add nothing to it but one row before Save: Undo, Redo
+        // and Edit / Done (read mode, on an iPhone) side by side. Eight
+        // rows at most, whatever the bar's width.
+        let share = UIAction(title: String(localized: "Share…"), image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+            self?.shareFromMenu()
         }
-        if UIApplication.shared.supportsMultipleScenes { first.append(Self.newWindowAction()) }
-        return [UIMenu(options: .displayInline, children: first), UIMenu(options: .displayInline, children: [revert, previousVersionsMenu()]),
-                writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu(),
-                UIMenu(options: .displayInline, children: [settings])]
+        share.accessibilityIdentifier = "editor.menu.share"
+        let findNow = UIAction(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+            self?.textView.findInteraction?.presentFindNavigator(showingReplace: false)
+        }
+        findNow.accessibilityIdentifier = "editor.menu.find"
+        let findMenu = UIMenu(title: String(localized: "Find"), image: UIImage(systemName: "magnifyingglass"), children: [
+            UIMenu(options: .displayInline, children: [findNow, replace, todos]),
+            UIMenu(options: .displayInline, children: markActions()),
+        ])
+        let viewMenu = UIMenu(title: String(localized: "View"), image: UIImage(systemName: "eyeglasses"), children: [wrap, invisibles, readable])
+        let shareMenu = UIMenu(title: String(localized: "Share & Export"), image: UIImage(systemName: "square.and.arrow.up"), children: [
+            UIMenu(options: .displayInline, children: [share, print]),
+            UIMenu(options: .displayInline, children: [exportHTML, exportPDF]),
+        ])
+        let preview = previewSubmenu()
+        var tools: [UIMenuElement] = [fixTyposAction(), check]
+        if let checkScript = checkScriptAction() { tools.append(checkScript) }
+        var fileGroup: [UIMenuElement] = [revert, previousVersionsMenu()]
+        if WindowSupport.multipleScenes { fileGroup.append(Self.newWindowAction()) }
+        let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
+            UIMenu(options: .displayInline, children: preview == nil ? [] : [viewMenu]),
+            UIMenu(options: .displayInline, children: [goTo, quickly, statistics]),
+            UIMenu(options: .displayInline, children: tools),
+            UIMenu(options: .displayInline, children: [writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu()]),
+            UIMenu(options: .displayInline, children: fileGroup),
+        ].filter { !$0.children.isEmpty })
+        return [UIMenu(options: .displayInline, children: [save, shareMenu]),
+                UIMenu(options: .displayInline, children: [findMenu, preview ?? viewMenu, ask]),
+                UIMenu(options: .displayInline, children: [more, settings])]
+    }
+
+    /// What a bar button shows when the bar runs out of room and it
+    /// collapses into the ••• menu: nothing (an empty inline group), for
+    /// the buttons whose commands the ••• menu lists itself.
+    static var notInOverflowMenu: UIMenuElement { UIMenu(options: .displayInline, children: []) }
+
+    /// Whether the bar's visibility priorities (iOS 27) order what a narrow
+    /// bar collapses: Undo first, then Redo, Edit / Done last. Only then
+    /// can Undo's collapsed row carry Redo and Edit (historyMenuRow); before
+    /// iOS 27 UIKit collapses the bar's buttons in an order of its own, so
+    /// each keeps its own entry. The one place this is decided; tests set
+    /// `barPrioritiesOverrideForTests` to run either path on any runtime.
+    static var barPrioritiesInForce: Bool {
+        if let forced = barPrioritiesOverrideForTests { return forced }
+        if #available(iOS 27.0, *) { return true }
+        return false
+    }
+    /// Tests only: nil follows the runtime (barPrioritiesInForce).
+    static var barPrioritiesOverrideForTests: Bool?
+
+    /// An iPad's bar pins Undo, Redo and Edit / Done (pinnedTrailingGroup:
+    /// UIKit never moves it to the ••• menu), so the menu has no history
+    /// row there; an iPhone's bar is too narrow to pin three buttons.
+    static var pinsHistory: Bool {
+        #if targetEnvironment(macCatalyst)
+        return false
+        #else
+        return !WindowSupport.isPhone
+        #endif
+    }
+
+    /// Undo, Redo and Edit / Done as the iPad's pinned group; if even that
+    /// doesn't fit (a narrow slide-over), one button with the three in its
+    /// menu, enabled as the buttons are.
+    private func historyGroup(_ edit: UIBarButtonItem?) -> UIBarButtonItemGroup {
+        let representative = UIBarButtonItem(title: String(localized: "Undo"), image: UIImage(systemName: "arrow.uturn.backward"),
+                                             menu: UIMenu(children: [historyMenuRow()]))
+        representative.accessibilityIdentifier = "editor.history"
+        return UIBarButtonItemGroup(barButtonItems: [undoItem, redoItem] + (edit.map { [$0] } ?? []), representativeItem: representative)
+    }
+
+    /// The ••• menu's Preview submenu: the preview modes side by side, on
+    /// every width (the bar's eye and Focus Preview buttons may or may not
+    /// fit, and never add themselves to the menu). Nil without a preview.
+    private func previewSubmenu() -> UIMenu? {
+        guard hasEditorPreview else { return nil }
+        let toggle = UIAction(title: String(localized: "Preview"), image: UIImage(systemName: "eye"),
+                              state: previewOn ? .on : .off) { [weak self] _ in
+            self?.togglePreview()
+        }
+        toggle.accessibilityIdentifier = "editor.menu.preview"
+        let focus = UIAction(title: String(localized: "Focus Preview"), image: UIImage(systemName: "arrow.up.left.and.arrow.down.right")) { [weak self] _ in
+            self?.toggleFocusPreview()
+        }
+        focus.accessibilityIdentifier = "editor.menu.focusPreview"
+        let children: [UIMenuElement] = [toggle, focus] + [detachPreviewAction()].compactMap { $0 }
+        return UIMenu(title: String(localized: "Preview"), image: UIImage(systemName: previewOn ? "eye.fill" : "eye"), children: children)
     }
 
     /// The preview button's long-press menu.
@@ -827,7 +947,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     /// The overflow menu in Focus Preview: back to the text, the text size.
-    private func focusMenuItems() -> [UIMenuElement] {
+    func focusMenuItems() -> [UIMenuElement] {
         let back = UIAction(title: String(localized: "Exit Focus Preview"), image: UIImage(systemName: "arrow.down.right.and.arrow.up.left")) { [weak self] _ in
             self?.exitFocusPreview()
         }
@@ -1913,8 +2033,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     private func showWritingPaused(_ reason: LargeDocument.Reason) {
         switch reason {
-        case .longLine: toast(String(localized: "Very long lines: colouring, spell check, the owl and Writing Mode are paused for speed."))
-        case .size: toast(String(localized: "Large file: colouring, spell check, the owl and Writing Mode are paused for speed."))
+        case .longLine: toast(String(localized: "Very long lines: coloring, spell check, the owl and Writing Mode are paused for speed."))
+        case .size: toast(String(localized: "Large file: coloring, spell check, the owl and Writing Mode are paused for speed."))
         }
     }
 
@@ -2792,20 +2912,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         askModel?.ask(title, action: action, inlineSelection: selection)
     }
 
+    /// Opens Ask Cedric, or does nothing when it is already open (panel,
+    /// or a sheet not on its way out): a second ⇧⌘A, ••• › Ask Cedric or
+    /// owl tap kept nothing of the first. It replaced `askModel` and
+    /// `askSheet` (on iPhone the new sheet was then refused, leaving the
+    /// shown sheet's conversation unreachable from the editor).
     @objc func askCedric() {
         // Ask is about the text: Focus Preview ends.
         if focusOn { exitFocusPreview() }
+        if askIsOpen { return }
         let model = AskCedricModel(fileName: document.displayName, language: document.language.language)
         model.apply = { [weak self] proposal in self?.apply(proposal) ?? .refused }
         model.documentNow = { [weak self] in self?.currentDocument() ?? AskCedricModel.DocumentNow(text: "", generation: 0, readOnly: true, large: false, lines: LineIndex()) }
         model.makeSnapshot = { [weak self] in self?.askSnapshot() ?? OwlDocumentSnapshot(text: "", generation: 0) }
         model.refreshScope()
         model.askIsVisible = { [weak self] in self?.askPanel != nil || self?.askSheet != nil }
-        model.openSettings = { [weak self] in
-            guard let self else { return }
-            if self.askPanel != nil { self.closeAskPanel(); self.showSettings() }
-            else { self.dismiss(animated: true) { self.showSettings() } }
-        }
+        // On top of Ask Cedric (sheet or panel), which stays open.
+        model.openSettings = { [weak self] in self?.showSettings() }
         askModel = model
         // An iPad at regular width docks Cedric beside the text. A phone
         // always gets the sheet, including landscape, where the width is
@@ -2817,6 +2940,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         presentAskSheet(model)
+    }
+
+    /// Ask Cedric is up: the panel, or a sheet not on its way out.
+    var askIsOpen: Bool {
+        askPanel != nil || (askSheet.map { !$0.isBeingDismissed } ?? false)
     }
 
     /// Side panel only on an iPad that has room. A phone, and an iPad in a
@@ -2833,7 +2961,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     private func presentAskSheet(_ model: AskCedricModel) {
-        let host = UIHostingController(rootView: askRoot(model))
+        let host = AskSheetHost(rootView: askRoot(model))
+        // The format bar (the text view's input accessory) would stay up
+        // over the sheet while the text keeps the keyboard: it goes while
+        // the sheet is up, and comes back however the sheet goes (Done,
+        // swipe down, docked into the panel, closed with the document).
+        host.onGone = { [weak self, weak host] in
+            guard let self else { return }
+            if self.askSheet == nil || self.askSheet === host { self.askSheet = nil }
+            self.contextBarHiddenForAsk = false
+            self.updateContextBar()
+        }
+        contextBarHiddenForAsk = true
+        updateContextBar()
         // Default sizing uses the SwiftUI ideal size. A ScrollView's ideal
         // size is its whole transcript, so the sheet clipped long answers
         // instead of scrolling them.
@@ -2989,6 +3129,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         guard hasEditorPreview else { return }
         // ⇧⌘P in Focus Preview: back to the text.
         if focusOn { exitFocusPreview(); return }
+        // Hiding it: the front matter block's state is kept first.
+        if previewOn { preview?.recordFrontMatterState() }
         previewOn.toggle()
         if previewOn { makePreview() }
         if document.language.language == .csv {
@@ -3529,6 +3671,111 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
+    /// What the last Share… handed the share sheet (a copy of the
+    /// document's file); the snapshot tests read it.
+    private(set) var sharedCopyItems: [URL] = []
+
+    /// How Share… puts its sheet up: presents it (tests stand in for a
+    /// presentation UIKit refuses).
+    var presentShareSheet: (_ presenter: UIViewController, _ sheet: UIViewController) -> Void = { presenter, sheet in
+        presenter.present(sheet, animated: true)
+    }
+
+    /// Share… from the ••• menu. The menu's action runs while the menu is
+    /// still on screen, closing; a sheet presented then can be refused
+    /// (b18 review). So the sheet waits for the menu to be gone and the
+    /// editor free (checked every 50 ms, two seconds at most), then goes
+    /// up as Share… does: its own checks decide, and leave no copy. Still
+    /// busy after two seconds: Share… does nothing (logged), no copy is
+    /// written and nothing presented (Codex b18 re-check 2: it used to run
+    /// anyway, into the transition it was waiting out).
+    func shareFromMenu() {
+        afterMenuCloses { [weak self] in self?.shareDocumentCopy() }
+    }
+
+    /// Whether a menu or a presentation is still in the way of Share…'s
+    /// sheet; tests stand in for a menu that never finishes closing.
+    var shareWaitBusy: (() -> Bool)?
+    /// Times Share… from the menu gave up, the menu still busy; tests read it.
+    private(set) var sharesSkippedBusy = 0
+    private static let shareLog = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Owlink", category: "Share")
+
+    private func afterMenuCloses(tries: Int = 40, _ work: @escaping () -> Void) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            let presenter = sheetPresenter()
+            let busy = shareWaitBusy?() ?? (menuShowing() || presenter.transitionCoordinator != nil
+                || presenter.isBeingPresented || presenter.isBeingDismissed)
+            if !busy {
+                work()
+            } else if tries > 0 {
+                afterMenuCloses(tries: tries - 1, work)
+            } else {
+                sharesSkippedBusy += 1
+                Self.shareLog.error("Share… skipped: the menu or a presentation was still busy after 2 s; no copy written, nothing presented")
+            }
+        }
+    }
+
+    /// A menu (the ••• menu, a submenu) is up, or on its way out, in the
+    /// editor's window scene. UIKit hands out no menu state: its
+    /// container view is looked for by name.
+    private func menuShowing() -> Bool {
+        let windows = view.window?.windowScene?.windows ?? [view.window].compactMap { $0 }
+        func shows(_ v: UIView) -> Bool {
+            if v.isHidden || v.alpha < 0.01 { return false }
+            if NSStringFromClass(type(of: v)).contains("ContextMenuContainer") { return true }
+            return v.subviews.contains(where: shows)
+        }
+        return windows.contains { !$0.isHidden && shows($0) }
+    }
+
+    /// Share…: a copy of the document as it is now (unsaved edits too), as
+    /// a file named like the document, in the share sheet (as Notes' Send a
+    /// Copy), in a popover from the ••• button on an iPad. Byte for byte
+    /// what Save would write (encoding, BOM, each line's ending). The copy
+    /// is removed when the sheet is done, and when the sheet goes without
+    /// saying so (UIKit refused it, or it was dismissed without its
+    /// handler): its handler holds the copy (ShareCopy), so the copy goes
+    /// with the sheet. None is made when the sheet can't be shown now.
+    @objc func shareDocumentCopy() {
+        // UIKit refuses a sheet while another is up or going, or off
+        // screen.
+        let presenter = sheetPresenter()
+        guard view.window != nil, presenter.viewIfLoaded?.window != nil, presenter.presentedViewController == nil,
+              !presenter.isBeingDismissed, !presenter.isBeingPresented else { return }
+        let manager = FileManager.default
+        guard let caches = manager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            showExportError(CocoaError(.fileNoSuchFile))
+            return
+        }
+        let directory = caches.appendingPathComponent("ShareCopy-\(UUID().uuidString)", isDirectory: true)
+        do {
+            let data = try document.serialized(textView.text ?? "").data
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let copy = ShareCopy(directory: directory)
+            let url = directory.appendingPathComponent(document.displayName)
+            try data.write(to: url, options: .atomic)
+            let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            activity.completionWithItemsHandler = { _, _, _, _ in copy.remove() }
+            activity.view.accessibilityIdentifier = "editor.shareSheet"
+            if let popover = activity.popoverPresentationController {
+                if let more = navigationItem.overflowPresentationSource {
+                    popover.sourceItem = more
+                } else {
+                    popover.sourceView = view
+                    popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+                    popover.permittedArrowDirections = []
+                }
+            }
+            sharedCopyItems = [url]
+            presentShareSheet(presenter, activity)
+        } catch {
+            try? manager.removeItem(at: directory)
+            showExportError(error)
+        }
+    }
+
     private func showExportError(_ error: Error) {
         let alert = UIAlertController(title: String(localized: "Couldn’t export"),
                                       message: error.localizedDescription, preferredStyle: .alert)
@@ -3555,7 +3802,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             a.addAction(UIAlertAction(title: String(localized: "Close"), style: .destructive) { [weak self] _ in
                 self?.finishClose(saveFirst: false)
             })
-            present(a, animated: true)
+            // Over a sheet the editor shows (Ask Cedric, Settings), if any.
+            sheetPresenter().present(a, animated: true)
             return
         }
         switch SavePolicy.onClose(saveAutomatically: AppSettings.saveAutomatically, hasUnsavedChanges: document.hasUnsavedChanges) {
@@ -3570,7 +3818,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             })
             a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel) { [weak self] _ in self?.afterClose = nil })
             a.preferredAction = a.actions.first
-            present(a, animated: true)
+            // Over a sheet the editor shows (Ask Cedric, Settings), if any.
+            sheetPresenter().present(a, animated: true)
         }
     }
 
@@ -3583,6 +3832,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         closing = true
+        // Ask Cedric's conversation goes with the document.
+        askModel?.stop()
         // The document is going: so is Fix Typos… (closeWithTab on the Mac).
         spellStep?.close(restoringFocus: false)
         stopDailyWordTracking()
@@ -3601,7 +3852,24 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             DetachedPreviews.documentClosed(path: self.document.recoveryPath)
             let after = self.afterClose
             self.afterClose = nil
-            self.dismiss(animated: true) { after?() }
+            self.dismissEditor { after?() }
+        }
+    }
+
+    /// Takes the editor off screen, with anything it shows over itself.
+    /// `dismiss` on the editor only dismisses the topmost controller it
+    /// presents when there is one: with the Ask Cedric sheet up (its half
+    /// height leaves the back chevron tappable) or Settings, closing took
+    /// that sheet away, left the editor up with its document closed and
+    /// `closing` set, and the back chevron did nothing from then on.
+    /// Dismissing from the controller that presented the editor's
+    /// navigation controller (the document browser) takes the whole stack.
+    func dismissEditor(_ done: @escaping () -> Void) {
+        let shown: UIViewController = navigationController ?? self
+        if let presenter = shown.presentingViewController {
+            presenter.dismiss(animated: true, completion: done)
+        } else {
+            dismiss(animated: true, completion: done)
         }
     }
 
@@ -3619,10 +3887,49 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         view.setNeedsLayout()
     }
 
+    /// Settings, from the ••• menu, ⌘, (the iPad menu bar), and Ask
+    /// Cedric's own button: on top of whatever this editor shows (the Ask
+    /// Cedric sheet stays open under it, its conversation kept, and reads
+    /// its engine again when Settings closes). Already showing: nothing.
     @objc func showSettings() {
-        let host = UIHostingController(rootView: SettingsView())
+        let presenter = sheetPresenter()
+        guard !(presenter is SettingsHost) else { return }
+        let host = SettingsHost(rootView: SettingsView())
         host.modalPresentationStyle = .formSheet
-        present(host, animated: true)
+        host.onGone = { [weak self] in
+            guard let model = self?.askModel, model.unavailable != nil else { return }
+            Task { await model.prepare() }
+        }
+        presenter.present(host, animated: true)
+    }
+
+    /// Everything the editor presents (Go to Line, alerts, Statistics, the
+    /// share sheet…) goes on the topmost controller it shows (see
+    /// `sheetPresenter`): with Ask Cedric's sheet up, on top of it. The
+    /// editor's own `present` went to its navigation controller, which
+    /// was already presenting Ask Cedric, so UIKit refused it: ⌘L over Ask
+    /// Cedric showed nothing. What may present while another modal is up
+    /// is `EditorCommandRouting.allows`.
+    override func present(_ controller: UIViewController, animated flag: Bool, completion: (() -> Void)? = nil) {
+        let top = sheetPresenter()
+        if top === (navigationController ?? self) {
+            super.present(controller, animated: flag, completion: completion)
+        } else {
+            top.present(controller, animated: flag, completion: completion)
+        }
+    }
+
+    /// Where a sheet the editor opens goes: on the topmost controller this
+    /// editor's window presents that isn't on its way out (the editor's
+    /// navigation controller when nothing is up). Never a controller that
+    /// is being dismissed, nor one whose view has left the window.
+    func sheetPresenter() -> UIViewController {
+        var top: UIViewController = navigationController ?? self
+        while let next = top.presentedViewController, !next.isBeingDismissed, next.viewIfLoaded?.window != nil,
+              !(next is UIAlertController) {
+            top = next
+        }
+        return top
     }
 
     @objc func newWindow() {
@@ -3871,6 +4178,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        // What a modal over the editor leaves available (one policy for the
+        // text's own chain and for the navigation controller, browser and
+        // scene, which route here).
+        guard EditorCommandRouting.allows(action, over: EditorCommandRouting.modal(over: navigationController ?? self)) else {
+            return false
+        }
         if action == #selector(printDocument) { return true }
         if action == #selector(exportHTMLDocument) || action == #selector(exportPDFDocument) {
             return document.language.language == .markdown
@@ -3878,6 +4191,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if action == #selector(copyAsHTML) || action == #selector(copyAsRichText) {
             return document.language.language == .markdown && textView.window != nil
         }
+        // ⌘B, ⌘], ⌘/… claim priority over the system's keys, so with the
+        // Find field or Ask Cedric's field taking the typing they'd change
+        // the document behind it: off until the text has the keyboard again.
+        if Self.documentMutationActions.contains(action) && otherTextInputHasFocus { return false }
         if Self.markdownActions.contains(action) { return markdownEditable }
         if action == #selector(commentSelection(_:)) { return lineEditable && document.language.language.commentSyntax != nil }
         if Self.lineActions.contains(action) { return lineEditable }
@@ -3909,6 +4226,42 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         return super.canPerformAction(action, withSender: sender)
     }
 
+    /// Commands that change the document (its text, folds, bookmarks) or
+    /// act on its selection: not while another text input has the keyboard.
+    /// Settings, Close, Save, preview, Go to Line, zoom and Ask Cedric stay.
+    static let documentMutationActions: Set<Selector> = markdownActions
+        .union(lineActions)
+        .union(indentationModeActions)
+        .union(foldingActions)
+        .union([#selector(commentSelection(_:)), #selector(unfoldMenu(_:)), #selector(unfoldAllMenu(_:)),
+                #selector(toggleBookmarkMenu(_:)), #selector(clearBookmarksMenu(_:)), #selector(explainSelection),
+                #selector(rewriteSelection), #selector(fixTypos)])
+
+    /// A text field, or a text view other than the editor's, is first
+    /// responder (the Find field, Ask Cedric's field): in the editor's
+    /// window, its scene's other windows, or the window of what the editor
+    /// shows over itself. A web view (the preview) doesn't count.
+    var otherTextInputHasFocus: Bool {
+        var windows: [UIWindow] = []
+        if let w = view.window {
+            windows.append(w)
+            windows += w.windowScene?.windows ?? []
+        }
+        var presented = (navigationController ?? self).presentedViewController
+        while let p = presented {
+            if let w = p.viewIfLoaded?.window { windows.append(w) }
+            presented = p.presentedViewController
+        }
+        var seen = Set<ObjectIdentifier>()
+        return windows.contains { seen.insert(ObjectIdentifier($0)).inserted && hasOtherFocusedTextInput(in: $0) }
+    }
+
+    private func hasOtherFocusedTextInput(in view: UIView) -> Bool {
+        if view === textView { return false }
+        if view.isFirstResponder && (view is UITextField || view is UITextView) { return true }
+        return view.subviews.contains { hasOtherFocusedTextInput(in: $0) }
+    }
+
     // MARK: Data safety
 
     private func barItem(_ title: String, _ symbol: String, _ id: String, _ action: @escaping () -> Void) -> UIBarButtonItem {
@@ -3932,6 +4285,72 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         let um = textView.undoManager
         undoItem.isEnabled = editGate.isEditable && um?.canUndo ?? false
         redoItem.isEnabled = editGate.isEditable && um?.canRedo ?? false
+        updateHistoryMenuRow()
+    }
+
+    /// Collapsed into the ••• menu (a narrow bar): Undo, Redo and Edit /
+    /// Done side by side in one row at its top, not a row each (b18 gate:
+    /// a 402-pt iPhone showed nine rows, Undo and Redo a row each). Undo's
+    /// button carries the row; Redo's and Edit's add nothing: by priority
+    /// they collapse only after Undo's, so the row is there when they go.
+    /// Without the priorities (before iOS 27: barPrioritiesInForce) any of
+    /// the three may go alone, first: each is then its own entry, so none
+    /// is ever collapsed out of reach. Pinned (an iPad) they never
+    /// collapse; their own entries all the same.
+    private func updateHistoryMenuRow() {
+        if Self.barPrioritiesInForce && !Self.pinsHistory {
+            undoItem.menuRepresentation = historyMenuRow()
+            redoItem.menuRepresentation = Self.notInOverflowMenu
+            editItem.menuRepresentation = Self.notInOverflowMenu
+        } else {
+            let h = historyActions()
+            undoItem.menuRepresentation = h.undo
+            redoItem.menuRepresentation = h.redo
+            editItem.menuRepresentation = h.edit ?? Self.notInOverflowMenu
+        }
+        // The pinned group's one button (a narrow iPad bar), as they are now.
+        navigationItem.pinnedTrailingGroup?.representativeItem?.menu = UIMenu(children: [historyMenuRow()])
+    }
+
+    /// Undo, Redo (and Edit / Done, in read mode's use) as one row of small
+    /// items (as the edit menu's Cut / Copy / Paste), enabled as the bar's
+    /// buttons are.
+    func historyMenuRow() -> UIMenu {
+        let h = historyActions()
+        let row = UIMenu(options: .displayInline, children: [h.undo, h.redo] + (h.edit.map { [$0] } ?? []))
+        row.preferredElementSize = .small
+        return row
+    }
+
+    /// Undo, Redo and Edit / Done (nil: read mode not in use) as menu
+    /// actions, enabled as the bar's buttons are.
+    private func historyActions() -> (undo: UIAction, redo: UIAction, edit: UIAction?) {
+        let undo = UIAction(title: String(localized: "Undo"), image: UIImage(systemName: "arrow.uturn.backward"),
+                            attributes: undoItem.isEnabled ? [] : .disabled) { [weak self] _ in
+            self?.textView.undoManager?.undo()
+        }
+        undo.accessibilityIdentifier = "editor.menu.undo"
+        let redo = UIAction(title: String(localized: "Redo"), image: UIImage(systemName: "arrow.uturn.forward"),
+                            attributes: redoItem.isEnabled ? [] : .disabled) { [weak self] _ in
+            self?.textView.undoManager?.redo()
+        }
+        redo.accessibilityIdentifier = "editor.menu.redo"
+        let edit: (title: String, symbol: String)?
+        switch editGate.button {
+        case .none: edit = nil
+        case .edit: edit = (String(localized: "Edit"), "pencil")
+        case .done: edit = (String(localized: "Done"), "checkmark")
+        case .readOnly: edit = (String(localized: "Read Only"), "lock")
+        }
+        if let edit {
+            let a = UIAction(title: edit.title, image: UIImage(systemName: edit.symbol),
+                             attributes: editGate.button == .readOnly ? .disabled : []) { [weak self] _ in
+                self?.toggleEditing()
+            }
+            a.accessibilityIdentifier = "editor.menu.edit"
+            return (undo, redo, a)
+        }
+        return (undo, redo, nil)
     }
 
     /// Sets one reason the text is read-only, and the text view to match.
@@ -3946,8 +4365,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             if !editable { textView.resignFirstResponder() }
             textView.isEditable = editable
         }
-        updateUndoItems()
         _ = configuredEditItem()
+        updateUndoItems()
         if isViewLoaded { updateStatus() }
         askModel?.documentEdited()
         contextBar?.refreshStates()
@@ -4522,3 +4941,13 @@ final class EditorDocumentTextView: UITextView {
     }
 }
 
+/// Share…'s copy of the document (a folder in Caches), held by the share
+/// sheet's handler: removed when the sheet is done with it, and when the
+/// sheet is let go without that (refused by UIKit, dismissed without its
+/// handler): never left behind.
+final class ShareCopy {
+    let directory: URL
+    init(directory: URL) { self.directory = directory }
+    func remove() { try? FileManager.default.removeItem(at: directory) }
+    deinit { remove() }
+}

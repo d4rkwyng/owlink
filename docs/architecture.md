@@ -617,11 +617,32 @@ first shown (no WebKit work at launch). Markdown goes through
   the page's load finishes, Cedric's own script (app content world, page
   JavaScript still off) scrolls to the element whose `id`/`name` is the
   fragment, else its heading slug (`PreviewAnchor.candidates`). Same-page
-  `#` links go through WebKit and the same script, which pins the scroll
-  so a late scroll event or the editor sync can't move it back.
-- HTTP(S) pages use a separate web view with a non-persistent store, no
-  app scripts, message handlers or document scheme, and no local-file
-  navigation. Open in Browser and ⌘-click retain the full-URL confirmation.
+  `#` links are cancelled in WebKit and scrolled by the same script, which
+  pins the scroll so a late scroll event or the editor sync can't move it
+  back.
+- A web page never loads in the preview (0.5.2 S1). `PreviewNavigation`
+  (CedricCore) decides every navigation in the preview's web view: only
+  Cedric's own main-frame page load (`cedric-doc:` or `about:blank`, while
+  it is loading, the expected URL) is allowed; a click goes through
+  `PreviewLinkAction`, where web and mail links, clicked or ⌘-clicked,
+  ask and then open in the default browser; an in-page `#anchor` (main
+  frame; on the blank page also the `about:blank%23x` spelling macOS 15
+  hands over) stays in the page: WebKit's navigation is cancelled and
+  Cedric scrolls, so no spelling loads another document;
+  everything else (redirects, meta refresh,
+  script `location`, form submits, frames, new windows, any other scheme)
+  is cancelled. A navigation response that isn't `cedric-doc:` or exactly
+  `about:blank` is cancelled too, and the `WKUIDelegate` opens no windows. Images,
+  styles and fonts are subresources, governed by the Network setting.
+- The link prompt (`LinkPrompt`, shared with PDF tabs) shows the site on
+  its own line as the opened URL spells it (punycode for a non-ASCII
+  name, flagged with its Unicode reading), calls out a user name before `@`, and shows the URL
+  whole or cut in the middle keeping the host (`ExternalLinkText`).
+  Cancel is the default (Return and Escape). After a Cancel with page
+  JavaScript on, that page load asks no more (`ExternalLinkGate`), so a
+  script `click()` loop can't keep the prompt up; a new load asks again.
+- A linked local document is resolved once (`PreviewLinkAction.previewDocument`):
+  that path is checked, read, and gives the page its kind and base folder.
 - Bare image names in Markdown and HTML use the bounded `WikiVault` index
   after a relative lookup, preferring the configured Obsidian attachment
   folder; resolved files remain confined to the vault.
@@ -658,8 +679,8 @@ always to the right of the editor, so there is no side to store. Restore
 runs in `AfterFirstFrame` for both, so a restored preview costs nothing
 before the first frame and nothing at all when there is none. Sessions
 saved before `previewShown` decode it as nil, which means not shown.
-An iOS port would reuse the CedricCore resolver and implement navigation
-and an isolated web view in the iOS preview controller.
+An iOS port would reuse the CedricCore resolver and navigation policy
+and implement navigation in the iOS preview controller.
 
 **CSV / TSV grid** (`CSVPreview`): `CSV.parse` (CedricCore, RFC 4180,
 UTF-16 offsets) on a background queue from an immutable copy of the text
@@ -678,21 +699,34 @@ one) and `edgeDelimiters` (every line a `| … |` pipe row). The parser and
 `fieldOffset` both follow it, so a click still lands in the right field.
 Table-driven samples in `CSVDialectTests`.
 
-**Closing the last window** (`AppDelegate.isClosingLastDocument`,
-`quitAfterLastClose`): a document tab's `onClose` (text, PDF, image,
-Office, certificate) asks, before the tab leaves its list, whether no other
-document tab exists and no restored tab is still pending. The tab is then
-hot-closed like any other (`rememberClosed`/`rememberClosedViewer`: in the
-closed list, unsaved text in its buffer), and only then does the quit path
-run (`prepareToQuit`: synchronous session save, waiters released) and
-`NSApp.terminate` on the next turn. So the next launch has no open tab
-(an empty Untitled one) and ⇧⌘T brings the closed one back; Quit (⌘Q)
-alone keeps every open tab open. Other windows
+**Closing the last window** (`AppDelegate.shouldCloseDocumentWindow`,
+`closeDocumentWindows`, `isClosingLastDocument`, `quitAfterLastClose`): a
+close that will quit the app quits with the tabs still open, like Quit
+(⌘Q), reopen on or off. A document tab's `windowShouldClose` (text, PDF,
+image, Office, certificate) asks `shouldCloseDocumentWindow` first: in the
+only window group, when the tab is the last document tab (⌘W on the last
+tab) or the red close button is closing the whole tab group
+(`isClosingWholeWindow`: the current event is a click on that button),
+it runs the quit path (`prepareToQuit`: synchronous session save with
+every open tab and its unsaved buffer, waiters released), cancels the
+close and calls `NSApp.terminate` on the next turn. File › Close Window
+(⇧⌘W) on the only window does the same (`closeDocumentWindows`). Launch
+then applies `SessionReopenPolicy.plan`: reopen on (the default), every
+tab comes back; reopen off, tabs with unsaved text come back as open tabs
+and only clean ones are parked on the closed list, so unsaved text never
+falls under `ClosedTabs.keepDays` / `unsavedLimit` because of a quit.
+Tabs ⌘W closed earlier, while other tabs were open, were hot-closed like
+any close. `onClose`'s `quitAfterLastClose` is only a fallback for a close
+that skipped `windowShouldClose`; that tab is hot-closed. Other windows
 (detached previews, Settings, panels, the owl) don't count.
 `applicationShouldTerminateAfterLastWindowClosed` gives the same answer
 for AppKit's own case (e.g. Settings closed last). Off before launch has
 finished, under the dev hooks (unless `CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1`)
-and with the setting off. File › Close Window on the only window hot-closes each tab, then quits.
+and with the setting off. AppKit closes a whole tab group only for a real
+click on the red button (`performClick` closes only the front tab); `Scripts/session-check.sh` step 8d posts such a click
+(`CEDRIC_TEST_CLOSE_BUTTON`). Known gap: if `isClosingWholeWindow` missed
+that click, the group's other tabs would be hot-closed before the last
+one quits.
 
 ## Editor tools
 
@@ -2134,6 +2168,16 @@ and that neither has entitlements; real-launches the signed app five times
 `CEDRIC_NOTARY_PROFILE`, default `cedric`); fetches Apple's log after every submission,
 accepted or not (`dist/notary-log.json`, next to `dist/notary-result.json`); fails unless
 Accepted; staples; checks with `spctl -a -vv`; and zips the stapled app.
+
+The release workflow then runs `Scripts/smoke-launch.sh dist/Owlink-<version>.zip`
+before it uploads: a fresh `ditto` unzip of the exact zip, its layout (every file the
+app looks up through `Bundle.main`), the checkout's `Resources` and `.build` renamed
+aside while the app runs (the `#filePath` resource fallbacks in OwlArt, ModelCatalog
+and OwlToolGate, and any SwiftPM `Bundle.module` build path, would otherwise answer
+for a zip that lacks its files), `CEDRIC_LLAMA_CHECK`, a 10 s launch, a clean quit and
+no new crash report. Owlink has no SwiftPM resource bundles today, so the First Light
+1.0.1 `Bundle.module` crash (d4rkwyng/first-light#22) can't happen as such; the smoke
+catches the same class of bug for what Owlink does ship.
 
 **Entitlements: none.** Checked 2026-11-17 on the M4 Pro:
 

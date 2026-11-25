@@ -63,8 +63,10 @@ final class InvisiblesTests: XCTestCase {
         XCTAssertFalse(AppSettings.showInvisibles)
         let editor = editor("a b")
         func action() throws -> UIAction {
-            let group = try XCTUnwrap(editor.moreMenuItems().first as? UIMenu)
-            return try XCTUnwrap(group.children.compactMap { $0 as? UIAction }.first { $0.accessibilityIdentifier == "editor.menu.showInvisibles" })
+            // The View › submenu (0.5.2 (18): at the top without a preview,
+            // else in More ›; it was the first group itself).
+            let view = try XCTUnwrap(allSubmenus(editor.moreMenuItems()).first { $0.title == "View" })
+            return try XCTUnwrap(view.children.compactMap { $0 as? UIAction }.first { $0.accessibilityIdentifier == "editor.menu.showInvisibles" })
         }
         let command = UICommand(title: "Show Invisibles", action: #selector(EditorViewController.toggleInvisibles))
         XCTAssertEqual(try action().state, .off)

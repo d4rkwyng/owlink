@@ -18,7 +18,7 @@ enum PreviewLinkLog {
 extension EditorWindowController {
     func previewLink(_ action: PreviewLinkAction) {
         switch action {
-        case .openInPreview, .openWebInPreview:
+        case .openInPreview:
             break // handled by PreviewController
         case .openInCedric(let url):
             (NSApp.delegate as? AppDelegate)?.open(url)
@@ -35,23 +35,59 @@ extension EditorWindowController {
     }
 
     private func confirmExternalLink(_ url: URL) {
-        LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window)
+        // The load and script setting the link was asked from (the page
+        // may reload while the prompt is up).
+        let load = preview?.pageLoads ?? 0, script = preview?.allowJavaScript ?? false
+        LinkPrompt.confirmExternal(url, in: previewPane?.window ?? window) { [weak self] opened in
+            self?.preview?.externalLinkAnswered(opened: opened, load: load, scriptCanClick: script)
+        }
     }
 }
 
 /// The "Open this link?" question, shared by the Markdown preview and PDF tabs.
+/// One at a time: a link asked for while a prompt is showing is dropped, so
+/// page script clicking a link over and over can't stack prompts.
 @MainActor
 enum LinkPrompt {
-    static func confirmExternal(_ url: URL, in window: NSWindow?) {
+    /// The prompt showing now (weak: gone with its alert, so a prompt
+    /// closed without an answer never blocks the next one).
+    private static weak var current: NSWindow?
+    /// Prompts shown, and dropped because one was showing (for checks).
+    private(set) static var shown = 0
+    private(set) static var dropped = 0
+
+    static func confirmExternal(_ url: URL, in window: NSWindow?, answered: @escaping @MainActor (Bool) -> Void = { _ in }) {
+        if current?.isVisible == true { dropped += 1; return }
+        shown += 1
         let a = NSAlert()
-        a.messageText = url.scheme?.lowercased() == "mailto" ? String(localized: "Write an email?") : String(localized: "Open this link?")
-        // The whole URL, so a misleading link text can't hide where it goes
-        // (bidi and control characters shown as escapes).
-        a.informativeText = PromptText.visible(url.absoluteString)
-        a.addButton(withTitle: String(localized: "Open"))
-        a.addButton(withTitle: String(localized: "Cancel"))
+        current = a.window
+        a.messageText = ExternalLinkText.promptTitle(for: url)
+        // The site on a line of its own, then the URL (whole, or cut in the
+        // middle keeping the host), so a misleading link text or a user name
+        // dressed as a site (`https://www.apple.com%2Fsignin@evil.example/`)
+        // can't hide where it goes (bidi and control characters shown as
+        // escapes; a non-ASCII host as its punycode, flagged:
+        // ExternalLinkText.promptMessage).
+        a.informativeText = ExternalLinkText(url).promptMessage
+        // Cancel is the default: Return (a newline typed while page script
+        // raised the prompt) and Escape both answer Cancel; Open takes a
+        // deliberate click (or Tab and Space).
+        let openButton = a.addButton(withTitle: String(localized: "Open"))
+        let cancelButton = a.addButton(withTitle: String(localized: "Cancel"))
+        openButton.keyEquivalent = ""
+        cancelButton.keyEquivalent = "\r"
+        let alertWindow = a.window
+        // A button has one key equivalent: Escape is caught for the alert's window here.
+        var escape: Any? = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak cancelButton] e in
+            guard e.window === alertWindow, e.keyCode == 53 else { return e }
+            cancelButton?.performClick(nil)
+            return nil
+        }
         let open: (NSApplication.ModalResponse) -> Void = { r in
-            if r == .alertFirstButtonReturn { PreviewLinkLog.open(url) }
+            if let m = escape { NSEvent.removeMonitor(m); escape = nil }
+            let yes = r == .alertFirstButtonReturn
+            if yes { PreviewLinkLog.open(url) }
+            answered(yes)
         }
         if let w = window, w.isVisible, w.attachedSheet == nil {
             a.beginSheetModal(for: w, completionHandler: open)

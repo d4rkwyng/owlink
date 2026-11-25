@@ -447,6 +447,100 @@ final class EditorSnapshotTests: XCTestCase {
         await withCheckedContinuation { c in doc.close { _ in c.resume() } }
     }
 
+    /// "Edited" follows the text, not a count of changes (Mac a95b0d2,
+    /// 0.5.2 #7): it clears on save, on Revert, on undo back to the saved
+    /// text, and after an edit and its reverse; undo past a save marks it
+    /// again, and redo back to the saved text clears it.
+    func testEditedFollowsTheTextNotAChangeCount() throws {
+        let url = try sample("sample.swift")
+        let doc = TextDocument(fileURL: url)
+        let wait: (String, (@escaping (Bool) -> Void) -> Void) -> Void = { what, start in
+            let done = self.expectation(description: what)
+            var ok = false
+            start { ok = $0; done.fulfill() }
+            self.wait(for: [done], timeout: 10)
+            XCTAssertTrue(ok, what)
+        }
+        wait("open") { doc.open(completionHandler: $0) }
+        let (_, editor) = show(doc, size: Self.iPhone, dark: false)
+        let tv = editor.textView
+        let original = tv.text!
+        let end = { NSRange(location: (tv.text as NSString).length, length: 0) }
+        let clean: (String) -> Void = { step in
+            XCTAssertFalse(doc.hasUnsavedChanges, step)
+            XCTAssertFalse(editor.editedShown, step)
+            XCTAssertFalse(editor.saveBarItem.isEnabled, step)
+        }
+        let edited: (String) -> Void = { step in
+            XCTAssertTrue(doc.hasUnsavedChanges, step)
+            XCTAssertTrue(editor.editedShown, step)
+            XCTAssertTrue(editor.saveBarItem.isEnabled, step)
+        }
+        let um: UndoManager = try XCTUnwrap(tv.undoManager)
+        /// Each change is its own undo step (`applyTextEdit` closes the
+        /// typing group), then a run-loop turn as between two key presses.
+        let step: (() -> Void) -> Void = { change in
+            change()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let append: (String) -> Void = { text in
+            let at = end()
+            step {
+                XCTAssertTrue(editor.applyTextEdit(TextEdit(range: at, replacement: text,
+                                                            selection: NSRange(location: at.location + (text as NSString).length, length: 0)),
+                                                   actionName: "Typing"))
+            }
+        }
+        let removeLast: (String) -> Void = { text in
+            let n = (text as NSString).length, len = (tv.text as NSString).length
+            step {
+                XCTAssertTrue(editor.applyTextEdit(TextEdit(range: NSRange(location: len - n, length: n), replacement: "",
+                                                            selection: NSRange(location: len - n, length: 0)),
+                                                   actionName: "Delete"))
+            }
+        }
+        clean("as opened")
+
+        // Undo back to the saved text.
+        append("// one")
+        edited("typed")
+        um.undo()
+        XCTAssertEqual(tv.text, original)
+        clean("undone to the saved text")
+        um.redo()
+        edited("redone")
+
+        // An edit and its reverse: two changes, the same text.
+        removeLast("// one")
+        XCTAssertEqual(tv.text, original)
+        clean("typed, then deleted again")
+
+        // Save: the new text is the baseline; undo past it is unsaved,
+        // redo back to it is not.
+        append("// two\n")
+        edited("typed again")
+        wait("save") { doc.save(to: doc.fileURL, for: .forOverwriting, completionHandler: $0) }
+        clean("saved")
+        let savedText = tv.text
+        um.undo()
+        XCTAssertEqual(tv.text, original)
+        edited("undone past the save")
+        um.redo()
+        XCTAssertEqual(tv.text, savedText)
+        clean("redone back to the saved text")
+
+        // Revert (to the opened version) while the disk holds that text.
+        removeLast("// two\n")
+        wait("save again") { doc.save(to: doc.fileURL, for: .forOverwriting, completionHandler: $0) }
+        clean("saved the opened text")
+        append("// three")
+        edited("typed before Revert")
+        step { editor.revertToOpened() }
+        XCTAssertEqual(tv.text, original)
+        clean("reverted")
+        wait("close") { doc.close(completionHandler: $0) }
+    }
+
     /// The hide-keyboard button shows only while editing and resigns.
     func testHideKeyboardButton() async throws {
         let doc = try await open(try sample("sample.swift"))

@@ -319,14 +319,11 @@ extension DevChecks {
                 s.quitOnLastClose.performClick(nil)
                 expect(!Settings.shared.quitWhenLastWindowCloses, "its checkbox turns it off")
                 UserDefaults.standard.removeObject(forKey: "reopenFilesFromLastSession")
-                let systemKeepsWindows = UserDefaults.standard.persistentDomain(forName: UserDefaults.globalDomain)?["NSQuitAlwaysKeepsWindows"] as? Bool
-                let reopenByDefault = SessionReopenPolicy.shouldReopen(explicit: nil, systemKeepsWindows: systemKeepsWindows)
                 s.refresh()
-                expect(Settings.shared.reopenFilesFromLastSession == reopenByDefault
-                       && s.reopenLastSession.state == (reopenByDefault ? .on : .off),
-                       "Reopen files from last session: on by default unless macOS closes windows")
+                expect(Settings.shared.reopenFilesFromLastSession && s.reopenLastSession.state == .on,
+                       "Reopen files from last session: on by default, whatever macOS's quit setting")
                 s.reopenLastSession.performClick(nil)
-                expect(Settings.shared.reopenFilesFromLastSession == !reopenByDefault, "its checkbox changes the effective policy")
+                expect(!Settings.shared.reopenFilesFromLastSession, "its checkbox turns it off")
                 expect(!app.quitsOnLastClose, "the checks themselves never quit on a last close")
                 s.indentKind.selectItem(at: 1)
                 s.changed(s.indentKind)
@@ -400,7 +397,8 @@ extension DevChecks {
             },
             { next in DispatchQueue.main.async { next() } },
             sync {
-                expect(a.text == "qalpha1\n" && a.doc.isDirty, "⇧⌘Z redoes it (an edit like any other)", "dirty \(a.doc.isDirty) \(a.text.debugDescription)")
+                expect(a.text == "qalpha1\n" && !a.doc.isDirty, "⇧⌘Z redoes it, back to the saved text: clean again",
+                       "dirty \(a.doc.isDirty) \(a.text.debugDescription)")
             },
             sync {
                 // Close Window: a second window with two tabs.

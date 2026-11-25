@@ -66,8 +66,11 @@ struct SettingsView: View {
     @AppStorage(AppSettings.Key.theme) private var theme = EditorTheme.system.rawValue
     @AppStorage(AppSettings.Key.saveAutomatically) private var saveAutomatically = true
     @AppStorage(AppSettings.Key.openReadOnly) private var openReadOnly = AppSettings.openReadOnlyDefault
-    /// Unset reads as on, as `AppSettings.reopenFilesFromLastSession` does.
-    @AppStorage(AppSettings.Key.reopenFilesFromLastSession) private var reopenFilesFromLastSession = true
+    /// Read as launch reads it (`AppSettings.reopenFilesFromLastSession`,
+    /// the Mac's `SessionReopenPolicy.shouldReopen(in:)`): unset is on, and
+    /// a `-reopenFilesFromLastSession NO` launch argument (a string, which
+    /// an `@AppStorage` Bool read as unset, so on) shows off.
+    @State private var reopenFilesFromLastSession = AppSettings.reopenFilesFromLastSession
     @AppStorage(AppSettings.Key.styleCheck) private var styleCheck = false
     @AppStorage(AppSettings.Key.readableWidthDefault) private var readableWidthDefault = false
     @AppStorage(AppSettings.Key.useProseFont) private var useProseFont = false
@@ -179,12 +182,13 @@ struct SettingsView: View {
                 .onChange(of: openReadOnly) { AppSettings.post() }
 
                 Section {
-                    Toggle(String(localized: "Reopen files from last session"), isOn: $reopenFilesFromLastSession)
+                    Toggle(String(localized: "Reopen files from last session"), isOn: Binding(
+                        get: { reopenFilesFromLastSession },
+                        set: { reopenFilesFromLastSession = AppSettings.setReopenFilesFromLastSession($0, in: AppSettings.defaults) }))
                         .accessibilityIdentifier("settings.reopenFilesFromLastSession")
                 } footer: {
                     Text(String(localized: "On: the document you had open opens again when Owlink starts, if the file is still there; if it’s gone, Owlink shows the document browser. Off: Owlink starts at the document browser. Unsaved text after a crash is offered either way."))
                 }
-                .onChange(of: reopenFilesFromLastSession) { AppSettings.post() }
 
                 Section {
                     Toggle(String(localized: "Use a prose font for Markdown and plain text"), isOn: $useProseFont)
@@ -234,7 +238,7 @@ struct SettingsView: View {
                 } header: {
                     Text(String(localized: "Writing"))
                 } footer: {
-                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nSpelling and grammar use the system’s checker: on for Markdown and plain text, off for code and data files. The system marks the whole document, including code blocks in Markdown.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centres the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
+                    Text(String(localized: "Prose fonts apply to Markdown and plain text only; code keeps the monospaced Font Size in Editor. Changing Font Size (zoom) changes both.\n\nSpelling and grammar use the system’s checker: on for Markdown and plain text, off for code and data files. The system marks the whole document, including code blocks in Markdown.\n\nStyle Check points out filler words, redundancies (“past history”) and clichés in Markdown and plain text, one at a time, never in code. Offline, no AI. Off until you turn it on. Separate phrases with commas. Ignore on a hint adds that phrase to Never flag.\n\nReadable Width centers the text in a column while lines wrap. Off until you turn it on. The document menu switches the open file and keeps that choice; this switch is the default for every other file."))
                 }
                 .onChange(of: useProseFont) { AppSettings.useProseFont = useProseFont }
                 .onChange(of: proseFontName) { AppSettings.proseFontName = proseFontName.isEmpty ? nil : proseFontName }
@@ -313,10 +317,10 @@ struct SettingsView: View {
                     models.startIfUnchanged(request.model)
                 }
             }
-            .alert(String(localized: "Couldn’t load the model licence"), isPresented: $models.missingLicence) {
+            .alert(String(localized: "Couldn’t load the model license"), isPresented: $models.missingLicence) {
                 Button(String(localized: "OK"), role: .cancel) {}
             } message: {
-                Text(String(localized: "The bundled licence text is missing. No download was started."))
+                Text(String(localized: "The bundled license text is missing. No download was started."))
             }
             .onAppear {
                 address = ai.backend.usesServer ? ai.baseURL.absoluteString : ""
@@ -522,6 +526,20 @@ final class ModelsModel: ObservableObject {
         Task {
             try? await downloader.delete(m)
             states[m.id] = .notDownloaded
+        }
+    }
+}
+
+/// Settings' host: says when it has gone, however it went.
+final class SettingsHost: UIHostingController<SettingsView> {
+    var onGone: (() -> Void)?
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || presentingViewController == nil {
+            let gone = onGone
+            onGone = nil
+            gone?()
         }
     }
 }

@@ -181,7 +181,7 @@ public enum OwlPrompts {
         case .explain:
             return "Explain what this \(what) (\(lines)) does or says, in plain words, in at most 5 sentences."
         case .summarise:
-            return "Summarise this \(what) (\(lines)) in at most 5 short bullet points."
+            return "Summarize this \(what) (\(lines)) in at most 5 short bullet points."
         case .findProblems:
             return prose
                 ? "Find real problems in this text (\(lines)): mistakes, unclear sentences, contradictions. List at most 4, each with its line number. If there are none, say so."
@@ -291,12 +291,12 @@ public enum OwlPrompts {
             let what = pictureKind + " (XML that draws a picture); the preview shows the rendered picture. Never say there is no picture. "
             if canDescribeImage {
                 return what + "To see the picture, call describe_image: it renders it on this Mac and reports what it shows, "
-                    + "any text in it, its size and colours. When asked what the picture shows, call it first, then answer from its "
+                    + "any text in it, its size and colors. When asked what the picture shows, call it first, then answer from its "
                     + "result together with what the XML draws."
             }
             return what + "You see only its XML, not the rendered image. "
                 + "If asked what it shows, say you can't see the rendered image, then describe what the code draws "
-                + "(size, shapes, colours, text) as far as the XML tells."
+                + "(size, shapes, colors, text) as far as the XML tells."
         default:
             return nil
         }

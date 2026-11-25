@@ -2,7 +2,7 @@
 
 A **simple text editor** for when you just want to look at a file.
 
-- Syntax colouring for Swift, Python, JSON, YAML, Markdown and more
+- Syntax coloring for Swift, Python, JSON, YAML, Markdown and more
 - Find and replace (`⌘F`, `⌥⌘F`)
 - Cedric's hints, offline
 

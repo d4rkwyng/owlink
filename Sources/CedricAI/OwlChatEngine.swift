@@ -688,7 +688,7 @@ extension LocalModelClient {
         // of the answer (a slow model reads a long prompt first); after
         // that, at most `streamIdleLimit` between bytes, and `streamCap`
         // over the whole answer. A long answer that keeps coming is fine.
-        let watch = StreamWatch(firstByte: timeout, idle: streamIdleLimit, cap: streamCap)
+        let watch = StreamWatch(firstByte: timeout, idle: streamIdleLimit, cap: streamCap, now: streamClock)
         do {
             return try await withThrowingTaskGroup(of: OpenAIStreamAccumulator?.self) { group in
                 group.addTask { [request] in

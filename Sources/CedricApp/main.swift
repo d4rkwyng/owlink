@@ -294,7 +294,6 @@ func buildMainMenu() -> NSMenu {
             item(String(localized: "Back"), #selector(AppDelegate.previewBackMenu(_:))),
             item(String(localized: "Forward"), #selector(AppDelegate.previewForwardMenu(_:))),
             item(String(localized: "This Document"), #selector(AppDelegate.previewHomeMenu(_:))),
-            item(String(localized: "Open in Browser"), #selector(AppDelegate.previewBrowserMenu(_:))),
             .separator(),
             item(String(localized: "Refresh Preview"), #selector(AppDelegate.refreshPreviewMenu(_:)), "r", [.command, .option]),
             item(String(localized: "Sync Scrolling"), #selector(AppDelegate.togglePreviewSyncMenu(_:))),

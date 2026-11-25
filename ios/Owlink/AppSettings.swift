@@ -38,6 +38,9 @@ enum AppSettings {
         static let highlightOccurrences = "highlightOccurrences"
         static let saveAutomatically = "ios.saveAutomatically"
         static let openReadOnly = "ios.openReadOnly"
+        /// The Markdown preview's front matter block was left open (the
+        /// reader's last tap on it); unset: collapsed.
+        static let previewFrontMatterExpanded = "previewFrontMatterExpanded"
         /// Same key as the Mac (Settings › "Reopen files from last session").
         static let reopenFilesFromLastSession = "reopenFilesFromLastSession"
         /// The Mac's find bar does not remember its Regex box; the phone does.
@@ -51,7 +54,7 @@ enum AppSettings {
     static let launchResetKeys = [Key.fontSize, Key.fontName, Key.wrap, Key.lineNumbers, Key.showInvisibles, Key.showContextBar, Key.owlHints, Key.theme,
                                   Key.saveAutomatically, Key.openReadOnly, Key.reopenFilesFromLastSession,
                                   Key.owlPlacement, Key.owlManualPlacement, Key.focusUnit,
-                                  Key.checkSpellingWhileTyping, Key.checkGrammarInProse]
+                                  Key.checkSpellingWhileTyping, Key.checkGrammarInProse, Key.previewFrontMatterExpanded]
 
     /// 15 pt on large screens (an iPad, an unfolded iPhone Duo), 13 on
     /// phone-sized ones: by size class, not device idiom (the Duo is a
@@ -83,6 +86,12 @@ enum AppSettings {
     @MainActor static var fontSize: Double {
         get { chosenFontSize ?? defaultFontSize }
         set { defaults.set(min(max(newValue, fontSizes.lowerBound), fontSizes.upperBound), forKey: Key.fontSize); post() }
+    }
+
+    /// Not posted as a change: the preview reads it at each render.
+    static var previewFrontMatterExpanded: Bool {
+        get { defaults.bool(forKey: Key.previewFrontMatterExpanded) }
+        set { defaults.set(newValue, forKey: Key.previewFrontMatterExpanded) }
     }
 
     static var wrap: Bool {
@@ -243,22 +252,37 @@ enum AppSettings {
     }
 
     static var openReadOnly: Bool {
-        get { defaults.object(forKey: Key.openReadOnly) as? Bool ?? openReadOnlyDefault }
+        // bool(forKey:) once set: a value given as text (a launch argument,
+        // "-ios.openReadOnly YES", is the string "YES") counts too; `as?
+        // Bool` read it as unset, the idiom's default.
+        get { defaults.object(forKey: Key.openReadOnly) == nil ? openReadOnlyDefault : defaults.bool(forKey: Key.openReadOnly) }
         set { defaults.set(newValue, forKey: Key.openReadOnly); post() }
     }
 
     /// Settings › "Reopen files from last session": the last open document
-    /// opens again at launch. iOS has no "Close windows when quitting"
-    /// setting, so until explicitly set it is on. Never `bool(forKey:)`:
-    /// a missing key must read as unset, not as off.
+    /// opens again at launch. On unless Owlink's own preference says off,
+    /// as on the Mac since 0.5.2 (ccdb2d8); a missing key reads as unset,
+    /// not as off. Read with the Mac's `SessionReopenPolicy`, so a
+    /// `-reopenFilesFromLastSession NO` launch argument (a string, which
+    /// `as? Bool` read as unset) turns it off too.
     static var reopenFilesFromLastSession: Bool {
         get { reopenFilesFromLastSession(in: defaults) }
         set { defaults.set(newValue, forKey: Key.reopenFilesFromLastSession); post() }
     }
 
     static func reopenFilesFromLastSession(in defaults: UserDefaults) -> Bool {
-        SessionReopenPolicy.shouldReopen(explicit: defaults.object(forKey: Key.reopenFilesFromLastSession) as? Bool,
-                                         systemKeepsWindows: nil)
+        SessionReopenPolicy.shouldReopen(in: defaults)
+    }
+
+    /// The Settings toggle's write: stores `on`, then returns what launch
+    /// will read (`reopenFilesFromLastSession(in:)`), which the toggle
+    /// shows. A launch argument outranks the stored value, so under
+    /// `-reopenFilesFromLastSession NO` the toggle stays off, as launch does.
+    @discardableResult
+    static func setReopenFilesFromLastSession(_ on: Bool, in defaults: UserDefaults) -> Bool {
+        defaults.set(on, forKey: Key.reopenFilesFromLastSession)
+        post()
+        return reopenFilesFromLastSession(in: defaults)
     }
 
     static var theme: EditorTheme {

@@ -9,9 +9,9 @@ final class OwlinkUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    private func launch(_ name: String, fresh: Bool) -> XCUIApplication {
+    private func launch(_ name: String, fresh: Bool, extra: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-OwlinkOpen", name, "-OwlinkResetSettings"] + (fresh ? ["-OwlinkFreshSample"] : [])
+        app.launchArguments = ["-OwlinkOpen", name, "-OwlinkResetSettings"] + (fresh ? ["-OwlinkFreshSample"] : []) + extra
         app.launch()
         return app
     }
@@ -22,15 +22,74 @@ final class OwlinkUITests: XCTestCase {
         return tv
     }
 
+    /// A finger's tap in the text (its middle). XCUIElement.tap() on the
+    /// text view never gives it focus on the iPad simulators (iOS 27.2: no
+    /// caret, no keyboard, textViewDidBeginEditing not called), while a tap
+    /// at the same point does, on iPhone and iPad alike.
+    private func tapText(_ tv: XCUIElement) {
+        tv.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
+    /// Shows the preview and returns its web view: the eye button in the
+    /// bar, or on a narrow iPhone the system overflow menu (More ›
+    /// Preview › Preview).
+    private func showPreview(_ app: XCUIApplication) -> XCUIElement {
+        let web = app.webViews["editor.previewWeb"]
+        if !web.waitForExistence(timeout: 2) {
+            let eye = app.buttons["editor.preview"]
+            if eye.exists { eye.tap() } else {
+                app.navigationBars.buttons["More"].firstMatch.tap()
+                // The eye's own submenu there: its first item is the toggle.
+                app.buttons["Preview"].firstMatch.tap()
+                let toggle = app.cells.buttons["Preview"].firstMatch
+                XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview item in the overflow menu")
+                toggle.tap()
+            }
+        }
+        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        return web
+    }
+
+    /// Leaves read mode (an iPhone opens files read-only): Edit must be
+    /// on the bar itself there, not collapsed into the ••• menu behind
+    /// disabled Undo/Redo (0.5.2 (17): a 402-pt iPhone hid it).
+    private func beginEditing(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let edit = app.navigationBars.buttons["editor.edit"]
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertTrue(edit.waitForExistence(timeout: 5) && edit.isHittable,
+                          "a file opened read-only: no Edit on the iPhone's bar", file: file, line: line)
+        }
+        if edit.exists, edit.isHittable {
+            if edit.label == "Edit" {
+                edit.tap()
+                let editing = NSPredicate(format: "label == 'Done'")
+                wait(for: [XCTNSPredicateExpectation(predicate: editing, object: edit)], timeout: 5)
+            }
+        } else if UIDevice.current.userInterfaceIdiom == .pad, app.navigationBars.buttons["editor.history"].isHittable {
+            // An iPad's bar too narrow for its pinned group: Edit in the
+            // representative's menu (none there: read mode off).
+            let rep = app.navigationBars.buttons["editor.history"].firstMatch
+            rep.tap()
+            let item = representativeMenuList(app).buttons[HistoryCommand.edit.menu].firstMatch
+            if item.waitForExistence(timeout: 3), item.label == "Edit" {
+                item.tap()
+                sleep(1)
+                rep.tap()
+                XCTAssertEqual(representativeMenuList(app).buttons[HistoryCommand.edit.menu].firstMatch.label, "Done",
+                               "Edit from the pinned representative didn't enter editing", file: file, line: line)
+            }
+            closeHistoryContainer(app, .representative, file: file, line: line)
+        }
+    }
+
     func testOpenEditSaveReopen() throws {
         var app = launch("sample.swift", fresh: true)
         var tv = editor(app)
         XCTAssertTrue((tv.value as? String ?? "").contains("struct Owl"))
         XCTAssertTrue(app.buttons["editor.language"].label.contains("Swift"))
         // Opened read-only on iPhone (the default): Edit first.
-        let edit = app.buttons["editor.edit"]
-        if edit.exists, edit.label == "Edit" { edit.tap() }
-        tv.tap()
+        beginEditing(app)
+        tapText(tv)
         tv.typeText("\n// typed by the UI test\n")
         XCTAssertTrue((tv.value as? String ?? "").contains("typed by the UI test"))
         // The system overflow menu (the "More" button the system adds).
@@ -50,18 +109,24 @@ final class OwlinkUITests: XCTestCase {
         let tv = editor(app)
         let hide = app.buttons["editor.hideKeyboard"]
         XCTAssertFalse(hide.exists && hide.isHittable)
-        tv.tap()
+        // Opened read-only on iPhone: a tap alone brings up no keyboard.
+        beginEditing(app)
+        tapText(tv)
         XCTAssertTrue(hide.waitForExistence(timeout: 5), "no hide-keyboard button while editing")
         XCTAssertEqual(hide.label, "Hide Keyboard")
         hide.tap()
         let gone = NSPredicate { _, _ in !app.keyboards.firstMatch.exists }
         wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 5)
+        XCTAssertFalse(hide.exists && hide.isHittable, "the hide-keyboard button stayed after the keyboard went")
     }
 
     func testOwlHintFixesTrailingSpaces() throws {
         let app = launch("sample.swift", fresh: true)
         let tv = editor(app)
         XCTAssertTrue((tv.value as? String ?? "").contains("struct Owl {   "))
+        // Opened read-only on iPhone: Fix it changes the text only once
+        // editing (in read mode it says "Tap Edit to change the text.").
+        beginEditing(app)
         // The owl in the corner shows a badge; tapping him opens his bubble.
         let owl = app.descendants(matching: .any)["owl.sprite"]
         XCTAssertTrue(owl.waitForExistence(timeout: 10), "no owl")
@@ -80,41 +145,31 @@ final class OwlinkUITests: XCTestCase {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         XCTAssertTrue(app.buttons["editor.language"].label.contains("Markdown"))
-        app.buttons["editor.preview"].tap()
-        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.webViews.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
+        let web = showPreview(app)
+        XCTAssertTrue(web.staticTexts["Owlink for iPhone and iPad"].waitForExistence(timeout: 10))
     }
 
-    /// A web link in the preview opens in the isolated browser; Open in
-    /// Browser asks first with the whole address. The prompt is captured
+    /// A web link in the preview asks first (Mac 0.5.2 S1): the tap itself
+    /// brings up the prompt, which names the site on its own line and then
+    /// shows the whole address; the page never loads in the preview and
+    /// there is no Open in Browser button any more. The prompt is captured
     /// as a screenshot attachment and then cancelled (never opened).
     func testWebLinkOpenInBrowserAsksFirst() throws {
         let app = launch("links.md", fresh: true)
         _ = editor(app)
-        let web = app.webViews["editor.previewWeb"]
-        if !web.waitForExistence(timeout: 2) {
-            // In the bar, or (a narrow iPhone) in the system overflow menu.
-            let eye = app.buttons["editor.preview"]
-            if eye.exists { eye.tap() } else {
-                app.navigationBars.buttons["More"].firstMatch.tap()
-                // The eye's own submenu there: its first item is the toggle.
-                app.buttons["Preview"].firstMatch.tap()
-                let toggle = app.cells.buttons["Preview"].firstMatch
-                XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview item in the overflow menu")
-                toggle.tap()
-            }
-        }
-        XCTAssertTrue(web.waitForExistence(timeout: 10))
+        let web = showPreview(app)
         let link = web.links["The Owlink site"].firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 10), "no web link in the preview")
         link.tap()
-        let open = app.buttons["preview.nav.openInBrowser"]
-        XCTAssertTrue(open.waitForExistence(timeout: 10), "no Open in Browser button")
-        open.tap()
         let alert = app.alerts.firstMatch
-        XCTAssertTrue(alert.waitForExistence(timeout: 5), "no prompt")
+        XCTAssertTrue(alert.waitForExistence(timeout: 5), "the tap didn't ask")
         XCTAssertTrue(alert.staticTexts["Open this link?"].exists)
-        XCTAssertTrue(alert.staticTexts["https://example.com/owlink"].exists, "the whole address")
+        let site = alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Site: example.com")).firstMatch
+        XCTAssertTrue(site.exists, "the site on its own line")
+        let address = alert.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "https://example.com/owlink")).firstMatch
+        XCTAssertTrue(address.exists, "the whole address")
+        XCTAssertTrue(alert.buttons["Cancel"].exists && alert.buttons["Open"].exists)
+        XCTAssertFalse(app.buttons["preview.nav.openInBrowser"].exists, "no Open in Browser button")
         sleep(1) // the alert's appearance animation
         let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         shot.name = "preview-external-link-prompt"
@@ -123,15 +178,1377 @@ final class OwlinkUITests: XCTestCase {
         alert.buttons["Cancel"].tap()
         XCTAssertFalse(alert.waitForExistence(timeout: 1) && alert.exists, "the prompt stayed")
         XCTAssertEqual(app.state, .runningForeground, "nothing was opened outside the app")
+        XCTAssertTrue(link.exists, "the preview still shows the document: the web page did not load in it")
+        XCTAssertFalse(app.buttons["preview.nav.back"].exists, "no history step: the Back bar stays hidden")
     }
 
+    /// Find: the magnifying glass in the bar, or on a narrow iPhone bar
+    /// (where Edit takes the room) Find in the ••• menu's Find › submenu
+    /// (0.5.2 (18): the top-level row opens the submenu, not the navigator).
     func testFindNavigatorOpens() throws {
         let app = launch("sample.swift", fresh: true)
         _ = editor(app)
-        app.buttons["editor.find"].tap()
-        let field = app.textFields.matching(NSPredicate(format: "placeholderValue CONTAINS[c] 'Search' OR placeholderValue CONTAINS[c] 'Find'")).firstMatch
+        let find = app.navigationBars.buttons["editor.find"]
+        if find.waitForExistence(timeout: 2) { find.tap() } else {
+            app.navigationBars.buttons["More"].firstMatch.tap()
+            let submenu = app.collectionViews.buttons["Find"].firstMatch
+            XCTAssertTrue(submenu.waitForExistence(timeout: 5), "no Find in the bar or the ••• menu")
+            submenu.tap()
+            let item = app.collectionViews.buttons["editor.menu.find"].firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 5), "no Find in the ••• menu's Find › submenu")
+            item.tap()
+        }
+        // The system find navigator's field (a search field, not a text field).
+        let field = app.descendants(matching: .any).matching(NSPredicate(
+            format: "(elementType == %d OR elementType == %d) AND (placeholderValue CONTAINS[c] 'Search' OR placeholderValue CONTAINS[c] 'Find')",
+            XCUIElement.ElementType.searchField.rawValue, XCUIElement.ElementType.textField.rawValue)).firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 5), "find navigator didn't open")
         field.typeText("hoot")
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'of'")).firstMatch.waitForExistence(timeout: 5))
     }
+    /// The editor's ••• menu (the system overflow) and its Preview submenu
+    /// for a Markdown document, saved as screenshot attachments (named for
+    /// the device: iphone-menu, ipad-menu-preview-submenu, …). "Focus
+    /// Preview" is in the Preview submenu only, never in the main list.
+    func testOverflowMenuScreenshots() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        let device = UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone"
+        func shoot(_ name: String) {
+            sleep(1) // the menu's appearance animation
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = "\(device)-\(name)"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        let more = app.navigationBars.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 10), "no ••• button")
+        more.tap()
+        shoot("menu")
+        let preview = app.collectionViews.buttons["Preview"].firstMatch
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "no Preview submenu in the ••• menu")
+        let mainList = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
+        XCTAssertEqual(mainList.count, 0, "Focus Preview in the ••• menu's main list")
+        // Seven rows (0.5.2 (18)): Save, Share & Export › | Find ›,
+        // Preview ›, Ask Cedric | More ›, Settings; on an iPhone eight when the bar's
+        // Undo and Redo collapse into it: one row first, side by side, with
+        // Edit / Done (read mode, an iPhone) if that collapsed too. Never
+        // more than eight (b18 gate: nine, Undo and Redo a row each).
+        // (The menu's cells don't expose their titles to XCUITest: rows
+        // counted by where its cells are, side-by-side cells one row, and
+        // the order checked by where the rows' buttons are.)
+        let menuList = app.collectionViews.containing(.button, identifier: "Settings").firstMatch
+        XCTAssertTrue(menuList.waitForExistence(timeout: 5), "no ••• menu list")
+        let cells = menuList.cells.allElementsBoundByIndex.map(\.frame).filter { !$0.isEmpty }
+        let rows = Set(cells.map { Int($0.midY.rounded()) }).count
+        print("MENU-TOP-ROWS \(device): \(rows) (\(cells.count) cells)")
+        let undo = menuList.buttons["editor.menu.undo"].firstMatch
+        let redo = menuList.buttons["editor.menu.redo"].firstMatch
+        let historyInMenu = undo.exists || redo.exists
+        var pinnedRepresentative = false
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // An iPad pins Undo, Redo and Edit / Done in the bar: seven
+            // rows, no history row (Codex b18 re-check 2).
+            XCTAssertFalse(historyInMenu, "a history row in an iPad's ••• menu")
+            XCTAssertEqual(rows, 7, "\(rows) rows at the top of an iPad's ••• menu")
+        } else {
+            XCTAssertEqual(rows, historyInMenu ? 8 : 7, "\(rows) rows at the top of the ••• menu (Undo and Redo in it: \(historyInMenu))")
+            XCTAssertLessThanOrEqual(rows, 8, "\(rows) rows at the top of the ••• menu")
+        }
+        // Undo and Redo by touch: in the bar, or both side by side in one row.
+        if historyInMenu {
+            XCTAssertTrue(undo.exists && redo.exists, "Undo and Redo not both in the ••• menu")
+            XCTAssertEqual(undo.frame.midY, redo.frame.midY, accuracy: 2, "Undo and Redo not in one row")
+        } else {
+            // In the bar: their own buttons, or (an iPad's bar too narrow
+            // for the pinned group) its representative, checked below.
+            // (Read with the ••• menu open over the bar: there, not hittable.)
+            let inBar = app.navigationBars.buttons["editor.undo"].exists && app.navigationBars.buttons["editor.redo"].exists
+            pinnedRepresentative = !inBar && app.navigationBars.buttons["editor.history"].exists
+            XCTAssertTrue(inBar || pinnedRepresentative,
+                          "Undo and Redo neither in the bar, nor the pinned representative, nor the ••• menu")
+        }
+        // Edit (read mode, on an iPhone): in the bar, or in that row.
+        let editInMenu = menuList.buttons["editor.menu.edit"].firstMatch.exists
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            XCTAssertTrue(editInMenu || app.navigationBars.buttons["editor.edit"].exists, "no Edit in the bar or the ••• menu")
+        }
+        if editInMenu { XCTAssertEqual(menuList.buttons["editor.menu.edit"].frame.midY, undo.frame.midY, accuracy: 2, "Edit not in the Undo / Redo row") }
+        if pinnedRepresentative {
+            // Undo and Redo by touch through the representative's menu.
+            closeMenu(app)
+            for c in [HistoryCommand.undo, .redo] {
+                let found = historyCommand(app, c)
+                XCTAssertEqual(found.path, .representative, "\(c.name) not in the pinned representative's menu")
+                closeHistoryContainer(app, found.path)
+            }
+            more.tap()
+            XCTAssertTrue(menuList.waitForExistence(timeout: 5), "the ••• menu didn't open again")
+        }
+        var order = ["Save", "Share & Export", "Find", "Preview", "Ask Cedric", "More", "Settings"]
+        if historyInMenu { order.insert("editor.menu.undo", at: 0) }
+        let ys = order.map { menuList.buttons[$0].firstMatch.frame.minY }
+        XCTAssertEqual(ys, ys.sorted(), "the ••• menu's rows not in the order \(order): \(ys)")
+        XCTAssertEqual(Set(ys).count, ys.count, "two rows at the same place: \(ys)")
+        if historyInMenu { shoot("menu-history-row") }
+        preview.tap()
+        let focus = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", "Focus Preview"))
+        XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
+        XCTAssertEqual(focus.count, 1, "Focus Preview more than once in the Preview submenu")
+        shoot("menu-preview-submenu")
+        // Share & Export › (0.5.2 (18)): Share…, Print… and the exports.
+        closeMenu(app)
+        more.tap()
+        openSubmenu(app, "Share & Export")
+        for item in ["editor.menu.share", "editor.menu.print", "editor.menu.exportHTML", "editor.menu.exportPDF"] {
+            XCTAssertTrue(app.collectionViews.buttons[item].firstMatch.waitForExistence(timeout: 5), "no \(item) in Share & Export ›")
+        }
+        XCTAssertTrue(app.collectionViews.buttons["Share…"].firstMatch.exists, "no Share… in Share & Export ›")
+        shoot("menu-share-export")
+        // More ›, without Export & Print › now.
+        closeMenu(app)
+        more.tap()
+        openSubmenu(app, "More")
+        XCTAssertTrue(app.collectionViews.buttons["Go to Line…"].firstMatch.waitForExistence(timeout: 5), "no Go to Line… in More ›")
+        XCTAssertFalse(app.collectionViews.buttons["Export & Print"].firstMatch.exists, "Export & Print › still in More ›")
+        shoot("menu-more")
+    }
+
+    /// Undo, Redo and Edit / Done by touch, end to end (Codex b18 re-check
+    /// 2: the menu checks would pass with Undo and Redo always disabled).
+    /// Each command is taken wherever it is (historyCommand): the ••• menu's
+    /// folded Undo | Redo | Edit row (an iPhone), the iPad's pinned
+    /// representative (editor.history, a bar too narrow for the pinned
+    /// group), or the bar's own button (an iPad pins them there), and the
+    /// test says which. On an iPhone on iOS 27 in portrait, where the bar's
+    /// priorities fold Undo first, all three must come from the folded row
+    /// (Codex b18 re-check 3). Read mode on (as an iPhone opens files) so
+    /// Edit / Done is there on every device: Edit enters editing, typed
+    /// text, Undo removes it, Redo restores it, Done leaves editing; Undo
+    /// and Redo enabled only when there is something to undo or redo (and
+    /// never in read mode), each read where it was taken from.
+    func testHistoryRowRoundTrip() throws {
+        let app = launch("README.md", fresh: true, extra: ["-ios.openReadOnly", "YES"])
+        let tv = editor(app)
+        let original = tv.value as? String ?? ""
+        let marker = "hoot roundtrip"
+        XCTAssertFalse(original.contains(marker))
+        var paths: [String: HistoryPath] = [:]
+        let foldingExpected = historyFoldingExpected(app)
+        print("HISTORY-ROUNDTRIP folded row expected: \(foldingExpected)")
+
+        /// The command where it is now; on the iPhone that folds them, the
+        /// folded row and nowhere else. Its container is left open.
+        func command(_ c: HistoryCommand, line: UInt = #line) -> (element: XCUIElement, path: HistoryPath) {
+            let found = historyCommand(app, c, file: #filePath, line: line)
+            if paths[c.name] == nil { print("HISTORY-ROUNDTRIP \(c.name): \(found.path.rawValue)") }
+            if foldingExpected {
+                XCTAssertEqual(found.path, .foldedRow, "\(c.name) not taken from the ••• menu's folded row on an iPhone on iOS 27", line: line)
+            }
+            paths[c.name] = found.path
+            return found
+        }
+        func assertEnabled(_ c: HistoryCommand, _ want: Bool, _ when: String, line: UInt = #line) {
+            let found = command(c, line: line)
+            XCTAssertEqual(found.element.isEnabled, want, "\(c.name) \(want ? "disabled" : "enabled") \(when) (\(found.path.rawValue))", line: line)
+            closeHistoryContainer(app, found.path, line: line)
+        }
+        /// Edit / Done's title, read where Edit was found, and that place closed.
+        func editTitle(line: UInt = #line) -> String {
+            let found = command(.edit, line: line)
+            let label = found.element.label
+            closeHistoryContainer(app, found.path, line: line)
+            return label
+        }
+        /// Taps Edit / Done where it is and checks the title turned to
+        /// `after` through that same path.
+        func toggleEdit(from before: String, to after: String, line: UInt = #line) {
+            let found = command(.edit, line: line)
+            XCTAssertEqual(found.element.label, before, "the Edit command isn't \(before) (\(found.path.rawValue))", line: line)
+            XCTAssertTrue(found.element.isEnabled, "\(before) disabled (\(found.path.rawValue))", line: line)
+            found.element.tap()
+            if found.path == .bar {
+                let turned = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", after), object: found.element)
+                XCTAssertEqual(XCTWaiter.wait(for: [turned], timeout: 5), .completed, "\(before) didn't turn to \(after) on the bar", line: line)
+            }
+            sleep(1) // the menu's closing, the mode change
+            let again = command(.edit, line: line)
+            XCTAssertEqual(again.path, found.path, "Edit / Done moved from \(found.path.rawValue) to \(again.path.rawValue)", line: line)
+            XCTAssertEqual(again.element.label, after, "\(before) didn't turn to \(after) (\(again.path.rawValue))", line: line)
+            closeHistoryContainer(app, again.path, line: line)
+        }
+        func text() -> String { tv.value as? String ?? "" }
+        func waitText(_ ok: @escaping (String) -> Bool, _ what: String, line: UInt = #line) {
+            let p = NSPredicate { _, _ in ok(tv.value as? String ?? "") }
+            let r = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: p, object: nil)], timeout: 5)
+            XCTAssertEqual(r, .completed, "\(what): \(text().prefix(120))", line: line)
+        }
+
+        // Read mode: Edit, nothing to undo or redo.
+        XCTAssertEqual(editTitle(), "Edit", "read mode: Edit / Done isn't Edit")
+        assertEnabled(.undo, false, "in read mode")
+        assertEnabled(.redo, false, "in read mode")
+
+        // Edit: from wherever it is; it turns to Done there.
+        toggleEdit(from: "Edit", to: "Done")
+        assertEnabled(.undo, false, "editing, nothing typed")
+        assertEnabled(.redo, false, "editing, nothing typed")
+
+        // Type.
+        tapText(tv)
+        tv.typeText(marker)
+        waitText({ $0.contains(marker) }, "the typed text isn't in the editor")
+        XCTAssertEqual(text().count, original.count + marker.count, "typing changed more than the marker")
+        let typed = text()
+
+        // Undo: the typed text goes. Redo, beside it, disabled.
+        assertEnabled(.redo, false, "with nothing to redo")
+        let u = command(.undo)
+        XCTAssertTrue(u.element.isEnabled, "Undo disabled with typing to undo (\(u.path.rawValue))")
+        u.element.tap()
+        waitText({ $0 == original }, "Undo didn't remove the typed text")
+        XCTAssertEqual(text(), original, "after Undo")
+
+        // Redo: it comes back.
+        let r = command(.redo)
+        XCTAssertTrue(r.element.isEnabled, "Redo disabled with an undo to redo (\(r.path.rawValue))")
+        r.element.tap()
+        waitText({ $0 == typed }, "Redo didn't restore the typed text")
+        XCTAssertEqual(text(), typed, "after Redo")
+        assertEnabled(.redo, false, "after Redo, nothing left to redo")
+        assertEnabled(.undo, true, "after Redo, the typing to undo")
+
+        // Done: back to read mode, Undo and Redo disabled.
+        toggleEdit(from: "Done", to: "Edit")
+        XCTAssertEqual(text(), typed, "Done changed the text")
+        assertEnabled(.undo, false, "back in read mode")
+        assertEnabled(.redo, false, "back in read mode")
+
+        // Said, not silent: where each command was.
+        let summary = paths.keys.sorted().map { "\($0): \(paths[$0]!.rawValue)" }.joined(separator: ", ")
+        print("HISTORY-ROUNDTRIP \(device): \(summary)")
+        XCTContext.runActivity(named: "History commands: \(summary)") { _ in }
+        XCTAssertEqual(Set(paths.keys), ["Undo", "Redo", "Edit"], "not every command taken: \(summary)")
+        if foldingExpected {
+            XCTAssertEqual(Set(paths.values), [.foldedRow], "an iPhone on iOS 27 took history commands outside the folded row: \(summary)")
+        }
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertFalse(paths.values.contains(.foldedRow), "an iPad folded history commands into the ••• menu: \(summary)")
+        }
+    }
+
+    // MARK: Undo, Redo and Edit / Done wherever they are (0.5.2 (18))
+
+    struct HistoryCommand {
+        let name: String, menu: String, bar: String
+        static let undo = HistoryCommand(name: "Undo", menu: "editor.menu.undo", bar: "editor.undo")
+        static let redo = HistoryCommand(name: "Redo", menu: "editor.menu.redo", bar: "editor.redo")
+        static let edit = HistoryCommand(name: "Edit", menu: "editor.menu.edit", bar: "editor.edit")
+    }
+
+    enum HistoryPath: String {
+        /// The ••• menu's Undo | Redo | Edit row (an iPhone's bar folded them).
+        case foldedRow = "folded ••• row"
+        /// The iPad's pinned group shown as its one button (editor.history).
+        case representative = "pinned representative"
+        /// The bar's own button.
+        case bar = "bar"
+    }
+
+    /// Where an iPhone's bar folds Undo (and so the whole row) into the •••
+    /// menu: iOS 27's priorities, a portrait iPhone's narrow bar, read mode.
+    private func historyFoldingExpected(_ app: XCUIApplication) -> Bool {
+        guard UIDevice.current.userInterfaceIdiom == .phone else { return false }
+        guard #available(iOS 27.0, *) else { return false }
+        let window = app.windows.firstMatch.frame
+        return !window.isEmpty && window.width < window.height && window.width <= 440
+    }
+
+    /// The open ••• menu's own list: the one with Settings in it.
+    private func overflowMenuList(_ app: XCUIApplication) -> XCUIElement {
+        app.collectionViews.containing(.button, identifier: "Settings").firstMatch
+    }
+
+    /// The pinned representative's open menu: the list with its Undo, and
+    /// not the ••• menu's.
+    private func representativeMenuList(_ app: XCUIApplication) -> XCUIElement {
+        // Opened only with the ••• menu closed (historyCommand), so the
+        // one list holding the row's Undo is the representative's.
+        app.collectionViews.containing(.button, identifier: "editor.menu.undo").firstMatch
+    }
+
+    /// Undo, Redo or Edit / Done wherever it is, by touch: the ••• menu's
+    /// folded row (that menu left open), else the iPad's pinned
+    /// representative's menu when the bar shows it in place of the group
+    /// (left open), else the bar's own button. One must be there.
+    private func historyCommand(_ app: XCUIApplication, _ c: HistoryCommand,
+                                file: StaticString = #filePath, line: UInt = #line) -> (element: XCUIElement, path: HistoryPath) {
+        sleep(1) // a menu or a mode change before this one settles
+        openMore(app)
+        let list = overflowMenuList(app)
+        XCTAssertTrue(list.waitForExistence(timeout: 5), "the ••• menu didn't open", file: file, line: line)
+        sleep(1) // the menu's appearance animation: its rows all in place
+        let inMenu = list.buttons[c.menu].firstMatch
+        if inMenu.waitForExistence(timeout: 2) { return (inMenu, .foldedRow) }
+        closeHistoryContainer(app, .foldedRow, file: file, line: line)
+        let inBar = app.navigationBars.buttons[c.bar].firstMatch
+        let rep = app.navigationBars.buttons["editor.history"].firstMatch
+        if !(inBar.exists && inBar.isHittable), rep.exists, rep.isHittable {
+            rep.tap()
+            let repList = representativeMenuList(app)
+            XCTAssertTrue(repList.waitForExistence(timeout: 5), "the pinned representative's menu didn't open", file: file, line: line)
+            XCTAssertFalse(overflowMenuList(app).exists, "the ••• menu open over the representative's", file: file, line: line)
+            sleep(1)
+            let item = repList.buttons[c.menu].firstMatch
+            XCTAssertTrue(item.waitForExistence(timeout: 3), "no \(c.name) in the pinned representative's menu", file: file, line: line)
+            return (item, .representative)
+        }
+        XCTAssertTrue(inBar.exists && inBar.isHittable,
+                      "\(c.name) neither in the ••• menu's row, nor the pinned representative's menu, nor the bar", file: file, line: line)
+        return (inBar, .bar)
+    }
+
+    /// Closes the menu historyCommand left open (none for the bar) by a
+    /// tap beside it, left of the text (closeMenu taps the window's foot:
+    /// the keyboard's, while editing), and checks it closed.
+    private func closeHistoryContainer(_ app: XCUIApplication, _ path: HistoryPath,
+                                       file: StaticString = #filePath, line: UInt = #line) {
+        let list: XCUIElement
+        switch path {
+        case .bar: return
+        case .foldedRow: list = overflowMenuList(app)
+        case .representative: list = representativeMenuList(app)
+        }
+        guard list.exists else { return }
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.4)).tap()
+        XCTAssertTrue(list.waitForNonExistence(timeout: 3), "the \(path.rawValue)'s menu didn't close", file: file, line: line)
+    }
+
+    /// Share… (Share & Export ›) brings up the share sheet with the
+    /// document's copy (its caption names the document); it is dismissed
+    /// without sharing, and goes. The sheet is the system's: its remote
+    /// container and activity list, the caption an Other (not a
+    /// StaticText) in a popover on an iPad (b18 gate: the old check looked
+    /// for neither and failed with the popover up).
+    func testShareOpensTheShareSheet() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        openSubmenu(app, "Share & Export")
+        let share = app.collectionViews.buttons["editor.menu.share"].firstMatch
+        XCTAssertTrue(share.waitForExistence(timeout: 5), "no Share… in Share & Export ›")
+        share.tap()
+        let sheet = app.otherElements["ShareSheet.RemoteContainerView"].firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 15), "no share sheet")
+        XCTAssertFalse(sheet.frame.isEmpty, "the share sheet isn't on screen: \(sheet.frame)")
+        let activities = sheet.collectionViews["activityCollectionView"].firstMatch
+        XCTAssertTrue(activities.waitForExistence(timeout: 10), "no activities in the share sheet")
+        let caption = sheet.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "README")).firstMatch
+        XCTAssertTrue(caption.waitForExistence(timeout: 10), "the share sheet doesn't name the document")
+        let popover = app.popovers.containing(.other, identifier: "ShareSheet.RemoteContainerView").firstMatch
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(popover.exists, "the share sheet isn't a popover on an iPad")
+        }
+        shoot("share-sheet")
+        // Dismissed without sharing: outside the popover (iPad), or the
+        // sheet's Close (iPhone).
+        let outside = app.otherElements["PopoverDismissRegion"].firstMatch
+        let close = sheet.buttons["Close"].firstMatch.exists ? sheet.buttons["Close"].firstMatch : app.buttons["Close"].firstMatch
+        if popover.exists, outside.exists {
+            outside.coordinate(withNormalizedOffset: CGVector(dx: 0.1, dy: 0.9)).tap()
+        } else if close.waitForExistence(timeout: 3) {
+            close.tap()
+        } else {
+            XCTFail("no way to dismiss the share sheet (no popover outside, no Close)")
+        }
+        XCTAssertTrue(sheet.waitForNonExistence(timeout: 10), "the share sheet is still up after its dismissal")
+        // (A hidden, offscreen activity list may stay in the tree: none is shown.)
+        let left = app.collectionViews["activityCollectionView"].firstMatch
+        XCTAssertFalse(left.exists && left.isHittable, "the share sheet's activities are still up")
+    }
+
+    // MARK: Settings and the back chevron (0.5.2 (17))
+
+    private var device: String { UIDevice.current.userInterfaceIdiom == .pad ? "ipad" : "iphone" }
+
+    private func shoot(_ name: String) {
+        sleep(1) // the appearance animation
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "\(device)-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    private func openMore(_ app: XCUIApplication) {
+        let more = app.navigationBars.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 10), "no ••• button")
+        more.tap()
+    }
+
+    /// An item of the open ••• menu (or of an open submenu). The ••• menu's
+    /// top level is short (0.5.2 (18): seven or eight rows) and a swipe on a
+    /// list that fits closes the menu, so the list is scrolled only if it
+    /// runs past the screen (More › and Language › can, on an iPhone).
+    private func menuItem(_ app: XCUIApplication, _ label: String) -> XCUIElement {
+        let item = app.collectionViews.buttons[label].firstMatch
+        // Down the list, then back up if a swipe went past it.
+        for i in 0..<14 {
+            if item.waitForExistence(timeout: 1), item.isHittable { return item }
+            guard let list = scrollingMenuList(app) else { break }
+            swipeMenu(app, list, up: i < 7)
+        }
+        XCTAssertTrue(item.exists && item.isHittable, "no \(label) in the ••• menu")
+        return item
+    }
+
+    /// The open menu's own list (activeMenuList), if it is open and its
+    /// rows run past the part of it on screen; nil if it fits, or if no
+    /// menu is open. A list that can't be read fails the test.
+    private func scrollingMenuList(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) -> XCUIElement? {
+        guard let list = activeMenuList(app) else { return nil }
+        // A snapshot that fails (the list going, XCUITest busy) is tried
+        // again; one that never comes is a failure, not a list that fits.
+        var snapshot: XCUIElementSnapshot?
+        for _ in 0..<3 where snapshot == nil {
+            snapshot = try? list.snapshot()
+            if snapshot == nil { sleep(1) }
+        }
+        guard let shot = snapshot else {
+            XCTFail("couldn't read the open menu's list", file: file, line: line)
+            return nil
+        }
+        var rows: [CGRect] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if e.elementType == .cell { rows.append(e.frame) }
+            e.children.forEach(walk)
+        }
+        walk(shot)
+        guard let top = rows.map(\.minY).min(), let bottom = rows.map(\.maxY).max() else {
+            XCTFail("the open menu's list has no rows", file: file, line: line)
+            return nil
+        }
+        // The list's own frame runs past the screen (an iPhone's ••• menu:
+        // y 62 to 936 on an 874-point screen), so the rows are measured
+        // against the part of it in the window.
+        let window = app.windows.firstMatch.frame
+        let shown = window.isEmpty ? shot.frame : shot.frame.intersection(window)
+        return top < shown.minY - 1 || bottom > shown.maxY + 1 ? list : nil
+    }
+
+    /// The open menu's own list: of the app's collection views, the menu's
+    /// (not the share sheet's activity list, which can stay in the tree
+    /// offscreen after the sheet, nor any other list), on screen, and the
+    /// last of those opened (a submenu over its parent on an iPhone,
+    /// beside it on an iPad). Nil if no menu is open.
+    private func activeMenuList(_ app: XCUIApplication) -> XCUIElement? {
+        let window = app.windows.firstMatch.frame
+        let menus = app.collectionViews.allElementsBoundByIndex.filter { list in
+            guard list.exists, list.identifier != "activityCollectionView" else { return false }
+            let frame = list.frame
+            guard !frame.isEmpty, window.isEmpty || frame.intersects(window) else { return false }
+            // A menu's list holds menu rows (cells), none of the share sheet's.
+            return list.cells.count > 0 && list.cells.matching(identifier: "shareCell").count == 0
+        }
+        return menus.last
+    }
+
+    /// Looks at every row of the open menu: once if it fits, else at each
+    /// step of a scroll through it, and back to the top. Only a list that
+    /// scrolls is swiped, and only while it is still open.
+    private func readOpenMenu(_ app: XCUIApplication, _ what: String, _ look: () -> Void) {
+        look()
+        XCTAssertNotNil(activeMenuList(app), "\(what): no menu open to read")
+        guard let list = scrollingMenuList(app) else { return }
+        var swipes = 0
+        while swipes < 7, list.exists {
+            swipeMenu(app, list, up: true)
+            swipes += 1
+            XCTAssertTrue(list.exists, "\(what) closed on a swipe through it")
+            guard list.exists else { return }
+            look()
+        }
+        for _ in 0..<swipes where list.exists { swipeMenu(app, list, up: false) }
+    }
+
+    /// A swipe on a menu's list that scrolls, over the rows shown: a drag
+    /// from the middle shown row to the top (or bottom) one, by screen
+    /// point. An element swipe isn't used: on an iPad mini, Language ›'s
+    /// list and its rows (on screen) fail it with "visible frame is empty".
+    private func swipeMenu(_ app: XCUIApplication, _ list: XCUIElement, up: Bool,
+                           file: StaticString = #filePath, line: UInt = #line) {
+        // A snapshot that fails is tried again; one that never comes fails
+        // the test, not a swipe silently skipped (Codex b18 re-check 3).
+        var snapshot: XCUIElementSnapshot?
+        for _ in 0..<3 where snapshot == nil {
+            snapshot = try? list.snapshot()
+            if snapshot == nil { sleep(1) }
+        }
+        guard let shot = snapshot else {
+            XCTFail("couldn't read the open menu's list to swipe it", file: file, line: line)
+            return
+        }
+        // The rows (cells, in the query's order), top first.
+        var rows: [CGRect] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if e.elementType == .cell { rows.append(e.frame) }
+            e.children.forEach(walk)
+        }
+        walk(shot)
+        let cells = list.cells
+        let order = rows.indices.sorted { rows[$0].minY < rows[$1].minY }
+        // The shown run: from the first hittable row to the last.
+        var shown: [CGRect] = []
+        for i in order {
+            if cells.element(boundBy: i).isHittable { shown.append(rows[i]) } else if !shown.isEmpty { break }
+        }
+        guard shown.count >= 3 else {
+            if up { list.swipeUp(velocity: .slow) } else { list.swipeDown(velocity: .slow) }
+            return
+        }
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func point(_ r: CGRect) -> XCUICoordinate { origin.withOffset(CGVector(dx: r.midX, dy: r.midY)) }
+        let from = shown[shown.count / 2], to = up ? shown[0] : shown[shown.count - 1]
+        point(from).press(forDuration: 0.05, thenDragTo: point(to), withVelocity: .slow, thenHoldForDuration: 0)
+        sleep(1) // the scroll's deceleration
+    }
+
+    /// Opens a submenu of the open ••• menu (More ›, Share & Export ›, …).
+    private func openSubmenu(_ app: XCUIApplication, _ label: String) {
+        menuItem(app, label).tap()
+        sleep(1) // the submenu's animation
+    }
+
+    /// Closes an open menu by tapping outside it (on the status line).
+    private func closeMenu(_ app: XCUIApplication) {
+        app.windows.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.98)).tap()
+        sleep(1)
+    }
+
+    /// ⌘, as a hardware-keyboard event (not a menu tap).
+    private func commandComma(_ app: XCUIApplication) {
+        app.typeKey(",", modifierFlags: .command)
+    }
+
+    /// A lone Shift press: no command, no text. On the iOS 27.2 iPad
+    /// simulators a ⌘-chord XCUITest synthesizes is dropped until the
+    /// launch has had a plain key event: with nothing before it, ⌘, didn't
+    /// open Settings (no sheet anywhere), a second ⌘, didn't either, and
+    /// typing in an earlier launch didn't help; after one Shift press ⌘,
+    /// opened Settings with no sheet, after Ask Cedric's sheet closed and
+    /// over the sheet (same app build; gate-ipad-mini and gate-ipad-pro-13,
+    /// 2026-11-24). This is an XCUITest-only artefact, so the prime is kept.
+    /// AXe v2.1.1's real HID `key-combo --modifiers 227 --key 54` (no prime)
+    /// opened Owlink's Settings on a fresh launch: twice on gate-ipad-pro-11,
+    /// and on all four gate devices in the 3b9e5a9 gate run after the •••
+    /// menu closed and after Ask Cedric closed (/tmp/ios-gate-run-20261124-065834).
+    /// A real keyboard sends ⌘'s own key-down first, as AXe does.
+    private func primeHardwareKeyboard(_ app: XCUIApplication) {
+        app.typeKey(XCUIKeyboardKey.shift.rawValue, modifierFlags: [])
+        sleep(1)
+    }
+
+    private func settingsShown(_ app: XCUIApplication) -> Bool {
+        app.descendants(matching: .any)["settings.font"].waitForExistence(timeout: 8)
+    }
+
+    private func closeSettings(_ app: XCUIApplication) {
+        let done = app.navigationBars.buttons["Done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "no Done in Settings")
+        done.tap()
+        let gone = NSPredicate { _, _ in !app.descendants(matching: .any)["settings.font"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// Ask Cedric from the ••• menu. As a sheet: an iPad at regular width
+    /// docks it beside the text, so there it is popped out into the sheet.
+    private func openAsk(_ app: XCUIApplication, sheet: Bool) {
+        openMore(app)
+        menuItem(app, "Ask Cedric").tap()
+        let done = app.buttons["ask.done"].firstMatch
+        XCTAssertTrue(done.waitForExistence(timeout: 10), "Ask Cedric didn't open")
+        if sheet {
+            // iPad at regular width docks Ask Cedric (ask.panel) and offers
+            // Pop Out (ask.popOut). ask.done exists in both presentations, so
+            // a missing identifier must not let a "sheet" test pass against
+            // the docked panel: both must be present, Pop Out is tapped, and
+            // both must then be gone. On iPhone, Ask is already a sheet (no
+            // panel). The sheet is independently the absence of ask.panel.
+            let panel = app.descendants(matching: .any)["ask.panel"].firstMatch
+            if device == "ipad" {
+                XCTAssertTrue(panel.waitForExistence(timeout: 5),
+                              "Ask Cedric didn't dock (no ask.panel); can't open the sheet")
+                let popOut = app.buttons["ask.popOut"].firstMatch
+                XCTAssertTrue(popOut.waitForExistence(timeout: 5),
+                              "Ask Cedric's docked panel has no Pop Out")
+                popOut.tap()
+                sleep(1)
+                XCTAssertFalse(app.buttons["ask.popOut"].firstMatch.exists,
+                               "Pop Out is still on screen; the sheet didn't open")
+            }
+            XCTAssertFalse(panel.exists, "Ask Cedric is still the docked panel; the sheet didn't open")
+        }
+        XCTAssertTrue(done.waitForExistence(timeout: 5), "Ask Cedric didn't stay open")
+    }
+
+    private func closeAskWithDone(_ app: XCUIApplication) {
+        app.buttons["ask.done"].firstMatch.tap()
+        let gone = NSPredicate { _, _ in !app.buttons["ask.done"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// Swipe-down on the sheet (from just above its Done button).
+    private func closeAskBySwipe(_ app: XCUIApplication) {
+        let done = app.buttons["ask.done"].firstMatch
+        let window = app.windows.firstMatch
+        let top = window.coordinate(withNormalizedOffset: .zero)
+        let y = done.frame.minY - 4
+        let start = top.withOffset(CGVector(dx: window.frame.midX, dy: max(y, 0)))
+        let end = top.withOffset(CGVector(dx: window.frame.midX, dy: window.frame.maxY - 2))
+        start.press(forDuration: 0.1, thenDragTo: end)
+        let gone = NSPredicate { _, _ in !app.buttons["ask.done"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// The back chevron closes the document: the file list (the document
+    /// browser, with its own Settings button) comes back.
+    private func assertBackReturnsToFiles(_ app: XCUIApplication, _ state: String, file: StaticString = #filePath, line: UInt = #line) {
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5) && back.isHittable, "\(state): no back chevron", file: file, line: line)
+        back.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "\(state): the back chevron didn't return to the file list", file: file, line: line)
+        XCTAssertFalse(app.textViews["editor.text"].exists, "\(state): the editor is still open", file: file, line: line)
+    }
+
+    func testSettingsOpensFromTheMenuWithoutCedric() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open from the ••• menu (Ask Cedric closed)")
+        shoot("settings-from-menu")
+        closeSettings(app)
+        // And again after Ask Cedric was opened and closed.
+        openAsk(app, sheet: true)
+        closeAskWithDone(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open from the ••• menu after Ask Cedric closed")
+        closeSettings(app)
+    }
+
+    /// The iPad menu bar's commands reach the editor with nothing in it
+    /// first responder (a document just opened, nothing tapped): ⇧⌘P shows
+    /// the preview, and ⌘, opens Owlink's Settings rather than sending
+    /// Owlink to the system Settings app.
+    func testMenuBarCommandsReachTheEditor() throws {
+        guard device == "ipad" else { throw XCTSkip("the menu bar's keys: iPad") }
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        // 0.5.2 (18) gate: a recovery offer left by an earlier test
+        // ("Owlink closed with unsaved changes in README.md. Restore?")
+        // covered the editor and held ⇧⌘P. A fresh sample has none.
+        XCTAssertFalse(app.alerts.firstMatch.exists,
+                       "an alert is over the editor: \(app.alerts.firstMatch.exists ? app.alerts.firstMatch.label : "")")
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 5), "⇧⌘P didn't reach the editor")
+        app.typeKey(",", modifierFlags: .command)
+        XCTAssertEqual(app.state, .runningForeground, "⌘, left Owlink (the system Settings app)")
+        XCTAssertTrue(settingsShown(app), "⌘, didn't open Owlink's Settings")
+        shoot("settings-from-command-comma")
+        closeSettings(app)
+        // ⇧⌘P again: the preview goes (it toggles both ways).
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForNonExistence(timeout: 5), "⇧⌘P didn't hide the preview again")
+    }
+
+    /// Settings over Ask Cedric, which stays open: Ask Cedric's own button
+    /// (shown with no model ready), else the ••• menu (above the iPhone's
+    /// half-height sheet; beside the iPad's docked panel).
+    func testSettingsOpensWithCedricOpen() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: false)
+        let open = app.buttons["Open Settings"].firstMatch
+        if open.waitForExistence(timeout: 3) { open.tap() } else {
+            openMore(app)
+            menuItem(app, "Settings").tap()
+        }
+        XCTAssertTrue(settingsShown(app), "Settings didn't open with Ask Cedric open")
+        shoot("settings-over-ask-cedric")
+        closeSettings(app)
+        XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "Ask Cedric went with Settings")
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "after Settings over Ask Cedric")
+    }
+
+    /// Waits until Owlink is in front and Ask Cedric's sheet has stopped
+    /// moving (Done hittable, its frame the same on two reads), so a tap
+    /// that follows is the one being tested, not one that activates the
+    /// window or lands mid-animation.
+    private func waitForAskSheetToSettle(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5), "Owlink isn't in front", file: file, line: line)
+        let done = app.buttons["ask.done"].firstMatch
+        var last = CGRect.null
+        for _ in 0..<40 {
+            let frame = done.frame
+            if done.exists, done.isHittable, frame == last { return }
+            last = frame
+            usleep(250_000)
+        }
+        XCTFail("Ask Cedric's sheet didn't settle", file: file, line: line)
+    }
+
+    /// One tap where the back chevron is (XCUITest may count the undimmed
+    /// sheet's container as covering it; a finger isn't stopped by it).
+    private func tapBackOnce(_ app: XCUIApplication) {
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "no back chevron")
+        back.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+
+    /// The sheet stops at half height, undimmed: the back chevron stays
+    /// tappable over it. One tap, once the sheet has settled, closes the
+    /// document (sheet and all). (Codex review of 0.5.2 (17), should-fix
+    /// 3: a second tap is no longer accepted.)
+    func testBackChevronWithAskCedricOpen() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "Ask Cedric open: one tap on the back chevron didn't return to the file list")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
+    }
+
+    /// Unsaved changes ("Save automatically" off) with Ask Cedric open:
+    /// one tap asks Save / Don't Save over the sheet; Cancel keeps the
+    /// document and Ask Cedric, and the chevron still works; Don't Save
+    /// returns to the file list.
+    func testBackChevronWithAskCedricOpenAndUnsavedChanges() throws {
+        let app = launch("README.md", fresh: true, extra: ["-ios.saveAutomatically", "<false/>"])
+        _ = editor(app)
+        // Opened read-only on iPhone: Edit (in the bar, or collapsed into
+        // the ••• menu on a narrow bar).
+        let edit = app.buttons["editor.edit"]
+        if edit.exists {
+            if edit.label == "Edit" { edit.tap() }
+        } else {
+            openMore(app)
+            let item = app.collectionViews.buttons["Edit"].firstMatch
+            if item.waitForExistence(timeout: 3) { item.tap() } else { closeMenu(app) }
+        }
+        // An unsaved change without the keyboard (typing doesn't reach the
+        // text view in this simulator: see testHideKeyboardButton): CRLF
+        // line endings, an undoable change written on Save.
+        openMore(app)
+        // In More › since 0.5.2 (18).
+        openSubmenu(app, "More")
+        menuItem(app, "Encoding and Line Endings").tap()
+        let crlf = app.buttons["CRLF"].firstMatch
+        XCTAssertTrue(crlf.waitForExistence(timeout: 5), "no CRLF item")
+        crlf.tap()
+        let change = app.alerts.buttons["Change"].firstMatch
+        XCTAssertTrue(change.waitForExistence(timeout: 5), "no line-ending confirmation")
+        change.tap()
+        XCTAssertTrue(app.alerts.count == 0 || !change.exists)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
+        let dontSave = app.buttons["Don’t Save"].firstMatch
+        XCTAssertTrue(dontSave.waitForExistence(timeout: 5), "one tap didn't ask about the unsaved changes")
+        app.buttons["Cancel"].firstMatch.tap()
+        XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "Cancel took Ask Cedric away")
+        XCTAssertTrue(app.textViews["editor.text"].exists, "Cancel closed the document")
+        waitForAskSheetToSettle(app)
+        tapBackOnce(app)
+        XCTAssertTrue(dontSave.waitForExistence(timeout: 5), "after Cancel the back chevron did nothing")
+        dontSave.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "Don't Save didn't return to the file list")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "the editor is still open")
+    }
+
+    /// Settings opened over the Ask Cedric sheet (from the ••• menu above
+    /// it), closed, Ask Cedric closed, then the back chevron. On every
+    /// device: the sheet stops at half height, undimmed, with ••• in view
+    /// above it (iPhone; an iPad's popped-out sheet too). XCUITest may
+    /// count the sheet's container as covering the button, so the tap
+    /// goes to its coordinate, as a finger's would.
+    func testSettingsOverAskCedricThenBack() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        let more = app.navigationBars.buttons["More"].firstMatch
+        XCTAssertTrue(more.waitForExistence(timeout: 5), "no ••• above Ask Cedric's sheet")
+        more.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open with Ask Cedric open")
+        closeSettings(app)
+        XCTAssertTrue(app.buttons["ask.done"].waitForExistence(timeout: 5), "Ask Cedric went with Settings")
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Settings over Ask Cedric")
+    }
+
+    func testBackChevronAfterAskCedricDone() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Ask Cedric, Done")
+    }
+
+    func testBackChevronAfterAskCedricSwipeDown() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: true)
+        closeAskBySwipe(app)
+        assertBackReturnsToFiles(app, "Ask Cedric, swipe down")
+    }
+
+    func testBackChevronAfterAskCedricPanel() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openAsk(app, sheet: false)
+        closeAskWithDone(app)
+        assertBackReturnsToFiles(app, "Ask Cedric (panel on iPad), Done")
+    }
+
+    func testBackChevronAfterSettings() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        closeSettings(app)
+        assertBackReturnsToFiles(app, "Settings")
+    }
+
+    func testBackChevronAfterPreviewAndFocusPreview() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        // Shown and hidden again from the ••• menu's Preview submenu.
+        for _ in 0..<2 {
+            openMore(app)
+            menuItem(app, "Preview").tap()
+            let toggle = app.buttons["editor.menu.preview"].firstMatch
+            XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview toggle in the Preview submenu")
+            toggle.tap()
+            sleep(1)
+        }
+        // Focus Preview in and out.
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let focus = app.buttons["editor.menu.focusPreview"].firstMatch
+        XCTAssertTrue(focus.waitForExistence(timeout: 5), "no Focus Preview in the Preview submenu")
+        focus.tap()
+        let edit = app.buttons["editor.focusDone"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5), "Focus Preview didn't start")
+        edit.tap()
+        sleep(1)
+        assertBackReturnsToFiles(app, "preview shown/hidden and Focus Preview")
+    }
+
+    func testBackChevronAfterMenus() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        closeMenu(app)
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        sleep(1)
+        closeMenu(app)
+        openMore(app)
+        // In More › since 0.5.2 (18).
+        openSubmenu(app, "More")
+        menuItem(app, "Writing Mode").tap()
+        sleep(1)
+        closeMenu(app)
+        assertBackReturnsToFiles(app, "••• menu and its submenus")
+    }
+
+    func testBackChevronAfterDetachingThePreview() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let detach = app.collectionViews.buttons["Open Preview in New Window"].firstMatch
+        guard detach.waitForExistence(timeout: 3) else {
+            closeMenu(app)
+            throw XCTSkip("no detached preview here (iPhone)")
+        }
+        detach.tap()
+        let detached = app.descendants(matching: .any)["detachedPreview.web"]
+        XCTAssertTrue(detached.waitForExistence(timeout: 10), "no preview window")
+        shoot("detached-preview")
+        // Without Stage Manager the new window takes the screen: closing
+        // it brings the editor's window back.
+        if !app.navigationBars.buttons["BackButton"].firstMatch.isHittable {
+            let close = app.buttons["detachedPreview.close"].firstMatch
+            XCTAssertTrue(close.waitForExistence(timeout: 5), "no Close in the preview window")
+            close.tap()
+            XCTAssertTrue(app.textViews["editor.text"].waitForExistence(timeout: 10), "the editor's window didn't come back")
+            // The editor's window comes back inactive (XCUITest reports the
+            // app in the background): a first tap would only activate it.
+            if app.state != .runningForeground { app.activate() }
+        }
+        assertBackReturnsToFiles(app, "detached preview")
+    }
+
+    // MARK: Format bar under Ask Cedric, front matter (0.5.2 (17))
+
+    private func formatBar(_ app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'contextbar.'")).firstMatch
+    }
+
+    /// Editing with the keyboard (and so the format bar) up, on every
+    /// device. (It used to skip on iPad as "hardware keyboard, no input
+    /// accessory": the real cause was XCUIElement.tap() not focusing the
+    /// text there; with a real tap the iPad shows the format bar.)
+    private func startTyping(_ app: XCUIApplication, _ tv: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        beginEditing(app, file: file, line: line)
+        tapText(tv)
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "no format bar while editing Markdown", file: file, line: line)
+    }
+
+    private func waitGone(_ e: XCUIElement, _ message: String) {
+        let gone = NSPredicate { _, _ in !e.exists || !e.isHittable }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+        XCTAssertFalse(e.exists && e.isHittable, message)
+    }
+
+    func testFormatBarHiddenUnderAskCedric() throws {
+        let app = launch("README.md", fresh: true)
+        let tv = editor(app)
+        startTyping(app, tv)
+        openAsk(app, sheet: true)
+        waitGone(formatBar(app), "the format bar shows under Ask Cedric")
+        // Not merely covered: off the keyboard altogether (an iPad's sheet
+        // leaves the bottom of the screen in view).
+        XCTAssertFalse(formatBar(app).exists, "the format bar is still on screen under Ask Cedric")
+        shoot("ask-cedric-no-format-bar")
+        closeAskWithDone(app)
+        tapText(tv)
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after Done")
+        shoot("format-bar-restored")
+        // And after a swipe down.
+        openAsk(app, sheet: true)
+        waitGone(formatBar(app), "the format bar shows under Ask Cedric (again)")
+        // Not merely covered: off the keyboard altogether (an iPad's sheet
+        // leaves the bottom of the screen in view).
+        XCTAssertFalse(formatBar(app).exists, "the format bar is still on screen under Ask Cedric (again)")
+        closeAskBySwipe(app)
+        tapText(tv)
+        XCTAssertTrue(formatBar(app).waitForExistence(timeout: 8), "the format bar didn't come back after a swipe down")
+    }
+
+    /// The preview's front matter: one line, a disclosure VoiceOver reads
+    /// with "Front matter" and the title; a tap opens it.
+    func testFrontMatterCollapsedAndExpanded() throws {
+        let app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        let web = showPreview(app)
+        let summary = web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'Front matter' AND label CONTAINS 'Owls of the World'")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 10), "no Front matter · title summary")
+        print("FRONTMATTER-SUMMARY type=\(summary.elementType.rawValue) label=\(summary.label) value=\(String(describing: summary.value))")
+        XCTAssertTrue([.button, .disclosureTriangle].contains(summary.elementType), "the summary isn't a button: \(summary.elementType.rawValue)")
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists, "the values show while collapsed")
+        shoot("front-matter-collapsed")
+        try auditPreview(app, web, "collapsed front matter")
+        summary.tap()
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
+        shoot("front-matter-expanded")
+        try auditPreview(app, web, "expanded front matter")
+    }
+
+    /// The system accessibility audit, on the preview: every issue it
+    /// finds on an element inside the preview's web view fails the test.
+    /// One narrow exception: "Label not human-readable" on a label that is
+    /// exactly one of the document's own front-matter values (the sample's
+    /// `icon: owl.png`). The preview shows the writer's text as written, and
+    /// VoiceOver reading "owl.png" is right. Issues on the rest of the
+    /// screen (the editor's bar and status line, the text) and issues the
+    /// audit can't place on an element are printed, not failed: they
+    /// aren't this test's subject.
+    private func auditPreview(_ app: XCUIApplication, _ web: XCUIElement, _ state: String,
+                              documentValues: Set<String> = ["owl.png", "/", "/notes"]) throws {
+        let area = web.frame
+        var inPreview: [String] = []
+        try app.performAccessibilityAudit(for: .all) { issue in
+            let element = issue.element
+            let frame = element?.frame ?? .null
+            let label = element?.label ?? ""
+            let line = "\(state): \(issue.auditType.rawValue) \(issue.compactDescription) (\(issue.detailedDescription)) — " +
+                "\(element.map { "\($0.elementType.rawValue) '\($0.label)' \(frame)" } ?? "no element")"
+            let inside = !frame.isNull && !frame.isEmpty && area.contains(CGPoint(x: frame.midX, y: frame.midY))
+            let documentText = issue.auditType == .sufficientElementDescription && documentValues.contains(label)
+            let verdict = !inside ? (element == nil ? "unplaced" : "outside") : documentText ? "PREVIEW-document-text" : "PREVIEW"
+            print("A11Y-AUDIT \(verdict) \(line)")
+            if inside && !documentText { inPreview.append(line) }
+            return !(inside && !documentText)
+        }
+        XCTAssertTrue(inPreview.isEmpty, "accessibility audit issues in the preview: \(inPreview)")
+    }
+
+    // MARK: ⌘, from the hardware keyboard (iPad, 0.5.2 (16) findings)
+
+    /// ⌘, opens Owlink's Settings as a real key event: right after the •••
+    /// menu closes, right after Settings (a sheet) closes, with Ask Cedric
+    /// docked beside the text, over Ask Cedric's sheet, and right after
+    /// Ask Cedric closes. Never the system Settings app.
+    func testCommandCommaOpensSettingsOnIPad() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        primeHardwareKeyboard(app)
+        func expectSettings(_ state: String, askStays: Bool = false) {
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "\(state): ⌘, left Owlink (the system Settings app)")
+            XCTAssertTrue(settingsShown(app), "\(state): ⌘, didn't open Owlink's Settings")
+            closeSettings(app)
+            if askStays {
+                XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "\(state): Ask Cedric went with Settings")
+            }
+        }
+        openMore(app)
+        closeMenu(app)
+        expectSettings("right after the ••• menu closed")
+        expectSettings("right after Settings closed")
+        openAsk(app, sheet: false)
+        expectSettings("Ask Cedric open (docked)", askStays: true)
+        closeAskWithDone(app)
+        expectSettings("right after Ask Cedric (docked) closed")
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        expectSettings("over Ask Cedric's sheet", askStays: true)
+        shoot("settings-over-ask-sheet-command-comma")
+        closeAskWithDone(app)
+        expectSettings("right after Ask Cedric's sheet closed")
+        assertBackReturnsToFiles(app, "after ⌘, in every state")
+    }
+
+    /// ⌘, as the first shortcut of a launch, right after a sheet closed:
+    /// Ask Cedric's sheet opens from the ••• menu and closes with Done,
+    /// then ⌘, is the first key command the app gets. Twice, each in a new
+    /// launch, so it is never only the simulator session's first launch.
+    func testCommandCommaFirstInALaunchAfterAskSheetClosed() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        for launchNumber in 1...2 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2) // the simulator hands synthesized keys to the app once it has settled
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            closeAskWithDone(app)
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, left Owlink")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, first after Ask Cedric's sheet closed didn't open Settings")
+            closeSettings(app)
+            app.terminate()
+        }
+    }
+
+    /// ⌘, as the first shortcut of a launch, over Ask Cedric's sheet (the
+    /// case that failed on launches after the first in a simulator session;
+    /// testCommandCommaOpensSettingsOnIPad presses ⌘, earlier in its launch).
+    func testCommandCommaFirstInALaunchOverAskSheet() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        for launchNumber in 1...2 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2)
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, left Owlink")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, first over Ask Cedric's sheet didn't open Settings")
+            closeSettings(app)
+            XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
+            app.terminate()
+        }
+    }
+
+    /// The launch-2 failure of testCommandCommaFirstInALaunchOverAskSheet
+    /// (0.5.2 (18), iPad mini): ⌘, over Ask Cedric's sheet brought the
+    /// system Settings app to the front. It was intermittent, so the same
+    /// steps run in eight fresh launches; in every one Owlink stays in
+    /// front, the system Settings app doesn't come up, and Owlink's
+    /// Settings opens over the sheet.
+    func testCommandCommaOverAskSheetInRepeatedLaunches() throws {
+        guard device == "ipad" else { throw XCTSkip("⌘, from a hardware keyboard: the iPad gate devices") }
+        let systemSettings = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        for launchNumber in 1...8 {
+            let app = launch("README.md", fresh: true)
+            _ = editor(app)
+            sleep(2) // the simulator hands synthesized keys to the app once it has settled
+            primeHardwareKeyboard(app) // not a shortcut: ⌘, below is the launch's first
+            openAsk(app, sheet: true)
+            waitForAskSheetToSettle(app)
+            // Launches 1, 2, 3, 5 and 7 (launch 2 among them: the failing
+            // one): the Ask field holds the keys (it took a plain
+            // character, so it is first responder) when ⌘, comes, still
+            // the launch's first shortcut. Launches 4, 6 and 8: the sheet
+            // as opened, nothing typed.
+            let fieldFocused = launchNumber == 2 || launchNumber % 2 == 1
+            if fieldFocused {
+                let field = app.descendants(matching: .any)["ask.field"].firstMatch
+                XCTAssertTrue(field.waitForExistence(timeout: 5), "launch \(launchNumber): no Ask field")
+                field.tap()
+                field.typeText("q7")
+                let took = NSPredicate { _, _ in ((field.value as? String) ?? "").contains("q7") }
+                wait(for: [XCTNSPredicateExpectation(predicate: took, object: nil)], timeout: 5)
+                XCTAssertTrue(((field.value as? String) ?? "").contains("q7"),
+                              "launch \(launchNumber): the Ask field didn't take a typed character (not first responder)")
+            }
+            let how = fieldFocused ? "with the Ask field focused" : "over Ask Cedric's sheet"
+            commandComma(app)
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, over Ask Cedric's sheet left Owlink")
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, over Ask Cedric's sheet opened the system Settings app")
+            // A system Settings app that comes up late is caught too.
+            for sample in 1...12 {
+                usleep(250_000)
+                let state = systemSettings.state
+                XCTAssertNotEqual(state, .runningForeground,
+                                  "launch \(launchNumber): ⌘, \(how) opened the system Settings app (sample \(sample), \(sample * 250) ms)")
+                if state == .runningForeground { break }
+            }
+            XCTAssertNotEqual(systemSettings.state, .runningForeground,
+                              "launch \(launchNumber): ⌘, \(how) opened the system Settings app (within 3 s)")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): ⌘, \(how) left Owlink (within 3 s)")
+            XCTAssertTrue(settingsShown(app), "launch \(launchNumber): ⌘, over Ask Cedric's sheet didn't open Owlink's Settings")
+            XCTAssertEqual(app.state, .runningForeground, "launch \(launchNumber): Owlink left the front with Settings up")
+            closeSettings(app)
+            XCTAssertTrue(app.buttons["ask.done"].firstMatch.waitForExistence(timeout: 5), "launch \(launchNumber): Ask Cedric went with Settings")
+            app.terminate()
+        }
+    }
+
+    // MARK: Focus Preview listed once (0.5.2 (16) findings)
+
+    /// Focus Preview is listed once: never in the ••• menu's main list (not
+    /// as a collapsed bar button either, with the preview off or on) nor in
+    /// More › or its submenus, once in its Preview submenu, at most once in
+    /// the bar. On every device
+    /// the gate runs (iPhone, iPad mini, iPad Pro 13).
+    func testFocusPreviewListedOnce() throws {
+        let app = launch("README.md", fresh: true)
+        _ = editor(app)
+        let named = NSPredicate(format: "label == %@", "Focus Preview")
+        for previewOn in [false, true] {
+            let state = previewOn ? "preview on" : "preview off"
+            XCTAssertLessThanOrEqual(app.navigationBars.descendants(matching: .any).matching(named).count, 1,
+                                     "\(state): Focus Preview more than once in the bar")
+            openMore(app)
+            let preview = app.collectionViews.buttons["Preview"].firstMatch
+            XCTAssertTrue(preview.waitForExistence(timeout: 5), "\(state): no Preview submenu in the ••• menu")
+            // The whole main list (seven or eight rows since 0.5.2 (18):
+            // scrolled through only if it doesn't fit).
+            var seen = 0
+            readOpenMenu(app, "\(state): the ••• menu") {
+                seen = max(seen, app.collectionViews.descendants(matching: .any).matching(named).count)
+            }
+            XCTAssertEqual(seen, 0, "\(state): Focus Preview in the ••• menu's main list")
+            // More › and each submenu in it: no Focus Preview either.
+            for nested in [nil, "View", "Writing Mode", "Language", "Encoding and Line Endings",
+                           "Indentation", "Bookmarks", "Folding"] as [String?] {
+                if nested != nil {
+                    closeMenu(app)
+                    openMore(app)
+                }
+                openSubmenu(app, "More")
+                XCTAssertTrue(app.collectionViews.buttons["Go to Line…"].firstMatch.waitForExistence(timeout: 5),
+                              "\(state): More › didn't open")
+                if let nested { openSubmenu(app, nested) }
+                let place = nested.map { "More › \($0) ›" } ?? "More ›"
+                var seenHere = 0
+                readOpenMenu(app, "\(state): \(place)") {
+                    seenHere = max(seenHere, app.collectionViews.descendants(matching: .any).matching(named).count)
+                }
+                XCTAssertEqual(seenHere, 0, "\(state): Focus Preview in \(place)")
+            }
+            closeMenu(app)
+            openMore(app)
+            menuItem(app, "Preview").tap()
+            let focus = app.collectionViews.buttons.matching(named)
+            XCTAssertTrue(focus.firstMatch.waitForExistence(timeout: 5), "\(state): no Focus Preview in the Preview submenu")
+            XCTAssertEqual(app.collectionViews.descendants(matching: .any).matching(named).count, 1,
+                           "\(state): Focus Preview more than once in the Preview submenu")
+            shoot("focus-preview-once-\(previewOn ? "on" : "off")")
+            if !previewOn {
+                // The submenu's Preview toggle: shown for the second round.
+                app.buttons["editor.menu.preview"].firstMatch.tap()
+                XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 10), "the preview didn't show")
+            } else {
+                closeMenu(app)
+            }
+        }
+    }
+
+    // MARK: US English on the real screens (0.5.2 (16) findings)
+
+    /// British-only stems, as in USEnglishCopyTests' source scan (US:
+    /// summarize, color, center, license…), word-aware, any case.
+    private static let british = try! NSRegularExpression(pattern: #"(?i)\b\w*(summaris|organis|customis|recognis|optimis|initialis|normalis|authoris|synchronis|categoris|visualis|prioritis|standardis|minimis|maximis|emphasis(e|ing)|apologis|colour|behaviour|favourit|honour|neighbour|catalogue|cancell(ed|ing)|labell(ed|ing)|centre|licence)\w*"#)
+
+    /// The visible copy now (labels, titles, placeholders, but not the
+    /// document's own text in the editor or the preview).
+    private func visibleCopy(_ app: XCUIApplication) -> [String] {
+        guard let root = try? app.snapshot() else { return [] }
+        var out: [String] = []
+        func walk(_ e: XCUIElementSnapshot) {
+            if [.textView, .webView, .keyboard].contains(e.elementType) { return }
+            for t in [e.label, e.title, e.placeholderValue ?? ""] where !t.isEmpty { out.append(t) }
+            e.children.forEach(walk)
+        }
+        walk(root)
+        return out
+    }
+
+    private func britishSpellings(_ copy: [String]) -> [String] {
+        copy.flatMap { text -> [String] in
+            let ns = text as NSString
+            return Self.british.matches(in: text, range: NSRange(location: 0, length: ns.length)).map {
+                "\(ns.substring(with: $0.range)) in “\(text)”"
+            }
+        }
+    }
+
+    func testTheVisibleCopyScanCatchesBritishSpellings() {
+        XCTAssertEqual(britishSpellings(["Summarise", "Summarising…", "Text colour", "CENTRE"]).count, 4)
+        XCTAssertTrue(britishSpellings(["Summarize", "Color", "Center", "License", "Centered"]).isEmpty)
+    }
+
+    /// Settings, the ••• menu (and its Preview submenu), the format bar,
+    /// and Ask Cedric, opened for real: no Summarise, colour, centre….
+    func testVisibleCopyIsUSEnglish() throws {
+        let app = launch("README.md", fresh: true)
+        let tv = editor(app)
+        var found: [String: [String]] = [:]
+        func scan(_ screen: String) {
+            let bad = britishSpellings(visibleCopy(app))
+            if !bad.isEmpty { found[screen, default: []] += bad }
+        }
+        scan("editor")
+        // The ••• menu (scrolled through only if it doesn't fit), and its
+        // Preview submenu.
+        openMore(app)
+        XCTAssertTrue(app.collectionViews.buttons["Preview"].firstMatch.waitForExistence(timeout: 5), "no ••• menu")
+        readOpenMenu(app, "the ••• menu") { scan("••• menu") }
+        menuItem(app, "Preview").tap()
+        sleep(1)
+        scan("••• › Preview")
+        closeMenu(app)
+        // Settings, scrolled through.
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        let form = app.collectionViews.firstMatch.exists ? app.collectionViews.firstMatch : app.tables.firstMatch
+        for _ in 0..<10 { scan("Settings"); form.swipeUp(velocity: .slow) }
+        scan("Settings")
+        closeSettings(app)
+        // Ask Cedric (its action buttons: Explain, Summarize, …).
+        openAsk(app, sheet: true)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier == 'ask.action'")).firstMatch.waitForExistence(timeout: 5),
+                      "no Ask Cedric actions")
+        scan("Ask Cedric")
+        shoot("ask-cedric-us-english")
+        closeAskWithDone(app)
+        // The format bar (the keyboard's input accessory), last: the
+        // keyboard would sit over the menus' taps.
+        startTyping(app, tv)
+        scan("format bar")
+        XCTAssertTrue(found.isEmpty, "British spellings on screen: \(found)")
+    }
+
+    // MARK: Front matter remembered (0.5.2 (16) findings)
+
+    private func hidePreview(_ app: XCUIApplication) {
+        openMore(app)
+        menuItem(app, "Preview").tap()
+        let toggle = app.buttons["editor.menu.preview"].firstMatch
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5), "no Preview toggle in the Preview submenu")
+        toggle.tap()
+        let gone = NSPredicate { _, _ in !app.webViews["editor.previewWeb"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: gone, object: nil)], timeout: 8)
+    }
+
+    /// The front matter stays as it was left, open or closed, when the
+    /// preview is hidden and shown again.
+    func testFrontMatterStateKeptAcrossPreviewHideShow() throws {
+        let app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        func summary(_ web: XCUIElement) -> XCUIElement {
+            web.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS 'Front matter' AND label CONTAINS 'Owls of the World'")).firstMatch
+        }
+        var web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter · title summary")
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists, "the values show while collapsed")
+        summary(web).tap()
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5), "a tap didn't open the front matter")
+        hidePreview(app)
+        web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter summary after showing the preview again")
+        XCTAssertTrue(web.staticTexts["A barn owl at dusk"].waitForExistence(timeout: 5),
+                      "opened, the preview hidden and shown: the front matter came back closed")
+        shoot("front-matter-kept-open")
+        summary(web).tap()
+        let closed = NSPredicate { _, _ in !web.staticTexts["A barn owl at dusk"].exists }
+        wait(for: [XCTNSPredicateExpectation(predicate: closed, object: nil)], timeout: 5)
+        hidePreview(app)
+        web = showPreview(app)
+        XCTAssertTrue(summary(web).waitForExistence(timeout: 10), "no Front matter summary after showing the preview again")
+        sleep(1)
+        XCTAssertFalse(web.staticTexts["A barn owl at dusk"].exists,
+                       "closed, the preview hidden and shown: the front matter came back open")
+    }
+
+    // MARK: The gate's screenshots (Scripts/ios-gate.sh)
+
+    private func gateShot(_ name: String) {
+        sleep(1)
+        let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        shot.name = "gate-\(name)"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+
+    /// The main screens, as attachments named gate-<screen>, which
+    /// Scripts/ios-gate.sh saves per build and device and compares with
+    /// the previous build's.
+    func testGateScreenshots() throws {
+        var app = launch("README.md", fresh: true)
+        _ = editor(app)
+        sleep(1)
+        gateShot("1-editor")
+        openMore(app)
+        gateShot("2-menu")
+        closeMenu(app)
+        openMore(app)
+        menuItem(app, "Settings").tap()
+        XCTAssertTrue(settingsShown(app), "Settings didn't open")
+        gateShot("3-settings")
+        closeSettings(app)
+        openAsk(app, sheet: true)
+        waitForAskSheetToSettle(app)
+        gateShot("4-ask-cedric")
+        closeAskWithDone(app)
+        app.terminate()
+        app = launch("front-matter.md", fresh: true)
+        _ = editor(app)
+        let web = showPreview(app)
+        XCTAssertTrue(web.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS 'Front matter'")).firstMatch.waitForExistence(timeout: 10),
+                      "no front matter in the preview")
+        gateShot("5-preview-front-matter")
+    }
+
 }

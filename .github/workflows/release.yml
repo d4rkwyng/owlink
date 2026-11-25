@@ -128,6 +128,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
 
+      # Launch the zip that ships: Scripts/smoke-launch.sh unzips the exact
+      # dist/Owlink-<version>.zip the next step uploads into a fresh temp
+      # folder, checks the bundle's layout, hides this checkout's Resources
+      # and .build (the app's #filePath resource fallbacks, and any SwiftPM
+      # Bundle.module build path, which would mask a zip missing its files on
+      # the machine that built it), runs the llama.framework check, keeps the
+      # app up for 10 s, quits it with a Quit event and fails on any new
+      # Cedric crash report. release.sh's launch-check runs the app before
+      # notarizing and zipping, with the checkout in place; this is the
+      # clean-machine check of the artifact itself, so a broken zip never
+      # reaches a draft (First Light 1.0.1 passed every signature check and
+      # crashed at launch on users' Macs: d4rkwyng/first-light#22).
+      - name: Launch smoke test
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"; ZIP="dist/Owlink-${V%%-*}.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::$ZIP is missing; \"Build, sign, notarize, staple\" did not finish."
+            ls -la dist || true
+            exit 1
+          fi
+          Scripts/smoke-launch.sh --seconds 10 "$ZIP"
+
       - name: Upload to the release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3
         with:

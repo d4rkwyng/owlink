@@ -167,17 +167,28 @@ func ob(_ s: String, vault: WikiVault? = nil) -> String {
         #expect(WikiVault.vaultRoot(for: plain, granted: grant)?.path == grant.path, "a folder outside the grant: unchanged")
     }
 
+    /// iOS reads Obsidian's "/" (vault root) and "./sub" (under the note's
+    /// folder) and refuses ':' and NUL; the Mac keeps 0.5.2's (2c8664a) rule:
+    /// a relative path with no "..", "\\" or leading "/", under the vault root.
     @Test func attachmentFolderRootAndNoteRelative() throws {
         let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/a/pic.webp",
-                              "v/notes/sub/deep/pic.webp"])
+                              "v/notes/sub/deep/pic.webp", "v/sub/pic.webp", "v/x:y/deep/pic.webp"])
         defer { try? FileManager.default.removeItem(at: t) }
         let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
         let config = root.appendingPathComponent(".obsidian/app.json")
-        for (path, expected) in [("/", "a/pic.webp"), ("./sub", "notes/sub/deep/pic.webp")] {
+        #if os(iOS)
+        let cases = [("/", "a/pic.webp"), ("./sub", "notes/sub/deep/pic.webp"), ("x:y", "a/pic.webp"),
+                     ("x:y\0", "a/pic.webp")]
+        #else
+        // "/" is refused (no preference: the shallowest wins); "./sub" is the
+        // vault's "sub"; ':' is an ordinary character.
+        let cases = [("/", "a/pic.webp"), ("./sub", "sub/pic.webp"), ("x:y", "x:y/deep/pic.webp")]
+        #endif
+        for (path, expected) in cases {
             let data = try JSONSerialization.data(withJSONObject: ["attachmentFolderPath": path])
             try data.write(to: config)
             let vault = WikiVault(documentFolder: folder)
-            #expect(vault.resolveImage("pic.webp")?.path == root.appendingPathComponent(expected).path)
+            #expect(vault.resolveImage("pic.webp")?.path == root.appendingPathComponent(expected).path, "\(path)")
         }
     }
 

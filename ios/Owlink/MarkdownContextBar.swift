@@ -1,4 +1,5 @@
 import UIKit
+import SwiftUI
 import CedricCore
 
 final class MarkdownContextBar: UIView {
@@ -197,16 +198,43 @@ final class MarkdownContextBar: UIView {
 }
 
 extension EditorViewController {
+    /// Makes or drops the bar for the setting and the language, and puts
+    /// it on the keyboard unless the Ask Cedric sheet is up (the same bar
+    /// comes back when the sheet goes).
     func updateContextBar() {
         let wanted = AppSettings.showContextBar && ContextBarSet.hasBar(document.language.language)
         if wanted, contextBar == nil {
-            let bar = MarkdownContextBar(editor: self)
-            contextBar = bar
-            textView.inputAccessoryView = bar
+            contextBar = MarkdownContextBar(editor: self)
         } else if !wanted, contextBar != nil {
-            textView.inputAccessoryView = nil
             contextBar = nil
-        } else { return }
+        }
+        let attached: UIView? = contextBarHiddenForAsk ? nil : contextBar
+        guard textView.inputAccessoryView !== attached else { return }
+        textView.inputAccessoryView = attached
         if textView.isFirstResponder { textView.reloadInputViews() }
+    }
+}
+
+/// The Ask Cedric sheet's host: says when it has gone, by any path (Done
+/// calls SwiftUI's dismiss, which the sheet delegate never hears about;
+/// swipe down; dismissed by its presenter).
+final class AskSheetHost: UIHostingController<AskCedricView> {
+    var onGone: (() -> Void)?
+
+    /// ⌘, here too: with the sheet (or its field) holding the keys, the
+    /// system's ⌘, opened the system Settings app (0.5.2 (18)). It goes
+    /// up the chain to the editor's navigation controller, which hands it
+    /// to the editor's `showSettings` (see `EditorCommandRouting`).
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + [MenuBar.settingsKey()]
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        if isBeingDismissed || presentingViewController == nil {
+            let gone = onGone
+            onGone = nil
+            gone?()
+        }
     }
 }

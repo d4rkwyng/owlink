@@ -206,7 +206,8 @@ final class EditorFoldingTests: XCTestCase {
         let ids = Set(menuItems(editor(swift)).keys)
         XCTAssertEqual(ids, ["editor.menu.fold", "editor.menu.unfold", "editor.menu.foldAll", "editor.menu.unfoldAll",
                              "editor.menu.foldToLevel1", "editor.menu.foldToLevel2", "editor.menu.foldToLevel3"])
-        XCTAssertTrue(editor(swift).moreMenuItems().contains { ($0 as? UIMenu)?.title == String(localized: "Folding") })
+        // In the ••• menu (under More › since 0.5.2 (18)).
+        XCTAssertTrue(allSubmenus(editor(swift).moreMenuItems()).contains { $0.title == String(localized: "Folding") })
     }
 
     func testMenuEnablementFollowsState() {

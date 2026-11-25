@@ -83,13 +83,35 @@ import Testing
         let f = cedricDir(h) + "/cli-token"
         try fm.createDirectory(atPath: cedricDir(h), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let late = String(repeating: "ab", count: 16)
-        // An empty file that stays empty for about 30 ms, then filled in place.
+        // An empty file, filled in place by another process while token()
+        // waits. Not "30 ms later" on the wall clock any more: a busy GitHub
+        // runner took longer than the 50 ms wait just to start that writer
+        // (release run 45208720302: out was ""). Here token()'s `sleep` (a
+        // shell function, found before the command) lets the writer go,
+        // waits until it has written, then sleeps as asked. A token() that
+        // doesn't wait and read again on an empty file still gets "": the
+        // writer then never goes, or gives up after 10 s.
         let out = try bash("""
             : > "$token_file"; chmod 600 "$token_file"
-            ( sleep 0.03; printf '\(late)\\n' >> "$token_file" ) &
+            ( i=0; while [ ! -e "$HOME/.waiting" ] && [ $i -lt 1000 ]; do command sleep 0.01; i=$((i+1)); done
+              printf '\(late)\\n' >> "$token_file"; : > "$HOME/.written" ) &
+            sleep() {
+                printf '%s' "$1" > "$HOME/.slept"; : > "$HOME/.waiting"
+                local i=0; while [ ! -e "$HOME/.written" ] && [ $i -lt 1000 ]; do command sleep 0.01; i=$((i+1)); done
+                command sleep "$@"
+            }
             token; wait
             """, home: h)
         #expect(out == late)
+        // The app takes about 30 ms to fill the file it made.
+        // Parsed in the POSIX locale: "0.05" whatever the process locale.
+        let slept: Double = (try? String(contentsOfFile: h + "/.slept", encoding: .utf8)).flatMap { text in
+            let scanner = Scanner(string: text)
+            scanner.locale = Locale(identifier: "en_US_POSIX")
+            guard let value = scanner.scanDouble(), scanner.isAtEnd else { return nil }
+            return value
+        } ?? 0
+        #expect(slept > 0.03, "waits longer than the app takes to fill its file: \(slept) s")
     }
 
     /// A Cedric folder an older version left 0755 is tightened to 0700.

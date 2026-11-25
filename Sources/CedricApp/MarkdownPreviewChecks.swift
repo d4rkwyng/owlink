@@ -18,6 +18,7 @@ extension DevChecks {
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
         case "previewnav": previewNavigationDemo(app)
+        case "mdfrontmatter": frontMatterCheck(app)
         default: return false
         }
         return true
@@ -49,6 +50,366 @@ extension DevChecks {
             snapshot("returned-home.png", window: tab.window),
             sync { finish() },
         ])
+    }
+
+    /// The front matter block as the reader leaves it (Codex review of
+    /// 0.5.2 (17), must-fix 3): opened, it stays open through edits (body
+    /// swaps) and a whole-page reload, and the next document opens it from
+    /// the preference; closed, the same. The preference is put back after.
+    static func frontMatterCheck(_ app: AppDelegate) {
+        let saved = UserDefaults.standard.object(forKey: FrontMatterDisclosure.preferenceKey)
+        PreviewController.frontMatterExpanded = false
+        let text = "---\ntitle: Owls of the World\nhero:\n  icon: owl.png\n---\n# Owls\n\nThey hunt at night.\n"
+        let tab = app.open(write("owls.md", text))!
+        sized(tab)
+        let p = { tab.preview }
+        var before = 0
+        let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
+        func expectState(_ want: String, _ name: String, in t: EditorWindowController? = nil) -> (@escaping () -> Void) -> Void {
+            { next in previewJS(t ?? tab, state) { v in expect(v as? String == want, name, "\(v ?? "nil")"); next() } }
+        }
+        func edit(_ s: String) -> (@escaping () -> Void) -> Void {
+            sync {
+                before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0)
+                focus(tab)
+                tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+                type(s)
+            }
+        }
+        var second: EditorWindowController?
+        var linker: EditorWindowController?
+        var secondOpen = false
+        var direct: EditorWindowController?
+        var via: EditorWindowController?
+        var directOpen = false
+        var swinger: EditorWindowController?
+        var barred: URL?
+        run([
+            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
+            waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
+            expectState("false", "front matter collapsed by default"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            edit("a"),
+            waitForSwap(tab, "an edit renders", since: { before }),
+            expectState("true", "an opened block stays open through an edit (body swap)"),
+            sync { expect(PreviewController.frontMatterExpanded, "opening it is kept as the preference") },
+            sync { p()?.forceReload(); before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0) },
+            edit("b"),
+            waitForSwap(tab, "a reload renders", since: { before }),
+            waitForPreview(tab, contains: "night. ab", "the reloaded page shows the edits"),
+            expectState("true", "an opened block stays open through a whole-page reload"),
+            sync { second = app.open(write("barn.md", "---\ntitle: Barn owl\n---\n# Barn\n\nPale.\n")) },
+            { next in
+                guard let second else { expect(false, "second document opens"); next(); return }
+                sized(second); focus(second)
+                if !second.previewVisible { second.togglePreview() }
+                next()
+            },
+            { next in
+                guard let second else { next(); return }
+                waitForPreview(second, contains: "Pale", "the second document's preview")(next)
+            },
+            { next in
+                guard let second else { next(); return }
+                expectState("true", "the next document opens the block from the preference", in: second)(next)
+            },
+            sync { focus(tab) },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            edit("c"),
+            waitForSwap(tab, "an edit renders", since: { before }),
+            expectState("false", "a closed block stays closed through an edit"),
+            sync { expect(!PreviewController.frontMatterExpanded, "closing it is kept as the preference") },
+            // Codex review of the 0.5.2 (17) fixes, should-fix: opened,
+            // then the preview closed with no edit or refresh between.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview() },
+            until("closing the preview keeps the opened block as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            sync { tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens again"),
+            expectState("true", "the reopened preview has the block open"),
+            // Codex review round 2, should-fix: reopened at once, before
+            // the close-time read has come back, the new preview still
+            // shows the block as the reader left it.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once"),
+            expectState("false", "reopened at once, the closed block is still closed"),
+            sync { expect(!PreviewController.frontMatterExpanded, "closing it at once is kept as the preference") },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again"),
+            expectState("true", "reopened at once, the opened block is still open"),
+            sync { expect(PreviewController.frontMatterExpanded, "opening it at once is kept as the preference") },
+            // Codex review round 3, should-fix: the close-time read comes
+            // back after its one-second timeout (held back 1.5 s), when
+            // the reopened preview has already rendered with the old
+            // preference: the late read still sets the block there.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (a slow close-time read)"),
+            // Codex b18 round 1, should-fix 2: the page shows the old state
+            // while the read is out (the render didn't wait for it).
+            expectState("true", "while the slow read is out, the reopened block shows the old state (open)"),
+            untilState(tab, "false", "a close-time read that comes back late sets the reopened block closed", timeout: 5),
+            sync { expect(!PreviewController.frontMatterExpanded, "the late read's closing is kept as the preference") },
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again (a slow close-time read)"),
+            expectState("false", "while the slow read is out, the reopened block shows the old state (closed)"),
+            untilState(tab, "true", "a close-time read that comes back late sets the reopened block open", timeout: 5),
+            sync { expect(PreviewController.frontMatterExpanded, "the late read's opening is kept as the preference") },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex review round 3, should-fix 2: a slow close-time read in
+            // this tab doesn't hold up a render in another tab (renders
+            // used to wait for every close-time read, up to a second).
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview() },
+            { next in
+                guard let second else { expect(false, "the second document is open"); next(); return }
+                let start = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                let t0 = Date()
+                second.renderPreview()
+                @MainActor func poll() {
+                    let n = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                    if n > start {
+                        expect(ms < 500, "another tab's render isn't held up by a slow close-time read", "\(ms) ms")
+                        next()
+                    } else if ms > 3000 {
+                        expect(false, "another tab's render isn't held up by a slow close-time read", "no render")
+                        next()
+                    } else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
+                    }
+                }
+                poll()
+            },
+            until("the slow close-time read still keeps the closed block", timeout: 4) { !PreviewController.frontMatterExpanded },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 1, must-fix 1: a change recorded in another
+            // tab while this tab's slow read is out stays the preference,
+            // and the read still sets this document's reopened block.
+            sync { focus(tab); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens (unrelated tab)"),
+            expectState("false", "the preview opens with the block closed (unrelated tab)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (unrelated tab)"),
+            expectState("false", "while the read is out, the reopened block is still closed (unrelated tab)"),
+            { next in
+                guard let second else { next(); return }
+                previewJS(second, "document.querySelector('details.frontmatter').open = false; 1") { _ in
+                    before = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
+                    second.renderPreview()
+                    waitForSwap(second, "the other tab renders", since: { before })(next)
+                }
+            },
+            untilState(tab, "true", "a change in another tab doesn't stop the late read setting this document's block", timeout: 5),
+            sync { expect(!PreviewController.frontMatterExpanded, "the other tab's newer change stays the preference") },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Must-fix 2: closed, reopened and closed again before the
+            // first read comes back, then reopened: the first read (the
+            // only one that saw the change) still sets the block.
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens (two closes)"),
+            expectState("false", "the block starts closed (two closes)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (two closes)"),
+            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens a second time (two closes)"),
+            expectState("false", "while the first read is out, the block is still closed (two closes)"),
+            untilState(tab, "true", "a second close before the first read lands doesn't drop the reader's change", timeout: 5),
+            until("and it is kept as the preference (two closes)", timeout: 3) { PreviewController.frontMatterExpanded },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Must-fix 4: the reader clicks the block twice in the reopened
+            // preview before the late read comes back: their choice stands.
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (double toggle)"),
+            expectState("true", "while the read is out, the reopened block is still open (double toggle)"),
+            { next in previewJS(tab, "const s = document.querySelector('details.frontmatter > summary'); s.click(); s.click(); 1") { _ in next() } },
+            expectState("true", "two clicks leave the block open"),
+            until("the late read comes back (double toggle)", timeout: 5) { !PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            expectState("true", "a late read doesn't undo the reader's two clicks"),
+            sync { PreviewController.closeReadDelayForChecks = 0; focus(tab); tab.togglePreview() },
+            until("closing keeps the reader's last choice (open) as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            // Must-fix 3: a read belongs to the page the preview shows. The
+            // linked barn.md's state, read as A's preview closes while it
+            // shows barn, isn't set on A's reopened page; A's own read isn't
+            // set on barn shown in A's reopened preview.
+            sync {
+                linker = app.open(write("linker.md", "---\ntitle: Linker\n---\n# Linker\n\nSee [Barn](barn.md).\n"))
+                if let l = linker { sized(l); focus(l); if !l.previewVisible { l.togglePreview() } }
+            },
+            { next in
+                guard let l = linker else { expect(false, "the linking document opens"); next(); return }
+                waitForPreview(l, contains: "See Barn", "the linking document's preview")(next)
+            },
+            { next in expectState("true", "the linking page opens the block from the preference", in: linker)(next) },
+            { next in
+                guard let l = linker else { next(); return }
+                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
+                    waitForPreview(l, contains: "Pale", "the preview shows the linked page")(next)
+                }
+            },
+            { next in expectState("true", "the linked page opens the block from the preference", in: linker)(next) },
+            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the preview shows the linking page")(next) },
+            { next in expectState("true", "while the linked page's read is out, the linking page's block is open", in: linker)(next) },
+            until("the linked page's late read is kept as the preference", timeout: 5) { !PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            { next in expectState("true", "the linked page's late read isn't set on the linking document's page", in: linker)(next) },
+            sync { PreviewController.closeReadDelayForChecks = 0; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "the linking page again")(next) },
+            { next in expectState("false", "the linking page opens closed from the preference", in: linker)(next) },
+            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 2.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
+            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the linking page")(next) },
+            { next in expectState("false", "while its read is out, the linking page's block is still closed", in: linker)(next) },
+            { next in
+                guard let l = linker else { next(); return }
+                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
+                    waitForPreview(l, contains: "Pale", "the reopened preview follows the link")(next)
+                }
+            },
+            { next in expectState("false", "the linked page opens closed from the preference", in: linker)(next) },
+            until("the linking page's late read is kept as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
+            { next in expectState("false", "the linking page's late read isn't set on the linked page its preview shows", in: linker)(next) },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 2, must-fix 1: A's late read lands while A's
+            // reopened preview is still loading, then B's late read lands
+            // before A has finished loading: A still ends up in A's state
+            // (B's read used to take A's one pending slot).
+            sync { focus(tab); tab.togglePreview() },
+            waitForPreview(tab, contains: "They hunt at night", "the preview opens (two late reads)"),
+            expectState("true", "the block starts open (two late reads)"),
+            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
+            { next in
+                guard let second else { expect(false, "the second document is open"); next(); return }
+                previewJS(second, "const d = document.querySelector('details.frontmatter'); d.open = !d.open; String(d.open)") { v in
+                    secondOpen = v as? String == "true"
+                    next()
+                }
+            },
+            sync {
+                PreviewController.holdFinishForChecks = true
+                PreviewController.closeReadDelayForChecks = 1.0
+                focus(tab); tab.togglePreview(); tab.togglePreview()
+                PreviewController.closeReadDelayForChecks = 1.6
+                if let second { focus(second); second.togglePreview() }
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { next() } },
+            sync { expect(PreviewController.frontMatterExpanded == secondOpen, "B's later read is kept as the preference (two late reads)") },
+            sync { PreviewController.releaseFinishesForChecks() },
+            untilState(tab, "false", "A's and then B's late reads land while A's page loads: A ends up in A's state", timeout: 5),
+            sync { PreviewController.closeReadDelayForChecks = 0; if let second { focus(second); second.togglePreview() } },
+            { next in
+                guard let second else { next(); return }
+                waitForPreview(second, contains: "Pale", "the second document's preview opens again")(next)
+            },
+            // Codex b18 round 2, must-fix 3: a page is keyed by the file it
+            // shows. A late read from a preview that followed a link
+            // through a symlink is set on a preview opened on the target.
+            sync {
+                let real = write("tawny.md", "---\ntitle: Tawny owl\n---\n# Tawny\n\nBrown.\n")
+                try? FileManager.default.createSymbolicLink(at: real.deletingLastPathComponent().appendingPathComponent("alias.md"),
+                                                            withDestinationURL: real)
+                direct = app.open(real)
+                if let d = direct { sized(d); focus(d); if !d.previewVisible { d.togglePreview() } }
+                via = app.open(write("via.md", "---\ntitle: Via\n---\n# Via\n\nSee [Alias](alias.md).\n"))
+                if let v = via { sized(v); focus(v); if !v.previewVisible { v.togglePreview() } }
+            },
+            { next in
+                guard let d = direct else { expect(false, "the target document opens"); next(); return }
+                waitForPreview(d, contains: "Brown", "the target's preview")(next)
+            },
+            { next in
+                guard let v = via else { expect(false, "the document linking through a symlink opens"); next(); return }
+                waitForPreview(v, contains: "See Alias", "the linking document's preview (symlink)")({
+                    previewJS(v, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Alias').click(); 1") { _ in
+                        waitForPreview(v, contains: "Brown", "the preview follows the link through the symlink")(next)
+                    }
+                })
+            },
+            { next in
+                guard let d = direct else { next(); return }
+                previewJS(d, "String(document.querySelector('details.frontmatter').open)") { v in
+                    directOpen = v as? String == "true"
+                    next()
+                }
+            },
+            { next in guard let v = via else { next(); return }; previewJS(v, "document.querySelector('details.frontmatter').open = \(!directOpen); 1") { _ in next() } },
+            sync { PreviewController.closeReadDelayForChecks = 1.0; if let v = via { focus(v); v.togglePreview() } },
+            { next in
+                guard let d = direct else { next(); return }
+                untilState(d, String(!directOpen), "a late read through a symlink is set on the preview opened on the target", timeout: 5)(next)
+            },
+            sync { PreviewController.closeReadDelayForChecks = 0 },
+            // Codex b18 round 3, must-fix: a symlink retargeted after the
+            // linked file was read but before its page loads doesn't give
+            // the page the new target's key: the key is the file shown.
+            sync {
+                let b = write("barred.md", "---\ntitle: Barred owl\n---\n# Barred\n\nStripes.\n")
+                let spotted = write("spotted.md", "---\ntitle: Spotted owl\n---\n# Spotted\n\nDots.\n")
+                let swing = b.deletingLastPathComponent().appendingPathComponent("swing.md")
+                try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: b)
+                barred = b
+                PreviewController.afterLinkedReadForChecks = {
+                    try? FileManager.default.removeItem(at: swing)
+                    try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: spotted)
+                }
+                swinger = app.open(write("swinger.md", "---\ntitle: Swinger\n---\n# Swinger\n\nSee [Swing](swing.md).\n"))
+                if let s = swinger { sized(s); focus(s); if !s.previewVisible { s.togglePreview() } }
+            },
+            { next in
+                guard let s = swinger else { expect(false, "the document linking through a retargeted symlink opens"); next(); return }
+                waitForPreview(s, contains: "See Swing", "the linking document's preview (retargeted symlink)")({
+                    previewJS(s, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Swing').click(); 1") { _ in
+                        waitForPreview(s, contains: "Stripes", "the preview shows the file read before the symlink was retargeted")(next)
+                    }
+                })
+            },
+            sync {
+                PreviewController.afterLinkedReadForChecks = nil
+                let want = barred.map(PreviewController.pageKey(for:))
+                let got = swinger?.preview?.pageKeyForChecks
+                expect(want != nil && got == want, "a symlink retargeted before the page loads: the page's key is the file shown",
+                       "\(got ?? "nil") vs \(want ?? "nil")")
+            },
+            // Codex b18 round 2, should-fix 3: once no preview shows a page
+            // and no read of it is out, its kept change time goes.
+            sync { expect(!PreviewController.pageChangeKeysForChecks.isEmpty, "pages' change times are kept while their previews are open") },
+            sync {
+                for t in [tab, second, linker, direct, via, swinger].compactMap({ $0 }) where t.previewVisible { focus(t); t.togglePreview() }
+            },
+            until("the pages' change times drain once every preview has closed", timeout: 5) { PreviewController.pageChangeKeysForChecks.isEmpty },
+            sync {
+                if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
+                else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
+                finish()
+            },
+        ])
+    }
+
+    /// Waits (up to `timeout`) for the preview's front matter block to be
+    /// `want` ("true", "false" or "none").
+    static func untilState(_ tab: EditorWindowController, _ want: String, _ name: String, timeout: Double) -> (@escaping () -> Void) -> Void {
+        { next in
+            let deadline = Date().addingTimeInterval(timeout)
+            let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
+            @MainActor func poll() {
+                previewJS(tab, state) { v in
+                    if v as? String == want { expect(true, name); next() }
+                    else if Date() > deadline { expect(false, name, "\(v ?? "nil")"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+            }
+            poll()
+        }
     }
 
     /// Runs `code` in the preview, in Cedric's own content world (where
@@ -105,7 +466,7 @@ extension DevChecks {
                 focus(tab)
                 key("p", [.command, .option])
                 expect(tab.previewVisible, "⌥⌘P shows the preview")
-                let want: [PreviewBarItem] = [.back, .forward, .home, .openInBrowser, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
+                let want: [PreviewBarItem] = [.back, .forward, .home, .refresh, .syncScroll, .zoomOut, .zoomIn, .export, .allowJavaScript, .allowNetwork, .detach]
                 expect(bar?.state.items == want, "Markdown: the bar has its controls", "\(bar?.state.items ?? [])")
                 for item in want {
                     guard let v = bar?.view(item) else { expect(false, "bar \(item)", "no view"); continue }
@@ -137,7 +498,7 @@ extension DevChecks {
                 let view = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
                 let preview = view?.items.first { $0.title == "Preview" }?.submenu
                 let titles = preview?.items.map(\.title).filter { !$0.isEmpty } ?? []
-                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Open in Browser", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
+                expect((titles.contains("Show Preview") || titles.contains("Hide Preview")) && ["Detach Preview", "Back", "Forward", "This Document", "Refresh Preview", "Sync Scrolling", "Zoom In Preview", "Zoom Out Preview",
                         "Restore File Order", "Export as HTML…", "Export as PDF…", "Allow JavaScript in Preview",
                         "Allow Network in Preview"].allSatisfy(titles.contains), "View › Preview lists the bar's actions", "\(titles)")
                 @MainActor func enabled(_ sel: Selector) -> Bool { menuItem(action: sel).map { app.validateMenuItem($0) } ?? false }
@@ -353,18 +714,6 @@ extension DevChecks {
             },
             waitForPreview(tab, contains: "Paragraph 60", "the preview shows the document"),
             { next in
-                let probe = WKWebView(frame: .zero, configuration: PreviewController.browserConfiguration())
-                probe.loadHTMLString("<html><body>isolated</body></html>", baseURL: nil)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-                    probe.evaluateJavaScript("typeof window.webkit?.messageHandlers?.cedricScroll") { value, error in
-                        MainActor.assumeIsolated {
-                            expect(error == nil && value as? String == "undefined", "isolated web configuration has no Cedric bridge", "\(value ?? "nil") \(String(describing: error))")
-                            next()
-                        }
-                    }
-                }
-            },
-            { next in
                 previewJS(tab, "typeof window.__cedricPatch + ',' + typeof window.__cedricScrollTo") { v in
                     expect(v as? String == "function,function", "Cedric's script runs in its own world with page JavaScript off", "\(v ?? "nil")")
                     next()
@@ -500,7 +849,8 @@ extension DevChecks {
             },
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
-            // revealed, other schemes ignored, the web isolated in preview.
+            // revealed, other schemes ignored, a web link asks and never
+            // loads in the preview (S1).
             { next in
                 let tabsBefore = app.tabs.count
                 PreviewLinkLog.revealed = []
@@ -544,25 +894,21 @@ extension DevChecks {
                                         expect(tab.noticeBar?.isHidden == false, "with a note in the tab")
                                         click("x-apple.systempreferences:com.apple.Security") {
                                             expect(action() == .ignore("x-apple.systempreferences"), "other schemes are ignored")
+                                            let page = tab.preview?.webView.url
                                             click("https://example.com/a?b=1") {
-                                                let web = tab.preview?.browserView
-                                                expect(action() == .openWebInPreview(URL(string: "https://example.com/a?b=1")!),
-                                                       "a web link opens in the isolated preview")
-                                                expect(web?.isHidden == false && tab.previewBarEnables(.openInBrowser), "web view and Open in Browser are available")
-                                                expect(web?.configuration.websiteDataStore.isPersistent == false
-                                                       && web?.configuration.userContentController.userScripts.isEmpty == true
-                                                       && web?.configuration.urlSchemeHandler(forURLScheme: "cedric-doc") == nil,
-                                                       "web view has a non-persistent store, no scripts and no document scheme")
+                                                let web = URL(string: "https://example.com/a?b=1")!
+                                                expect(action() == .confirmExternal(web), "a web link asks first (S1)", "\(String(describing: action()))")
+                                                expect(tab.preview?.isHome == true && tab.preview?.webView.url == page && page?.scheme == "cedric-doc",
+                                                       "and the preview does not navigate to it", "\(tab.preview?.webView.url?.absoluteString ?? "nil")")
                                                 expect(tab.preview?.csp.contains("script-src 'none'") == true,
                                                        "local preview retains its strict CSP")
-                                                expect(PreviewLinkLog.opened.isEmpty, "preview browsing opens no system browser")
-                                                tab.previewBarAction(.openInBrowser)
+                                                expect(PreviewLinkLog.opened.isEmpty, "nothing opens before the answer")
                                                 let sheet = tab.previewPane?.window?.attachedSheet
                                                 let shown = sheet.flatMap { s in
                                                     s.contentView.flatMap { allViews($0) }?
                                                         .compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ") }
                                                 expect(shown?.contains("https://example.com/a?b=1") == true,
-                                                       "Open in Browser asks first, showing the whole URL", shown ?? "no sheet")
+                                                       "the prompt shows the whole URL", shown ?? "no sheet")
                                                 if let sheet, let cancel = allViews(sheet.contentView!).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Cancel" }) {
                                                     cancel.performClick(nil)
                                                 }
@@ -647,6 +993,68 @@ extension DevChecks {
     /// ⌘-click) scrolls the live document in place; `other.md#part`, a
     /// heading-text fragment, a `[[other#Part]]` wikilink and `page.html#sec`
     /// open in the preview at that heading, and Back/Forward come back to it.
+    /// How `webPrompt` answers: the Cancel button, or the Return or Escape key.
+    enum PromptAnswer { case cancelButton, returnKey, escapeKey }
+
+    /// Waits (up to 3 s) for the external-link prompt on the tab's preview,
+    /// expects it to show `url` whole with Cancel as the default button
+    /// (Return) and Open with no key, and answers Cancel (by button or key).
+    static func webPrompt(_ tab: EditorWindowController, _ url: String, _ name: String,
+                          answer: PromptAnswer = .cancelButton, contains: [String] = []) -> (@escaping () -> Void) -> Void {
+        { next in
+            @MainActor func allViews(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(allViews) }
+            let window = tab.previewPane?.window ?? tab.window
+            let deadline = Date().addingTimeInterval(3)
+            @MainActor func poll() {
+                guard let sheet = window?.attachedSheet else {
+                    if Date() < deadline { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } }; return }
+                    expect(false, name, "no prompt")
+                    next(); return
+                }
+                let views = sheet.contentView.map(allViews) ?? []
+                let shown = views.compactMap { ($0 as? NSTextField)?.stringValue }.joined(separator: " ")
+                expect(shown.contains("Open this link?") && shown.contains(url) && contains.allSatisfy(shown.contains), name, shown)
+                let buttons = views.compactMap { $0 as? NSButton }
+                // NSAlert hands Return to the window's default button cell.
+                let defaultTitle = (sheet.defaultButtonCell as? NSButtonCell)?.title
+                let keys = buttons.filter { !$0.title.isEmpty }.map { "\($0.title)=\($0.keyEquivalent.unicodeScalars.map { String($0.value, radix: 16) })" }
+                expect(defaultTitle == "Cancel" && buttons.first { $0.title == "Open" }?.keyEquivalent == "",
+                       "Cancel is the prompt's default button (Return); Open has no key",
+                       "default \(defaultTitle ?? "none"); " + keys.joined(separator: " "))
+                let openedBefore = PreviewLinkLog.opened.count
+                func key(_ chars: String, _ code: UInt16) -> NSEvent? {
+                    NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                     windowNumber: sheet.windowNumber, context: nil, characters: chars,
+                                     charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code)
+                }
+                switch answer {
+                case .cancelButton: buttons.first { $0.title == "Cancel" }?.performClick(nil)
+                case .returnKey:
+                    // A key Return reaches the default button only in the key
+                    // window; when Owlink isn't the active app, press the
+                    // default button instead (what Return does) and say so.
+                    if sheet.isKeyWindow, let e = key("\r", 36) { NSApp.postEvent(e, atStart: false) }
+                    else {
+                        print("check: note: the prompt isn't the key window (Owlink not active): Return pressed as the default button")
+                        sheet.defaultButtonCell?.performClick(nil)
+                    }
+                case .escapeKey: if let e = key("\u{1b}", 53) { NSApp.postEvent(e, atStart: false) }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    MainActor.assumeIsolated {
+                        if answer != .cancelButton {
+                            expect(window?.attachedSheet == nil && PreviewLinkLog.opened.count == openedBefore,
+                                   answer == .returnKey ? "Return answers Cancel: nothing opens" : "Escape answers Cancel: nothing opens",
+                                   "sheet \(window?.attachedSheet != nil) opened \(PreviewLinkLog.opened.map(\.absoluteString))")
+                        }
+                        next()
+                    }
+                }
+            }
+            poll()
+        }
+    }
+
     static func previewAnchorCheck(_ app: AppDelegate) {
         var filler = ""
         for k in 1...40 { filler += "Filler paragraph \(k) with enough words in it to take up a line or two of the preview.\n\n" }
@@ -654,10 +1062,22 @@ extension DevChecks {
         var html = "<!doctype html><html><body><h1>Page</h1>"
         for k in 1...40 { html += "<p>html filler \(k), a line or two of words to fill the page out.</p>" }
         html += "<h2 id=\"sec\">Sec</h2><p>the html section</p>"
+        // S1: a meta refresh to a web page must not load it in the preview.
+        html += "<meta http-equiv=\"refresh\" content=\"0;url=https://example.invalid/refresh\">"
         for k in 1...40 { html += "<p>more html \(k)</p>" }
         _ = write("anchors/page.html", html + "</body></html>")
-        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec)"
-        src += " [jump](#unique-section) [jump text](#Unique%20Section)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
+        // A symbolic link to a document in a subfolder: the page's relative
+        // image loads from the folder the file is really in.
+        _ = write("anchors/real/doc.md", "# Real\n\nthe real doc ![dot](dot.png)\n")
+        try? Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")!
+            .write(to: dir.appendingPathComponent("anchors/real/dot.png"))
+        try? FileManager.default.createSymbolicLink(atPath: dir.appendingPathComponent("anchors/alias.md").path, withDestinationPath: "real/doc.md")
+        var src = "# Anchors\n\n[other part](other.md#part) [text part](other.md#Part) [[other#Part|wiki part]] [html part](page.html#sec) [alias](alias.md)"
+        src += " [jump](#unique-section) [jump text](#Unique%20Section)"
+        // S1: web links, plain and target=_blank.
+        src += " [web](https://example.invalid/s1?q=1) <a href=\"https://example.invalid/blank\" target=\"_blank\">blank web</a>"
+        // A user name dressed as a site: the prompt names the real one.
+        src += " [spoof](https://www.apple.com%2Fsignin@evil.example/)\n\n" + filler + "## Unique Section\n\nthe unique section\n\n" + filler
         let tab = app.open(write("anchors/notes.md", src))!
         sized(tab)
         let tabs = app.tabs.count
@@ -678,6 +1098,15 @@ extension DevChecks {
         }
         let toTop: (@escaping () -> Void) -> Void = { next in
             previewJS(tab, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in next() }
+        }
+        var livePage: URL?
+        var promptsBefore = 0, droppedBefore = 0
+        var blank: EditorWindowController?
+        // S1: the preview stays on the live document; no web page, no tab, nothing opened.
+        @MainActor func stayed(_ name: String) {
+            expect(p()?.isHome == true && p()?.webView.url == livePage && livePage?.scheme == "cedric-doc" && noTab()
+                   && PreviewLinkLog.opened.isEmpty && p()?.webView.isLoading == false,
+                   name, "\(p()?.webView.url?.absoluteString ?? "nil") loading \(p()?.webView.isLoading ?? false)")
         }
         let home: (@escaping () -> Void) -> Void = { next in
             tab.previewBarAction(.home)
@@ -720,6 +1149,100 @@ extension DevChecks {
                     }
                 }
             },
+            // S1: with page JavaScript and Network on, a web link still never
+            // loads in the preview: a click asks (whole URL), Cancel opens
+            // nothing; script, forms and new windows go nowhere.
+            sync { livePage = p()?.webView.url; PreviewLinkLog.opened = [] },
+            click("web"),
+            webPrompt(tab, "https://example.invalid/s1?q=1", "a plain click on a web link asks first, showing the whole URL"),
+            sync {
+                expect(p()?.lastLinkAction == .confirmExternal(URL(string: "https://example.invalid/s1?q=1")!), "routed as an external link",
+                       "\(String(describing: p()?.lastLinkAction))")
+                stayed("the preview did not load the web page; Cancel opened nothing")
+            },
+            // Page script clicking the declined link over and over: no prompt comes back.
+            { next in
+                promptsBefore = LinkPrompt.shown
+                pageJS(tab, "const w = [...document.querySelectorAll('a')].find(a => a.textContent === 'web'); for (let i = 0; i < 5; i++) w.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 1,
+                       "with JavaScript on, script re-clicking a declined web link doesn't ask again",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                promptsBefore = LinkPrompt.shown
+                droppedBefore = LinkPrompt.dropped
+            },
+            // Another web link from the same page load: dropped too (a script
+            // can't loop the prompt by changing the URL).
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 2,
+                       "after a Cancel with JavaScript on, another web link from the same page load doesn't ask either",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(p()?.droppedExternal ?? 0)")
+                stayed("and nothing loads")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
+            },
+            // A new page load asks again.
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown"),
+            sync { livePage = p()?.webView.url; promptsBefore = LinkPrompt.shown; droppedBefore = LinkPrompt.dropped },
+            // Another web link, clicked three times at once by script: one prompt, never stacked.
+            { next in
+                pageJS(tab, "const b = [...document.querySelectorAll('a')].find(a => a.textContent === 'blank web'); b.click(); b.click(); b.click(); 1") { _ in next() }
+            },
+            webPrompt(tab, "https://example.invalid/blank", "after a reload, a target=_blank web link asks again", answer: .returnKey),
+            sync {
+                expect(LinkPrompt.shown == promptsBefore + 1 && LinkPrompt.dropped >= droppedBefore + 1, "one prompt at a time: the repeats are dropped, not stacked",
+                       "shown \(LinkPrompt.shown - promptsBefore) dropped \(LinkPrompt.dropped - droppedBefore)")
+                stayed("and the preview did not load it either")
+                loadsBefore = p()?.pageLoads ?? 0
+                tab.previewBarAction(.refresh)
+            },
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if (p()?.pageLoads ?? 0) > loadsBefore, p()?.webView.isLoading == false {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() }
+                    } else if Date() > deadline { expect(false, "Refresh reloads the page again", "\(loadsBefore) → \(p()?.pageLoads ?? 0)"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            },
+            waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
+            sync { livePage = p()?.webView.url },
+            click("spoof"),
+            webPrompt(tab, "https://www.apple.com%2Fsignin@evil.example/",
+                      "a click asks again on the next load; a user name before @ is called out and the real site shown on its own line",
+                      answer: .escapeKey, contains: ["Site: evil.example", "user name (“www.apple.com/signin”)", "This link goes to evil.example."]),
+            sync { stayed("Escape opened nothing") },
+            { next in pageJS(tab, "location.href = 'https://example.invalid/script'; 1") { _ in next() } },
+            { next in
+                pageJS(tab, "window.open('https://example.invalid/popup'); const f = document.createElement('form'); f.action = 'https://example.invalid/form'; f.method = 'get'; document.body.appendChild(f); f.submit(); 1") { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
+                }
+            },
+            sync {
+                stayed("page script's location =, window.open and a form submit don't leave the document")
+                expect((tab.previewPane?.window ?? tab.window)?.attachedSheet == nil, "and ask nothing (only a click asks)")
+            },
+            waitForPreview(tab, contains: "jump text", "the live document is still shown"),
             // Another document's heading.
             click("other part"),
             waitForAnchor(tab, id: "part", "other.md#part opens in the preview at the heading",
@@ -769,7 +1292,72 @@ extension DevChecks {
             waitForAnchor(tab, id: "sec", "page.html#sec opens in the preview at the element",
                           when: { p()?.isHome == false && p()?.navigationTitle == "page.html" && noTab() }),
             sync { expect(onSource() && PreviewLinkLog.revealed.isEmpty && PreviewLinkLog.opened.isEmpty, "nothing revealed or opened outside the preview") },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() } },
+            sync {
+                let url = p()?.webView.url
+                expect(p()?.navigationTitle == "page.html" && url?.scheme == "cedric-doc" && url?.absoluteString.hasSuffix("/anchors/") == true
+                       && p()?.webView.isLoading == false,
+                       "page.html's meta refresh to a web page does not load it (S1)", url?.absoluteString ?? "nil")
+            },
             home,
+            click("alias"),
+            waitForPreview(tab, contains: "the real doc", "a symbolic link to a document opens in the preview"),
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    previewJS(tab, "location.href + '|' + [...document.images].filter(i => i.complete && i.naturalWidth > 0).length") { v in
+                        let parts = (v as? String ?? "").split(separator: "|").map(String.init)
+                        expect(parts.count == 2 && parts[0].hasSuffix("/anchors/real/") && parts[1] == "1",
+                               "its page is based in the linked file's own folder, and its relative image loads", "\(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            home,
+            // An untitled document's preview is at about:blank (security read
+            // NIT 1): a click on #far, or an href written about:blank%23far
+            // (what macOS 15 hands over for #far), scrolls in place; WebKit's
+            // navigation is cancelled, so the page never leaves about:blank.
+            sync {
+                app.newTab(nil)
+                guard let t = app.tabs.last else { return }
+                blank = t
+                sized(t)
+                t.setText("# Blank\n\n[far](#far-away) <a href=\"about:blank%23far-away\">lit</a>\n\n" + filler + "## Far Away\n\nthe far section\n\n" + filler)
+                t.setLanguage(.markdown)
+                focus(t)
+                if !t.previewVisible { t.togglePreview() }
+            },
+            { next in if let b = blank { waitForPreview(b, contains: "the far section", "an untitled document's preview shows it")(next) } else { expect(false, "untitled tab"); next() } },
+        ] + ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
+            { next in
+                guard let b = blank else { next(); return }
+                expect(b.preview?.webView.url?.absoluteString == "about:blank", "\(text): the page is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
+                previewJS(b, "window.__cedricQuietUntil = Date.now() + 500; window.scrollTo(0, 0); window.scrollY") { _ in
+                    previewJS(b, "(() => { const a = [...document.querySelectorAll('a')].find(a => a.textContent === '\(text)'); if (!a) return 'no link'; a.click(); return a.getAttribute('href') })()") { v in
+                        print("check: note: clicked \(text) → \(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+            { next in
+                guard let b = blank else { next(); return }
+                waitForAnchor(b, id: "far-away", "on about:blank, a click on \(text) scrolls the page (not routed)",
+                              when: { b.preview?.isHome == true && b.preview?.lastAnchor?.found == true })(next)
+            },
+            { next in
+                guard let b = blank else { next(); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    let url = b.preview?.webView.url?.absoluteString ?? "nil"
+                    expect(url == "about:blank" && b.preview?.lastLinkAction == nil && b.preview?.isHome == true && b.preview?.webView.isLoading == false,
+                           "and WebKit never navigated: the page is still about:blank, nothing routed",
+                           "\(url) action \(String(describing: b.preview?.lastLinkAction))")
+                    previewJS(b, "document.body.innerText.includes('the far section') + ''") { v in
+                        expect(v as? String == "true", "and still shows the document", "\(v ?? "nil")")
+                        next()
+                    }
+                }
+            },
+        ] } + [
             sync { for t in app.tabs { t.doc.markSaved() } },
         ])
     }

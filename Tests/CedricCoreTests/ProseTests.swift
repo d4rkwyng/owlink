@@ -200,11 +200,31 @@ import Testing
         #expect(m.hasPrefix("See ") && m.contains(" about it."))
     }
 
+    /// Bounded: only the sample (`sampleLimit` units) is read, checked by
+    /// what it decides, so this holds on any machine: a big file that opens
+    /// with prose and goes on as code reads as prose, and the other way
+    /// round as code. A detector that looked at the whole file gets both
+    /// wrong. Fast: a time bound only against a blow-up in handling the
+    /// sample. It was 1 s for 10 runs, and GitHub's macOS runners, busy
+    /// with the rest of the suite, took 1.10 s and 1.42 s (release run
+    /// 45208720302) for what takes 0.10 s on an M-series Mac; looking at
+    /// the whole file took 3.5 s there. 10 s leaves the runners 7x.
     @Test(.offPool) func detectionIsBoundedAndFast() {
+        let code = Self.notProse.first { $0.0.hasPrefix("#include") }!.0
+        func repeated(_ s: String, toAtLeast n: Int) -> String { String(repeating: s, count: n / s.utf16.count + 1) }
+        let proseHead = repeated(Self.prose[0], toAtLeast: ProseDetector.sampleLimit)
+        let codeHead = repeated(code, toAtLeast: ProseDetector.sampleLimit)
+        // A tail 40 times the sample: what a whole-file read would go by.
+        let proseThenCode = (proseHead + repeated(code, toAtLeast: 350_000)) as NSString
+        let codeThenProse = (codeHead + repeated(Self.prose[0], toAtLeast: 350_000)) as NSString
+        #expect(ProseDetector.isProse(proseThenCode, language: .plain), "only the sample is read: the code after it isn't")
+        #expect(!ProseDetector.isProse(codeThenProse, language: .plain), "only the sample is read: the prose after it isn't")
+
         let big = String(repeating: Self.prose[0], count: 2_000) as NSString // ~360 K
         let t0 = Date()
         for _ in 0..<10 { _ = ProseDetector.isProse(big, language: .plain) }
-        #expect(Date().timeIntervalSince(t0) < 1.0, "10 detections on a big file (sample only)")
+        let took = Date().timeIntervalSince(t0)
+        #expect(took < 10, "10 detections on a big file: \(took) s")
     }
 
     /// A time inside a sentence, or a leading clock time with no log marker,

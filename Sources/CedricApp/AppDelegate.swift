@@ -128,9 +128,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         quitsOnLastClose && tabs.isEmpty && viewerTabs.isEmpty
     }
 
-    /// No "save changes?" on quit: unsaved text is kept in the session (and
-    /// comes back with the open tabs when reopen is on, or in Reopen Closed
-    /// Tab when it is off).
+    /// No "save changes?" on quit: unsaved text is kept in the session and
+    /// comes back as open tabs next launch, reopen on or off (with it off,
+    /// only clean files go to Reopen Closed Tab: SessionReopenPolicy.plan).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Closing the last window already saved (quitAfterLastClose / a
         // last-window terminate started from windowShouldClose).
@@ -153,14 +153,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ReplaceInFiles.waitForWrites()
         // The last words of the day, if typing hadn't paused yet.
         tabs.forEach { $0.commitDailyWords() }
-        if Settings.shared.reopenFilesFromLastSession {
-            saveSession()
-        } else {
-            // Files should not come back as open tabs; unsaved text stays
-            // on the closed list for ⇧⌘T, so buffers are not pruned.
-            parkOpenDocumentsIntoClosedTabs()
-            saveSession(includeOpenWindows: false)
-        }
+        // The whole session, whatever Reopen files from last session says:
+        // launch decides what comes back (SessionReopenPolicy.plan; with it
+        // off, files go to Reopen Closed Tab there and unsaved text reopens).
+        saveSession()
         releaseAllWaiters()
         terminating = true
         sessionTimer?.invalidate()
@@ -190,10 +186,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         quitsOnLastClose && otherDocumentWindows(than: window) == 0
     }
 
-    /// The last document tab has closed: if reopen is on this is only a
-    /// fallback (windowShouldClose / Close Window usually quit first, while
-    /// the tabs were still open). If reopen is off, the tab was hot-closed
-    /// and should not come back as an open tab.
+    /// The last document tab has closed: only a fallback (windowShouldClose
+    /// / Close Window usually quit first, while the tabs were still open).
     func quitAfterLastClose() {
         prepareToQuit()
         DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -201,12 +195,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Close Window (⇧⌘W) and the traffic-light / last-tab close, when that
     /// close will quit the app: save the session while the tabs are still
-    /// open (if reopen is on), then terminate instead of tearing them down
-    /// one by one. Returns `false` when the close should be cancelled
-    /// because quit is already under way.
+    /// open, then terminate instead of tearing them down one by one. With
+    /// reopen off too: launch then parks the files and reopens unsaved
+    /// text (SessionReopenPolicy.plan), where hot-closing each tab would
+    /// leave that text to the closed list's 30-day / 100-tab limits.
+    /// Returns `false` when the close should be cancelled because quit is
+    /// already under way.
     func shouldCloseDocumentWindow(_ window: NSWindow) -> Bool? {
         guard !terminating else { return false }
-        guard Settings.shared.reopenFilesFromLastSession, quitsOnLastClose else { return nil }
+        guard quitsOnLastClose else { return nil }
         let onlyGroup = windowGroups().count == 1
         let lastTab = otherDocumentWindows(than: window) == 0
         if onlyGroup, lastTab || isClosingWholeWindow(window) {
@@ -220,7 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// File › Close Window (⇧⌘W): every tab in this window. On a
     /// quit-causing last window, terminate with the session already saved.
     func closeDocumentWindows(in window: NSWindow) {
-        if Settings.shared.reopenFilesFromLastSession, quitsOnLastClose, windowGroups().count == 1 {
+        if quitsOnLastClose, windowGroups().count == 1 {
             prepareToQuit()
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return
@@ -229,7 +226,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     /// The red close button on a tabbed window closes the whole group;
-    /// a tab's own close, or ⌘W, closes only that tab.
+    /// a tab's own close, or ⌘W, closes only that tab. AppKit closes the
+    /// group only for a real click (performClick closes just the front
+    /// tab), and every tab's windowShouldClose
+    /// then sees that click as the current event (session-check step 8d).
+    /// Known gap: if this ever missed it, the group's other tabs would be
+    /// hot-closed onto the closed list before the last one quits.
     private func isClosingWholeWindow(_ window: NSWindow) -> Bool {
         let group = window.tabbedWindows ?? [window]
         guard group.count > 1 else { return false }
@@ -237,12 +239,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
               event.type == .leftMouseUp || event.type == .leftMouseDown,
               let btn = window.standardWindowButton(.closeButton) else { return false }
         return btn.bounds.contains(btn.convert(event.locationInWindow, from: nil))
-    }
-
-    /// Push every still-open document onto the closed list (no session write).
-    private func parkOpenDocumentsIntoClosedTabs() {
-        for t in tabs { rememberClosed(t, persist: false) }
-        for t in viewerTabs { rememberClosedViewer(t, persist: false) }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -392,9 +388,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self.tabs.removeAll { $0 === t }
             // Hot close: remembered for Reopen Closed Tab, unsaved text and all.
             self.rememberClosed(t)
-            // The last document window: quit. Reopen-on keeps this from
-            // usually being reached (windowShouldClose already terminated
-            // with the tabs still open). Reopen-off: the tab stays closed.
+            // The last document window: quit. Only a fallback, for a close
+            // that skipped windowShouldClose (shouldCloseDocumentWindow
+            // already terminated with the tabs still open, reopen on or
+            // off); this tab was hot-closed above and stays closed.
             if last { self.quitAfterLastClose() }
         }
         tabs.append(tab)
@@ -601,7 +598,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
     /// `sync`: wait for it (quit).
-    func saveSession(sync: Bool = true, includeOpenWindows: Bool = true) {
+    func saveSession(sync: Bool = true) {
         sessionTimer?.invalidate()
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
@@ -610,7 +607,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var keep = Set<UUID>()
         var buffers: [(UUID, String)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
-        if includeOpenWindows {
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
             var selected = 0
@@ -667,7 +663,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 windows.append(SessionWindow(tabs: sessionTabs, selectedTab: selected, frame: group.first?.frameDescriptor,
                                               floatOnTop: floats ? true : nil))
             }
-        }
         }
         for c in closedTabs where c.hasBuffer { keep.insert(c.id) }
         let session = Session(windows: windows, closedTabs: closedTabs.isEmpty ? nil : closedTabs, folder: folderSessionState,
@@ -748,21 +743,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         fileWordGoals = session.wordGoals ?? []
         for gone in kept.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
         // Closed tabs and word goals still load when the user turned reopen off
-        // (⇧⌘T and the stats popover need them). Open windows and the folder
-        // do not come back; unsaved open tabs are parked on the closed list
-        // so their buffers are not pruned by the next save.
-        guard Settings.shared.reopenFilesFromLastSession else {
+        // (⇧⌘T and the stats popover need them). Then the folder and files
+        // do not come back: they are parked on the closed list. Tabs with
+        // unsaved text always reopen (SessionReopenPolicy.plan), so that
+        // text never falls under the closed list's 30-day / 100-tab limits.
+        let reopen = Settings.shared.reopenFilesFromLastSession
+        let plan = SessionReopenPolicy.plan(session.windows, reopen: reopen)
+        if !plan.park.isEmpty {
             var closed = closedTabs
-            for tab in session.allTabs {
+            for tab in plan.park {
                 let r = ClosedTabs.push(tab, onto: closed)
                 closed = r.list
                 for gone in r.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
             }
             closedTabs = closed
-            return
         }
-        restoreFolder(session.folder)
-        for w in session.windows {
+        if reopen { restoreFolder(session.folder) }
+        for w in plan.windows {
             let openTabs = SessionRestoreList.openTabs(w.tabs) { FileManager.default.fileExists(atPath: $0) }
             let selectedID = w.tabs.indices.contains(w.selectedTab) ? w.tabs[w.selectedTab].id : nil
             let selectedTab = selectedID.flatMap { id in openTabs.firstIndex { $0.id == id } }
@@ -948,7 +945,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func previewBackMenu(_ sender: Any?) { currentTab?.previewBarAction(.back) }
     @objc func previewForwardMenu(_ sender: Any?) { currentTab?.previewBarAction(.forward) }
     @objc func previewHomeMenu(_ sender: Any?) { currentTab?.previewBarAction(.home) }
-    @objc func previewBrowserMenu(_ sender: Any?) { currentTab?.previewBarAction(.openInBrowser) }
     @objc func toggleWrap(_ sender: Any?) { Settings.shared.wrapLines.toggle() }
     @objc func toggleInvisibles(_ sender: Any?) { Settings.shared.showInvisibles.toggle() }
     @objc func toggleLineNumbers(_ sender: Any?) { Settings.shared.showLineNumbers.toggle() }
@@ -1052,7 +1048,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(previewBackMenu(_:)): return tab?.previewBarEnables(.back) == true
         case #selector(previewForwardMenu(_:)): return tab?.previewBarEnables(.forward) == true
         case #selector(previewHomeMenu(_:)): return tab?.previewBarEnables(.home) == true
-        case #selector(previewBrowserMenu(_:)): return tab?.previewBarEnables(.openInBrowser) == true
         case #selector(pickLanguageMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.language.rawValue ? .on : .off
         case #selector(pickLineEndingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.lineEnding.rawValue ? .on : .off
         case #selector(pickEncodingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.encoding.rawValue ? .on : .off

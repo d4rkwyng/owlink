@@ -98,6 +98,19 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
     }
 
+    /// Menu-bar and keyboard commands (⌘, Settings…, ⌘W, ⇧⌘P…) with no
+    /// first responder in the editor go up the chain from the window, past
+    /// this scene delegate: they go to this window's editor (see
+    /// `EditorCommandRouting`). The scene the command came from is the one
+    /// that shows the result.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = EditorCommandRouting.editor(presentedBy: window?.rootViewController),
+           editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
+    }
+
     /// The launch's reopen decision, taken by the process's first window.
     private static var launchReopen = LaunchReopenGate()
 
@@ -122,20 +135,101 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 enum TestLaunch {
     static var active: Bool { ProcessInfo.processInfo.arguments.contains("-OwlinkOpen") }
 
-    static func documentToOpen() -> URL? {
-        let args = ProcessInfo.processInfo.arguments
+    /// Defaults are the live launch's; the tests pass their own folder,
+    /// bundle and store to run the same path (twice, for a second window).
+    @MainActor static func documentToOpen(
+        arguments args: [String] = ProcessInfo.processInfo.arguments,
+        documentsDirectory docs: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0],
+        bundle: Bundle = .main,
+        recovery: RecoveryStore = SaveSafetyStores.recovery,
+        queue: DispatchQueue? = SaveSafetyStores.queue,
+        now: Date = Date()
+    ) -> URL? {
         guard let i = args.firstIndex(of: "-OwlinkOpen"), i + 1 < args.count else { return nil }
         let name = args[i + 1]
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = docs.appendingPathComponent(name)
-        let fresh = args.contains("-OwlinkFreshSample")
+        // Once per process: a second window (New Window, ⌥⌘N) must not wipe
+        // the document, or its recovery record, under the first one's editor.
+        let fresh = claimFreshSample(requested: args.contains("-OwlinkFreshSample"))
         if fresh || !FileManager.default.fileExists(atPath: url.path),
-           let sample = Bundle.main.url(forResource: (name as NSString).deletingPathExtension,
-                                        withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
-            try? FileManager.default.removeItem(at: url)
-            try? FileManager.default.copyItem(at: sample, to: url)
+           let sample = bundle.url(forResource: (name as NSString).deletingPathExtension,
+                                   withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
+            if fresh {
+                prepareFreshSample(sample, at: url, recovery: recovery, queue: queue, now: now)
+            } else {
+                try? FileManager.default.copyItem(at: sample, to: url)
+            }
         }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Whether `-OwlinkFreshSample` has been acted on in this process.
+    @MainActor private(set) static var freshSampleConsumed = false
+
+    /// True the first time it is asked with `requested` set, false after
+    /// (and whenever `requested` is false).
+    @MainActor static func claimFreshSample(requested: Bool) -> Bool {
+        guard requested, !freshSampleConsumed else { return false }
+        freshSampleConsumed = true
+        return true
+    }
+
+    /// For the tests (any configuration): lets the next launch claim it again.
+    @MainActor static func resetFreshSampleClaim() { freshSampleConsumed = false }
+
+    /// `-OwlinkFreshSample`: puts the bundled `sample` at `url` as if it
+    /// were new. An earlier test's unsaved text for that document (its
+    /// recovery record) is cleared, and the copy is dated now (`copyItem`
+    /// keeps the bundle's older date, which a leftover record would beat),
+    /// so no "Owlink closed with unsaved changes… Restore?" comes up over
+    /// the next test. Other documents' records are left alone, and launches
+    /// without `-OwlinkFreshSample` keep the recovery offer as it is.
+    ///
+    /// The record is cleared only once the copy is in place and dated: a
+    /// failed fixture keeps it (and says so in the log). With `queue` (the
+    /// recovery stores' queue) the clear runs on it, after any write this
+    /// process already queued, so such a write can't bring the record back.
+    @discardableResult
+    static func prepareFreshSample(_ sample: URL, at url: URL, recovery: RecoveryStore,
+                                   queue: DispatchQueue? = nil, now: Date = Date()) -> Bool {
+        let fm = FileManager.default
+        // Staged beside it and dated first, then swapped in whole: a sample
+        // that can't be copied, dated or swapped in leaves the document as
+        // it was (it is never removed ahead of the swap).
+        let staged = url.deletingLastPathComponent()
+            .appendingPathComponent(".fresh-\(UUID().uuidString)-\(url.lastPathComponent)")
+        do {
+            try fm.copyItem(at: sample, to: staged)
+            try fm.setAttributes([.modificationDate: now], ofItemAtPath: staged.path)
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: staged)
+            } else {
+                try fm.moveItem(at: staged, to: url)
+            }
+        } catch {
+            if fm.fileExists(atPath: staged.path) { try? fm.removeItem(at: staged) }
+            restoreOriginalIfRelocated(error: error, to: url, fileManager: fm)
+            NSLog("Owlink: -OwlinkFreshSample couldn't put %@ at %@ (%@); its recovery record is kept",
+                  sample.path, url.path, String(describing: error))
+            return false
+        }
+        let paths = Set([url.standardizedFileURL.path, url.resolvingSymlinksInPath().standardizedFileURL.path])
+        let clear = { for path in paths { recovery.clear(documentPath: path) } }
+        if let queue { queue.sync(execute: clear) } else { clear() }
+        return true
+    }
+
+    /// A failed `replaceItemAt` can leave the original moved aside (named
+    /// in the error's `NSFileOriginalItemLocationKey`) with nothing at
+    /// `url`; this puts it back so the document is never lost. (The key is
+    /// documented in NSFileManager.h but not exported as a symbol.)
+    static let originalItemLocationKey = "NSFileOriginalItemLocationKey"
+
+    static func restoreOriginalIfRelocated(error: Error, to url: URL, fileManager fm: FileManager = .default) {
+        guard !fm.fileExists(atPath: url.path),
+              let original = (error as NSError).userInfo[originalItemLocationKey] as? URL,
+              fm.fileExists(atPath: original.path) else { return }
+        try? fm.moveItem(at: original, to: url)
     }
 }
 
@@ -158,6 +252,14 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         })
         settings.accessibilityIdentifier = "browser.settings"
         additionalTrailingNavigationBarButtonItems = [settings]
+    }
+
+    /// See `EditorCommandRouting`: with an editor up, the editor's commands.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = EditorCommandRouting.editor(presentedBy: self), editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -313,6 +415,24 @@ enum UIHostingSettings {
 /// The editor's navigation controller: the editor decides whether the
 /// status bar and home indicator show (hidden in Focus Preview).
 final class EditorNavigationController: UINavigationController {
+    /// See `EditorCommandRouting`: a sheet over the editor (Ask Cedric,
+    /// Settings) hands its unhandled commands to its presenter, this
+    /// controller, which hands them to the editor it shows.
+    override func target(forAction action: Selector, withSender sender: Any?) -> Any? {
+        if let editor = topViewController as? EditorViewController, editor.canPerformAction(action, withSender: sender) {
+            return editor
+        }
+        return super.target(forAction: action, withSender: sender)
+    }
+
+    /// ⌘, Settings… for the editor and every sheet over it (they hand
+    /// their commands to this controller): Owlink's Settings ahead of the
+    /// system's ⌘,, which opens the system Settings app, even before the
+    /// menu bar has its own (0.5.2 (18)).
+    override var keyCommands: [UIKeyCommand]? {
+        (super.keyCommands ?? []) + [MenuBar.settingsKey()]
+    }
+
     override var childForStatusBarHidden: UIViewController? { topViewController }
     override var childForHomeIndicatorAutoHidden: UIViewController? { topViewController }
     override var childForScreenEdgesDeferringSystemGestures: UIViewController? { topViewController }
@@ -324,4 +444,80 @@ final class EditorNavigationController: UINavigationController {
             view.bringSubviewToFront(owl)
         }
     }
+}
+
+/// Why menu-bar commands need routing to the editor: UIKit sends a key
+/// command or menu-bar command to the first responder and up its chain.
+/// The editor is the child of a navigation controller the document browser
+/// presents. With nothing in the editor first responder (reading, the
+/// keyboard hidden, Ask Cedric just closed) the chain starts outside it,
+/// and from a sheet over the editor (Ask Cedric, Settings) it goes sheet →
+/// presenter (the navigation controller) → browser → window → scene: past
+/// the editor, never into it. So ⌘, (Settings…) and the rest did nothing
+/// (grayed out in the menu bar), and worked only while Ask Cedric's docked
+/// panel, inside the editor, held the keyboard. The navigation controller,
+/// the browser and the scene delegate hand such commands to the editor.
+@MainActor enum EditorCommandRouting {
+    /// The editor `root` (a window's document browser) presents, if any,
+    /// and not on its way out.
+    static func editor(presentedBy root: UIViewController?) -> EditorViewController? {
+        guard let nav = root?.presentedViewController as? UINavigationController, !nav.isBeingDismissed else { return nil }
+        return nav.viewControllers.first as? EditorViewController
+    }
+
+    /// What the editor's navigation controller shows over the editor: the
+    /// topmost presented controller that is on screen and not on its way
+    /// out.
+    enum Modal: Equatable {
+        case none
+        /// The Ask Cedric sheet: at half height it leaves the editor in
+        /// view, undimmed and in use (the text can keep the keyboard).
+        case askCedric
+        /// Settings, Open Quickly, Statistics, the share sheet…
+        case sheet
+        /// An alert (Go to Line, Save / Don't Save…): it takes the keys.
+        case alert
+    }
+
+    static func modal(over base: UIViewController) -> Modal {
+        var top: UIViewController?
+        var next = base.presentedViewController
+        while let shown = next, !shown.isBeingDismissed, shown.viewIfLoaded?.window != nil {
+            top = shown
+            next = shown.presentedViewController
+        }
+        switch top {
+        case nil: return .none
+        case is UIAlertController: return .alert
+        case is AskSheetHost: return .askCedric
+        default: return .sheet
+        }
+    }
+
+    /// Commands that stay available over a sheet other than Ask Cedric:
+    /// Settings (it goes on top, or does nothing when it is the sheet), and
+    /// Close and Save (Close takes the sheet with the editor; their alerts
+    /// go on top of the sheet).
+    static let availableOverASheet: Set<Selector> = [
+        #selector(EditorViewController.showSettings),
+        #selector(EditorViewController.closeDocument),
+        #selector(EditorViewController.saveDocument),
+    ]
+
+    /// The policy, for the editor's own chain and for the navigation
+    /// controller, browser and scene that hand commands to it:
+    /// - nothing up: every command;
+    /// - Ask Cedric's sheet: every command. The editor is in view and in
+    ///   use; what presents goes on top of Ask Cedric (the editor's
+    ///   `present`), and Ask Cedric… does nothing (already open);
+    /// - another sheet: only `availableOverASheet`;
+    /// - an alert: none.
+    static func allows(_ action: Selector, over modal: Modal) -> Bool {
+        switch modal {
+        case .none, .askCedric: return true
+        case .sheet: return availableOverASheet.contains(action)
+        case .alert: return false
+        }
+    }
+
 }

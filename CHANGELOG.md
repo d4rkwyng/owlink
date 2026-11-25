@@ -4,6 +4,25 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [0.5.2] - 2026-11-23
+
+### Security
+- **Web links in the preview always ask first.** A plain click on a web link in the Markdown or HTML preview no longer loads the page inside the preview, where the JavaScript and Network settings did not apply. Clicked or ⌘-clicked, web links now open in your browser only after you confirm. The question names the site on its own line (a name in non-Latin look-alike letters is shown as its plain-ASCII form and flagged), points out a user name placed before the site to disguise it, and has Cancel as its default button. If you cancel a link while the page's JavaScript is on, that page can't ask again until it reloads. Redirects, refreshes, form submissions, frames and page scripts cannot load a web page in the preview either.
+- **Linked documents in the preview load from their real location.** A document opened through a symbolic link takes its type and its folder for images and links from the file that was checked and read.
+
+### Added
+- **Unsaved edits are marked.** A dirty tab and its window title show a trailing •, and the close button keeps the usual macOS edited dot. The mark clears when you save, revert, or undo back to the last saved text.
+
+### Changed
+- **Reopen files from last session is on unless you turn it off in Owlink.** macOS's “Close windows when quitting an application” setting no longer turns it off. With it off, tabs with unsaved text (including untitled tabs) still reopen after a quit or closing the last window, instead of going to Reopen Closed Tab, where unsaved text is deleted after 30 days. A `-reopenFilesFromLastSession NO` launch argument now works.
+
+### Fixed
+- **Obsidian vault bounds.** A stray `.obsidian` folder in your home folder (or above it, or at a disk's root) no longer makes that whole folder the vault for wiki-links and embeds in the preview; the vault falls back to the document's folder. A note saved directly in your home folder no longer searches all of it for bare `[[names]]`. Open the folder in the sidebar to use it as a vault on purpose.
+- **Plain text document icon.** `.txt` files now have their own teal page with a TXT label, instead of a dark navy page that looked like the generic document icon in Finder and in the window title. Finder's 64 pt icon size now shows each type's label too.
+
+### Removed
+- **Open in Browser** in the preview bar and View › Preview, which only applied to web pages shown in the preview.
+
 ## [0.5.1] - 2026-11-23
 
 ### Added
@@ -266,6 +285,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
 [0.5.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.1
 [0.5.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.0
 [0.4.1]: https://github.com/d4rkwyng/owlink/releases/tag/v0.4.1
