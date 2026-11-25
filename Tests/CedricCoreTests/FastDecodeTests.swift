@@ -148,16 +148,48 @@ import Testing
         }
     }
 
+    /// A UTF-8 BOM case where the decode is meant to differ from
+    /// `Reference`: Foundation's "as UTF-8" keeps a leading BOM on macOS 15
+    /// and drops it on macOS 26, and the old decode then saved without it.
+    /// Exactly one leading BOM is left out of the text, on every macOS (a
+    /// second one is text, U+FEFF), and the encoding is UTF-8 with BOM, so
+    /// a save writes it back. Expected outright for text and encoding; the
+    /// rest (line ending, mixed, binary, nil-ness) still as `Reference`.
+    func oneBOMOut(_ bytes: [UInt8], as enc: TextEncoding?, _ note: String, text: String, ending: LineEnding,
+                   sourceLocation: SourceLocation = #_sourceLocation) {
+        let data = Data(bytes)
+        let label = "\(note) as \(enc.map(\.rawValue) ?? "detected")"
+        let new = TextCodec.decode(data, as: enc), old = Reference.decode(data, as: enc)
+        #expect((new == nil) == (old == nil), "\(label): nil-ness", sourceLocation: sourceLocation)
+        guard let new = new else { Issue.record("\(label): nil", sourceLocation: sourceLocation); return }
+        #expect(new.text == text, "\(label): text", sourceLocation: sourceLocation)
+        #expect(new.encoding == .utf8BOM, "\(label): encoding", sourceLocation: sourceLocation)
+        #expect(new.lineEnding == ending, "\(label): ending", sourceLocation: sourceLocation)
+        #expect(!new.encodingGuessed, "\(label): not a guess", sourceLocation: sourceLocation)
+        #expect(TextCodec.encode(new.text, encoding: new.encoding, lineEnding: new.lineEnding) == data,
+                "\(label): saved as it was", sourceLocation: sourceLocation)
+        guard let old else { return }
+        #expect(new.lineEnding == old.lineEnding, "\(label): ending", sourceLocation: sourceLocation)
+        #expect(new.mixedLineEndings == old.mixedLineEndings, "\(label): mixed", sourceLocation: sourceLocation)
+        #expect(new.looksBinary == old.looksBinary, "\(label): binary", sourceLocation: sourceLocation)
+    }
+
     /// BOMs (UTF-8, UTF-16 LE/BE), a second UTF-8 BOM, a BOM with "as
-    /// UTF-8" (Foundation drops it), the empty file, a BOM alone, and every
-    /// encoding chosen by hand.
+    /// UTF-8", the empty file, a BOM alone, and every encoding chosen by
+    /// hand. A leading UTF-8 BOM read as UTF-8 (`oneBOMOut`) is expected
+    /// outright, not as Foundation, which differs by macOS there.
     @Test func bomsEmptyAndChosenEncodings() {
         let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
         let all: [TextEncoding?] = [nil] + TextEncoding.allCases.map { $0 }
         same([], as: all, "empty")
-        same(bom, as: all, "UTF-8 BOM alone")
-        same(bom + Array("hi\r\nthere".utf8), as: all, "UTF-8 BOM, CRLF")
-        same(bom + bom + Array("double".utf8), as: all, "two UTF-8 BOMs")
+        same(bom, as: all.filter { $0 != .utf8 }, "UTF-8 BOM alone")
+        oneBOMOut(bom, as: .utf8, "UTF-8 BOM alone", text: "", ending: .lf)
+        same(bom + Array("hi\r\nthere".utf8), as: all.filter { $0 != .utf8 }, "UTF-8 BOM, CRLF")
+        oneBOMOut(bom + Array("hi\r\nthere".utf8), as: .utf8, "UTF-8 BOM, CRLF", text: "hi\nthere", ending: .crlf)
+        same(bom + bom + Array("double".utf8), as: all.filter { $0 != nil && $0 != .utf8 && $0 != .utf8BOM }, "two UTF-8 BOMs")
+        for enc: TextEncoding? in [nil, .utf8, .utf8BOM] {
+            oneBOMOut(bom + bom + Array("double".utf8), as: enc, "two UTF-8 BOMs", text: "\u{FEFF}double", ending: .lf)
+        }
         same(Array("a".utf8) + bom + Array("b".utf8), as: all, "a BOM inside")
         same([0xFF, 0xFE, 0x61, 0x00, 0x0D, 0x00, 0x0A, 0x00], as: all, "UTF-16 LE BOM, CRLF")
         same([0xFE, 0xFF, 0x00, 0x61, 0x00, 0x0D], as: all, "UTF-16 BE BOM, CR")

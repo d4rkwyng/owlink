@@ -431,9 +431,17 @@ public enum TextCodec {
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
         if enc == .utf8 || enc == .utf8BOM {
-            // Foundation's UTF-8 decoding drops one leading BOM ("as UTF-8"
-            // on a file with one, or a second BOM after the first): kept.
-            if body.starts(with: [0xEF, 0xBB, 0xBF]) { body = body.dropFirst(3); scanned = nil }
+            // Exactly one leading BOM is left out of the text, on every
+            // macOS (Foundation's UTF-8 decoding drops one on macOS 26 and
+            // keeps it on 15): a second BOM is text (U+FEFF). Asked for as
+            // UTF-8, a file with a BOM is UTF-8 with BOM, so a save writes
+            // it back; dropping a second one too, or the BOM's encoding,
+            // saved a file opened and saved unedited without it.
+            if enc == .utf8, body.starts(with: TextEncoding.utf8BOM.bom) {
+                body = body.dropFirst(3)
+                enc = .utf8BOM
+                scanned = nil
+            }
             return decodeUTF8(body, scan: scanned, encoding: enc, looksBinary: looksBinary(data), shareBytes: shareBytes)
         }
         if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
