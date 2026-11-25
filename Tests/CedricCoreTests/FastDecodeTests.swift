@@ -531,6 +531,26 @@ import Testing
         #expect(try TextCodec.readAll(fd, url: file, sizeHint: 8, limit: nil) == big, "unlimited, it grows to fit")
     }
 
+    /// `maxBytes: Int.max` means no real limit: the ceiling saturates
+    /// instead of trapping on `limit + 1` (Find in Files with
+    /// `maxFileSize: Int.max` read every file that way; Sol round 2).
+    @Test func anIntMaxLimitReadsWithoutTrapping() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-maxint-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("tiny.txt")
+        try Data("needle\n".utf8).write(to: file)
+        #expect(try TextCodec.snapshot(of: file, maxBytes: Int.max) == Data("needle\n".utf8))
+        let fd = Darwin.open(file.path, O_RDONLY | O_CLOEXEC)
+        #expect(fd >= 0)
+        defer { close(fd) }
+        #expect(try TextCodec.readAll(fd, url: file, sizeHint: 7, limit: Int.max) == Data("needle\n".utf8))
+        var hits = 0
+        let summary = try FileSearch(FileSearchOptions(root: dir, query: "needle", maxFileSize: Int.max)).run { _ in hits += 1 }
+        #expect(hits == 1)
+        #expect(summary.filesSearched == 1)
+    }
+
     /// A tab's read takes the file's stamp from the descriptor its bytes
     /// come from. From the path, before the read, a file replaced in
     /// between (an atomic save by another app, a link retargeted) gave the

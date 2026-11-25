@@ -299,8 +299,10 @@ public enum TextCodec {
     /// `sizeHint` bytes, more if the file grows while read, but never more
     /// than `limit + 1` (enough to see it is too large: `tooLarge`).
     static func readAll(_ fd: Int32, url: URL, sizeHint: Int, limit: Int?) throws -> Data {
-        let ceiling = limit.map { $0 + 1 } ?? Int.max
-        var capacity = min(max(sizeHint, 0) + 1, ceiling)
+        // Saturating: `maxBytes: Int.max` (no real limit) must not trap.
+        let ceiling = limit.map { $0 == Int.max ? $0 : $0 + 1 } ?? Int.max
+        let hint = max(sizeHint, 0)
+        var capacity = min(hint == Int.max ? hint : hint + 1, ceiling)
         guard var buffer = malloc(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
         var count = 0
         while true {
