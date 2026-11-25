@@ -91,9 +91,13 @@ import Testing
                 let scanned = LineIndex.scanASCIIBytes(text) { viaBytes.append($0) }
                 if text.length > 0 { bytesSeen += 1 }
                 #expect(scanned == text.length && viaBytes == reference, "byte-copy path, \(scanned) of \(text.length) units")
+                // Whether the fast path is taken here is Foundation's
+                // storage choice; whatever it scans, it reports the
+                // loop's starts for exactly those units.
                 var viaPrefix = [0]
-                #expect(LineIndex.scanASCIIPrefix(text) { viaPrefix.append($0) } == text.length && viaPrefix == reference,
-                        "8-bit ASCII is scanned whole, \(text.length) units")
+                let prefix = LineIndex.scanASCIIPrefix(text) { viaPrefix.append($0) }
+                #expect((0...text.length).contains(prefix) && viaPrefix == reference.filter { $0 <= prefix },
+                        "the fast path reports the loop's starts for what it scans, \(prefix) of \(text.length) units")
                 let idx = LineIndex(text)
                 #expect(idx.starts == reference, "init, \(text.length) units")
                 #expect(idx.length == text.length)
@@ -129,6 +133,10 @@ import Testing
             var viaPointer = [0]
             #expect(LineIndex.scanASCIIPointer(text) { viaPointer.append($0) }, "the pointer path is taken, \(text.length) units")
             #expect(viaPointer == Self.loopStarts(text) && LineIndex(text).starts == viaPointer, "…with the loop's starts")
+            var viaPrefix = [0]
+            #expect(CFStringGetFastestEncoding(cf) == CFStringBuiltInEncodings.ASCII.rawValue, "stored as 8-bit ASCII, \(text.length) units")
+            #expect(LineIndex.scanASCIIPrefix(text) { viaPrefix.append($0) } == text.length && viaPrefix == viaPointer,
+                    "init's fast path scans it whole, \(text.length) units")
         }
         // A large decode's text (the bytes in place, no NUL after them):
         // no pointer, so the byte copies.
