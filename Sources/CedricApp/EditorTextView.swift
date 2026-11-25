@@ -184,8 +184,9 @@ final class EditorTextView: NSTextView {
     /// or a split resize.
     var onViewportLayout: (() -> Void)?
     private var lastLaidOutViewport: (range: NSRange?, bounds: CGRect)?
-    /// Viewport passes reported (checks).
+    /// Viewport passes reported (checks); those TextKit's own word reported.
     private(set) var viewportLayoutsReported = 0
+    private(set) var viewportLayoutsReportedByTextKit = 0
 
     override func layout() {
         super.layout()
@@ -198,18 +199,20 @@ final class EditorTextView: NSTextView {
     /// without one.
     override func textViewportLayoutControllerDidLayout(_ controller: NSTextViewportLayoutController) {
         if Self.superHasDidLayout { super.textViewportLayoutControllerDidLayout(controller) }
-        viewportLaidOut()
+        if viewportLaidOut() { viewportLayoutsReportedByTextKit += 1 }
     }
 
     private static let superHasDidLayout = NSTextView.instancesRespond(to: #selector(NSTextView.textViewportLayoutControllerDidLayout(_:)))
 
-    private func viewportLaidOut() {
-        guard let tlm = textLayoutManager else { return }
+    /// Reports a viewport pass that laid out something new; true if it did.
+    @discardableResult private func viewportLaidOut() -> Bool {
+        guard let tlm = textLayoutManager else { return false }
         let now = (range: viewportCharacterRange, bounds: tlm.textViewportLayoutController.viewportBounds)
-        if let last = lastLaidOutViewport, last.range == now.range, last.bounds == now.bounds { return }
+        if let last = lastLaidOutViewport, last.range == now.range, last.bounds == now.bounds { return false }
         lastLaidOutViewport = now
         viewportLayoutsReported += 1
         onViewportLayout?()
+        return true
     }
 
     /// The caret's rect at `offset` (view coordinates), from the layout
@@ -218,27 +221,34 @@ final class EditorTextView: NSTextView {
     /// for layout: firstRect lays out up to the caret, and a caret at the
     /// start of the next, unlaid chunk of a long line had it lay out (and
     /// estimate) on the main thread.
+    ///
+    /// A caret at a fragment's end belongs to the fragment after it (the
+    /// next chunk, the next paragraph), so the viewport's end is out of it
+    /// (nil), unless it is the end of the document, where it ends the last
+    /// fragment. Reading it from the fragment before placed it there.
     func laidOutCaretRect(at offset: Int) -> NSRect? {
-        guard let tlm = textLayoutManager, let vr = tlm.textViewportLayoutController.viewportRange else { return nil }
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager,
+              let vr = tlm.textViewportLayoutController.viewportRange else { return nil }
         let vStart = self.offset(of: vr.location), vEnd = self.offset(of: vr.endLocation)
-        guard offset >= vStart, offset <= vEnd else { return nil }
-        // The fragment holding the caret: the one it is inside, else the
-        // laid-out one it ends (the caret at the viewport's end).
+        let docEnd = self.offset(of: tcm.documentRange.endLocation)
+        let atDocEnd = offset == docEnd && vEnd == docEnd
+        guard offset >= vStart, offset < vEnd || atDocEnd else { return nil }
         var hit: (frag: NSTextLayoutFragment, local: Int)?
         tlm.enumerateTextLayoutFragments(from: vr.location, options: []) { frag in
             let start = self.offset(of: frag.rangeInElement.location)
-            guard start <= offset, start < vEnd || start == offset && hit == nil else { return false }
+            guard start <= offset else { return false }
             let end = self.offset(of: frag.rangeInElement.endLocation)
-            if offset < end {
+            if offset < end || atDocEnd && offset == end {
                 hit = frag.state == .layoutAvailable ? (frag, offset - start) : nil
                 return false
             }
-            if offset == end, frag.state == .layoutAvailable { hit = (frag, offset - start) }
-            return end <= offset && end < vEnd
+            return end < vEnd || atDocEnd
         }
         guard let (frag, local) = hit else { return nil }
         let lines = frag.textLineFragments
-        guard let line = lines.first(where: { NSLocationInRange(local, $0.characterRange) }) ?? lines.last(where: { NSMaxRange($0.characterRange) == local })
+        // Inside a line, else (the document's end) the last line it ends.
+        guard let line = lines.first(where: { NSLocationInRange(local, $0.characterRange) })
+                ?? (atDocEnd ? lines.last(where: { NSMaxRange($0.characterRange) == local }) : nil)
         else { return nil }
         let at = line.locationForCharacter(at: local)
         let box = line.typographicBounds

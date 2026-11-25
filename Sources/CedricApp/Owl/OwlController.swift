@@ -589,6 +589,8 @@ final class OwlController: NSObject, NSPopoverDelegate {
     private(set) var caretMovesInEdit = 0
     /// Caret looks that got as far as placing the caret (checks).
     private(set) var caretLooks = 0
+    /// Calls to paneLayoutChanged: a resize or a new viewport laid out (checks).
+    private(set) var layoutRechecks = 0
     /// The primary pane was resized (a split opened or closed), or TextKit
     /// laid out a new viewport there (its viewport lags a scroll or a
     /// resize by a layout pass). The caret is looked at again once that
@@ -596,6 +598,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     /// view from the old viewport may be in this one, and a resized pane
     /// moves the owl while the caret stays put.
     func paneLayoutChanged() {
+        layoutRechecks += 1
         guard !caretLookPending else { return }
         caretLookPending = true
         DispatchQueue.main.async { [weak self] in

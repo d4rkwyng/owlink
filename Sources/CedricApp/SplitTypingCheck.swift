@@ -44,8 +44,18 @@ extension DevChecks {
         sized(tab)
         final class Timings: @unchecked Sendable { var ms: [String: Double] = [:] }
         let timings = Timings()
-        final class Viewport: @unchecked Sendable { var range: NSRange?; var reported = 0 }
+        final class Viewport: @unchecked Sendable { var range: NSRange?; var reported = 0; var rechecks = 0; var looks = 0; var bottom: CGFloat? }
         let viewport = Viewport()
+        /// TextKit has laid out the viewport for where the primary pane is
+        /// scrolled to now (its viewport lags a scroll by a pass).
+        func viewportLaidOutAtTop() -> Bool {
+            let tv = tab.primaryTextView
+            guard let tlm = tv.textLayoutManager, tv.viewportCharacterRange != nil else { return false }
+            // viewportBounds is in the text container's coordinates.
+            let vb = tlm.textViewportLayoutController.viewportBounds.offsetBy(dx: tv.textContainerOrigin.x, dy: tv.textContainerOrigin.y)
+            let visible = tv.visibleRect
+            return vb.minY <= visible.minY && vb.maxY >= visible.maxY
+        }
         func timed(_ name: String, _ f: () -> Void) {
             mark(name)
             let t0 = DevHooks.now()
@@ -205,14 +215,16 @@ extension DevChecks {
             // The caret at the viewport's end: the start of the next chunk,
             // not laid out. The owl's look takes the caret's place from what
             // is laid out and lays nothing more out (firstRect laid that
-            // chunk out on the main thread: 0.5.4 QA, Codex review).
+            // chunk out on the main thread: 0.5.4 QA, Codex review). The
+            // caret belongs to that next chunk, so it is out of view: the
+            // chunk before must not answer for it (Codex review round 2).
             sync {
                 mark("scroll to the top")
                 let clip = tab.primaryPane.scrollView.contentView
                 clip.scroll(to: .zero)
                 tab.primaryPane.scrollView.reflectScrolledClipView(clip)
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("the viewport at the top is laid out") { viewportLaidOutAtTop() },
             sync {
                 mark("caret at the viewport's end")
                 let tv = tab.primaryTextView
@@ -236,31 +248,100 @@ extension DevChecks {
                     return laid
                 }
                 expect(!nextLaidOut(), "the chunk after the viewport isn't laid out")
+                // Still the viewport's end after the invalidation: the caret
+                // is at the boundary the look must handle, not simply out of
+                // the viewport (where any version says "out of view").
+                let endNow = tv.viewportCharacterRange.map(NSMaxRange)
+                expect(endNow == end, "the caret is still at the viewport's end", "\(end) → \(String(describing: endNow))")
+                expect(tv.laidOutCaretRect(at: end) == nil,
+                       "the caret at the viewport's end has no laid-out place (it starts the next chunk)",
+                       String(describing: tv.laidOutCaretRect(at: end)))
+                expect(tv.laidOutCaretRect(at: vr.location) != nil,
+                       "…a caret at the top of the viewport, in view, has one", String(describing: tv.laidOutCaretRect(at: vr.location)))
+                expect(!nextLaidOut(), "…and asking laid nothing out past the viewport")
                 let looks = owl.caretLooks
                 owl.caretMoved()
                 expect(owl.caretLooks > looks, "the owl looked at the caret at the viewport's end")
                 expect(!nextLaidOut(), "…and laid nothing out past the viewport for it")
             },
+            // The same with the viewport's end in view: scrolled so a chunk's
+            // bottom is the visible rect's bottom, the viewport ends with that
+            // chunk, and its last line is on screen. The caret there starts
+            // the next chunk, below: out of view, not at the end of the line
+            // above (the chunk before answered for it: Codex review round 2).
+            sync {
+                mark("a chunk's bottom at the visible bottom")
+                let tv = tab.primaryTextView
+                guard let tlm = tv.textLayoutManager, let vr = tlm.textViewportLayoutController.viewportRange else {
+                    expect(false, "a viewport"); return
+                }
+                let h = tv.visibleRect.height
+                var bottom: CGFloat?
+                tlm.enumerateTextLayoutFragments(from: vr.location, options: [.ensuresLayout]) { frag in
+                    let maxY = frag.layoutFragmentFrame.maxY + tv.textContainerOrigin.y
+                    if maxY > h + 40 { bottom = maxY; return false }
+                    return true
+                }
+                guard let bottom else { expect(false, "a chunk lower than the visible rect"); return }
+                viewport.bottom = bottom
+                let clip = tab.primaryPane.scrollView.contentView
+                clip.scroll(to: NSPoint(x: clip.bounds.minX, y: bottom - h))
+                tab.primaryPane.scrollView.reflectScrolledClipView(clip)
+            },
+            waitFor("the viewport there is laid out") { viewportLaidOutAtTop() },
+            sync {
+                let tv = tab.primaryTextView
+                guard let vr = tv.viewportCharacterRange, let tlm = tv.textLayoutManager else { expect(false, "a viewport"); return }
+                let end = NSMaxRange(vr)
+                var endsAt: CGFloat?
+                tlm.enumerateTextLayoutFragments(from: tlm.textViewportLayoutController.viewportRange?.location ?? tlm.documentRange.location, options: []) { frag in
+                    if tv.offset(of: frag.rangeInElement.endLocation) == end { endsAt = frag.layoutFragmentFrame.maxY + tv.textContainerOrigin.y; return false }
+                    return true
+                }
+                expect(endsAt == viewport.bottom && abs(tv.visibleRect.maxY - (endsAt ?? 0)) < 0.5,
+                       "the viewport ends with the chunk whose bottom is the visible bottom",
+                       "ends at \(String(describing: endsAt)), chunk bottom \(String(describing: viewport.bottom)), visible \(tv.visibleRect)")
+                expect(tv.laidOutCaretRect(at: end - 1) != nil, "the last character before the viewport's end is in view",
+                       String(describing: tv.laidOutCaretRect(at: end - 1)))
+                expect(tv.laidOutCaretRect(at: end) == nil, "a caret at the viewport's end, in view or not, starts the next chunk: no place",
+                       String(describing: tv.laidOutCaretRect(at: end)))
+                let clip = tab.primaryPane.scrollView.contentView
+                clip.scroll(to: .zero)
+                tab.primaryPane.scrollView.reflectScrolledClipView(clip)
+            },
+            waitFor("back at the top, laid out") { viewportLaidOutAtTop() && tab.primaryTextView.visibleRect.minY == 0 },
             // A viewport pass that lays out the same characters elsewhere (a
-            // small scroll within the chunks laid out) is heard: the owl
-            // looks again from it (NSView.layout() alone missed it).
+            // small scroll within the chunks laid out) is heard from TextKit
+            // itself (NSView.layout() alone missed it), and the owl looks
+            // again from it.
             sync {
                 mark("small scroll")
                 let tv = tab.primaryTextView
                 tv.setSelectedRange(NSRange(location: 0, length: 0))
                 viewport.range = tv.viewportCharacterRange
-                viewport.reported = tv.viewportLayoutsReported
+                viewport.reported = tv.viewportLayoutsReportedByTextKit
+                viewport.rechecks = tab.owl?.layoutRechecks ?? 0
+                viewport.looks = tab.owl?.caretLooks ?? 0
                 let clip = tab.primaryPane.scrollView.contentView
                 clip.scroll(to: NSPoint(x: clip.bounds.minX, y: clip.bounds.minY + 6))
                 tab.primaryPane.scrollView.reflectScrolledClipView(clip)
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("TextKit reports the small scroll's viewport pass") {
+                tab.primaryTextView.viewportLayoutsReportedByTextKit > viewport.reported && viewportLaidOutAtTop()
+            },
+            waitFor("the owl's look after that pass has run") {
+                guard let owl = tab.owl else { return false }
+                return owl.layoutRechecks > viewport.rechecks && !owl.caretLookPending
+            },
             sync {
                 let tv = tab.primaryTextView
                 expect(tv.viewportCharacterRange == viewport.range, "a small scroll lays out the same characters",
                        "\(String(describing: viewport.range)) → \(String(describing: tv.viewportCharacterRange))")
-                expect(tv.viewportLayoutsReported > viewport.reported, "…and that viewport pass is heard",
-                       "\(tv.viewportLayoutsReported - viewport.reported) passes")
+                expect(tv.viewportLayoutsReportedByTextKit > viewport.reported, "…and TextKit's word on that pass is heard",
+                       "\(tv.viewportLayoutsReportedByTextKit - viewport.reported) passes")
+                expect((tab.owl?.layoutRechecks ?? 0) > viewport.rechecks && (tab.owl?.caretLooks ?? 0) > viewport.looks,
+                       "…and the owl looked at the caret again from it",
+                       "rechecks \((tab.owl?.layoutRechecks ?? 0) - viewport.rechecks), looks \((tab.owl?.caretLooks ?? 0) - viewport.looks)")
                 for (k, v) in timings.ms.sorted(by: { $0.key < $1.key }) { print(String(format: "check: note: %@ %.0f ms", k, v)) }
                 tab.doc.markSaved()
             },
