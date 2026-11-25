@@ -150,7 +150,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     private var previewTimer: Timer?
     private var observers: [NSObjectProtocol] = []
     /// While loading text, edits aren't user changes.
-    private var loading = false
+    private(set) var loading = false
     var onChange: ((EditorWindowController) -> Void)?
     var onClose: ((EditorWindowController) -> Void)?
     /// Cedric the owl, while Cedric › Show Cedric is on.
@@ -207,6 +207,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// Keep / Keep Mixed was chosen: the bar stays away for this tab.
     var encodingNoticeKept = false
     var lineEndingNoticeKept = false
+    /// A mixed file's breaks that edits took, waiting for the undo or redo
+    /// that puts their text back, and what undo and redo inserted so far
+    /// (LineBreakTracking.swift).
+    var pendingBreaks: [(location: Int, removed: [Int])] = []
+    var undoInserted: [NSRange] = []
+    /// Reload's ⌘Z: the line breaks the text it brings back had.
+    var pendingBreakSnapshot: (LineEnding, LineBreaks?)?
     /// "Changed on disk — Reload / Keep Mine" (DiskChange.swift), built when first needed.
     var diskBar: NoticeBar?
     /// Background catch-up reads (reloadIfChangedOnDisk(inBackground:))
@@ -409,6 +416,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             MainActor.assumeIsolated { self?.storageEdited() }
         })
         observePane(primaryPane)
+        // The end of an undo or redo: breaks it brought back (LineBreakTracking.swift).
+        for name in [Notification.Name.NSUndoManagerDidUndoChange, .NSUndoManagerDidRedoChange] {
+            observers.append(nc.addObserver(forName: name, object: nil, queue: nil) { [weak self] n in
+                let source = (n.object as AnyObject?).map(ObjectIdentifier.init)
+                MainActor.assumeIsolated {
+                    guard let self, let um = self.textView.undoManager, source == ObjectIdentifier(um) else { return }
+                    self.undoOrRedoEnded()
+                }
+            })
+        }
         observers.append(nc.addObserver(forName: .cedricAppearanceChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyAppearance() }
         })
@@ -424,6 +441,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func observePane(_ pane: EditorPane) {
         let nc = NotificationCenter.default
         let scrollView = pane.scrollView, textView = pane.textView
+        // Before NSTextView registers its undo (LineBreakTracking.swift).
+        textView.beforeChange = { [weak self] ranges in self?.textWillChange(ranges) }
         scrollView.contentView.postsBoundsChangedNotifications = true
         pane.observers.append(nc.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self, weak pane] _ in
             MainActor.assumeIsolated { if let pane { self?.scrolled(pane) } }
@@ -483,6 +502,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             pane.textView.setSelectedRange(NSRange(location: 0, length: 0))
         }
         textView.undoManager?.removeAllActions()
+        pendingBreaks = []
+        pendingBreakSnapshot = nil
         loading = false
         // Opening is the first setText, before the appearance is applied,
         // and there are no proposals yet. A later replacement (disk reload,
@@ -583,6 +604,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             let a = lineIndex.line(containing: oldRange.location), b = lineIndex.line(containing: NSMaxRange(oldRange))
             bookmarkEdit = (a, b - a, lineIndex.starts[a] == oldRange.location && lineIndex.starts[b] == NSMaxRange(oldRange))
         }
+        // A mixed file's odd breaks move with their "\n" (LineBreakTracking.swift).
+        if !loading, doc.lineBreaks != nil { trackLineBreaks(oldRange, edited) }
         primaryTextView.textEdited(oldRange: oldRange, newLength: edited.length)
         splitEditor?.second.textView.textEdited(oldRange: oldRange, newLength: edited.length)
         if let folding, !loading { folding.textEdited(oldRange: oldRange, newLength: edited.length, storage: storage) }
@@ -1019,9 +1042,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// Picked (status bar, Format › Line Endings, the mixed bar's
     /// Convert): every break is written as `le` from the next save on.
     func convertLineEndings(to le: LineEnding) {
-        guard le != doc.lineEnding || doc.mixedLineEndings else { return }
+        guard le != doc.lineEnding || doc.mixedLineEndings else {
+            // The kind it already is, no odd break left: nothing to write
+            // differently, but picked, so the breaks are no longer followed.
+            doc.lineBreaks = nil
+            return
+        }
         doc.lineEnding = le
-        doc.mixedLineEndings = false
         doc.lineBreaks = nil
         markConverted()
     }
@@ -1029,23 +1056,24 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// The owl's "Use LF" on a shell script with CRLF, and the mixed bar's
     /// Convert: the same change as the status bar's, as one undo step.
     func convertLineEndingsWithUndo(to le: LineEnding) {
-        let old = (doc.lineEnding, doc.mixedLineEndings, doc.lineBreaks)
-        guard le != old.0 || old.1 else { return }
+        let old = (doc.lineEnding, doc.lineBreaks)
+        guard le != old.0 || doc.mixedLineEndings else { return }
         convertLineEndings(to: le)
-        registerLineEndingUndo(back: old.0, mixed: old.1, breaks: old.2)
+        registerLineEndingUndo(back: old.0, breaks: old.1)
     }
 
-    private func registerLineEndingUndo(back le: LineEnding, mixed: Bool, breaks: LineBreaks?) {
+    /// Undo is linear: when this runs the text is as it was at the change,
+    /// so `breaks` fits it.
+    private func registerLineEndingUndo(back le: LineEnding, breaks: LineBreaks?) {
         guard let um = textView.undoManager else { return }
         um.registerUndo(withTarget: self) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                let now = (self.doc.lineEnding, self.doc.mixedLineEndings, self.doc.lineBreaks)
+                let now = (self.doc.lineEnding, self.doc.lineBreaks)
                 self.doc.lineEnding = le
-                self.doc.mixedLineEndings = mixed
                 self.doc.lineBreaks = breaks
                 self.markConverted()
-                self.registerLineEndingUndo(back: now.0, mixed: now.1, breaks: now.2)
+                self.registerLineEndingUndo(back: now.0, breaks: now.1)
             }
         }
         um.setActionName(String(localized: "Line Endings"))
@@ -1262,6 +1290,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         do {
             let (d, mod) = try EditorDocument.read(url, encoding: doc.encoding)
             let all = NSRange(location: 0, length: storage.length)
+            let breaksBefore = (doc.lineEnding, doc.lineBreaks)
             textView.breakUndoCoalescing()
             let replaced = replacingFromDisk { () -> Bool in
                 guard textView.shouldChangeText(in: all, replacementString: d.text) else { return false }
@@ -1274,6 +1303,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             }
             guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
+            // ⌘Z gives the old text its own breaks back.
+            registerLineBreaksSnapshotUndo(breaksBefore)
             doc.noteDisk(mod)
             doc.markSaved()
             resetPreviewTrust()
@@ -1300,7 +1331,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         panel.nameFieldStringValue = String(localized: "\(base) copy") + (ext.isEmpty ? ".txt" : "." + ext)
         panel.directoryURL = doc.fileURL?.deletingLastPathComponent()
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let data = doc.encoded(textView.string)?.data else {
+        guard let data = doc.encoded(textView.string) else {
             showError(NSError(domain: "Cedric", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Couldn’t encode the copy.")]))
             return
         }

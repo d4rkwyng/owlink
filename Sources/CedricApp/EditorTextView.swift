@@ -24,6 +24,19 @@ final class EditorTextView: NSTextView {
     var occurrenceRanges: [NSRange] = []
     var markRanges: [NSRange] = []
     var bracketRanges: [NSRange] = []
+    /// Told of every change before NSTextView registers its undo for it
+    /// (EditorWindowController.textWillChange).
+    var beforeChange: (([NSValue]) -> Void)?
+
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        beforeChange?(affectedRanges)
+        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        beforeChange?([NSValue(range: affectedCharRange)])
+        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+    }
 
     // MARK: Multiple carets (MultiCaretEditing.swift)
 

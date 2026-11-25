@@ -801,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         finishRestore()
         var windows: [SessionWindow] = []
         var keep = Set<UUID>()
-        var buffers: [(UUID, String)] = []
+        var buffers: [(UUID, String, LineBreaks?)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
@@ -820,7 +820,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     keep.insert(d.id)
                     if d.sessionChangeCount != d.changeCount, d.sessionWritingCount != d.changeCount {
                         // One copy of the text (the storage keeps changing).
-                        buffers.append((d.id, t.text))
+                        // A mixed file's breaks go into the buffer with it (restoreFormat).
+                        buffers.append((d.id, t.text, d.lineBreaks))
                         written[d.id] = (d, d.changeCount)
                         // sessionChangeCount moves only once the write has
                         // worked (finished, below): hot close skips its own
@@ -869,9 +870,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let toWrite = buffers, keeping = keep
         let write: @Sendable () -> Set<UUID> = {
             var ok = Set<UUID>()
-            for (id, text) in toWrite {
+            for (id, text, breaks) in toWrite {
                 do {
-                    try store.writeBuffer(id, text: text)
+                    try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks))
                     ok.insert(id)
                 } catch {
                     FileHandle.standardError.write(Data("session: buffer write failed: \(error)\n".utf8))
@@ -1016,7 +1017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             doc.lineEnding = st.lineEnding
             doc.noteDisk(st.diskStamp)
         }
-        doc.restoreFormat(st, fromBuffer: fromBuffer)
+        if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else { return nil } // the file is gone and there was no buffer
         if let l = st.language {
             doc.languageChoice.choose(l)

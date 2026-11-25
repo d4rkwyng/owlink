@@ -13,10 +13,22 @@ import CedricCore
 /// Mixed line endings: the bar says "mostly LF" with Convert to LF and
 /// Keep Mixed; the status bar says "LF (mixed)". Edits in the middle (a
 /// typed line, a changed line, a joined pair) save with every other
-/// line's own ending, byte for byte; undone and saved, the file's bytes
-/// again. Keep Mixed hides the bar and saving still keeps them. Convert to
-/// LF (one undo step) writes all LF; ⌘Z brings mixed back; the status
-/// bar's CRLF writes all CRLF.
+/// line's own ending, byte for byte; undone and saved again, the file's
+/// bytes again (each save checked to have written the file). Keep Mixed
+/// hides the bar and saving still keeps them. Convert to LF (one undo
+/// step) writes all LF; ⌘Z brings mixed back; the status bar's CRLF
+/// writes all CRLF.
+///
+/// Then, each through ⌘S (or Save As) and the file's bytes: a break
+/// belongs to its "\n", not to what its line says (two lines alike, the
+/// first deleted); a CR left straight before an LF is written so it
+/// doesn't read back as one CRLF; the only CRLF deleted, saved, undone
+/// and saved again comes back (and redo, undo again); typing then deleting
+/// across a CRLF undoes in steps that each change the text; Save As keeps
+/// them; a tab closed unsaved and brought back with ⇧⌘T after its file
+/// was moved away keeps them (from what was kept, not the file); Revert
+/// to Saved after the file was rewritten with one kind, then ⌘Z: the
+/// edited text's own breaks again.
 extension DevChecks {
     static func fileNoticesCheck(_ name: String, _ app: AppDelegate) -> Bool {
         guard name == "filenotices" else { return false }
@@ -121,14 +133,22 @@ extension DevChecks {
                 guard let m = mixedTab else { return }
                 edit(m)
                 expect(m.text == "one\ntwo\nnew\nthree!\nfourfive\nsix\n", "edited in the middle", m.text.debugDescription)
+                key("s", [.command])
+                expect(bytes(mixed) == edited && !m.doc.isDirty, "⌘S writes the edit, each line's own ending", show(bytes(mixed)))
             },
             sync {
-                guard let m = mixedTab, let um = m.textView.undoManager else { return }
+                guard let m = mixedTab, let um = m.textView.undoManager else { expect(false, "the mixed tab has an undo manager"); return }
                 var n = 0
                 while um.canUndo, n < 20, m.text != "one\ntwo\nthree\nfour\nfive\nsix\n" { um.undo(); n += 1 }
                 expect(m.text == "one\ntwo\nthree\nfour\nfive\nsix\n", "undo brings the text back", m.text.debugDescription)
+            },
+            sync {
+                // (Unsaved is noted a turn after an undo.) The edit is on disk: the save below has to write.
+                guard let m = mixedTab else { return }
+                expect(m.doc.isDirty && bytes(mixed) == edited, "undone past the save: unsaved, the edit still on disk")
                 key("s", [.command])
                 expect(bytes(mixed) == mixedBytes, "undone and saved: the file's bytes, byte for byte", show(bytes(mixed)))
+                expect(!m.doc.isDirty, "…saved")
             },
             sync {
                 guard let m = mixedTab else { return }
@@ -182,8 +202,192 @@ extension DevChecks {
                 key("s", [.command])
                 expect(bytes(again) == Array("one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n".utf8), "saved: all CRLF", show(bytes(again)))
                 EditorWindowController.checkEncodingPicker = nil
+                s.window?.performClose(nil)
             },
-        ])
+        ] + mixedSaveSteps(app))
         return true
+    }
+}
+
+extension DevChecks {
+    /// Mixed line endings through real saves (FileNoticesCheck's second half).
+    static func mixedSaveSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        func bytes(_ u: URL) -> [UInt8]? { (try? Data(contentsOf: u)).map { [UInt8]($0) } }
+        func put(_ name: String, _ s: String) -> URL {
+            let u = dir.appendingPathComponent(name)
+            try? Data(s.utf8).write(to: u)
+            return u
+        }
+        func show(_ b: [UInt8]?) -> String { b.map { String(decoding: $0, as: UTF8.self).debugDescription } ?? "no file" }
+        func b(_ s: String) -> [UInt8] { Array(s.utf8) }
+        /// Selects `r` and presses delete (backspace).
+        func delete(_ t: EditorWindowController, _ r: NSRange) {
+            t.textView.setSelectedRange(r)
+            key("\u{7f}")
+        }
+        func open(_ name: String, _ s: String) -> EditorWindowController? {
+            guard let t = app.open(put(name, s)) else { expect(false, "opened \(name)"); return nil }
+            sized(t)
+            focus(t)
+            return t
+        }
+        func close(_ t: EditorWindowController?) {
+            t?.doc.markSaved()
+            t?.window?.performClose(nil)
+        }
+        var tab: EditorWindowController?
+        let crlfOnce = "a\r\nb\nc\nd\n"
+        var moved: URL?
+        var stepsChanged: [Bool] = []
+        return [
+            sync {
+                // Two lines alike: deleting the first and its CRLF keeps the second's own LF.
+                guard let t = open("alike.txt", "x\r\nx\nz") else { return }
+                tab = t
+                expect(t.doc.mixedLineEndings, "x\\r\\nx\\nz is mixed")
+                delete(t, NSRange(location: 0, length: 2))
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("x\nz"), "a break is its own \\n's, not its line's: x\\nz", show(bytes(t.doc.fileURL!)))
+                close(t)
+            },
+            sync {
+                // A\rB\nC, B deleted: the CR before the LF is written as CRLF, so three lines read back.
+                guard let t = open("merge.txt", "A\rB\nC") else { return }
+                delete(t, NSRange(location: 2, length: 1))
+                key("s", [.command])
+                let out = bytes(t.doc.fileURL!)
+                expect(out == b("A\r\n\nC"), "a CR left before an LF doesn't merge with it", show(out))
+                expect(out.flatMap { TextCodec.decode(Data($0))?.text } == "A\n\nC", "…reopened, still three lines")
+                close(t)
+            },
+            sync {
+                // The only CRLF deleted (backspace at the start of b), saved.
+                guard let t = open("crlf-once.txt", crlfOnce) else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 2, length: 0))
+                key("\u{7f}")
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("ab\nc\nd\n") && !t.doc.isDirty, "the only CRLF deleted and saved",
+                       show(bytes(t.doc.fileURL!)))
+            },
+            sync {
+                guard let t = tab, let um = t.textView.undoManager else { expect(false, "crlf-once: an undo manager"); return }
+                um.undo()
+            },
+            sync {
+                guard let t = tab, let um = t.textView.undoManager else { expect(false, "crlf-once: an undo manager"); return }
+                expect(t.text == "a\nb\nc\nd\n" && t.doc.isDirty, "⌘Z after the save: the break back, unsaved", t.text.debugDescription)
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b(crlfOnce), "saved again: the CRLF is back, byte for byte", show(bytes(t.doc.fileURL!)))
+                um.redo()
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("ab\nc\nd\n"), "redo and save: deleted again", show(bytes(t.doc.fileURL!)))
+                um.undo()
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b(crlfOnce), "undo and save again: the CRLF again", show(bytes(t.doc.fileURL!)))
+                close(t)
+            },
+            sync {
+                // Typing, then deleting back across the CRLF: each ⌘Z changes the text, and all of them give the file back.
+                guard let t = open("crlf-typing.txt", crlfOnce) else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 2, length: 0))
+                type("xy")
+            },
+            // Each key in its own turn, as a person types: coalesced into one undo step by NSTextView.
+            sync { key("\u{7f}") },
+            sync { key("\u{7f}") },
+            sync { key("\u{7f}") },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "ab\nc\nd\n", "typed and deleted back across the CRLF", t.text.debugDescription)
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b("ab\nc\nd\n"), "…saved", show(bytes(t.doc.fileURL!)))
+            },
+            sync {
+                guard let t = tab, let um = t.textView.undoManager else { expect(false, "crlf-typing: an undo manager"); return }
+                stepsChanged = []
+                var n = 0
+                while um.canUndo, n < 10, t.text != "a\nb\nc\nd\n" {
+                    let before = t.text
+                    um.undo()
+                    stepsChanged.append(t.text != before)
+                    n += 1
+                }
+                expect(t.text == "a\nb\nc\nd\n" && !stepsChanged.isEmpty && !stepsChanged.contains(false),
+                       "every ⌘Z changes the text (no step that only gives a break back)", "\(stepsChanged) \(t.text.debugDescription)")
+                key("s", [.command])
+                expect(bytes(t.doc.fileURL!) == b(crlfOnce), "…undone and saved: the CRLF back", show(bytes(t.doc.fileURL!)))
+                close(t)
+            },
+            sync {
+                // Save As: a new file with each break as it was.
+                guard let t = open("saveas-src.txt", "one\r\ntwo\nthree\rfour\r\n") else { return }
+                t.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type("!")
+                let target = dir.appendingPathComponent("saveas-out.txt")
+                try? FileManager.default.removeItem(at: target)
+                EditorWindowController.checkSaveAsURL = target
+                t.saveAs()
+                expect(bytes(target) == b("one\r\ntwo!\nthree\rfour\r\n") && t.doc.fileURL == target,
+                       "Save As writes each break as it was", show(bytes(target)))
+                close(t)
+            },
+            sync {
+                // Closed unsaved, the file moved away, ⇧⌘T: the breaks come from what was kept.
+                guard let t = open("closed-mixed.txt", "one\r\ntwo\nthree\rfour\r\n") else { return }
+                t.textView.setSelectedRange(NSRange(location: 13, length: 0))
+                key("\r")
+                type("new")
+                expect(t.text == "one\ntwo\nthree\nnew\nfour\n" && t.doc.isDirty, "typed a line after the CR", t.text.debugDescription)
+                let url = t.doc.fileURL!
+                key("w", [.command])
+                let away = dir.appendingPathComponent("closed-mixed-moved.txt")
+                try? FileManager.default.removeItem(at: away)
+                try? FileManager.default.moveItem(at: url, to: away)
+                moved = away
+            },
+            sync {
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let r = app.tabs.last, r.doc.displayName == "closed-mixed.txt" else { expect(false, "⇧⌘T brought closed-mixed.txt back"); return }
+                expect(r.text == "one\ntwo\nthree\nnew\nfour\n" && r.doc.isDirty && r.doc.mixedLineEndings,
+                       "⇧⌘T: the unsaved text, still mixed", r.text.debugDescription)
+                let target = dir.appendingPathComponent("closed-mixed-saved.txt")
+                try? FileManager.default.removeItem(at: target)
+                EditorWindowController.checkSaveAsURL = target
+                r.saveAs()
+                expect(bytes(target) == b("one\r\ntwo\nthree\r\nnew\rfour\r\n"),
+                       "…saved: each break as it was, the file it came from gone", show(bytes(target)))
+                _ = moved
+                close(r)
+            },
+            sync {
+                // Revert to Saved after the file was rewritten all LF, then ⌘Z: the edited text's own breaks.
+                guard let t = open("revert-mixed.txt", "one\r\ntwo\nthree\rfour\r\n") else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 3, length: 0))
+                type("!")
+            },
+            sync {
+                // Its own event, as from the menu: one undo step of its own.
+                guard let t = tab else { return }
+                try? Data(b("plain\nlf\n")).write(to: t.doc.fileURL!)
+                app.revertToSaved(nil)
+                expect(t.text == "plain\nlf\n" && !t.doc.mixedLineEndings, "Revert to Saved: the file as it is now (one kind)", t.text.debugDescription)
+            },
+            sync {
+                guard let t = tab, let um = t.textView.undoManager else { expect(false, "revert: an undo manager"); return }
+                um.undo()
+                expect(t.text == "one!\ntwo\nthree\nfour\n" && t.doc.mixedLineEndings, "⌘Z: the edited text, mixed again", t.text.debugDescription)
+                let target = dir.appendingPathComponent("revert-mixed-saved.txt")
+                try? FileManager.default.removeItem(at: target)
+                EditorWindowController.checkSaveAsURL = target
+                t.saveAs()
+                expect(bytes(target) == b("one!\r\ntwo\nthree\rfour\r\n"), "…saved: its own breaks", show(bytes(target)))
+                close(t)
+            },
+        ]
     }
 }

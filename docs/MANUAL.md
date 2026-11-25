@@ -176,11 +176,17 @@ as right. Either way the bar goes and "(guessed)" with it.
 
 Mixed line endings (some LF, some CRLF or CR) are shown as such: the
 status bar says **LF (mixed)** (the most common kind) and a bar says
-"This file has mixed line endings (mostly LF)." Saving keeps each line's
-own ending, byte for byte, however you edit; a line you add gets the most
-common kind. **Convert to LF** on the bar (one undo step), or picking a
-line ending from the status bar or **Format › Line Endings**, writes them
-all as that kind from the next save; **Keep Mixed** just hides the bar.
+"This file has mixed line endings (mostly LF)." Saving keeps each line
+break as it was, byte for byte: a break stays with its place in the text
+however you type or delete around it, and one you delete comes back as it
+was when you undo, before or after a save. A line break you type, or one a
+text tool rewrites, gets the most common kind. (Delete the text between a
+CR and an LF and the CR is written as CRLF, so the two breaks don't read
+back as one.) Unsaved text kept for the next launch or for Reopen Closed
+Tab keeps its line breaks too. **Convert to LF** on the bar (one undo
+step), or picking a line ending from the status bar or **Format › Line
+Endings**, writes them all as that kind from the next save; **Keep
+Mixed** just hides the bar.
 A file that looks binary (a NUL byte, or many control characters, in
 its first 8 KB; never UTF-16) opens with a bar, "This looks like a
 binary file", and nothing shown: **Open Anyway** shows it as text,

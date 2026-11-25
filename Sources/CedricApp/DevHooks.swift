@@ -247,6 +247,10 @@ enum DevHooks {
                 for t in app.tabGroups().joined() {
                     let body = t.text.replacingOccurrences(of: "\n", with: "\\n")
                     print("tab: name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) language=\(t.doc.language.rawValue) text=\(body.prefix(60))")
+                    // A mixed file's own breaks: the bytes ⌘S would write (LineBreaks).
+                    if t.doc.lineBreaks != nil, let data = t.doc.encoded(t.text) {
+                        print("breaks: name=\(t.doc.displayName) saves=\(String(decoding: data, as: UTF8.self).debugDescription)")
+                    }
                 }
                 for v in app.viewerTabs { print("viewer: file=\(v.fileURL.path)") }
                 if let f = app.folderSessionState {

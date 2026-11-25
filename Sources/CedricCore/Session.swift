@@ -66,7 +66,8 @@ public struct SessionTab: Codable, Equatable, Sendable {
     /// hadn't kept it or picked one. Only `true` is stored.
     public var encodingGuessed: Bool?
     /// The file mixed line endings and saving kept each one (LineBreaks):
-    /// a tab restored from its buffer reads them from the file again.
+    /// the buffer holds the text with those breaks written in, read back
+    /// against `lineEnding` (the most common kind), never from the file.
     /// Only `true` is stored.
     public var mixedLineEndings: Bool?
 

@@ -23,14 +23,14 @@ extension AppDelegate {
         guard needsBuffer(t) else { return true }
         let d = t.doc
         if !sessionSaving {
-            closedTexts[d.id] = t.text
+            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
             return true
         }
         if d.sessionChangeCount == d.changeCount, FileManager.default.fileExists(atPath: store.bufferURL(d.id).path) { return true }
-        let text = t.text, id = d.id, store = self.store
+        let text = t.text, breaks = d.lineBreaks, id = d.id, store = self.store
         var failure: Error?
         sessionQueue.sync {
-            do { try store.writeBuffer(id, text: text) } catch { failure = error }
+            do { try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks)) } catch { failure = error }
         }
         if let failure {
             FileHandle.standardError.write(Data("session: closing tab, buffer write failed: \(failure)\n".utf8))
@@ -58,7 +58,7 @@ extension AppDelegate {
         // A tab closed without windowShouldClose (programmatically): write now.
         if keepText, !keepTextForClose(t) {
             // Couldn't write it: keep it in memory at least, for this run.
-            closedTexts[d.id] = t.text
+            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
         }
         if !keepText { store.removeBuffer(d.id) }
         // Kept for ⇧⌘T, but the file wasn't written: say so once (ClosedNotice.swift).
@@ -119,7 +119,7 @@ extension AppDelegate {
             doc.lineEnding = st.lineEnding
             doc.noteDisk(st.diskStamp)
         }
-        doc.restoreFormat(st, fromBuffer: fromBuffer)
+        if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else {
             // The file has gone and there was no unsaved text.
             NSSound.beep()

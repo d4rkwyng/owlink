@@ -462,5 +462,21 @@ check "old session: the markdown tab is restored" "^tab: name=old.md"
 grep -q "^preview:" "$W/dump.txt" && { echo "session-check: FAIL an old session opened a preview" >&2; fail=1; } \
     || echo "session-check: OK   old session without previewShown leaves the preview closed"
 
+# 12. A file with mixed line endings, edited and not saved, then a crash:
+# its own line breaks come back from the unsaved buffer, even after the
+# file on disk was replaced by one with a single kind (never read again).
+export CEDRIC_SESSION_DIR="$W/session12"
+printf 'one\r\ntwo\nthree\rfour\r\n' > "$W/mixed.txt"
+env CEDRIC_OPEN="$W/mixed.txt" CEDRIC_TEST_TYPE="five" "$BIN" -ApplePersistenceIgnoreState YES >/dev/null 2>&1 &
+pid=$!
+sleep 4
+kill -9 $pid; wait $pid 2>/dev/null || true
+printf 'one\ntwo\n' > "$W/mixed.txt"
+dump
+check "mixed: the unsaved edit restored" "file=$W/mixed.txt dirty=true .*text=one\\\\ntwo\\\\nthree\\\\nfour\\\\nfive"
+if grep -qF 'breaks: name=mixed.txt saves="one\r\ntwo\nthree\rfour\r\nfive"' "$W/dump.txt"; then
+    echo "session-check: OK   mixed: each line break as it was, from the buffer, not the replaced file"
+else echo "session-check: FAIL mixed: restored breaks are '$(grep '^breaks: name=mixed.txt' "$W/dump.txt" || echo none)'" >&2; fail=1; fi
+
 [ $fail = 0 ] && echo "session-check: all OK"
 exit $fail
