@@ -58,7 +58,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         LaunchTrace.mark("will_finish")
         // A save past the file-size limit fails with an error the save
         // recovers from, instead of SIGXFSZ ending the app mid-write.
-        DocumentWrite.ignoreFileSizeSignal()
+        // Caught, not ignored: git and other programs Owlink starts get
+        // the default action back.
+        DocumentWrite.catchFileSizeSignal()
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),

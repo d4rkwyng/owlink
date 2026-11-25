@@ -150,8 +150,9 @@ public enum DocumentWrite {
         public var failWriteAfter: Int?
         /// Fail putting the file back with EIO.
         public var failRestore = false
-        /// Skip the file-size limit check, so the kernel's limit is hit
-        /// part way through the write.
+        /// Skip the file-size limit check (and the preallocation, which
+        /// can also fail with EFBIG), so the kernel's limit is hit part
+        /// way through the write itself.
         public var skipSizeLimit = false
         public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false) {
             self.failWriteAfter = failWriteAfter
@@ -293,7 +294,7 @@ public enum DocumentWrite {
     ///
     /// - The save is refused before anything is written when the new text
     ///   is larger than the process's file-size limit (RLIMIT_FSIZE; the
-    ///   app ignores SIGXFSZ, `ignoreFileSizeSignal`, so a limit hit
+    ///   app catches SIGXFSZ, `catchFileSizeSignal`, so a limit hit
     ///   anyway is an EFBIG error, not a crash), when the volume has less
     ///   free space than the new text, or can't preallocate the growth.
     /// - The file as it is is copied to a recovery copy in a private
@@ -328,7 +329,7 @@ public enum DocumentWrite {
         var fs = statfs()
         if fstatfs(fd, &fs) == 0, !enoughSpace(for: data.count, in: fs) { throw writeError(ENOSPC, url) }
         let oldCount = Int(st.st_size)
-        if data.count > oldCount {
+        if data.count > oldCount, faults?.skipSizeLimit != true {
             var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL), fst_posmode: F_PEOFPOSMODE,
                                  fst_offset: 0, fst_length: off_t(data.count - oldCount), fst_bytesalloc: 0)
             if fcntl(fd, F_PREALLOCATE, &store) == -1, errno == ENOSPC || errno == EDQUOT || errno == EFBIG {
@@ -374,9 +375,21 @@ public enum DocumentWrite {
     /// For the app to call once at launch: a write past the file-size
     /// limit (RLIMIT_FSIZE) then fails with EFBIG, which a save can
     /// recover from, instead of SIGXFSZ ending the app.
-    public static func ignoreFileSizeSignal() {
-        signal(SIGXFSZ, SIG_IGN)
+    ///
+    /// Caught by a handler that does nothing (but count), not ignored
+    /// (SIG_IGN): an ignored signal stays ignored across exec, so git and
+    /// every other program Owlink starts ran with SIGXFSZ ignored; a
+    /// caught one goes back to its default action in the new program.
+    public static func catchFileSizeSignal() {
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in fileSizeSignalsCaught &+= 1 }
+        sigemptyset(&action.sa_mask)
+        action.sa_flags = 0
+        _ = sigaction(SIGXFSZ, &action, nil)
     }
+
+    /// How many SIGXFSZ the handler has caught (tests).
+    public static var fileSizeSignals: Int32 { fileSizeSignalsCaught }
 
     /// Whether a `count`-byte file is within this process's file-size limit.
     static func withinFileSizeLimit(_ count: Int) -> Bool {
@@ -521,3 +534,7 @@ public enum DocumentWrite {
         return CocoaError(kind, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path, NSUnderlyingErrorKey: underlying])
     }
 }
+
+/// SIGXFSZ caught (DocumentWrite.catchFileSizeSignal): written only by
+/// the signal handler, a plain counter (no locks in a handler).
+nonisolated(unsafe) private var fileSizeSignalsCaught: Int32 = 0

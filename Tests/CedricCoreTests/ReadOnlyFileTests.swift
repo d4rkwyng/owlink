@@ -382,7 +382,7 @@ import Testing
 
     /// A file-size limit (RLIMIT_FSIZE) in a child process, since the
     /// limit and SIGXFSZ's disposition are process-wide. With the app's
-    /// launch setup (`ignoreFileSizeSignal`), a save larger than the limit
+    /// launch setup (`catchFileSizeSignal`), a save larger than the limit
     /// is refused before writing; one that hits the limit part way (the
     /// check skipped) gets EFBIG, not SIGXFSZ, and is put back. Either
     /// way the child lives and the file keeps every original byte. 0.5.4
@@ -411,8 +411,24 @@ import Testing
         child.standardOutput = out
         child.standardError = out
         try child.run()
-        let output = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        // Bounded: a child that hangs is ended, and the test fails, rather
+        // than waiting for EOF for ever.
+        final class Collected: @unchecked Sendable { var data = Data() }
+        let collected = Collected()
+        let readDone = DispatchSemaphore(value: 0)
+        let reader = out.fileHandleForReading
+        Thread {
+            collected.data = reader.readDataToEndOfFile()
+            readDone.signal()
+        }.start()
+        let inTime = readDone.wait(timeout: .now() + 60) == .success
+        if !inTime {
+            child.terminate()
+            _ = readDone.wait(timeout: .now() + 10)
+        }
+        #expect(inTime, "the child finished within 60 s")
         child.waitUntilExit()
+        let output = String(decoding: collected.data, as: UTF8.self)
         #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
         #expect(child.terminationStatus == 0, "\(output)")
         #expect(output.contains("fsize child: ok"), "\(output)")
@@ -423,7 +439,7 @@ import Testing
 
     /// The child's half: exits 0 printing "fsize child: ok", else 1.
     static func fileSizeChild(_ url: URL) -> Never {
-        DocumentWrite.ignoreFileSizeSignal()
+        DocumentWrite.catchFileSizeSignal()
         var failures: [String] = []
         guard let original = try? Data(contentsOf: url) else { print("fsize child: can't read"); exit(1) }
         var limit = rlimit(rlim_cur: 100_000, rlim_max: 0)
@@ -433,6 +449,7 @@ import Testing
         guard setrlimit(RLIMIT_FSIZE, &limit) == 0 else { print("fsize child: can't lower RLIMIT_FSIZE"); exit(1) }
         let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
         for skip in [false, true] {
+            let caught = DocumentWrite.fileSizeSignals
             do {
                 try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
                                         faults: .init(skipSizeLimit: skip))
@@ -440,8 +457,31 @@ import Testing
             } catch {
                 let posix = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError)?.code
                 if posix != Int(EFBIG) { failures.append("skip=\(skip): \(error), not EFBIG") }
+                // The bypass must reach the write past the limit itself:
+                // the writer says it wrote into the file, and the kernel's
+                // SIGXFSZ came and was caught (not refused earlier).
+                if skip {
+                    if DocumentWrite.fileLeft(by: error) == nil { failures.append("skip=true: refused before writing") }
+                    if DocumentWrite.fileSizeSignals <= caught { failures.append("skip=true: no SIGXFSZ was caught") }
+                } else if DocumentWrite.fileLeft(by: error) != nil {
+                    failures.append("skip=false: wrote before refusing")
+                }
             }
             if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
+        }
+        // A program started from here (git, as Git.run starts it) gets
+        // SIGXFSZ's default action back: an ignored SIGXFSZ was inherited.
+        let script = url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("xfsz-\(getpid()).sh")
+        let body = "#!/bin/sh\nkill -XFSZ $$\necho survived\n"
+        if FileManager.default.createFile(atPath: script.path, contents: Data(body.utf8), attributes: [.posixPermissions: 0o755]) {
+            GitRunner.override = script.path
+            let r = GitRunner.run(["status"], cwd: url.deletingLastPathComponent().deletingLastPathComponent(), timeout: 10)
+            GitRunner.override = nil
+            try? FileManager.default.removeItem(at: script)
+            if r == nil { failures.append("git child: didn't start") }
+            if r?.text.contains("survived") == true { failures.append("git child: SIGXFSZ was ignored in it (inherited)") }
+        } else {
+            failures.append("git child: no script")
         }
         print(failures.isEmpty ? "fsize child: ok" : "fsize child: \(failures)")
         exit(failures.isEmpty ? 0 : 1)
