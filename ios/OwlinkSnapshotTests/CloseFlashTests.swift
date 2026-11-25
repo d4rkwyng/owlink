@@ -2,6 +2,9 @@ import XCTest
 import UIKit
 import CedricCore
 
+@_silgen_name("OWReadUserInterfaceStyleOverride")
+func OWReadUserInterfaceStyleOverride(_ window: UIWindow, _ outStyle: UnsafeMutablePointer<Int>) -> Int32
+
 /// Closing a file showed the document browser dark for a moment, then
 /// light, with the phone in light mode (Derek, after build 18), and the
 /// browser went dark under the editor as it slid in. The theme sets the
@@ -83,9 +86,21 @@ final class CloseFlashTests: XCTestCase {
         theme == .system ? .unspecified : (theme.palette(systemIsDark: false).isDark ? .dark : .light)
     }
 
+    /// UIKit throws if `traitOverrides.userInterfaceStyle` is read when no
+    /// override was ever set ("Can't return value for trait UserInterfaceStyle
+    /// that has no override"). A missing override and an explicit
+    /// `.unspecified` both mean the window follows the phone. After
+    /// `EditorBarStyle.restore` the override is set and readable; during
+    /// open it has never been set.
+    private func traitOverrideFollowsThePhone(_ window: UIWindow) -> Bool {
+        var raw: Int = -1
+        if OWReadUserInterfaceStyleOverride(window, &raw) == 0 { return true }
+        return UIUserInterfaceStyle(rawValue: raw) == .unspecified
+    }
+
     private func assertOnPhone(_ window: UIWindow, _ what: String, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(window.overrideUserInterfaceStyle, .unspecified, "\(what): window style", file: file, line: line)
-        XCTAssertEqual(window.traitOverrides.userInterfaceStyle, .unspecified, "\(what): window trait override", file: file, line: line)
+        XCTAssertTrue(traitOverrideFollowsThePhone(window), "\(what): window trait override follows the phone", file: file, line: line)
     }
 
     // MARK: Open
