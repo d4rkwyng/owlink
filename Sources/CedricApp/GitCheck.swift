@@ -270,17 +270,10 @@ extension DevChecks {
                 notices = (tab.gitState?.clearNotices ?? -1, hostileTab?.gitState?.clearNotices ?? -1, plainTab?.gitState?.clearNotices ?? -1)
                 calls = (tab.gitStateChanges, hostileTab?.gitStateChanges ?? -1, plainTab?.gitStateChanges ?? -1)
                 Settings.shared.showGitChanges = false
-                offTab = app.open(write("repo/src/other.swift", "x\n"))
-                if let o = offTab { sized(o); focus(o) }
-                hostileOpened = Date()
-            },
-            wait("a while with the setting off") { Date().timeIntervalSince(hostileOpened) > 2 },
-            sync {
-                expect(offTab?.gitState?.refreshCount == 0, "Show git changes off: git never ran for the tab",
-                       "\(offTab?.gitState?.refreshCount ?? -1)")
-                expect(offTab?.statusBar.gitButton.isHidden == true, "and no branch label")
-                expect(tab.gitState?.status == nil && tab.statusBar.gitButton.isHidden, "an open tab drops its git info")
-                expect(tab.gitState?.clearNotices == notices.tab + 1, "…and that clear redrew it once",
+                // Counted right at the switch (the setting's notification
+                // is delivered synchronously), before any refresh or diff
+                // already in flight can land and redraw on its own.
+                expect(tab.gitState?.clearNotices == notices.tab + 1, "…and that clear redrew it once (at the switch)",
                        "\(tab.gitState?.clearNotices ?? -1) vs \(notices.tab)")
                 expect(hostileTab?.gitState?.clearNotices == notices.hostile + 1 && hostileTab?.statusBar.gitButton.isHidden == true,
                        "the refused repository's tab drops Git info off, redrawn once", "\(hostileTab?.gitState?.clearNotices ?? -1) vs \(notices.hostile)")
@@ -292,6 +285,17 @@ extension DevChecks {
                        "\(hostileTab?.gitStateChanges ?? -1) vs \(calls.hostile)")
                 expect(plainTab?.gitStateChanges == calls.plain && calls.plain == 0, "…and none for the file outside git",
                        "\(plainTab?.gitStateChanges ?? -1) vs \(calls.plain)")
+                offTab = app.open(write("repo/src/other.swift", "x\n"))
+                if let o = offTab { sized(o); focus(o) }
+                hostileOpened = Date()
+            },
+            wait("a while with the setting off") { Date().timeIntervalSince(hostileOpened) > 2 },
+            sync {
+                expect(offTab?.gitState?.refreshCount == 0, "Show git changes off: git never ran for the tab",
+                       "\(offTab?.gitState?.refreshCount ?? -1)")
+                expect(offTab?.statusBar.gitButton.isHidden == true, "and no branch label")
+                expect(tab.gitState?.status == nil && tab.statusBar.gitButton.isHidden, "an open tab drops its git info")
+                expect(hostileTab?.statusBar.gitButton.isHidden == true, "the refused repository's tab drops Git info off")
                 Settings.shared.showGitChanges = true
             },
             wait("git back on") { (offTab?.gitState?.refreshCount ?? 0) > 0 && offTab?.gitState?.status != nil },
