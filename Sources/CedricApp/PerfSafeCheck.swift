@@ -82,6 +82,7 @@ extension DevChecks {
         }
 
         var builds = 0
+        var savedFontSize: Any?
         run([
             sync {
                 focus(tab)
@@ -157,11 +158,17 @@ extension DevChecks {
 
                 // baseAttributes: cached, and equal to a fresh measure.
                 attributesMatchAFreshMeasure("open")
-                Settings.shared.fontSize += 3
+                // Zoom for this run only: the saved size is never written.
+                savedFontSize = UserDefaults.standard.object(forKey: "fontSize")
+                Settings.shared.fontSizeOverride = Settings.shared.fontSize == 20 ? 17 : 20
             },
             sync {
+                expect(tab.editorFont.pointSize == Settings.shared.fontSizeOverride, "zoomed for this run",
+                       "\(tab.editorFont.pointSize)")
                 attributesMatchAFreshMeasure("zoomed")
-                Settings.shared.fontSize -= 3
+                Settings.shared.fontSizeOverride = nil
+                expect(UserDefaults.standard.object(forKey: "fontSize") as? NSObject == savedFontSize as? NSObject,
+                       "the saved font size is left as it was", "\(String(describing: UserDefaults.standard.object(forKey: "fontSize")))")
                 tab.setIndentation(Indentation(usesTabs: true, width: 7))
                 attributesMatchAFreshMeasure("tab width 7")
                 tab.setIndentation(Indentation(usesTabs: false, width: 4))
@@ -171,6 +178,14 @@ extension DevChecks {
             waitFor("the end is coloured, in time") { tab.colorizer.isColored(tab.lineIndex.lineCount - 2) },
             sync {
                 expect(tab.colorizer.isColored(tab.lineIndex.lineCount - 2), "the end was coloured")
+                // The last line's "let" really is in the keyword colour, so
+                // Plain Text below has a distant token colour to undo.
+                let last = tab.lineIndex.contentRange(ofLine: tab.lineIndex.lineCount - 2)
+                let lastLine = (tab.text as NSString).substring(with: last)
+                let distant = tab.textView.textStorage?.attribute(.foregroundColor, at: last.location, effectiveRange: nil) as? NSColor
+                expect(lastLine.hasPrefix("let value599") && distant == NSColor(hex: tab.palette.color(for: .keyword))
+                       && distant != NSColor(hex: tab.palette.foreground),
+                       "the last line's \"let\" is in the keyword colour", "\(lastLine.prefix(14)) \(String(describing: distant))")
                 tab.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
             },
             waitFor("back at the top, coloured, in time") { tab.colorizer.isColored(0) },
