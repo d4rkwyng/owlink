@@ -243,43 +243,133 @@ final class SettingsAndCloseTests: XCTestCase {
 
     /// Astra / Sol (18): a sample that can't be put in place keeps the
     /// document as it was and its recovery record (the unsaved text is
-    /// still offered), and says so.
+    /// still offered), and says so: whether the copy fails (no sample) or
+    /// the swap fails after the dated copy is staged beside the document.
+    /// The document is never removed ahead of the swap, and nothing staged
+    /// is left behind.
     func testFreshSampleThatFailsKeepsTheRecoveryRecord() throws {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("FreshSampleFail-\(UUID().uuidString)", isDirectory: true)
-        defer { try? fm.removeItem(at: root) }
         let docs = root.appendingPathComponent("Documents", isDirectory: true)
         try fm.createDirectory(at: docs, withIntermediateDirectories: true)
         let url = docs.appendingPathComponent("README.md")
+        defer {
+            try? fm.setAttributes([.immutable: false], ofItemAtPath: url.path)
+            try? fm.removeItem(at: root)
+        }
         let earlier = Data("# Sample\nhoot roundtrip\n".utf8)
         try earlier.write(to: url)
-        let missing = root.appendingPathComponent("Samples/README.md")
+        let old = Date(timeIntervalSince1970: 1_600_000_000)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
         let store = RecoveryStore(directory: root.appendingPathComponent("Recovery", isDirectory: true))
         let path = url.standardizedFileURL.path
         let record = RecoveryRecord(documentPath: path, displayName: "README.md", bookmark: nil,
-                                    savedAt: Date(timeIntervalSince1970: 1_600_000_060), text: "unsaved",
+                                    savedAt: old.addingTimeInterval(60), text: "unsaved",
                                     encoding: .utf8, lineEnding: .lf)
         try store.write(record)
-
         let queue = DispatchQueue(label: "test.fresh-sample")
-        XCTAssertFalse(TestLaunch.prepareFreshSample(missing, at: url, recovery: store, queue: queue,
-                                                     now: Date(timeIntervalSince1970: 1_800_000_000)))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
 
-        XCTAssertEqual(store.read(documentPath: path), record, "a failed fresh sample cleared the recovery record")
-        XCTAssertEqual(try Data(contentsOf: url), earlier, "a failed fresh sample changed the document")
+        func checkKept(_ when: String, file: StaticString = #filePath, line: UInt = #line) throws {
+            XCTAssertEqual(store.read(documentPath: path), record, "\(when): the recovery record was cleared", file: file, line: line)
+            let modified = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date, file: file, line: line)
+            XCTAssertEqual(modified.timeIntervalSince1970, old.timeIntervalSince1970, accuracy: 1,
+                           "\(when): the document was redated", file: file, line: line)
+            XCTAssertEqual(store.pending(documentPath: path, documentModified: modified), record,
+                           "\(when): the unsaved text is no longer offered", file: file, line: line)
+            XCTAssertEqual(try Data(contentsOf: url), earlier, "\(when): the document changed", file: file, line: line)
+            XCTAssertEqual(try fm.contentsOfDirectory(atPath: docs.path), ["README.md"],
+                           "\(when): a staged copy was left behind", file: file, line: line)
+        }
+
+        // No sample to copy: fails before anything is staged.
+        let missing = root.appendingPathComponent("Samples/README.md")
+        XCTAssertFalse(TestLaunch.prepareFreshSample(missing, at: url, recovery: store, queue: queue, now: now))
+        try checkKept("no sample")
+
+        // The sample copies and is dated beside the document, but the
+        // document can't be swapped out (it's locked): fails after staging.
+        let samples = root.appendingPathComponent("Samples", isDirectory: true)
+        try fm.createDirectory(at: samples, withIntermediateDirectories: true)
+        let sample = samples.appendingPathComponent("README.md")
+        try Data("# Sample\n".utf8).write(to: sample)
+        try fm.setAttributes([.immutable: true], ofItemAtPath: url.path)
+        XCTAssertFalse(TestLaunch.prepareFreshSample(sample, at: url, recovery: store, queue: queue, now: now))
+        try fm.setAttributes([.immutable: false], ofItemAtPath: url.path)
+        try checkKept("swap refused after staging")
+        XCTAssertTrue(fm.fileExists(atPath: sample.path), "the sample itself went")
+
+        // Unlocked, the same call goes through and only then clears it.
+        XCTAssertTrue(TestLaunch.prepareFreshSample(sample, at: url, recovery: store, queue: queue, now: now))
+        XCTAssertEqual(try Data(contentsOf: url), Data("# Sample\n".utf8))
+        XCTAssertNil(store.read(documentPath: path))
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: docs.path), ["README.md"], "a staged copy was left behind")
     }
 
-    /// Astra (18): `-OwlinkFreshSample` is acted on once per process, so a
-    /// second window (⌥⌘N) doesn't wipe the document under the first.
-    func testFreshSampleIsClaimedOncePerProcess() {
+    /// Astra / Sol (18): `-OwlinkFreshSample` is acted on once per process,
+    /// so a second window (⌥⌘N) doesn't wipe the document under the first.
+    /// The real launch path, twice: the first puts the sample in fresh and
+    /// clears its record; after an edit (and its unsaved text recorded),
+    /// the second opens the edited document and leaves the record offered.
+    func testFreshSampleIsClaimedOncePerProcess() throws {
         TestLaunch.resetFreshSampleClaim()
         defer { TestLaunch.resetFreshSampleClaim() }
         XCTAssertFalse(TestLaunch.claimFreshSample(requested: false))
         XCTAssertFalse(TestLaunch.freshSampleConsumed, "a launch without the flag used up the claim")
-        XCTAssertTrue(TestLaunch.claimFreshSample(requested: true))
+
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FreshSampleOnce-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let bundleURL = root.appendingPathComponent("Fixture.bundle", isDirectory: true)
+        let samples = bundleURL.appendingPathComponent("Samples", isDirectory: true)
+        let docs = root.appendingPathComponent("Documents", isDirectory: true)
+        try fm.createDirectory(at: samples, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+        let sampleText = Data("# Sample\n".utf8)
+        try sampleText.write(to: samples.appendingPathComponent("README.md"))
+        let bundle = try XCTUnwrap(Bundle(url: bundleURL))
+        let store = RecoveryStore(directory: root.appendingPathComponent("Recovery", isDirectory: true))
+        let url = docs.appendingPathComponent("README.md")
+        let path = url.standardizedFileURL.path
+        let old = Date(timeIntervalSince1970: 1_600_000_000)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func record(_ savedAt: Date) -> RecoveryRecord {
+            RecoveryRecord(documentPath: path, displayName: "README.md", bookmark: nil,
+                           savedAt: savedAt, text: "unsaved", encoding: .utf8, lineEnding: .lf)
+        }
+        // An earlier test's leftovers.
+        try Data("# Sample\nhoot roundtrip\n".utf8).write(to: url)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: url.path)
+        try store.write(record(old.addingTimeInterval(60)))
+        let args = ["Owlink", "-OwlinkOpen", "README.md", "-OwlinkFreshSample"]
+        func launch() -> URL? {
+            TestLaunch.documentToOpen(arguments: args, documentsDirectory: docs, bundle: bundle,
+                                      recovery: store, queue: nil, now: now)
+        }
+
+        // Launch 1 (the first window).
+        XCTAssertEqual(launch()?.standardizedFileURL, url.standardizedFileURL)
         XCTAssertTrue(TestLaunch.freshSampleConsumed)
-        XCTAssertFalse(TestLaunch.claimFreshSample(requested: true), "a second window prepared the fresh sample again")
+        XCTAssertEqual(try Data(contentsOf: url), sampleText, "launch 1 didn't put the sample in fresh")
+        XCTAssertNil(store.read(documentPath: path), "launch 1 left the earlier recovery record")
+
+        // An edit in the first window, saved, then more typed and recorded.
+        let edited = Data("# Sample\nedited in window 1\n".utf8)
+        try edited.write(to: url)
+        let editedAt = now.addingTimeInterval(30)
+        try fm.setAttributes([.modificationDate: editedAt], ofItemAtPath: url.path)
+        let unsaved = record(editedAt.addingTimeInterval(30))
+        try store.write(unsaved)
+
+        // Launch 2 (⌥⌘N), same arguments, same process.
+        XCTAssertEqual(launch()?.standardizedFileURL, url.standardizedFileURL)
+        XCTAssertEqual(try Data(contentsOf: url), edited, "a second window put the sample over the edited document")
+        let modified = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
+        XCTAssertEqual(modified.timeIntervalSince1970, editedAt.timeIntervalSince1970, accuracy: 1,
+                       "a second window redated the document")
+        XCTAssertEqual(store.pending(documentPath: path, documentModified: modified), unsaved,
+                       "a second window cleared the first's recovery record")
+        XCTAssertFalse(TestLaunch.claimFreshSample(requested: true), "the claim came back")
     }
 
     /// Astra / Sol (18): ⌘B, ⌘] and ⌘/ claim priority over the system's
@@ -327,6 +417,68 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.askCedric), withSender: nil))
         XCTAssertTrue(field.resignFirstResponder())
         check(true, "after Ask Cedric's field let go")
+        nav.presented = nil
+        field.removeFromSuperview()
+
+        // A text view that isn't the editor's (a sheet's notes, say).
+        window.makeKey()
+        let other = UITextView(frame: CGRect(x: 0, y: 0, width: 100, height: 60))
+        window.addSubview(other)
+        XCTAssertTrue(other.becomeFirstResponder())
+        XCTAssertTrue(editor.otherTextInputHasFocus, "another text view didn't count")
+        check(false, "with another text view focused")
+        XCTAssertTrue(other.resignFirstResponder())
+        check(true, "after the other text view let go")
+        other.removeFromSuperview()
+
+        // Clear Bookmarks: on with a bookmark, off while another field
+        // has the keyboard, back after.
+        let clear = #selector(EditorViewController.clearBookmarksMenu(_:))
+        XCTAssertTrue(editor.textView.becomeFirstResponder())
+        editor.toggleBookmarkMenu(nil)
+        XCTAssertFalse(editor.bookmarks.isEmpty, "the bookmark wasn't added")
+        XCTAssertTrue(editor.canPerformAction(clear, withSender: nil), "Clear Bookmarks off with a bookmark")
+        for input in [UITextField(frame: CGRect(x: 0, y: 0, width: 100, height: 30)),
+                      UITextView(frame: CGRect(x: 0, y: 0, width: 100, height: 60))] as [UIView] {
+            window.addSubview(input)
+            XCTAssertTrue(input.becomeFirstResponder())
+            XCTAssertFalse(editor.canPerformAction(clear, withSender: nil), "Clear Bookmarks on with \(type(of: input)) focused")
+            XCTAssertTrue(input.resignFirstResponder())
+            XCTAssertTrue(editor.canPerformAction(clear, withSender: nil), "Clear Bookmarks off after \(type(of: input)) let go")
+            input.removeFromSuperview()
+        }
+
+        // The preview (a web view) doesn't count: edits, preview, Go to
+        // Line and zoom all stay on with it shown and focused.
+        let preserved = [#selector(EditorViewController.togglePreview), #selector(EditorViewController.toggleFocusPreview),
+                         #selector(EditorViewController.goToLine), #selector(EditorViewController.biggerFont),
+                         #selector(EditorViewController.smallerFont), #selector(EditorViewController.actualSizeFont)]
+        func checkPreserved(_ when: String, file: StaticString = #filePath, line: UInt = #line) {
+            for action in preserved {
+                XCTAssertTrue(editor.canPerformAction(action, withSender: nil), "\(action) \(when)", file: file, line: line)
+            }
+        }
+        checkPreserved("with the text focused")
+        editor.togglePreview()
+        let web = try XCTUnwrap(editor.preview?.web, "the preview has no web view")
+        XCTAssertNotNil(web.window, "the preview's web view isn't in the window")
+        _ = web.becomeFirstResponder()
+        XCTAssertFalse(editor.otherTextInputHasFocus, "the preview counted as another field")
+        check(true, "with the preview shown")
+        checkPreserved("with the preview shown")
+        XCTAssertTrue(editor.canPerformAction(clear, withSender: nil), "Clear Bookmarks off with the preview shown")
+
+        // …and with another field focused while the preview is up, edits
+        // go off but the preview, Go to Line and zoom stay.
+        let findOverPreview = UITextField(frame: CGRect(x: 0, y: 0, width: 100, height: 30))
+        window.addSubview(findOverPreview)
+        XCTAssertTrue(findOverPreview.becomeFirstResponder())
+        check(false, "with the Find field focused over the preview")
+        checkPreserved("with the Find field focused over the preview")
+        XCTAssertTrue(findOverPreview.resignFirstResponder())
+        findOverPreview.removeFromSuperview()
+        check(true, "after the Find field let go over the preview")
+        editor.togglePreview()
     }
 
     /// Records what `MenuBar.apply` does to the system's menus.
