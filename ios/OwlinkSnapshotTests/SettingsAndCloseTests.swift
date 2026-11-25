@@ -55,6 +55,7 @@ final class SettingsAndCloseTests: XCTestCase {
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = nav
         window.makeKeyAndVisible()
+        window.layoutIfNeeded()
         windows.append(window)
         return (nav, editor)
     }
@@ -306,6 +307,39 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertEqual(try fm.contentsOfDirectory(atPath: docs.path), ["README.md"], "a staged copy was left behind")
     }
 
+    /// Sol r3 (18): a failed swap that moved the document aside (named in
+    /// the error's `NSFileOriginalItemLocationKey`) and left nothing at
+    /// its place has it put back; with something already there, nothing
+    /// is moved.
+    func testFreshSampleRestoresARelocatedOriginal() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FreshSampleRelocated-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let url = root.appendingPathComponent("README.md")
+        let aside = root.appendingPathComponent(".aside-README.md")
+        let original = Data("# Original\n".utf8)
+        try original.write(to: aside)
+        let error = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError,
+                            userInfo: [TestLaunch.originalItemLocationKey: aside])
+
+        TestLaunch.restoreOriginalIfRelocated(error: error, to: url)
+        XCTAssertEqual(try Data(contentsOf: url), original, "the relocated original wasn't put back")
+        XCTAssertFalse(fm.fileExists(atPath: aside.path), "the relocated copy was left behind")
+
+        // Something already at `url`: left as it is, the other copy too.
+        try Data("# Other\n".utf8).write(to: aside)
+        TestLaunch.restoreOriginalIfRelocated(error: error, to: url)
+        XCTAssertEqual(try Data(contentsOf: url), original, "the document was overwritten")
+        XCTAssertTrue(fm.fileExists(atPath: aside.path))
+
+        // No location in the error: nothing happens.
+        try fm.removeItem(at: url)
+        TestLaunch.restoreOriginalIfRelocated(error: NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError), to: url)
+        XCTAssertFalse(fm.fileExists(atPath: url.path))
+        XCTAssertTrue(fm.fileExists(atPath: aside.path))
+    }
+
     /// Astra / Sol (18): `-OwlinkFreshSample` is acted on once per process,
     /// so a second window (⌥⌘N) doesn't wipe the document under the first.
     /// The real launch path, twice: the first puts the sample in fresh and
@@ -411,7 +445,9 @@ final class SettingsAndCloseTests: XCTestCase {
         nav.presented = ask
         let field = UITextField(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
         ask.view.addSubview(field)
-        field.window?.makeKey()
+        let askWindow = try XCTUnwrap(ask.view.window, "Ask Cedric's sheet isn't in a window")
+        askWindow.makeKey()
+        askWindow.layoutIfNeeded()
         XCTAssertTrue(field.becomeFirstResponder())
         check(false, "with Ask Cedric's field focused")
         XCTAssertTrue(editor.canPerformAction(#selector(EditorViewController.askCedric), withSender: nil))
@@ -462,7 +498,19 @@ final class SettingsAndCloseTests: XCTestCase {
         editor.togglePreview()
         let web = try XCTUnwrap(editor.preview?.web, "the preview has no web view")
         XCTAssertNotNil(web.window, "the preview's web view isn't in the window")
+        // The web view hands first responder to a subview (its content
+        // view), and may only take it once laid out and given a turn.
+        func hasFirstResponder(in view: UIView) -> Bool {
+            view.isFirstResponder || view.subviews.contains { hasFirstResponder(in: $0) }
+        }
+        window.makeKey()
+        web.layoutIfNeeded()
         _ = web.becomeFirstResponder()
+        if !hasFirstResponder(in: web) {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+            _ = web.becomeFirstResponder()
+        }
+        XCTAssertTrue(hasFirstResponder(in: web), "the preview's web view didn't take first responder")
         XCTAssertFalse(editor.otherTextInputHasFocus, "the preview counted as another field")
         check(true, "with the preview shown")
         checkPreserved("with the preview shown")
