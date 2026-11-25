@@ -1042,6 +1042,23 @@ import Testing
         #expect(last.1.bytes == 2 && last.1.stamp == DiskStamp.of(url), "stamped as the file now")
     }
 
+    /// decodeWhole finds the CR to hold in the bytes (one decode), also
+    /// before a UTF-16 odd byte (maybe the first half of the LF).
+    @Test func decodeWholeHoldsACRFoundInTheBytes() throws {
+        #expect(FileTail.heldCR(Data("ab\r".utf8), .utf8) == 2)
+        #expect(FileTail.heldCR(Data("ab\r\n".utf8), .utf8) == nil)
+        #expect(FileTail.heldCR(Data("\r".utf8), .utf8) == 0)
+        #expect(FileTail.heldCR(Data(), .utf8) == nil)
+        let le = Data([0xFF, 0xFE, 0x61, 0x00, 0x0D, 0x00])
+        #expect(FileTail.heldCR(le, .utf16LE) == 4)
+        #expect(FileTail.heldCR(le + [0x0A], .utf16LE) == 4, "CR, then half an LF")
+        #expect(FileTail.heldCR(Data([0xFE, 0xFF, 0x00, 0x61, 0x00, 0x0D, 0x00]), .utf16BE) == 4)
+        let (d, used) = try #require(FileTail.decodeWhole(le + [0x0A], as: .utf16LE))
+        #expect(d.text == "a" && used == 4)
+        let (u8, n) = try #require(FileTail.decodeWhole(Data("one\ntwo\r".utf8), as: .utf8))
+        #expect(u8.text == "one\ntwo" && n == 7 && u8.lineEnding == .lf)
+    }
+
     /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
     /// (its bytes counted as read), and the next good append stamped the
     /// whole file's size: ⌘S then dropped the skipped bytes with no

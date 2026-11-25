@@ -340,12 +340,26 @@ public final class FileTail: @unchecked Sendable {
     /// finished, and taken as a break of its own it made that CRLF two
     /// breaks once the LF came (0.5.4 before review 3). Nil: the file
     /// isn't text in `encoding`.
+    /// The CR is found in the bytes before decoding, so the text is
+    /// decoded once (a second whole decode, while the first was still
+    /// live, doubled the work and the peak memory of starting Follow).
     public static func decodeWhole(_ data: Data, as encoding: TextEncoding) -> (DecodedText, Int)? {
-        guard let (d, used) = decodePrefix(data, encoding, { TextCodec.decode($0, as: encoding) }) else { return nil }
-        guard let cr = "\r".data(using: encoding.foundation), !cr.isEmpty, used >= cr.count,
-              data.prefix(used).suffix(cr.count).elementsEqual(cr),
-              let held = TextCodec.decode(data.prefix(used - cr.count), as: encoding) else { return (d, used) }
-        return (held, used - cr.count)
+        let decode = { (d: Data) in TextCodec.decode(d, as: encoding) }
+        if let end = heldCR(data, encoding), let (d, used) = decodePrefix(data.prefix(end), encoding, decode), used == end {
+            return (d, used)
+        }
+        return decodePrefix(data, encoding, decode)
+    }
+
+    /// Where a CR that ends `data`'s whole characters starts (UTF-16: the
+    /// CR may come before an odd byte, the first half of an LF). Nil: no
+    /// such CR.
+    static func heldCR(_ data: Data, _ encoding: TextEncoding) -> Int? {
+        guard let cr = "\r".data(using: encoding.foundation), !cr.isEmpty else { return nil }
+        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let end = data.count - (utf16 ? data.count % 2 : 0)
+        guard end >= cr.count, data[data.startIndex + end - cr.count ..< data.startIndex + end].elementsEqual(cr) else { return nil }
+        return end - cr.count
     }
 
     private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp, lineEnding: LineEnding?, breaks: LineBreaks?) {
