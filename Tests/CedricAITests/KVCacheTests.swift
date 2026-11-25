@@ -148,7 +148,13 @@ import Testing
         // Registration closes before `stop` runs: wait for the callback
         // itself, not for `isClosed`, before checking what it did.
         let stopCalled = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        // On a thread of its own, as the atexit hook runs on the exiting
+        // thread. Not DispatchQueue.global(): GCD starts no thread there
+        // while as many as there are cores run CPU work at that QoS, and on
+        // a 3-core runner other tests' work kept exit from starting for
+        // over 5 s (all four jobs of run 45449763393); the load was then
+        // let go first and registered, which looked like exit's fault.
+        Thread.detachNewThread {
             reg.exit(on: q, onQueue: false, timeout: 5, stop: { $0.stopped.mutate { $0 += 1 }; stopCalled.signal() },
                      free: { $0.freed.mutate { $0 += 1 } }, giveUp: { gaveUp.mutate { $0 = true } })
             done.signal()
