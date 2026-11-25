@@ -430,6 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if last { self.quitAfterLastClose() }
         }
         tabs.append(tab)
+        // Checks: every tab as it is registered, before it is shown.
+        if DevEnvironment.checksEnabled { Self.tabMadeForChecks?(tab) }
         guard let window = tab.window else { return tab }
         let host = newWindow ? nil : group ?? Self.documentKeyWindow ?? tabs.dropLast().last?.window
         if let tabIndex, let host = group, host !== window, let tg = host.tabGroup {
@@ -644,6 +646,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The line index the last background open made (check builds only:
     /// BigOpenCheck sees the tab use it rather than scan the text again).
     var lastBackgroundIndexForChecks: LineIndex?
+    /// Checks only (DevEnvironment.checksEnabled): the next background
+    /// read waits for this before it reads (BigOpenCheck holds it there to
+    /// look at the app while the file can't be whole), and every tab made
+    /// is passed to `tabMadeForChecks` as it is registered.
+    static var backgroundReadGateForChecks: DispatchSemaphore?
+    static var tabMadeForChecks: ((EditorWindowController) -> Void)?
     /// Run (once) when the last background open has finished (launch metrics).
     var whenBackgroundOpensDone: [() -> Void] = []
 
@@ -673,7 +681,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Counted as the reads are: under way, or done and not yet shown.
         backgroundReadsInFlight += 1
         mostBackgroundReadsForChecks = max(mostBackgroundReadsForChecks, backgroundReadsInFlight)
+        let gate = DevEnvironment.checksEnabled ? Self.backgroundReadGateForChecks : nil
+        Self.backgroundReadGateForChecks = nil
         DispatchQueue.global(qos: .userInitiated).async {
+            gate?.wait()
             let result = Result { try Self.readInBackground(std) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self.finishBackgroundOpen(std, job, result) }

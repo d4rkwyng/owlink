@@ -38,6 +38,18 @@ extension DevChecks {
         expect(size >= AppDelegate.backgroundOpenBytes, "the log is big enough to open in the background", "\(size) bytes")
         let other = app.open(write("other.txt", "another tab\n"))
         var arrived: [EditorWindowController] = []
+        // The read is held at a gate until the steps below have looked at
+        // the app over several turns of the main loop (no tab for the file
+        // can exist while its text can't be whole); and the tab, when it
+        // is registered (before it is shown), must already hold all of it.
+        let gate = DispatchSemaphore(value: 0)
+        AppDelegate.backgroundReadGateForChecks = gate
+        let originalBytes = (try? Data(contentsOf: url)) ?? Data()
+        var registered: [(tab: EditorWindowController, length: Int, whole: Bool)] = []
+        AppDelegate.tabMadeForChecks = { t in
+            guard t.doc.fileURL?.standardizedFileURL == std else { return }
+            registered.append((t, (t.text as NSString).length, t.text.utf8.count == originalBytes.count))
+        }
         let t0 = DevHooks.now()
         let first = app.open(url, background: true) { arrived.append($0) }
         expect(first == nil, "a big file returns no tab at once")
@@ -85,8 +97,42 @@ extension DevChecks {
             poll()
         }
 
+        func heldTurn(_ n: Int) -> (@escaping () -> Void) -> Void {
+            { next in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    expect(app.backgroundOpens[std] != nil && registered.isEmpty
+                           && !app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == std },
+                           "held read, turn \(n): no tab for the file, nothing registered")
+                    next()
+                }
+            }
+        }
         run([
+            heldTurn(1),
+            sync {
+                // Typing and ⌘S while it is held: no tab takes them, the
+                // file isn't written, no tool has a document.
+                type("typed while reading")
+                key("s", [.command])
+                expect(!app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == std } && registered.isEmpty,
+                       "held read: typing and ⌘S reach no tab for the file")
+                expect(app.currentTab == nil || app.currentTab?.doc.fileURL?.standardizedFileURL != std,
+                       "held read: no current tab for tools to act on")
+            },
+            heldTurn(2),
+            sync {
+                expect((try? Data(contentsOf: url)) == originalBytes, "held read: the file on disk is untouched")
+                gate.signal()
+            },
             { next in waitForTab(next) },
+            sync {
+                AppDelegate.tabMadeForChecks = nil
+                expect(registered.count == 1, "the file's tab was registered once", "\(registered.count)")
+                expect(registered.first?.whole == true && registered.first?.length == originalLength,
+                       "…already holding the whole file when registered (before it was shown)",
+                       "\(registered.first?.length ?? -1) of \(originalLength)")
+                expect(registered.first?.tab === arrived.first, "…and it is the tab the opens got")
+            },
             sync {
                 print(String(format: "check: note: background open ready in %.0f ms", (DevHooks.now() - t0) * 1000))
                 expect(arrived.count == 2 && arrived[0] === arrived[1], "both opens get the one tab", "\(arrived.count)")
