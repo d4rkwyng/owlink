@@ -72,19 +72,21 @@ extension DevChecks {
                 let inEdit = owl.caretMovesInEdit, looks = owl.caretLooks
                 let t0 = DevHooks.now()
                 f()
+                // Each look is on a later main-queue turn (GitCheck's wait).
                 @MainActor func settle(_ turns: Int) {
-                    DispatchQueue.main.async {
-                        guard owl.caretLookPending, turns < 50 else {
-                            timings.ms[name] = (DevHooks.now() - t0) * 1000
-                            expect(owl.caretMovesInEdit > inEdit, "\(name): the caret move reached the owl from inside the edit",
-                                   "\(owl.caretMovesInEdit - inEdit) calls in an edit")
-                            expect(!owl.caretLookPending && owl.caretLooks > looks, "\(name): the owl's caret look ran after the edit",
-                                   "pending \(owl.caretLookPending), looks \(owl.caretLooks - looks)")
-                            next()
-                            return
-                        }
-                        settle(turns + 1)
+                    DispatchQueue.main.async { MainActor.assumeIsolated { look(turns) } }
+                }
+                @MainActor func look(_ turns: Int) {
+                    guard owl.caretLookPending, turns < 50 else {
+                        timings.ms[name] = (DevHooks.now() - t0) * 1000
+                        expect(owl.caretMovesInEdit > inEdit, "\(name): the caret move reached the owl from inside the edit",
+                               "\(owl.caretMovesInEdit - inEdit) calls in an edit")
+                        expect(!owl.caretLookPending && owl.caretLooks > looks, "\(name): the owl's caret look ran after the edit",
+                               "pending \(owl.caretLookPending), looks \(owl.caretLooks - looks)")
+                        next()
+                        return
                     }
+                    settle(turns + 1)
                 }
                 settle(0)
             }
