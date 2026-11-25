@@ -385,20 +385,20 @@ public enum DocumentWrite {
     /// limit (RLIMIT_FSIZE) then fails with EFBIG, which a save can
     /// recover from, instead of SIGXFSZ ending the app.
     ///
-    /// Caught by a handler that does nothing (but count), not ignored
-    /// (SIG_IGN): an ignored signal stays ignored across exec, so git and
-    /// every other program Owlink starts ran with SIGXFSZ ignored; a
-    /// caught one goes back to its default action in the new program.
+    /// Caught by a handler that does nothing, not ignored (SIG_IGN): an
+    /// ignored signal stays ignored across exec, so git and every other
+    /// program Owlink starts ran with SIGXFSZ ignored; a caught one goes
+    /// back to its default action in the new program. The handler touches
+    /// no state at all (it may run on any thread, at any point): a count
+    /// it kept was an unsynchronized read-modify-write. Tests that need to
+    /// see the signal arrive install their own, signal-safe, handler.
     public static func catchFileSizeSignal() {
         var action = sigaction()
-        action.__sigaction_u.__sa_handler = { _ in fileSizeSignalsCaught &+= 1 }
+        action.__sigaction_u.__sa_handler = { _ in }
         sigemptyset(&action.sa_mask)
         action.sa_flags = 0
         _ = sigaction(SIGXFSZ, &action, nil)
     }
-
-    /// How many SIGXFSZ the handler has caught (tests).
-    public static var fileSizeSignals: Int32 { fileSizeSignalsCaught }
 
     /// Whether a `count`-byte file is within this process's file-size limit.
     static func withinFileSizeLimit(_ count: Int) -> Bool {
@@ -544,6 +544,3 @@ public enum DocumentWrite {
     }
 }
 
-/// SIGXFSZ caught (DocumentWrite.catchFileSizeSignal): written only by
-/// the signal handler, a plain counter (no locks in a handler).
-nonisolated(unsafe) private var fileSizeSignalsCaught: Int32 = 0

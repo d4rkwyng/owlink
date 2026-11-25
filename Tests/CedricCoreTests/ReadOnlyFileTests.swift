@@ -422,12 +422,26 @@ import Testing
             readDone.signal()
         }.start()
         let inTime = readDone.wait(timeout: .now() + 60) == .success
+        var readFinished = inTime
         if !inTime {
             child.terminate()
-            _ = readDone.wait(timeout: .now() + 10)
+            readFinished = readDone.wait(timeout: .now() + 10) == .success
         }
         #expect(inTime, "the child finished within 60 s")
-        child.waitUntilExit()
+        // Its exit is bounded too: SIGKILL if it outlives its output.
+        func exited(within seconds: Double) -> Bool {
+            let end = Date(timeIntervalSinceNow: seconds)
+            while child.isRunning, Date() < end { usleep(10_000) }
+            return !child.isRunning
+        }
+        var gone = exited(within: 10)
+        if !gone {
+            _ = kill(child.processIdentifier, SIGKILL)
+            gone = exited(within: 10)
+        }
+        // The buffer is the reader's until it signals; never read before.
+        try #require(gone, "the child exited")
+        try #require(readFinished, "the child's output was read to its end")
         let output = String(decoding: collected.data, as: UTF8.self)
         #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
         #expect(child.terminationStatus == 0, "\(output)")
@@ -448,8 +462,37 @@ import Testing
         limit.rlim_max = old.rlim_max
         guard setrlimit(RLIMIT_FSIZE, &limit) == 0 else { print("fsize child: can't lower RLIMIT_FSIZE"); exit(1) }
         let bigger = Data(repeating: UInt8(ascii: "n"), count: 200_000)
-        for skip in [false, true] {
-            let caught = DocumentWrite.fileSizeSignals
+        // The app's handler: neither ignored nor the default (which ends
+        // the process).
+        var current = sigaction()
+        _ = sigaction(SIGXFSZ, nil, &current)
+        let handler = unsafeBitCast(current.__sigaction_u.__sa_handler, to: Int.self)
+        if handler == unsafeBitCast(SIG_IGN, to: Int.self) || handler == unsafeBitCast(SIG_DFL, to: Int.self) {
+            failures.append("catchFileSizeSignal installed no handler")
+        }
+        // Run with the app's handler, then again with one that reports
+        // each signal (signal-safely: one byte down a pipe), to see the
+        // bypass really meets the kernel's limit.
+        var pipeFDs: [Int32] = [-1, -1]
+        guard pipe(&pipeFDs) == 0 else { print("fsize child: no pipe"); exit(1) }
+        for fd in pipeFDs { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
+        fileSizeSignalPipe = pipeFDs[1]
+        func signalsCaught() -> Int {
+            var n = 0, byte: UInt8 = 0
+            while read(pipeFDs[0], &byte, 1) == 1 { n += 1 }
+            return n
+        }
+        for (skip, counting) in [(false, false), (true, false), (true, true)] {
+            if counting {
+                var action = sigaction()
+                action.__sigaction_u.__sa_handler = { _ in
+                    var b: UInt8 = 1
+                    _ = write(fileSizeSignalPipe, &b, 1)
+                }
+                sigemptyset(&action.sa_mask)
+                _ = sigaction(SIGXFSZ, &action, nil)
+                _ = signalsCaught()
+            }
             do {
                 try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
                                         faults: .init(skipSizeLimit: skip))
@@ -462,13 +505,14 @@ import Testing
                 // SIGXFSZ came and was caught (not refused earlier).
                 if skip {
                     if DocumentWrite.fileLeft(by: error) == nil { failures.append("skip=true: refused before writing") }
-                    if DocumentWrite.fileSizeSignals <= caught { failures.append("skip=true: no SIGXFSZ was caught") }
+                    if counting, signalsCaught() == 0 { failures.append("skip=true: no SIGXFSZ was caught") }
                 } else if DocumentWrite.fileLeft(by: error) != nil {
                     failures.append("skip=false: wrote before refusing")
                 }
             }
             if (try? Data(contentsOf: url)) != original { failures.append("skip=\(skip): the file changed") }
         }
+        DocumentWrite.catchFileSizeSignal()
         // A program started from here (git, as Git.run starts it) gets
         // SIGXFSZ's default action back: an ignored SIGXFSZ was inherited.
         let script = url.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("xfsz-\(getpid()).sh")
@@ -677,3 +721,8 @@ import Testing
                 == "a.md — Read-Only •", "the unsaved mark stays last")
     }
 }
+
+/// The fsize child's write end for its counting SIGXFSZ handler: set once
+/// before that handler is installed, then only read (by it), in a child
+/// process of its own.
+nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
