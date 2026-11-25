@@ -221,8 +221,7 @@ final class EditorDocument {
     /// ending, or each line's own when they are mixed (`lineBreaks`).
     /// Nil if a character can't be represented in the encoding.
     func encoded(_ text: String) -> Data? {
-        if let lineBreaks { return TextCodec.encode(lineBreaks.output(text), encoding: encoding, lineEnding: .lf) }
-        return TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding)
+        TextCodec.encodeDocument(text, encoding: encoding, lineEnding: lineEnding, lineBreaks: lineBreaks)
     }
 
     /// Checks only (DevEnvironment.checksEnabled): a fault for the next

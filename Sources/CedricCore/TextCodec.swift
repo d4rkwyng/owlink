@@ -650,6 +650,16 @@ public enum TextCodec {
         return encoding.bom.isEmpty ? body : Data(encoding.bom) + body
     }
 
+    /// `text` as a document saves it (Mac tabs, EditorDocument.encoded):
+    /// its encoding, and its line ending, or each line's own when they are
+    /// mixed (`lineBreaks`, DecodedText.lineBreaks of a mixed file). Nil if
+    /// a character can't be represented in the encoding.
+    public static func encodeDocument(_ text: String, encoding: TextEncoding, lineEnding: LineEnding,
+                                      lineBreaks: LineBreaks?) -> Data? {
+        if let lineBreaks { return encode(lineBreaks.output(text), encoding: encoding, lineEnding: .lf) }
+        return encode(text, encoding: encoding, lineEnding: lineEnding)
+    }
+
     /// Whether `text` can be saved in `encoding` without loss.
     public static func canEncode(_ text: String, as encoding: TextEncoding) -> Bool {
         switch encoding {
