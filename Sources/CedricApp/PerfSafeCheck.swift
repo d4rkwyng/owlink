@@ -10,10 +10,12 @@ import CedricCore
 /// - `baseAttributes()` is cached by font, tab width and text colour, and
 ///   equals a fresh measure after zoom, a tab width change and a theme
 ///   change.
-/// - `SyntaxColorizer.recolorAll()` skips its whole-text pass only when
-///   the text is all in the text colour: on open it skips; switching to
-///   Plain Text after colouring lines far down, and a theme change, still
-///   leave no stale colour anywhere.
+/// - `SyntaxColorizer.recolorAll()` makes its whole-text pass on every
+///   theme and language change (it is not skipped): switching to Plain
+///   Text after colouring lines far down, back to Swift, a theme change
+///   and the prose font's appearance pass leave no stale colour anywhere.
+///   The prose font is off for the run (then on for one step), through a
+///   run-local override: the saved switch is neither read nor written.
 @MainActor
 extension DevChecks {
     static func perfSafeCheck(_ app: AppDelegate) {
@@ -83,16 +85,26 @@ extension DevChecks {
 
         var builds = 0
         var savedFontSize: Any?
+        let savedProseSwitch = UserDefaults.standard.object(forKey: "useProseFont") as? NSObject
+        var themePasses = 0
         run([
             sync {
                 focus(tab)
+                // A prose font in the user's settings must not change what
+                // a language switch does here: off for this run, not saved.
+                Settings.shared.useProseFontOverride = false
+                // Counted before the theme is applied: its pass, not one
+                // from opening, is what the next step sees.
+                themePasses = tab.colorizer.fullPasses
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "light", theme: .light, system: nil))
             },
             sync {
-                // Opening: the text was set in the text colour, so the
-                // colouriser's whole-text pass had nothing to do.
-                expect(tab.colorizer.fullPassesSkipped >= 1, "open: the whole-text recolour is skipped on text set in the text colour",
-                       "skipped \(tab.colorizer.fullPassesSkipped), made \(tab.colorizer.fullPasses)")
+                // The theme: the whole-text pass runs (text set in the text
+                // colour is not a reason to skip it).
+                expect(tab.colorizer.fullPasses > themePasses, "the light theme: the whole-text recolour runs",
+                       "made \(tab.colorizer.fullPasses - themePasses)")
+                expect(!Settings.shared.useProseFont && tab.editorFont == Settings.shared.font,
+                       "the prose font is off for the run: the code font", "\(tab.editorFont)")
                 expect(tab.colorizer.isColored(0), "…and the viewport is coloured")
                 let keyword = tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
                 expect(keyword == NSColor(hex: tab.palette.color(for: .keyword)), "\"let\" in the keyword colour", "\(String(describing: keyword))")
@@ -188,19 +200,52 @@ extension DevChecks {
                        "the last line's \"let\" is in the keyword colour", "\(lastLine.prefix(14)) \(String(describing: distant))")
                 tab.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
             },
-            waitFor("back at the top, coloured, in time") { tab.colorizer.isColored(0) },
+            // Line 1 stayed coloured from before: wait for the viewport
+            // itself to be back at the top too.
+            waitFor("back at the top, coloured, in time") { tab.textView.visibleRect.minY < 1 && tab.colorizer.isColored(0) },
             sync {
-                let made = tab.colorizer.fullPasses
+                expect(tab.textView.visibleRect.minY < 1, "back at the top", "\(tab.textView.visibleRect)")
+                var made = tab.colorizer.fullPasses
                 tab.setLanguage(.plain)
                 expect(tab.colorizer.fullPasses == made + 1, "Plain Text after colouring: the whole-text pass runs",
                        "\(tab.colorizer.fullPasses - made)")
                 colorsAreCurrent("Plain Text: every character in the text colour, the end too", tokensAllowed: false)
-                let skipped = tab.colorizer.fullPassesSkipped
+                made = tab.colorizer.fullPasses
                 tab.setLanguage(.swift)
-                expect(tab.colorizer.fullPassesSkipped == skipped + 1, "Swift again over plain text: nothing to undo, skipped")
+                expect(tab.colorizer.fullPasses == made + 1, "Swift again over plain text: the whole-text pass runs, once",
+                       "\(tab.colorizer.fullPasses - made)")
                 let keyword = tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
                 expect(keyword == NSColor(hex: tab.palette.color(for: .keyword)), "Swift again: \"let\" coloured")
                 colorsAreCurrent("Swift again: no stale colour")
+
+                // The prose font on (for this step only): Plain Text takes
+                // it, its appearance pass recolours as well as the language
+                // change, and neither leaves a stale colour; Swift again
+                // takes the code font back.
+                Settings.shared.useProseFontOverride = true
+                made = tab.colorizer.fullPasses
+                tab.setLanguage(.plain)
+                let prose = Settings.shared.font(for: .plain)
+                expect(prose == Settings.shared.proseFont && tab.editorFont == prose && tab.textView.font == prose
+                       && (tab.textView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont) == prose,
+                       "the prose font on: Plain Text in it", "\(String(describing: tab.textView.font)) vs \(prose)")
+                expect(tab.colorizer.fullPasses >= made + 1, "the prose font's Plain Text: the whole-text pass runs",
+                       "\(tab.colorizer.fullPasses - made)")
+                colorsAreCurrent("the prose font's Plain Text: every character in the text colour", tokensAllowed: false)
+                attributesMatchAFreshMeasure("the prose font")
+                made = tab.colorizer.fullPasses
+                tab.setLanguage(.swift)
+                expect(tab.editorFont == Settings.shared.font && tab.textView.font == Settings.shared.font,
+                       "the prose font on: Swift in the code font", "\(String(describing: tab.textView.font))")
+                expect(tab.colorizer.fullPasses >= made + 1, "the prose font's Swift: the whole-text pass runs",
+                       "\(tab.colorizer.fullPasses - made)")
+                let proseKeyword = tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+                expect(proseKeyword == NSColor(hex: tab.palette.color(for: .keyword)), "the prose font's Swift: \"let\" coloured")
+                colorsAreCurrent("the prose font's Swift: no stale colour")
+                Settings.shared.useProseFontOverride = false
+                expect(UserDefaults.standard.object(forKey: "useProseFont") as? NSObject == savedProseSwitch,
+                       "the saved prose font switch is left as it was",
+                       "\(String(describing: UserDefaults.standard.object(forKey: "useProseFont")))")
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "dracula", theme: .dracula, system: nil))
             },
             waitFor("the theme change reaches the tab, in time") {
@@ -216,11 +261,11 @@ extension DevChecks {
                 expect(keyword == NSColor(hex: p.color(for: .keyword)), "\"let\" in the new keyword colour")
                 attributesMatchAFreshMeasure("a theme change")
                 // Marked text: no pass at all (as before), then one.
-                let made = tab.colorizer.fullPasses, skipped = tab.colorizer.fullPassesSkipped
+                let made = tab.colorizer.fullPasses
                 tab.textView.setSelectedRange(NSRange(location: 0, length: 0))
                 tab.textView.setMarkedText("ka", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
                 tab.colorizer.recolorAll()
-                expect(tab.colorizer.fullPasses == made && tab.colorizer.fullPassesSkipped == skipped, "under marked text: no whole-text pass")
+                expect(tab.colorizer.fullPasses == made, "under marked text: no whole-text pass")
                 tab.textView.unmarkText()
                 tab.undoManager?.undo()
             },
@@ -231,9 +276,14 @@ extension DevChecks {
                     && tab.colorizer.isColored(0)
             },
             sync {
+                let made = tab.colorizer.fullPasses
                 tab.colorizer.recolorAll()
+                expect(tab.colorizer.fullPasses == made + 1, "after marked text: the whole-text pass runs again")
                 colorsAreCurrent("after marked text: no stale colour")
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "light", theme: .light, system: nil))
+                Settings.shared.useProseFontOverride = nil
+                expect(UserDefaults.standard.object(forKey: "useProseFont") as? NSObject == savedProseSwitch,
+                       "the end: the saved prose font switch is left as it was")
                 tab.doc.markSaved()
             },
         ])
