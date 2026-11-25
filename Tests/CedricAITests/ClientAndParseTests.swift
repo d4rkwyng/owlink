@@ -358,6 +358,7 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 2.0
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
         client.requestTimeout = .infinity
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
@@ -383,6 +384,7 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 2.0
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
         client.requestTimeout = .infinity
         let start = clock.now
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
@@ -417,6 +419,7 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 0.3
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
         client.requestTimeout = .infinity
         let seen = Locked("")
         let start = clock.now
@@ -450,6 +453,7 @@ import CedricCore
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 10, session: server.session)
         client.streamIdleLimit = 0.2
         client.streamClock = clock.read
+        client.streamTouched = clock.touched
         client.requestTimeout = .infinity
         let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 8) { _ in }
         #expect(acc.content == "w0 ")

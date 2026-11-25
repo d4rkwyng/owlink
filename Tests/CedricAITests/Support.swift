@@ -122,9 +122,13 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
     /// `response` on virtual time, in step with the client:
     /// - the headers wait until the client's deadline loop has read the
     ///   clock (it is running);
-    /// - each chunk but the last waits until the client has read it (the
-    ///   watch was touched at the chunk's virtual time), so the stub never
-    ///   runs ahead of a stalled reader and makes a gap the client never saw;
+    /// - each chunk but the last waits until the client has read a byte of
+    ///   it and stored the touch (`streamTouched`: after `last` is set, with
+    ///   the bytes read so far and the time stored), at the chunk's virtual
+    ///   time. A touch the reader has read the clock for but not stored, or
+    ///   a late one for an earlier chunk (too few bytes), doesn't count. So
+    ///   the stub never runs ahead of a stalled reader and makes a gap the
+    ///   client never saw;
     /// - a chunk with a `heard` entry waits, before the clock moves to it,
     ///   until `onText` has delivered that text;
     /// - the last chunk waits until the deadline loop has read the clock
@@ -152,6 +156,7 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
                                    httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"])!
         proto.client?.urlProtocol(proto, didReceive: http, cacheStoragePolicy: .notAllowed)
         if !response.body.isEmpty { proto.client?.urlProtocol(proto, didLoad: response.body) }
+        var sent = response.body.count
         for (i, chunk) in response.chunks.enumerated() {
             // Real time only to keep chunks apart: 20 ms > the 10 ms in
             // which `StreamWatch` takes bytes as one chunk.
@@ -176,14 +181,19 @@ final class StubProtocol: URLProtocol, @unchecked Sendable {
                 // check having run.
                 guard decided else { return fail(proto, "the deadline loop didn't find time left before the last chunk") }
             }
-            let touched = clock.touchReads
+            let before = sent, at = clock.now
             proto.client?.urlProtocol(proto, didLoad: chunk)
+            sent += chunk.count
             if !last {
                 // Not touched: fail here rather than advance the clock past
-                // a gap the reader never saw.
-                let read = await clock.wait(atMost: 10) { $0.touchReads > touched }
+                // a gap the reader never saw. Only a stored touch on a byte
+                // of this chunk, at its time, counts.
+                let read = await clock.wait(atMost: 10) {
+                    guard let c = $0.lastTouch else { return false }
+                    return c.bytesRead > before && c.at >= at
+                }
                 if Task.isCancelled { return }
-                guard read else { return fail(proto, "chunk \(i) was never read (no touch)") }
+                guard read else { return fail(proto, "chunk \(i) was never read (no stored touch)") }
             }
         }
         proto.client?.urlProtocolDidFinishLoading(proto)
@@ -290,6 +300,14 @@ final class StreamClock: @unchecked Sendable {
 
     func advance(_ dt: TimeInterval) { lock.withLock { t += dt } }
 
+    private var _lastTouch: (at: TimeInterval, bytesRead: Int)?
+    /// The client's latest stored touch of its watch (`touched`).
+    var lastTouch: (at: TimeInterval, bytesRead: Int)? { lock.withLock { _lastTouch } }
+    /// For `streamTouched`: called after the watch has stored the touch.
+    var touched: @Sendable (TimeInterval, Int) -> Void {
+        { [self] at, n in self.lock.withLock { self._lastTouch = (at, n) } }
+    }
+
     private var _heard = ""
     /// All the text `onText` has delivered (`hear`).
     var heard: String { lock.withLock { _heard } }
@@ -297,12 +315,12 @@ final class StreamClock: @unchecked Sendable {
     /// is in (`StubServer.Response.heard`).
     func hear(_ text: String) { lock.withLock { _heard += text } }
 
-    /// Polls (real time) until `cond` holds, the task is cancelled, or
-    /// `atMost` seconds pass; whether `cond` held.
+    /// Polls (real, monotonic time) until `cond` holds, the task is
+    /// cancelled, or `atMost` seconds pass; whether `cond` held.
     func wait(atMost: TimeInterval, _ cond: (StreamClock) -> Bool) async -> Bool {
-        let end = Date().addingTimeInterval(atMost)
+        let end = ContinuousClock.now.advanced(by: .milliseconds(Int64(atMost * 1000)))
         while !cond(self) {
-            if Task.isCancelled || Date() > end { return false }
+            if Task.isCancelled || ContinuousClock.now > end { return false }
             try? await Task.sleep(nanoseconds: 2_000_000)
         }
         return true
