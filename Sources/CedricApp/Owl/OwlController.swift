@@ -748,9 +748,14 @@ final class OwlController: NSObject, NSPopoverDelegate {
         // on the text now, off the main thread (formatting up to 64 KB, or
         // the long one-line file's shape check over the whole file, can
         // take a while; Sol round 3: that scan ran in the click), and
-        // shown only if the tab still holds that text.
+        // shown only if the tab still holds that text: its text revision
+        // unchanged (EditorDocument.textRevision), not the whole text
+        // compared again on the main thread when the check comes back.
         guard replay.hint.id == RulesHintProvider.jsonID else { showReplay(replay, own: own); return }
-        guard let document else { showReplay(RulesHintProvider.pastJSON(closed: true, source: replay.hint.source), own: own); return }
+        guard let document, let doc = tab?.doc else {
+            showReplay(RulesHintProvider.pastJSON(closed: true, source: replay.hint.source), own: own); return
+        }
+        let revision = doc.textRevision
         let text = document.copy() as! String
         let source = replay.hint.source
         replayToken &+= 1
@@ -762,8 +767,8 @@ final class OwlController: NSObject, NSPopoverDelegate {
             self.pendingRechecks -= 1
             // Another bubble came (or went) meanwhile: that one stays.
             guard self.replayToken == token, let tab = self.tab else { return }
-            // The same UTF-16 units, not just an equivalent spelling.
-            let current = (tab.textView.string as NSString).isEqual(to: text)
+            // Nothing has touched the text since it was copied.
+            let current = tab.doc === doc && doc.textRevision == revision
             self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
         }
     }

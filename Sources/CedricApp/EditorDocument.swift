@@ -56,6 +56,13 @@ final class EditorDocument {
     /// The tab's text (its storage, not a copy), set by its window
     /// controller: what a save, open or clean reload remembers.
     var currentText: (() -> NSString?)?
+    /// Every change to the tab's text, edits or not: typing, undo, tools,
+    /// Follow File's appends (which `changeCount` doesn't count: they
+    /// aren't edits and mustn't make a session buffer write) and whole
+    /// buffer replacements (`setText`). Work done off the main thread on
+    /// a copy of the text checks it is still current by this number, not
+    /// by comparing the whole text again on the main thread.
+    private(set) var textRevision = 0
     /// The change count the session store last saved a buffer for: set
     /// only once that write has succeeded (hot close trusts it to skip
     /// its own write).
@@ -123,6 +130,7 @@ final class EditorDocument {
     /// document stays clean: this is not a user edit.
     func noteBufferReplacement() {
         changeCount = OwlBufferReplacement.generation(after: changeCount)
+        textRevision &+= 1
         rebaseIfClean()
     }
 
@@ -143,7 +151,10 @@ final class EditorDocument {
     /// The tab's text storage changed (every change, edits and not):
     /// where the text can now differ from the saved text (EditedState
     /// keeps a long saved text as chunk hashes, not a copy).
-    func noteStorageEdit(_ range: NSRange, delta: Int) { edited.noteEdit(range, delta: delta) }
+    func noteStorageEdit(_ range: NSRange, delta: Int) {
+        textRevision &+= 1
+        edited.noteEdit(range, delta: delta)
+    }
 
     /// The saved text is kept as chunk hashes, not a copy (checks).
     var keepsSavedFingerprint: Bool { edited.keepsFingerprint }

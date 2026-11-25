@@ -714,8 +714,59 @@ extension DevChecks {
             },
             waitFor("stale JSON: the long file's check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
             sync {
-                guard let tab, let owl = tab.owl else { return }
+                guard let tab, let owl = tab.owl, let shown else { return }
                 expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: the long file still JSON-shaped, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // 0.5.4 QA review 3: the check coming back compared the
+                // whole text with its copy on the main thread. Now the
+                // tab's text revision: any change while it is checked,
+                // even one that ends at the same text, makes it a past hint.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+                replace(second)
+                expect(tab.text == second, "stale JSON: edited and back to the same text")
+            },
+            waitFor("stale JSON: the check comes back (edited and back)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle,
+                       "stale JSON: edited while checked, even back to the same text, a past hint", owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Text added the way Follow File adds it (the storage, no
+                // user edit, the tab stays clean) while it is checked.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                let storage = tab.textView.textStorage!
+                storage.beginEditing()
+                storage.append(NSAttributedString(string: "\n", attributes: tab.baseAttributes()))
+                storage.endEditing()
+            },
+            waitFor("stale JSON: the check comes back (appended)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: appended to while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // The whole buffer replaced (a reload, a Follow reset) by the same text.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                tab.setText(second)
+                expect(tab.text == second, "stale JSON: the buffer replaced by the same text")
+            },
+            waitFor("stale JSON: the check comes back (replaced)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: buffer replaced while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Untouched while checked: still asks.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (untouched)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: untouched while checked, it asks",
                        owl.presentedHint?.hint.title ?? "-")
                 owl.hideBubble()
                 tab.setOwlVisible(false)
