@@ -1047,6 +1047,39 @@ extension DevChecks {
                 big.textView.setSelectedRange(NSRange(location: 0, length: 20 * 18))
                 let l3 = big.statusBar.counts.stringValue
                 expect(l3 == "Selected: 60 words · 20 lines · 360 characters", "a small selection in a big document is counted", l3)
+                // 0.5.4: lines-only and cached counts never read the text.
+                // Past the cap, the document's lines-only state is cached.
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                big.updateCounts()
+                var cachedLinesOnly = false
+                if case .some(.none) = big.editing.documentCounts { cachedLinesOnly = true }
+                expect(cachedLinesOnly && big.statusBar.counts.stringValue == "70,000 lines", "over the cap: lines only, cached as such",
+                       big.statusBar.counts.stringValue)
+                // A selection over the cap: the lines it touches, from the index
+                // ("x" was typed at the start: line 1 is 19 units long).
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "a selection over the cap: its lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18 - 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "…ending before a newline: the same lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 1, length: 19 + 59_999 * 18 + 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,001 lines", "…one unit into the next line: one more",
+                       big.statusBar.counts.stringValue)
+                // Exactly the cap: counted (after a pause, off the main thread).
+                big.textView.setSelectedRange(NSRange(location: 1, length: TextStats.maxCounted))
+                // The cached document counts come back at once with no selection.
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 27))
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                expect(mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters", "cached counts, at once",
+                       mid.statusBar.counts.stringValue)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { next() } },
+            sync {
+                // 1,000,000 units of "lorem ipsum dolor\n" (18 each): 55,555
+                // lines and "lorem ipsu", 166,667 words over 55,556 lines.
+                let l4 = big.statusBar.counts.stringValue
+                expect(l4 == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters", "a selection of exactly the cap is counted", l4)
                 for t in [tab, mid, big] { t.doc.markSaved() }
             },
         ])

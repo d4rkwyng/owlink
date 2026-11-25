@@ -242,24 +242,33 @@ extension EditorWindowController {
     func updateCounts() {
         editing.countsTimer = nil
         let sel = textView.selectedRange()
-        let ns = textView.string as NSString
+        // Lines only (past the cap) and cached counts come from the line
+        // index and the cache: the text itself (a bridge of the whole
+        // string) only for a count that reads it.
         if sel.length > 0 {
-            if sel.length > Self.immediateCountLimit, sel.length <= TextStats.maxCounted {
+            if sel.length > TextStats.maxCounted {
+                showSelectedLines(sel)
+                return
+            }
+            let ns = textView.string as NSString
+            if sel.length > Self.immediateCountLimit {
                 countInBackground(ns, range: sel, selection: true)
                 return
             }
-            if let c = TextStats.count(ns, range: sel) {
-                showCounts(c, selection: true)
-            } else {
-                let a = lineIndex.line(containing: sel.location), b = lineIndex.line(containing: max(sel.location, NSMaxRange(sel) - 1))
-                showLinesOnly(b - a + 1, selection: true)
-            }
+            if let c = TextStats.count(ns, range: sel) { showCounts(c, selection: true) } else { showSelectedLines(sel) }
             return
         }
         if let cached = editing.documentCounts {
             if let c = cached { showCounts(c, selection: false) } else { showDocumentLines() }
             return
         }
+        // The storage's length is the text's, without the text.
+        if (textView.textStorage?.length ?? lineIndex.length) > TextStats.maxCounted {
+            editing.documentCounts = .some(nil)
+            showDocumentLines()
+            return
+        }
+        let ns = textView.string as NSString
         if ns.length > Self.immediateCountLimit, ns.length <= TextStats.maxCounted {
             countInBackground(ns, range: NSRange(location: 0, length: ns.length), selection: false)
             return
@@ -305,6 +314,13 @@ extension EditorWindowController {
     private func showLinesOnly(_ n: Int, selection: Bool) {
         let s = plural(n, String(localized: "line"), String(localized: "lines"))
         statusBar.counts.stringValue = selection ? String(localized: "Selected: \(s)") : s
+    }
+
+    /// The lines a selection touches, from the line index: one ending
+    /// just after a newline doesn't touch the next line.
+    private func showSelectedLines(_ sel: NSRange) {
+        let a = lineIndex.line(containing: sel.location), b = lineIndex.line(containing: max(sel.location, NSMaxRange(sel) - 1))
+        showLinesOnly(b - a + 1, selection: true)
     }
 
     private func showDocumentLines() {
