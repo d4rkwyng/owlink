@@ -16,12 +16,14 @@ import UniformTypeIdentifiers
         #expect(Set(claims).count == claims.count, "no content type is in two labelled rows")
     }
 
-    /// Same defaults after the update: every content type is claimed by the
-    /// same kind of row at the same rank as in 0.5.3, except that MD, JSON
-    /// and YAML now hold their Alternate claim themselves (so Finder draws
-    /// their icon), instead of the catch-all. TXT, XML, HTML and CSS stay
-    /// None with their claim in the catch-all: as Alternate rows of their
-    /// own, xml and css went from Safari to Owlink on a clean macOS 26 VM.
+    /// Claim parity with 0.5.3 (what this test can check; which app macOS
+    /// then picks is Launch Services' call): every content type is claimed
+    /// by the same kind of row at the same rank as in 0.5.3, except that
+    /// MD, JSON and YAML now hold their Alternate claim themselves (so
+    /// Finder draws their icon), instead of the catch-all. TXT, XML, HTML
+    /// and CSS stay None with their claim in the catch-all: as Alternate
+    /// rows of their own (1653a51), xml and css went from Safari to Owlink
+    /// on a clean macOS 26 VM.
     @Test func ranksKeep0_5_3ButMdJsonYaml() {
         // 0.2.x's one Text entry, which 0.5.3 kept as the catch-all.
         let v02 = ["public.text", "public.plain-text", "public.source-code", "public.script", "public.json", "public.yaml",

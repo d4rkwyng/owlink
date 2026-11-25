@@ -781,9 +781,12 @@ predates 0.3.0 and is unchanged: on a Mac where nothing but TextEdit
 opens text, Markdown, JSON and YAML files open in Owlink once it's
 installed, because Owlink names those types and TextEdit only claims
 "text". (On macOS 15, where .md files opened in nothing before, they now
-open in Owlink for the same reason.) The other types in the list keep the
-app macOS gives them (TextEdit, Safari, Console, …) until you choose
-Owlink.
+open in Owlink for the same reason.) For the other types in the list
+Owlink makes the same claims as 0.5.3, so macOS picks their app as it
+did with 0.5.3: on a clean macOS 26 Mac that is TextEdit, Safari,
+Console and so on until you choose Owlink. Owlink also claims plain
+text and source code in general at a low rank, so on a Mac with no
+other app for some type, macOS may pick Owlink for it.
 Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
