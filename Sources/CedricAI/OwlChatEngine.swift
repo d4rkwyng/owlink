@@ -107,6 +107,11 @@ public final class OwlToolbox: @unchecked Sendable {
     /// says he has seen (`OwlChatRequest.coverageNote`).
     public var linesRead: IndexSet { lock.withLock { _linesRead } }
     public var wholeDocumentLooks: Set<OwlToolName> { lock.withLock { _looks } }
+    /// Lines whose number and text a tool result showed ("12| text" from a
+    /// search or the outline): an answer may cite them. A search that
+    /// found nothing shows none.
+    public var linesShown: IndexSet { lock.withLock { _linesShown } }
+    private var _linesShown = IndexSet()
     private var _linesRead = IndexSet()
     private var _looks = Set<OwlToolName>()
 
@@ -150,6 +155,8 @@ public final class OwlToolbox: @unchecked Sendable {
         if r.ok {
             lock.withLock {
                 if let l = r.lines { _linesRead.insert(integersIn: l) }
+                // Only rows the tool emitted (and that survived its cap).
+                _linesShown.formUnion(OwlCitations.quotedLines(in: r.text).intersection(r.rows))
                 if let name, name == .searchDocument || name == .getOutline { _looks.insert(name) }
             }
         }
@@ -417,6 +424,30 @@ public struct OwlChatRequest: Sendable {
         return note + "."
     }
 
+    /// The lines an answer to this request may cite: those it was sent,
+    /// those a tool read or showed (`linesShown`: the "12|" lines a search
+    /// or the outline returned, never the whole document because one ran),
+    /// the digest showed or the offline checks and scan name, and any the
+    /// question or the conversation sent with it names (a follow-up about
+    /// "line 210" from an earlier answer). nil (no filter) for an edit
+    /// (its proposal is checked on its own).
+    public func citableLines(linesRead: IndexSet = IndexSet(), linesShown: IndexSet = IndexSet(), digest: Digest? = nil,
+                             checks: String? = nil) -> IndexSet? {
+        guard action?.proposesEdit != true, snapshot.countedLines > 0 else { return nil }
+        var s = IndexSet(integersIn: context.firstLine...max(context.firstLine, context.lastLine))
+        s.formUnion(linesRead)
+        s.formUnion(linesShown)
+        if let digest {
+            s.formUnion(digest.lines)
+            s.formUnion(OwlCitations.lines(in: digest.text))
+        }
+        for text in [checks, scan, question] { if let text { s.formUnion(OwlCitations.lines(in: text)) } }
+        // An earlier answer's citation flagged as unread stays unverified.
+        s.formUnion(OwlPrompts.historyCitations(history))
+        if let scanFindings { for f in scanFindings { s.insert(f.line) } }
+        return s
+    }
+
     /// How the answer's "safe" claims are rewritten (`ScriptVerdict.clamp`,
     /// and `ScriptVerdictStream` while it streams), or nil for none.
     /// `.verdict` (every claim, the whole line) for the script check and
@@ -472,6 +503,9 @@ public struct OwlChatOutcome: Sendable, Equatable {
     public var rounds: Int
     /// The coverage note `answer` starts with (`OwlChatRequest.coverageNote`), if any.
     public var coverageNote: String? = nil
+    /// A whole-document answer's per-part notes (`OwlChunkedReviewRunner`),
+    /// shown collapsed below `answer`.
+    public var sections: [OwlChatSection] = []
 
     /// The model's own words: `answer` without the coverage note.
     public var modelAnswer: String {
@@ -513,6 +547,11 @@ public enum OwlChatRunner {
         // Said before the answer, from what the model has seen by its
         // first word (the tools run before it writes).
         let note = TextBuffer()
+        // Lines that cite a line are shown once checked (`OwlCitations.Stream`).
+        let gate = CitationGate()
+        let citable: @Sendable () -> IndexSet? = {
+            req.citableLines(linesRead: toolbox.linesRead, linesShown: toolbox.linesShown, digest: digest, checks: checks)
+        }
         let onText: @Sendable (String) -> Void = { t in
             if !wrote.value {
                 wrote.value = true
@@ -523,7 +562,8 @@ public enum OwlChatRunner {
                 }
             }
             streamed.append(t)
-            onEvent(.text(t))
+            let shown = gate.feed(t, allowed: citable())
+            if !shown.isEmpty { onEvent(.text(shown)) }
         }
         var rounds = 0
         var answer = ""
@@ -563,6 +603,8 @@ public enum OwlChatRunner {
             }
             break
         }
+        let rest = gate.finish(allowed: citable())
+        if !rest.isEmpty { onEvent(.text(rest)) }
         var proposals = toolbox.proposals
         if proposals.isEmpty, req.inlineSelection == nil, req.action?.proposesEdit == true, let block = fencedBlock(answer),
            var p = OwlEditProposal.lines(req.context.firstLine, req.context.lastLine, with: stripLineNumbers(block),
@@ -582,6 +624,12 @@ public enum OwlChatRunner {
         // Nothing is applied until the user presses Apply: "Fixed …" and
         // "I changed …" are reworded as proposals (`OwlProposalWording`).
         shown = OwlProposalWording.guardClaims(shown, proposals: proposals.count)
+        // Only lines it was given may be cited: "lines 19–20" from a model
+        // shown 1–18 is dropped or marked (`OwlCitations`).
+        if let allowed = req.citableLines(linesRead: toolbox.linesRead, linesShown: toolbox.linesShown, digest: digest,
+                                          checks: checks) {
+            shown = OwlCitations.filter(shown, allowed: allowed).text
+        }
         // The coverage note shown while it streamed stays with the answer;
         // an engine that wrote nothing through onText still gets it.
         var said: String?
@@ -632,6 +680,13 @@ final class TextBuffer: @unchecked Sendable {
     private var s = ""
     func append(_ t: String) { lock.withLock { s += t } }
     var value: String { lock.withLock { s } }
+}
+
+final class CitationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stream = OwlCitations.Stream()
+    func feed(_ t: String, allowed: IndexSet?) -> String { lock.withLock { stream.feed(t, allowed: allowed) } }
+    func finish(allowed: IndexSet?) -> String { lock.withLock { stream.finish(allowed: allowed) } }
 }
 
 final class Flag: @unchecked Sendable {

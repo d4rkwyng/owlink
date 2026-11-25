@@ -24,7 +24,10 @@ import CedricCore
 
     static func request(_ question: String, language: String = "python", action: OwlQuickAction? = nil,
                         scanHasHigh: Bool = false) -> OwlChatRequest {
-        let snap = OwlDocumentSnapshot(text: "import queue\nq = queue.Queue()\n", generation: 1, fileName: "worker.py", language: language)
+        // 15 lines, so the answers' "line 12" and "Line 4" are lines the
+        // model was shown (citations of unsent lines are filtered, 0.5.3).
+        let text = "import queue\nq = queue.Queue()\n" + String(repeating: "# filler\n", count: 13)
+        let snap = OwlDocumentSnapshot(text: text, generation: 1, fileName: "worker.py", language: language)
         let ctx = OwlChatContext.build(snap, scope: .wholeDocument, budget: 6000)!
         return OwlChatRequest(question: question, action: action, context: ctx, snapshot: snap, useTools: false, prose: false,
                               scanHasHigh: scanHasHigh)
