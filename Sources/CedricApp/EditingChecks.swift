@@ -1016,7 +1016,9 @@ extension DevChecks {
                 mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
                 type("x")
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("a 72 K document is counted after a pause, in time", 5) {
+                mid.statusBar.counts.stringValue == "12,000 words · 6,000 lines · 72,001 characters"
+            },
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "12,000 words · 6,000 lines · 72,001 characters", "a 72 K document is counted after a pause", l)
@@ -1032,7 +1034,9 @@ extension DevChecks {
                 let ms = Date().timeIntervalSince(t0) * 1000
                 expect(ms < 15, "counting ~1 M characters doesn't hold up the main thread", String(format: "%.1f ms", ms))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
+            waitFor("~1 M characters counted, in time", 10) {
+                mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters"
+            },
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "180,000 words · 36,000 lines · 972,000 characters", "and the counts arrive", l)
@@ -1050,11 +1054,27 @@ extension DevChecks {
                 // 0.5.4: lines-only and cached counts never read the text.
                 // Past the cap, the document's lines-only state is cached.
                 big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                // (Review: the text read itself is counted, so the old eager
+                // bridge would fail these.) A small selection reads it: the
+                // counter is live.
+                var reads = big.editing.countsTextReads
+                big.textView.setSelectedRange(NSRange(location: 0, length: 18))
+                expect(big.editing.countsTextReads == reads + 1, "a small selection's count reads the text",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                big.editing.documentCounts = nil
+                reads = big.editing.countsTextReads
                 big.updateCounts()
                 var cachedLinesOnly = false
                 if case .some(.none) = big.editing.documentCounts { cachedLinesOnly = true }
                 expect(cachedLinesOnly && big.statusBar.counts.stringValue == "70,000 lines", "over the cap: lines only, cached as such",
                        big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "over the cap, not cached: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.updateCounts()
+                big.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                expect(big.editing.countsTextReads == reads && big.statusBar.counts.stringValue == "70,000 lines",
+                       "over the cap, cached: the text isn't read", "\(big.editing.countsTextReads - reads) reads")
                 // A selection over the cap: the lines it touches, from the index
                 // ("x" was typed at the start: line 1 is 19 units long).
                 big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18))
@@ -1066,15 +1086,24 @@ extension DevChecks {
                 big.textView.setSelectedRange(NSRange(location: 1, length: 19 + 59_999 * 18 + 1))
                 expect(big.statusBar.counts.stringValue == "Selected: 60,001 lines", "…one unit into the next line: one more",
                        big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "selections over the cap: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
                 // Exactly the cap: counted (after a pause, off the main thread).
                 big.textView.setSelectedRange(NSRange(location: 1, length: TextStats.maxCounted))
                 // The cached document counts come back at once with no selection.
                 mid.textView.setSelectedRange(NSRange(location: 0, length: 27))
+                let midReads = mid.editing.countsTextReads
                 mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                mid.updateCounts()
                 expect(mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters", "cached counts, at once",
                        mid.statusBar.counts.stringValue)
+                expect(mid.editing.countsTextReads == midReads, "cached counts: the text isn't read",
+                       "\(mid.editing.countsTextReads - midReads) reads")
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { next() } },
+            // The cap-sized count runs off the main thread: wait for it (bounded).
+            waitFor("a selection of exactly the cap is counted, in time", 10) {
+                big.statusBar.counts.stringValue == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters"
+            },
             sync {
                 // 1,000,000 units of "lorem ipsum dolor\n" (18 each): 55,555
                 // lines and "lorem ipsu", 166,667 words over 55,556 lines.

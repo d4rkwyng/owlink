@@ -26,6 +26,9 @@ final class EditingState {
     var countsGeneration = 0
     /// The newest background count asked for; older ones are dropped.
     var countsRequest = 0
+    /// How many times updateCounts read the whole text (the checks show
+    /// cached and lines-only counts never do).
+    var countsTextReads = 0
 
     /// View › Writing Mode for this tab (WritingMode.swift): off by default.
     var writing = WritingModeState()
@@ -250,7 +253,7 @@ extension EditorWindowController {
                 showSelectedLines(sel)
                 return
             }
-            let ns = textView.string as NSString
+            let ns = countsText()
             if sel.length > Self.immediateCountLimit {
                 countInBackground(ns, range: sel, selection: true)
                 return
@@ -268,7 +271,7 @@ extension EditorWindowController {
             showDocumentLines()
             return
         }
-        let ns = textView.string as NSString
+        let ns = countsText()
         if ns.length > Self.immediateCountLimit, ns.length <= TextStats.maxCounted {
             countInBackground(ns, range: NSRange(location: 0, length: ns.length), selection: false)
             return
@@ -276,6 +279,12 @@ extension EditorWindowController {
         let counts = TextStats.count(ns, range: NSRange(location: 0, length: ns.length))
         editing.documentCounts = .some(counts)
         if let c = counts { showCounts(c, selection: false) } else { showDocumentLines() }
+    }
+
+    /// The whole text, for a count that reads it (counted for the checks).
+    private func countsText() -> NSString {
+        editing.countsTextReads &+= 1
+        return textView.string as NSString
     }
 
     /// Big ranges (50 K to 1 M units) are counted off the main thread, on
