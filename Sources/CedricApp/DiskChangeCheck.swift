@@ -33,7 +33,9 @@ extension DevChecks {
         sized(tab)
         func disk() -> String { (try? String(contentsOf: url, encoding: .utf8)) ?? "-" }
         let compares = app.compareWindows.count
-        run([
+        // Built in parts, not one `[...] + f() + g() + ...` expression:
+        // Swift 6.1's type checker (CI, macOS 15) times out on those.
+        var steps: [(@escaping () -> Void) -> Void] = [
             sync {
                 expect(tab.owl == nil, "the owl is off")
                 focus(tab)
@@ -125,7 +127,12 @@ extension DevChecks {
                 expect(disk() == "clean reload\n" && !tab.doc.isDirty && !tab.doc.missingOnDisk && tab.diskBar?.isHidden == true,
                        "Save writes it back where it was", disk())
             },
-        ] + conflictWordingSteps(app) + ownFailedSaveSteps(app) + reloadEndingSteps(app) + linkSteps(app))
+        ]
+        steps += conflictWordingSteps(app)
+        steps += ownFailedSaveSteps(app)
+        steps += reloadEndingSteps(app)
+        steps += linkSteps(app)
+        run(steps)
     }
 
     /// 0.5.4 QA (should round 2): the failed-save-to-conflict path through

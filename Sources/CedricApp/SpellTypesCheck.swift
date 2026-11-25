@@ -148,7 +148,9 @@ extension DevChecks {
         }
 
         var big: EditorWindowController?
-        let steps: [(@escaping () -> Void) -> Void] = [
+        // Built in parts: one `[...] + f() + [...] + ...` expression
+        // timed out in Swift 6.1's type checker (CI, macOS 15).
+        var steps: [(@escaping () -> Void) -> Void] = [
             sync { focus(tab) },
             wait("the first spelling marks") { marked == ["sentense", "tpyo"] },
             sync {
@@ -167,7 +169,9 @@ extension DevChecks {
                 expect(onTraits == freshTraits, "spelling on: the other switches are a new view's", "\(onTraits) vs \(freshTraits)")
                 expect(fresh.isAutomaticTextCompletionEnabled && tv.isAutomaticTextCompletionEnabled, "spelling on: text completion on, as a new view's")
             },
-        ] + checked("spelling on", tv) + [
+        ]
+        steps += checked("spelling on", tv)
+        steps += [
             sync { Settings.shared.checkSpellingWhileTyping = false },
             sync {
                 expectOff("the setting off")
@@ -175,7 +179,9 @@ extension DevChecks {
                 expect(UserDefaults.standard.object(forKey: "checkSpellingWhileTyping") as? Bool == savedDefault,
                        "the saved setting is left as it was")
             },
-        ] + quiet("the setting off", tv) + [
+        ]
+        steps += quiet("the setting off", tv)
+        steps += [
             sync {
                 // A split while spelling is off: the second pane's own types go too.
                 tab.splitPanes(focusSecond: false)
@@ -193,7 +199,9 @@ extension DevChecks {
                        second.map { writingTools($0) } ?? "-")
                 expectOff("split, spelling off")
             },
-        ] + quiet("split, spelling off: the second pane", tab.splitEditor?.second.textView) + [
+        ]
+        steps += quiet("split, spelling off: the second pane", tab.splitEditor?.second.textView)
+        steps += [
             sync {
                 expectOff("split, after the second pane's edit")
                 Settings.shared.checkSpellingWhileTyping = true
@@ -237,7 +245,9 @@ extension DevChecks {
                 expectOn("split, spelling on")
                 tab.unsplit()
             },
-        ] + checked("the setting on again", tv) + [
+        ]
+        steps += checked("the setting on again", tv)
+        steps += [
             sync {
                 expect(tab.splitEditor == nil, "unsplit")
                 expectOn("unsplit")
@@ -247,10 +257,14 @@ extension DevChecks {
                 expectOff("Plain Text → JSON")
                 expect(tv.markedMisspellings.isEmpty, "JSON: no marks")
             },
-        ] + quiet("JSON", tv) + [
+        ]
+        steps += quiet("JSON", tv)
+        steps += [
             sync { tab.setLanguage(.plain) },
             sync { expectOn("JSON → Plain Text") },
-        ] + checked("JSON → Plain Text", tv) + [
+        ]
+        steps += checked("JSON → Plain Text", tv)
+        steps += [
             sync {
                 // Large mode: off at open, back with Turn On Anyway.
                 var rng = SystemRandomNumberGenerator()
@@ -269,7 +283,9 @@ extension DevChecks {
                 expect(traits(btv) == onTraits, "large mode: the other switches don't move", "\(traits(btv)) vs \(onTraits)")
                 expect(!btv.isAutomaticTextCompletionEnabled, "large mode: text completion goes with the types")
             },
-        ] + quiet("large mode", big?.primaryTextView) + [
+        ]
+        steps += quiet("large mode", big?.primaryTextView)
+        steps += [
             sync {
                 guard let b = big else { return }
                 click(b.largeBar.button, at: NSPoint(x: b.largeBar.button.bounds.midX, y: b.largeBar.button.bounds.midY))
@@ -285,7 +301,9 @@ extension DevChecks {
                 expect(traits(btv) == onTraits, "Turn On Anyway: the other switches don't move")
                 expect(btv.isAutomaticTextCompletionEnabled, "Turn On Anyway: text completion is back")
             },
-        ] + checked("Turn On Anyway", big?.primaryTextView) + [
+        ]
+        steps += checked("Turn On Anyway", big?.primaryTextView)
+        steps += [
             sync {
                 big?.doc.markSaved()
                 big?.window?.close()

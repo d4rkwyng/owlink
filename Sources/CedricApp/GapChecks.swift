@@ -497,7 +497,13 @@ extension DevChecks {
     static func encodings(_ app: AppDelegate) {
         let url = dir.appendingPathComponent("mac.txt")
         // "café, don’t" in Mac Roman.
-        try? (Data("caf".utf8) + Data([0x8E]) + Data(", don".utf8) + Data([0xD5]) + Data("t\n".utf8)).write(to: url)
+        // Appended in parts: as one `Data + Data + ...` it took 150-170 ms to type-check.
+        var macRoman = Data("caf".utf8)
+        macRoman.append(0x8E)
+        macRoman.append(contentsOf: Data(", don".utf8))
+        macRoman.append(0xD5)
+        macRoman.append(contentsOf: Data("t\n".utf8))
+        try? macRoman.write(to: url)
         let tab = app.open(url)!
         sized(tab)
         run([
