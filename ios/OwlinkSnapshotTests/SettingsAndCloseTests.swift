@@ -158,6 +158,89 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertEqual(without.first?.1, .after(.view))
     }
 
+    /// 0.5.2 (18) gate: ⇧⌘P didn't reach the editor on the iPads. The
+    /// shortcuts the system, UIKit, `UITextView` or `WKWebView` can take
+    /// ahead of Owlink's (Close Window, zoom, bold / italic, history, …)
+    /// claim priority over the system's behavior, with or without the app
+    /// menu's Settings…; no advertised shortcut changed (⇧⌘K is still
+    /// Delete Line and Ask Cedric…).
+    func testContestableShortcutsAreClaimed() {
+        let contestable: [(String, UIKeyModifierFlags, String)] = [
+            ("w", .command, "⌘W"), ("p", [.command, .shift], "⇧⌘P"), ("p", [.command, .alternate], "⌥⌘P"),
+            ("+", .command, "⌘+"), ("=", .command, "⌘="), ("-", .command, "⌘-"), ("0", .command, "⌘0"),
+            ("b", .command, "⌘B"), ("i", .command, "⌘I"), ("]", .command, "⌘]"), ("[", .command, "⌘["),
+            ("s", .command, "⌘S"), ("l", .command, "⌘L"), ("k", .command, "⌘K"), ("n", [.command, .alternate], "⌥⌘N"),
+            ("/", .command, "⌘/"), (",", .command, "⌘,"),
+        ]
+        for hasAppSettings in [true, false] {
+            let all = MenuBar.insertions(hasFind: true, hasSpelling: true, hasAppSettings: hasAppSettings)
+                .flatMap { Self.commands($0.menu) }
+            for (input, modifiers, name) in contestable {
+                let keys = all.filter { $0.input == input && $0.modifierFlags == modifiers }
+                XCTAssertFalse(keys.isEmpty, "\(name) isn't in the menu bar (hasAppSettings: \(hasAppSettings))")
+                for k in keys {
+                    XCTAssertTrue(k.wantsPriorityOverSystemBehavior,
+                                  "\(name) (\(k.title)) doesn't claim priority over the system (hasAppSettings: \(hasAppSettings))")
+                }
+            }
+            let shiftK = all.filter { $0.input == "k" && $0.modifierFlags == [.command, .shift] }.compactMap(\.action)
+            XCTAssertEqual(Set(shiftK), [#selector(EditorViewController.deleteLine(_:)), #selector(EditorViewController.askCedric)])
+        }
+    }
+
+    /// 0.5.2 (18) gate: `-OwlinkFreshSample` left an earlier test's
+    /// recovery record for the sample (and `copyItem` kept the bundle's
+    /// older date, which the record beat), so "Owlink closed with unsaved
+    /// changes in README.md. Restore?" covered the next test and held
+    /// ⇧⌘P. The fresh sample now clears that document's record (by its
+    /// path and its resolved path) and is dated now; other documents'
+    /// records stay.
+    func testFreshSampleClearsItsRecoveryRecordOnly() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("FreshSample-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: root) }
+        let bundle = root.appendingPathComponent("Samples", isDirectory: true)
+        let docs = root.appendingPathComponent("Documents", isDirectory: true)
+        let link = root.appendingPathComponent("Linked", isDirectory: true)
+        try fm.createDirectory(at: bundle, withIntermediateDirectories: true)
+        try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: link, withDestinationURL: docs)
+        let old = Date(timeIntervalSince1970: 1_600_000_000)
+        let sample = bundle.appendingPathComponent("README.md")
+        try Data("# Sample\n".utf8).write(to: sample)
+        try fm.setAttributes([.modificationDate: old], ofItemAtPath: sample.path)
+        // The document as an earlier test left it, reached through the link.
+        let url = link.appendingPathComponent("README.md")
+        try Data("# Sample\nhoot roundtrip\n".utf8).write(to: docs.appendingPathComponent("README.md"))
+        let other = docs.appendingPathComponent("Other.md")
+        try Data("other\n".utf8).write(to: other)
+
+        let store = RecoveryStore(directory: root.appendingPathComponent("Recovery", isDirectory: true))
+        func record(_ path: String) -> RecoveryRecord {
+            RecoveryRecord(documentPath: path, displayName: (path as NSString).lastPathComponent, bookmark: nil,
+                           savedAt: old.addingTimeInterval(60), text: "unsaved", encoding: .utf8, lineEnding: .lf)
+        }
+        let path = url.standardizedFileURL.path
+        let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+        XCTAssertNotEqual(path, resolved, "the test's link didn't give the document two paths")
+        let otherPath = other.standardizedFileURL.path
+        for p in [path, resolved, otherPath] { try store.write(record(p)) }
+        XCTAssertNotNil(store.pending(documentPath: path, documentModified: old))
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        TestLaunch.prepareFreshSample(sample, at: url, recovery: store, now: now)
+
+        XCTAssertEqual(try Data(contentsOf: url), Data("# Sample\n".utf8), "the sample wasn't copied fresh")
+        let modified = try XCTUnwrap(fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
+        XCTAssertEqual(modified.timeIntervalSince1970, now.timeIntervalSince1970, accuracy: 1,
+                       "the fresh copy kept the bundle sample's date")
+        XCTAssertNil(store.read(documentPath: path), "the fresh sample's recovery record is still there")
+        XCTAssertNil(store.read(documentPath: resolved), "the fresh sample's recovery record (resolved path) is still there")
+        XCTAssertNil(store.pending(documentPath: path, documentModified: modified))
+        XCTAssertEqual(store.read(documentPath: otherPath), record(otherPath), "another document's recovery record was cleared")
+        XCTAssertEqual(store.all().map(\.documentPath), [otherPath])
+    }
+
     /// Records what `MenuBar.apply` does to the system's menus.
     @MainActor final class RecordingBuilder: MenuBar.Editing {
         var present: Set<UIMenu.Identifier>
@@ -288,15 +371,24 @@ final class SettingsAndCloseTests: XCTestCase {
         XCTAssertTrue(third.settingsInserted.isEmpty, "Settings… is in the menu bar twice")
         XCTAssertTrue(MenuBar.appSettingsReplaced)
         XCTAssertEqual(rebuilds, 2, "a rebuild was asked for after Settings… was replaced")
-        // Replaced: later builds and a scene becoming active ask for none
-        // (no second retry next to the one still pending).
-        applyMenuBar(RecordingBuilder(present: [.find, .spelling]), rebuilds: &rebuilds)
+        // The retry `second` scheduled is still pending; it fires after
+        // the replacement, does nothing, and is gone.
+        XCTAssertTrue(MenuBar.retryPendingForTesting)
+        XCTAssertFalse(fireRetry(), "the stale retry asked for a rebuild after Settings… was replaced")
+        XCTAssertFalse(MenuBar.retryPendingForTesting)
+        // Replaced: later builds (with `.preferences` present) and a scene
+        // becoming active ask for none.
+        let fourth = RecordingBuilder(present: [.preferences, .find, .spelling])
+        applyMenuBar(fourth, rebuilds: &rebuilds)
+        XCTAssertEqual(fourth.replaced.filter { $0.0 == .preferences }.count, 1)
+        XCTAssertTrue(MenuBar.appSettingsReplaced)
         var activations = 0
         let saved = MenuBar.requestRebuild
         MenuBar.requestRebuild = { _ in activations += 1 }
         MenuBar.sceneDidActivate()
         MenuBar.requestRebuild = saved
         XCTAssertEqual(rebuilds, 2)
+        XCTAssertFalse(MenuBar.retryPendingForTesting)
         XCTAssertEqual(activations, 0)
     }
 

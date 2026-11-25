@@ -846,6 +846,11 @@ final class OwlinkUITests: XCTestCase {
         let app = launch("README.md", fresh: true)
         _ = editor(app)
         sleep(2) // the simulator hands synthesized keys to the app once it has settled
+        // 0.5.2 (18) gate: a recovery offer left by an earlier test
+        // ("Owlink closed with unsaved changes in README.md. Restore?")
+        // covered the editor and held ⇧⌘P. A fresh sample has none.
+        XCTAssertFalse(app.alerts.firstMatch.exists,
+                       "an alert is over the editor: \(app.alerts.firstMatch.exists ? app.alerts.firstMatch.label : "")")
         app.typeKey("p", modifierFlags: [.command, .shift])
         XCTAssertTrue(app.webViews["editor.previewWeb"].waitForExistence(timeout: 5), "⇧⌘P didn't reach the editor")
         app.typeKey(",", modifierFlags: .command)
@@ -853,6 +858,9 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(settingsShown(app), "⌘, didn't open Owlink's Settings")
         shoot("settings-from-command-comma")
         closeSettings(app)
+        // ⇧⌘P again: the preview goes (it toggles both ways).
+        app.typeKey("p", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.webViews["editor.previewWeb"].waitForNonExistence(timeout: 5), "⇧⌘P didn't hide the preview again")
     }
 
     /// Settings over Ask Cedric, which stays open: Ask Cedric's own button
@@ -1305,9 +1313,12 @@ final class OwlinkUITests: XCTestCase {
             XCTAssertNotEqual(systemSettings.state, .runningForeground,
                               "launch \(launchNumber): ⌘, over Ask Cedric's sheet opened the system Settings app")
             // A system Settings app that comes up late is caught too.
-            for _ in 0..<12 {
+            for sample in 1...12 {
                 usleep(250_000)
-                if systemSettings.state == .runningForeground { break }
+                let state = systemSettings.state
+                XCTAssertNotEqual(state, .runningForeground,
+                                  "launch \(launchNumber): ⌘, \(how) opened the system Settings app (sample \(sample), \(sample * 250) ms)")
+                if state == .runningForeground { break }
             }
             XCTAssertNotEqual(systemSettings.state, .runningForeground,
                               "launch \(launchNumber): ⌘, \(how) opened the system Settings app (within 3 s)")
