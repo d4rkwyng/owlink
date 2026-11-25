@@ -588,7 +588,61 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ] + followHeldBytes(app))
+        ] + followHeldBytes(app) + followLineBreaks(app))
+    }
+
+    /// 0.5.4 QA (should round 2): Follow's appended text came with every
+    /// break as LF, and a rotation kept the previous file's odd breaks, so
+    /// an edit and ⌘S after Follow stopped rewrote the file's endings.
+    /// Each append and reset now brings its own breaks.
+    static func followLineBreaks(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let grows = write("follow-crlf-append.log", "one\n")
+        let rotates = write("follow-rotate.log", "p\nq\r\nr\n")
+        var tabs: [String: EditorWindowController] = [:]
+        func bytes(_ u: URL) -> String { String(decoding: (try? Data(contentsOf: u)) ?? Data(), as: UTF8.self) }
+        /// Stops Follow, types `s` at the end, saves: the file's bytes.
+        func stopTypeSave(_ name: String, _ url: URL, _ want: String) {
+            guard let tab = tabs[name] else { expect(false, "\(name): has its tab"); return }
+            tab.toggleFollow()
+            focus(tab)
+            tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+            type("!")
+            let saved = tab.save()
+            expect(saved && bytes(url) == want, "\(name): saved after Follow, each break as the file has it",
+                   "saved \(saved): \(bytes(url).debugDescription)")
+        }
+        return [
+            sync {
+                guard let tab = app.open(grows) else { expect(false, "follow-crlf-append.log opens"); return }
+                tabs["append"] = tab
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                let fh = try! FileHandle(forWritingTo: grows)
+                fh.seekToEndOfFile()
+                fh.write(Data("two\r\nthree\n".utf8))
+                fh.closeFile()
+                tab.tail?.poll()
+            },
+            waitFor("append: the CRLF line shows") { tabs["append"]?.text == "one\ntwo\nthree\n" },
+            sync { stopTypeSave("append", grows, "one\ntwo\r\nthree\n!") },
+            sync {
+                guard let tab = app.open(rotates) else { expect(false, "follow-rotate.log opens"); return }
+                tabs["rotate"] = tab
+                expect(tab.doc.mixedLineEndings, "rotate: the first file is mixed")
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                // Rotated to a plain LF file (another inode).
+                let next = dir.appendingPathComponent("follow-rotate.next")
+                try? Data("x\ny\nz\n".utf8).write(to: next)
+                _ = rename(next.path, rotates.path)
+                tab.tail?.poll()
+            },
+            waitFor("rotate: the new file shows") { tabs["rotate"]?.text == "x\ny\nz\n" },
+            sync {
+                expect(tabs["rotate"]?.doc.mixedLineEndings == false, "rotate: the new file's breaks, not the old file's")
+                stopTypeSave("rotate", rotates, "x\ny\nz\n!")
+            },
+        ]
     }
 
     /// Waits (polling every 50 ms, at most `seconds`) for `cond`; a

@@ -685,8 +685,12 @@ import Testing
         tail.start()
         defer { tail.stop() }
         settle(tail, callbacks)
-        // The viewer is busy: the event waits.
+        // The viewer is busy: the event waits. Resumed on every way out:
+        // a suspended queue released crashes, and a throw before `resume`
+        // left it suspended.
         callbacks.suspend()
+        var suspended = true
+        defer { if suspended { callbacks.resume() } }
         try appendBytes(url, Array("two\n".utf8))
         tail.poll()
         _ = tail.isWatching   // read, and queued for the viewer
@@ -698,6 +702,7 @@ import Testing
         let replaced = try #require(DiskStamp.of(url))
         #expect(replaced.size == read.size && replaced.identity != read.identity)
         callbacks.resume()
+        suspended = false
         settle(tail, callbacks)
         let first = try #require(got.all.first)
         #expect(first.0 == .appended("two\n"))
@@ -722,6 +727,8 @@ import Testing
         defer { tail.stop() }
         settle(tail, callbacks)
         callbacks.suspend()
+        var suspended = true
+        defer { if suspended { callbacks.resume() } }
         let b = dir.appendingPathComponent("b.log"), c = dir.appendingPathComponent("c.log")
         try Data("bb\n".utf8).write(to: b)
         #expect(rename(b.path, url.path) == 0)
@@ -731,6 +738,7 @@ import Testing
         try Data("cc\n".utf8).write(to: c)
         #expect(rename(c.path, url.path) == 0)
         callbacks.resume()
+        suspended = false
         settle(tail, callbacks)
         let first = try #require(got.all.first)
         #expect(first.0 == .reset("bb\n"))
@@ -754,5 +762,151 @@ import Testing
         #expect(mkfifo(fifo.path, 0o600) == 0)
         #expect(throws: (any Error).self) { try FileTail.readStamped(fifo) }
         #expect(throws: (any Error).self) { try FileTail.readStamped(dir.appendingPathComponent("gone")) }
+    }
+
+    /// 0.5.4 QA (follow round 2): a file put in place of the followed one
+    /// after Follow's first read but before the tail watched was taken as
+    /// the file followed; a larger one then had its tail appended to the
+    /// old text, stamped as the new file whole, and ⌘S after stopping
+    /// wrote that mix over it. The tail starts from the first read's
+    /// identity: a different file is a reset.
+    @Test func aRotationBeforeTheTailStartsIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        // Rotated to a larger file before the tail starts.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("NEW FILE\nmore\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        tail.poll()
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .reset("NEW FILE\nmore\n"), "the new file whole, not its tail after the old text")
+        #expect(first.1.bytes == 14)
+        #expect(first.1.stamp == DiskStamp.of(url))
+    }
+
+    /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
+    /// (its bytes counted as read), and the next good append stamped the
+    /// whole file's size: ⌘S then dropped the skipped bytes with no
+    /// question. After a skip no event shows a size, until a reset.
+    @Test func aSkippedAppendLeavesTheTextLossy() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // Not UTF-8 however it's cut: skipped.
+        try appendBytes(url, [0xFF, 0xFE, 0xFF, 0xFE, 0xFF])
+        tail.poll()
+        settle(tail, callbacks)
+        try appendBytes(url, Array("two\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        let appended = got.all.filter { $0.0 == .appended("two\n") }
+        try #require(appended.count == 1)
+        #expect(appended[0].1.bytes == nil, "no size: the skipped bytes aren't in the text")
+        #expect(DiskStamp.changed(known: appended[0].1.stamp, current: DiskStamp.of(url)), "so ⌘S asks")
+        // A faithful reset makes it whole again.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("fresh\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .reset("fresh\n"))
+        #expect(got.all.last?.1.bytes == 6)
+    }
+
+    /// 0.5.4 QA (follow round 2): truncated or rotated to an empty file,
+    /// the reset never came (readToEnd says nil at the end), so the old
+    /// text and offset stayed; a file growing back past that offset was
+    /// then followed as an append to the old text.
+    @Test func anEmptyRotationIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\ntwo\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 8, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data().write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.map(\.0) == [.reset("")])
+        #expect(got.all.first?.1.bytes == 0)
+        // Grows back past the old offset: followed from the new start.
+        try appendBytes(url, Array("ABCDEFGHIJ\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(Self.shown(got.all.map(\.0)) == "ABCDEFGHIJ\n")
+    }
+
+    /// 0.5.4 QA (should round 2): appended text comes with every break as
+    /// LF, so a CRLF line appended to an LF log, saved after Follow
+    /// stopped, became LF; and a rotation kept the previous file's breaks.
+    /// Each event now carries the breaks of the text it shows.
+    @Test func eventsCarryTheirLineBreaks() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, lineEnding: .lf, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, Array("ab\r\ncd\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        let a = try #require(got.all.first)
+        #expect(a.0 == .appended("ab\ncd\n"))
+        #expect(a.1.lineEnding == nil)
+        #expect(a.1.lineBreaks?.others == [LineBreaks.entry(2, .crlf)], "the CRLF, at its offset in the appended text")
+        // An append of the dominant kind only: none.
+        try appendBytes(url, Array("ef\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.1.lineBreaks == nil)
+
+        // Rotated to a CRLF file with one LF: its own breaks.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("x\r\ny\r\nz\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        let r = try #require(got.all.last)
+        #expect(r.0 == .reset("x\ny\nz\n"))
+        #expect(r.1.lineEnding == .crlf)
+        #expect(r.1.lineBreaks?.others == [LineBreaks.entry(5, .lf)])
+        // Appends now count against CRLF: an LF one is odd, a CRLF isn't.
+        try appendBytes(url, Array("p\nq\r\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .appended("p\nq\n"))
+        #expect(got.all.last?.1.lineBreaks?.others == [LineBreaks.entry(1, .lf)])
     }
 }

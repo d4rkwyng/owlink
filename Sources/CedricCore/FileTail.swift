@@ -20,7 +20,13 @@ public final class FileTail: @unchecked Sendable {
     private var source: DispatchSourceFileSystemObject?
     private var retry: DispatchSourceTimer?
     private var offset: UInt64
-    private var inode: UInt64 = 0
+    /// The file being followed (device and inode): the start's, from the
+    /// read Follow began with, then each reset's. Another file there is a
+    /// rotation, even one that came before the watcher started.
+    private var identity: DiskStamp.FileID?
+    /// The most common line ending of the text shown (the start's, then
+    /// each reset's): appended breaks of another kind are noted against it.
+    private var dominant: LineEnding
     private var pending = Data()
     private var stopped = false
     /// The last reset showed lossy text: appends after it aren't the
@@ -43,6 +49,15 @@ public final class FileTail: @unchecked Sendable {
         /// (same size, an atomic replace) has another identity and date,
         /// and stamping with those would let ⌘S write the old text over it.
         public let stamp: DiskStamp
+        /// A reset's line ending (its most common kind); nil for an append.
+        public var lineEnding: LineEnding? = nil
+        /// The breaks that aren't the shown text's most common kind
+        /// (LineBreaks): a reset's whole text's (nil: one kind only); an
+        /// append's, by offsets in the appended text (nil: none). Appended
+        /// text comes with every break as LF, so without this a followed
+        /// file's CRLF appended to an LF log, or a rotated file's own
+        /// breaks, were saved as the wrong kind after Follow stopped.
+        public var lineBreaks: LineBreaks? = nil
     }
 
     /// `offset`: how many bytes of the file the caller already shows.
@@ -59,11 +74,18 @@ public final class FileTail: @unchecked Sendable {
 
     /// `stamped` gets each event with what the text shown after it stands
     /// for: how many of the file's bytes, and the stamp they were read at.
+    /// `startedFrom`: the stamp of the read the caller shows (its first
+    /// `offset` bytes): a file put in its place before the tail starts
+    /// watching is a reset, not an append to it. `lineEnding`: that text's
+    /// most common line ending.
     public init(url: URL, encoding: TextEncoding = .utf8, offset: UInt64, callbackQueue: DispatchQueue = .main,
+                startedFrom: DiskStamp? = nil, lineEnding: LineEnding = .lf,
                 stamped: @escaping @Sendable (Event, Shown) -> Void) {
         self.url = url
         self.encoding = encoding
         self.offset = offset
+        self.identity = startedFrom?.identity
+        self.dominant = lineEnding
         self.callbackQueue = callbackQueue
         self.handler = stamped
     }
@@ -98,7 +120,11 @@ public final class FileTail: @unchecked Sendable {
 
     public func start() {
         queue.async { [self] in
-            inode = Self.fileInfo(url)?.inode ?? 0
+            // Without the start's own identity, the file there now (as
+            // before: a rotation before this point goes unseen).
+            if identity == nil, let info = Self.fileInfo(url) {
+                identity = DiskStamp.FileID(device: info.device, inode: info.inode)
+            }
             watch()
             check()
         }
@@ -138,10 +164,10 @@ public final class FileTail: @unchecked Sendable {
         return n
     }
 
-    static func fileInfo(_ url: URL) -> (size: UInt64, inode: UInt64)? {
+    static func fileInfo(_ url: URL) -> (size: UInt64, inode: UInt64, device: UInt64)? {
         var st = Darwin.stat()
         guard stat(url.path, &st) == 0 else { return nil }
-        return (UInt64(st.st_size), UInt64(st.st_ino))
+        return (UInt64(st.st_size), UInt64(st.st_ino), DiskStamp(st).identity?.device ?? 0)
     }
 
     /// A file descriptor or timer is live (false after `stop`, once the
@@ -195,23 +221,30 @@ public final class FileTail: @unchecked Sendable {
         guard !stopped, let (fh, st) = try? Self.openRegular(url) else { return }
         defer { try? fh.close() }
         let size = UInt64(st.st_size), stamp = DiskStamp(st)
-        if UInt64(st.st_ino) != inode || size < offset {
+        if stamp.identity != identity || size < offset {
             // Replaced or truncated: start over.
-            let replaced = UInt64(st.st_ino) != inode
-            inode = UInt64(st.st_ino)
+            let replaced = stamp.identity != identity
+            identity = stamp.identity
             if replaced || source == nil { watch() }
-            guard let read = try? fh.readToEnd() else { return }
-            let data = read ?? Data()
+            // Empty now (truncated to nothing, or rotated to a new empty
+            // file) is a reset too: readToEnd says nil at the end, which
+            // left the old text and offset in place.
+            let data: Data
+            do { data = try fh.readToEnd() ?? Data() } catch { return }
             // The same decode Follow starts with: a character cut in half
             // at the end (the writer still busy) waits for the next append.
             if let (d, used) = Self.decodeWhole(data, as: encoding) {
                 offset = UInt64(used)
                 pending = Data()
-                emit(.reset(d.text), shown: offset, stamp)
+                dominant = d.lineEnding
+                emit(.reset(d.text), shown: offset, stamp, lineEnding: d.lineEnding, breaks: d.mixedLineEndings ? d.lineBreaks : nil)
             } else {
                 offset = UInt64(data.count)
                 pending = Data()
-                emit(.reset(String(decoding: data, as: UTF8.self)), shown: nil, stamp)
+                let raw = String(decoding: data, as: UTF8.self)
+                let le = TextCodec.detectLineEnding(raw).0
+                dominant = le
+                emit(.reset(TextCodec.normalizeLineEndings(raw)), shown: nil, stamp, lineEnding: le, breaks: nil)
             }
             return
         }
@@ -227,6 +260,12 @@ public final class FileTail: @unchecked Sendable {
             if let (s, used) = Self.decodePrefix(bytes, encoding, { String(data: $0, encoding: encoding.foundation) }) {
                 text = s
                 pending = bytes.suffix(bytes.count - used)
+            } else {
+                // Bytes that aren't text in this encoding are skipped, so
+                // the text no longer stands for the file's bytes: no size
+                // from here on until a faithful reset (a later append
+                // stamped the whole file and ⌘S dropped them silently).
+                lossy = true
             }
             guard var s = text, !s.isEmpty else { return }
             // A CR at the very end may be the first half of a CRLF.
@@ -235,7 +274,11 @@ public final class FileTail: @unchecked Sendable {
                 pending = cr + pending
             }
             guard !s.isEmpty else { return }
-            emit(.appended(TextCodec.normalizeLineEndings(s)), shown: lossy ? nil : offset - UInt64(pending.count), stamp)
+            var rec: TextCodec.BreakRecorder? = TextCodec.BreakRecorder(dominant: dominant, ascii: false)
+            let appended = TextCodec.normalizeLineEndings(s, recording: &rec)
+            let odd = rec.map { LineBreaks(dominant: dominant, others: $0.others) }
+            emit(.appended(appended), shown: lossy ? nil : offset - UInt64(pending.count), stamp,
+                 lineEnding: nil, breaks: odd?.isMixed == true ? odd : nil)
         } catch {
             return
         }
@@ -262,9 +305,9 @@ public final class FileTail: @unchecked Sendable {
         decodePrefix(data, encoding) { TextCodec.decode($0, as: encoding) }
     }
 
-    private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp) {
+    private func emit(_ e: Event, shown: UInt64?, _ stamp: DiskStamp, lineEnding: LineEnding?, breaks: LineBreaks?) {
         lossy = shown == nil
-        let h = handler, s = Shown(bytes: shown, stamp: stamp.showing(shown))
+        let h = handler, s = Shown(bytes: shown, stamp: stamp.showing(shown), lineEnding: lineEnding, lineBreaks: breaks)
         callbackQueue.async { h(e, s) }
     }
 }

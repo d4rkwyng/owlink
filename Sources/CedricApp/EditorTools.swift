@@ -328,8 +328,11 @@ extension EditorWindowController {
         window?.subtitle = String(localized: "Following")
         scrollToBottom()
         let me = WeakRef(self)
-        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used)) { (e: FileTail.Event, shown: FileTail.Shown) in
-            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown.stamp) }
+        // From the read shown: a file put in its place before the tail
+        // watches is a reset, not an append to this text.
+        let t = FileTail(url: url, encoding: doc.encoding, offset: UInt64(used), startedFrom: stamp,
+                         lineEnding: d.lineEnding) { (e: FileTail.Event, shown: FileTail.Shown) in
+            MainActor.assumeIsolated { me.value?.tailEvent(e, shown: shown) }
         }
         tail = t
         t.start()
@@ -342,22 +345,33 @@ extension EditorWindowController {
         return clip.bounds.maxY >= textView.frame.maxY - lineHeight
     }
 
-    /// `shown`: the stamp of the bytes the text now stands for, as the
-    /// tail read them (FileTail.Shown.stamp): not the path's stamp now,
-    /// which may be a file put there after the read.
-    func tailEvent(_ e: FileTail.Event, shown: DiskStamp) {
+    /// `shown`: what the text now stands for, as the tail read it: the
+    /// stamp of those bytes (FileTail.Shown.stamp; not the path's stamp
+    /// now, which may be a file put there after the read), and their line
+    /// breaks, so a save after Follow stops writes each as the file has it.
+    func tailEvent(_ e: FileTail.Event, shown: FileTail.Shown) {
         guard tail != nil, let storage = textView.textStorage else { return }
         let atBottom = isScrolledToBottom
         switch e {
         case .appended(let s):
             // Not a user edit (no didChangeText): the tab stays clean, the
             // line index and colouring update from the storage edit.
+            let at = storage.length
             storage.beginEditing()
             storage.append(NSAttributedString(string: s, attributes: baseAttributes()))
             storage.endEditing()
+            // Its breaks of another kind than the text's most common one.
+            if let odd = shown.lineBreaks {
+                if doc.lineBreaks == nil { doc.lineBreaks = LineBreaks(dominant: doc.lineEnding) }
+                doc.lineBreaks?.append(odd, at: at)
+            }
             // A followed log can grow past the auto-review cap.
             updateAutoReviewCap(newText: false)
         case .reset(let s):
+            // The new content's own line endings, never the previous file's
+            // (a rotation): set before the text, which they describe.
+            if let le = shown.lineEnding { doc.lineEnding = le }
+            doc.lineBreaks = shown.lineBreaks
             setText(s)
         }
         // A reset drops cards inside setText. An append is not a user edit,
@@ -366,7 +380,7 @@ extension EditorWindowController {
         if owlChat?.hasProposals == true { owlChat?.refreshCards() }
         textView.undoManager?.removeAllActions()
         doc.markSaved()
-        doc.noteDisk(shown)
+        doc.noteDisk(shown.stamp)
         setGuttersNeedDisplay()
         updateStatus()
         if atBottom {
