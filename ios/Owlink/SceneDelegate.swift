@@ -135,20 +135,27 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 enum TestLaunch {
     static var active: Bool { ProcessInfo.processInfo.arguments.contains("-OwlinkOpen") }
 
-    @MainActor static func documentToOpen() -> URL? {
-        let args = ProcessInfo.processInfo.arguments
+    /// Defaults are the live launch's; the tests pass their own folder,
+    /// bundle and store to run the same path (twice, for a second window).
+    @MainActor static func documentToOpen(
+        arguments args: [String] = ProcessInfo.processInfo.arguments,
+        documentsDirectory docs: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0],
+        bundle: Bundle = .main,
+        recovery: RecoveryStore = SaveSafetyStores.recovery,
+        queue: DispatchQueue? = SaveSafetyStores.queue,
+        now: Date = Date()
+    ) -> URL? {
         guard let i = args.firstIndex(of: "-OwlinkOpen"), i + 1 < args.count else { return nil }
         let name = args[i + 1]
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = docs.appendingPathComponent(name)
         // Once per process: a second window (New Window, ⌥⌘N) must not wipe
         // the document, or its recovery record, under the first one's editor.
         let fresh = claimFreshSample(requested: args.contains("-OwlinkFreshSample"))
         if fresh || !FileManager.default.fileExists(atPath: url.path),
-           let sample = Bundle.main.url(forResource: (name as NSString).deletingPathExtension,
-                                        withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
+           let sample = bundle.url(forResource: (name as NSString).deletingPathExtension,
+                                   withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
             if fresh {
-                prepareFreshSample(sample, at: url, recovery: SaveSafetyStores.recovery, queue: SaveSafetyStores.queue)
+                prepareFreshSample(sample, at: url, recovery: recovery, queue: queue, now: now)
             } else {
                 try? FileManager.default.copyItem(at: sample, to: url)
             }
@@ -187,21 +194,21 @@ enum TestLaunch {
     static func prepareFreshSample(_ sample: URL, at url: URL, recovery: RecoveryStore,
                                    queue: DispatchQueue? = nil, now: Date = Date()) -> Bool {
         let fm = FileManager.default
+        // Staged beside it and dated first, then swapped in whole: a sample
+        // that can't be copied, dated or swapped in leaves the document as
+        // it was (it is never removed ahead of the swap).
+        let staged = url.deletingLastPathComponent()
+            .appendingPathComponent(".fresh-\(UUID().uuidString)-\(url.lastPathComponent)")
         do {
-            // Staged beside it first: a sample that can't be copied leaves
-            // the document as it was.
-            let staged = url.deletingLastPathComponent()
-                .appendingPathComponent(".fresh-\(UUID().uuidString)-\(url.lastPathComponent)")
             try fm.copyItem(at: sample, to: staged)
-            do {
-                if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
+            try fm.setAttributes([.modificationDate: now], ofItemAtPath: staged.path)
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: staged)
+            } else {
                 try fm.moveItem(at: staged, to: url)
-            } catch {
-                try? fm.removeItem(at: staged)
-                throw error
             }
-            try fm.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
         } catch {
+            if fm.fileExists(atPath: staged.path) { try? fm.removeItem(at: staged) }
             NSLog("Owlink: -OwlinkFreshSample couldn't put %@ at %@ (%@); its recovery record is kept",
                   sample.path, url.path, String(describing: error))
             return false

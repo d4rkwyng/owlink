@@ -4234,8 +4234,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         .union(indentationModeActions)
         .union(foldingActions)
         .union([#selector(commentSelection(_:)), #selector(unfoldMenu(_:)), #selector(unfoldAllMenu(_:)),
-                #selector(toggleBookmarkMenu(_:)), #selector(explainSelection), #selector(rewriteSelection),
-                #selector(fixTypos)])
+                #selector(toggleBookmarkMenu(_:)), #selector(clearBookmarksMenu(_:)), #selector(explainSelection),
+                #selector(rewriteSelection), #selector(fixTypos)])
 
     /// A text field, or a text view other than the editor's, is first
     /// responder (the Find field, Ask Cedric's field): in the editor's
