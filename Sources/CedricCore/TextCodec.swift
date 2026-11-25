@@ -367,19 +367,35 @@ public enum TextCodec {
                 text = body.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
             }
         } else {
+            // The room is sized from the scan. Bytes that changed since (a
+            // mapped file rewritten in place, CRLF pairs gone) need more:
+            // `lfOnly` never writes past it and says so, and the text is
+            // made again from a copy of the bytes as they are now.
+            var fits = true
             text = body.withUnsafeBytes { raw in
-                let length = raw.count - scan.crlf
+                let length = max(0, raw.count - scan.crlf)
                 if scan.ascii, !binary, length >= sharedBytesMinimum,
                    let buffer = malloc(max(1, length))?.assumingMemoryBound(to: UInt8.self) {
-                    let written = lfOnly(raw, into: buffer, recording: &breaks)
-                    if let s = NSString(bytesNoCopy: buffer, length: written, encoding: String.Encoding.ascii.rawValue,
+                    if let written = lfOnly(raw, into: buffer, capacity: length, recording: &breaks),
+                       let s = NSString(bytesNoCopy: buffer, length: written, encoding: String.Encoding.ascii.rawValue,
                                         deallocator: { p, _ in free(p) }) {
                         return s as String
                     }
                     free(buffer)
                     breaks = mixed ? BreakRecorder(dominant: ending, ascii: scan.ascii) : nil
                 }
-                return String(unsafeUninitializedCapacity: length) { lfOnly(raw, into: $0.baseAddress!, recording: &breaks) }
+                return String(unsafeUninitializedCapacity: length) { out in
+                    guard let p = out.baseAddress,
+                          let written = lfOnly(raw, into: p, capacity: length, recording: &breaks) else {
+                        fits = false
+                        return 0
+                    }
+                    return written
+                }
+            }
+            if !fits {
+                let copy = body.withUnsafeBytes { Data($0) }
+                return decodeUTF8(copy, scan: nil, encoding: encoding, looksBinary: binary, shareBytes: false)
             }
         }
         return DecodedText(text: text, encoding: encoding, lineEnding: ending, mixedLineEndings: mixed, looksBinary: binary,
@@ -399,12 +415,15 @@ public enum TextCodec {
     }
 
     /// Copies `raw` into `out` with CRLF and lone CR as LF (as replacing
-    /// "\r\n" then "\r" did); returns the bytes written. `out` has room
-    /// for `raw.count` bytes less one per CRLF. With `recording`, each
+    /// "\r\n" then "\r" did); returns the bytes written, or nil when
+    /// `out` (room for `capacity` bytes) was too small: then it wrote only
+    /// `capacity` bytes, never past them. Room for `raw.count` bytes less
+    /// one per CRLF is enough, unless `raw` changed since its CRLFs were
+    /// counted (a mapped file rewritten in place). With `recording`, each
     /// break that isn't its `dominant` kind is noted there.
-    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>) -> Int {
+    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>, capacity: Int) -> Int? {
         var none: BreakRecorder?
-        return lfOnly(raw, into: out, recording: &none)
+        return lfOnly(raw, into: out, capacity: capacity, recording: &none)
     }
 
     /// The breaks `lfOnly` writes that aren't `dominant`, as
@@ -439,14 +458,17 @@ public enum TextCodec {
         }
     }
 
-    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>, recording: inout BreakRecorder?) -> Int {
+    static func lfOnly(_ raw: UnsafeRawBufferPointer, into out: UnsafeMutablePointer<UInt8>, capacity: Int,
+                       recording: inout BreakRecorder?) -> Int? {
         guard let base = raw.baseAddress else { return 0 }
         let n = raw.count
         let b = base.assumingMemoryBound(to: UInt8.self)
         var i = 0, o = 0
         while i < n {
-            let run: Int
+            var run: Int
             if let cr = memchr(b + i, 13, n - i) { run = UnsafeRawPointer(cr) - UnsafeRawPointer(b + i) } else { run = n - i }
+            let full = run > capacity - o
+            if full { run = capacity - o }
             (out + o).update(from: b + i, count: run)
             // Not mostly LF: each LF in the run is one of the others.
             if recording != nil, recording?.dominant != .lf {
@@ -459,7 +481,9 @@ public enum TextCodec {
             }
             o += run
             i += run
+            if full { return nil }
             guard i < n else { break }
+            guard o < capacity else { return nil }
             out[o] = 10
             let crlf = i + 1 < n && b[i + 1] == 10
             recording?.note(crlf ? .crlf : .cr, at: o, in: out)
@@ -488,7 +512,10 @@ public enum TextCodec {
         return copy.withUTF8 { b -> String in
             let raw = UnsafeRawBufferPointer(b)
             guard let base = raw.baseAddress, memchr(base, 13, raw.count) != nil else { return text }
-            return String(unsafeUninitializedCapacity: raw.count) { lfOnly(raw, into: $0.baseAddress!, recording: &recording) }
+            // Room for every byte: LF-only text is never longer.
+            return String(unsafeUninitializedCapacity: raw.count) {
+                lfOnly(raw, into: $0.baseAddress!, capacity: raw.count, recording: &recording) ?? raw.count
+            }
         }
     }
 

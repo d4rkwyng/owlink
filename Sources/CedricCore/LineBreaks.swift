@@ -144,7 +144,7 @@ public struct LineBreaks: Sendable, Equatable {
         let text = copy.withUTF8 { b -> String in
             guard b.count > 0 else { return "" }
             return String(unsafeUninitializedCapacity: b.count) {
-                TextCodec.lfOnly(UnsafeRawBufferPointer(b), into: $0.baseAddress!, recording: &rec)
+                TextCodec.lfOnly(UnsafeRawBufferPointer(b), into: $0.baseAddress!, capacity: b.count, recording: &rec) ?? b.count
             }
         }
         return (text, LineBreaks(dominant: dominant, others: rec?.others ?? []))

@@ -278,4 +278,36 @@ import Testing
             same(bytes, "random #\(k) \(bytes)")
         }
     }
+
+    /// Reload and Find in Files decode a mapped file: one rewritten in
+    /// place between the scan and the CRLF conversion can have fewer CRLF
+    /// pairs than the scan counted, so the conversion needs more room than
+    /// it was given. It never writes past that room (the bytes after it
+    /// keep their guard value), and the text comes from the bytes as they
+    /// are now (0.5.4 QA, Codex review).
+    @Test func crlfConversionNeverWritesPastItsRoom() {
+        let raw = Array("ab\r\ncd\r\nef\rgh\n".utf8)   // 1 CR, CRLF pairs since gone
+        let room = raw.count - 3                         // as if the scan counted 3 CRLF
+        let guardBytes = 64
+        let out = UnsafeMutablePointer<UInt8>.allocate(capacity: room + guardBytes)
+        defer { out.deallocate() }
+        out.initialize(repeating: 0xA5, count: room + guardBytes)
+        var rec: TextCodec.BreakRecorder? = TextCodec.BreakRecorder(dominant: .crlf, ascii: true)
+        let written = raw.withUnsafeBytes { TextCodec.lfOnly($0, into: out, capacity: room, recording: &rec) }
+        #expect(written == nil, "too small: says so")
+        #expect((0..<guardBytes).allSatisfy { out[room + $0] == 0xA5 }, "nothing written past the room")
+        // Room enough: the whole conversion, as before.
+        let fits = raw.withUnsafeBytes { TextCodec.lfOnly($0, into: out, capacity: raw.count) }
+        #expect(fits == raw.count - 2 && String(decoding: UnsafeBufferPointer(start: out, count: fits ?? 0), as: UTF8.self) == "ab\ncd\nef\ngh\n")
+
+        // A scan made before the rewrite (3 CRLF), the bytes after it (2 CRLF, a CR).
+        let now = Data("one\r\ntwo\r\nthree\rfour\nfive".utf8)
+        var stale = TextCodec.UTF8Scan()
+        stale.crlf = 3
+        stale.cr = 1
+        stale.lf = 0
+        let d = TextCodec.decodeUTF8(now, scan: stale, encoding: .utf8, looksBinary: false, shareBytes: false)
+        #expect(d?.text == "one\ntwo\nthree\nfour\nfive", "the text of the bytes as they are now")
+        #expect(d?.lineEnding == .crlf && d?.mixedLineEndings == true)
+    }
 }
