@@ -62,6 +62,25 @@ import Testing
         #expect(ServerContextReport.ollama(loaded: 8_192, show: parsed) == ServerContextReport(tokens: 8_192, source: .loaded))
     }
 
+    /// A server reporting an absurd window (up to Int.max): parsed as the
+    /// largest window, and its budget is the cap, without trapping.
+    @Test func aHugeReportedWindowIsClampedAndBudgetsToTheCap() throws {
+        let big = Int.max, maxWindow = ContextWindow.maximumWindowTokens
+        let lm = data(["data": [["id": "m", "state": "loaded", "loaded_context_length": big, "max_context_length": big]]])
+        let report = try #require(ServerContextReport.lmStudio(lm, model: "m"))
+        #expect(report == ServerContextReport(tokens: maxWindow, source: .loaded))
+        #expect(ContextWindow.serverBudget(contextTokens: report.tokens) == 32_000)
+        let ps = data(["models": [["name": "m:latest", "model": "m:latest", "context_length": big]]])
+        #expect(ServerContextReport.ollamaLoaded(ps, model: "m") == maxWindow)
+        let show = try #require(ServerContextReport.ollamaShow(data([
+            "parameters": "num_ctx \(big)", "model_info": ["general.architecture": "x", "x.context_length": big]])))
+        #expect(show.configured == maxWindow && show.maximum == maxWindow)
+        let configured = try #require(ServerContextReport.ollama(loaded: nil, show: show))
+        #expect(ContextWindow.serverBudget(contextTokens: configured.tokens) == 32_000)
+        // A report built directly with Int.max (not through the parser) is safe too.
+        #expect(ContextWindow.serverBudget(contextTokens: ServerContextReport(tokens: big, source: .loaded).tokens) == 32_000)
+    }
+
     @Test func ollamaWithoutNumCtxUsesItsDefaultLoad() throws {
         let plain = try #require(ServerContextReport.ollamaShow(data(["model_info": ["llama.context_length": 131_072]])))
         #expect(ServerContextReport.ollama(loaded: nil, show: plain) == ServerContextReport(tokens: 4_096, source: .serverDefault))
@@ -95,11 +114,14 @@ import Testing
     }
 }
 
-@Suite(.timely) struct ServerContextProbeTests {
+/// The requests and answers, not the deadline: a client deadline that
+/// never passes on its own (`withoutRealDeadline`), except for the one
+/// whose point is the deadline (0.2 s against an hour's stall).
+@Suite(.timely, .timeLimit(.minutes(1))) struct ServerContextProbeTests {
     @Test func lmStudioServerIsAskedOnItsNativeList() async {
         let server = StubServer()
         server.json("/api/v0/models", ["data": [["id": "qwen3-4b", "state": "loaded", "loaded_context_length": 8_192]]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "qwen3-4b", kind: .lmStudio) == ServerContextReport(tokens: 8_192, source: .loaded))
         #expect(!server.recorded.contains { $0.path.hasPrefix("/api/ps") || $0.path.hasPrefix("/api/show") })
     }
@@ -108,7 +130,7 @@ import Testing
         let server = StubServer()
         server.json("/api/ps", ["models": []])
         server.json("/api/show", ["parameters": "num_ctx 6144", "model_info": ["qwen3.context_length": 40_960]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "qwen3:4b", kind: .ollama) == ServerContextReport(tokens: 6_144, source: .configured))
         let show = try #require(server.recorded.first { $0.path == "/api/show" }?.body)
         let sent = try #require(try JSONSerialization.jsonObject(with: show) as? [String: String])
@@ -119,20 +141,20 @@ import Testing
     @Test func customServerTriesLMStudioThenOllama() async {
         let server = StubServer()
         server.json("/api/ps", ["models": [["model": "m:latest", "context_length": 32_768]]])
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "m", kind: .custom) == ServerContextReport(tokens: 32_768, source: .loaded))
     }
 
     @Test func aServerThatSaysNothingOrFailsGivesNil() async {
         let server = StubServer()   // every path 404
-        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session)
+        let client = LocalModelClient(baseURL: server.baseURL, timeout: 5, session: server.session).withoutRealDeadline()
         #expect(await client.contextReport(model: "m", kind: .custom) == nil)
         #expect(await client.contextReport(model: "m", kind: .lmStudio) == nil)
         let slow = StubServer()
         slow.json("/api/v0/models", ["data": [["id": "m", "state": "loaded", "loaded_context_length": 8_192]]], delay: 3_600)
         let quick = LocalModelClient(baseURL: slow.baseURL, timeout: 0.2, session: slow.session)
         #expect(await quick.contextReport(model: "m", kind: .lmStudio) == nil, "past the deadline")
-        let public_ = LocalModelClient(baseURL: URL(string: "http://example.com/v1")!, timeout: 1, session: server.session)
+        let public_ = LocalModelClient(baseURL: URL(string: "http://example.com/v1")!, timeout: 1, session: server.session).withoutRealDeadline()
         #expect(await public_.contextReport(model: "m", kind: .lmStudio) == nil, "not a local server: never asked")
     }
 }

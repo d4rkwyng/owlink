@@ -682,7 +682,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let r = OwlCoordinator.replay(shown, document: document)
         replays += 1
         presented = (r.hint, r.documentRange, r.expected)
-        let buttons = own ? buttons(for: r.hint, tab: tab)
+        let buttons = own ? buttons(for: r.hint, tab: tab, isStale: r.isStale)
             : [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }]
         showBubble(r.hint, buttons: buttons)
     }
@@ -723,7 +723,9 @@ final class OwlController: NSObject, NSPopoverDelegate {
         return true
     }
 
-    private func buttons(for hint: OwlHint, tab: EditorWindowController) -> [OwlBubble.Button] {
+    /// `isStale`: a recent hint shown again whose text has changed
+    /// (`OwlCoordinator.Replay.isStale`): nothing that edits the file.
+    private func buttons(for hint: OwlHint, tab: EditorWindowController, isStale: Bool = false) -> [OwlBubble.Button] {
         let hub = OwlHub.shared
         if hint.id == RulesHintProvider.letterID {
             return [.init(title: String(localized: "No thanks, I’m an owl"), isDefault: false) { [weak self] in self?.hideBubble() }]
@@ -772,7 +774,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
             })
             return out
         }
-        if hint.id == RulesHintProvider.jsonID, hint.replacement == nil {
+        if RulesHintProvider.formatsWholeJSONFile(hint, isStale: isStale) {
             // A long one-line JSON file, only its start in view: Fix it
             // checks and formats the whole file.
             out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self, weak tab] in

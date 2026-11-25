@@ -99,4 +99,36 @@ import Testing
         let r = OwlCoordinator.replay(shown, document: nil)
         #expect(!r.isStale && r.hint == note && r.documentRange == nil)
     }
+    /// A recent "Looks like JSON. Format it?" whose text has changed: replay
+    /// strips its range and replacement but keeps the ID, and before 0.5.4
+    /// the bubble took that ID without a replacement for the long one-line
+    /// file's hint and offered Fix it, formatting the whole current file.
+    @Test func aStaleJSONHintIsNotTheWholeFileFormatter() throws {
+        let (c, _) = make([])
+        let doc = UUID()
+        let minified = #"{"a":1,"b":[1,2]}"#
+        let inView = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?",
+                             range: NSRange(location: 0, length: (minified as NSString).length),
+                             replacement: "{\n  \"a\" : 1,\n  \"b\" : [1, 2]\n}", source: "rules")
+        c.markShown(inView, documentID: doc, context: window(minified, doc: doc).context)
+        let shown = try #require(c.recent.first)
+        // Still the same text: its own Fix it (the replacement), not the whole-file one.
+        let fresh = OwlCoordinator.replay(shown, document: minified as NSString)
+        #expect(!fresh.isStale && fresh.hint.replacement != nil)
+        #expect(!RulesHintProvider.formatsWholeJSONFile(fresh.hint, isStale: fresh.isStale))
+        // The text changed (or the file closed): stale, and no whole-file format.
+        let changed: [NSString?] = [#"{"a":2,"b":[1,2]}"# as NSString, "not json at all" as NSString, "" as NSString, nil]
+        for now in changed {
+            let r = OwlCoordinator.replay(shown, document: now)
+            #expect(r.isStale)
+            #expect(r.hint.id == RulesHintProvider.jsonID && r.hint.replacement == nil, "the ID is kept")
+            #expect(!RulesHintProvider.formatsWholeJSONFile(r.hint, isStale: r.isStale), "\(String(describing: now))")
+        }
+        // The long one-line file's own hint (no range, never stale) still formats the whole file.
+        let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+        c.markShown(longLine, documentID: doc, context: window(minified, doc: doc).context)
+        let again = OwlCoordinator.replay(try #require(c.recent.first), document: "{}" as NSString)
+        #expect(!again.isStale)
+        #expect(RulesHintProvider.formatsWholeJSONFile(again.hint, isStale: again.isStale))
+    }
 }

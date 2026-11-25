@@ -115,9 +115,11 @@ final class ChunkedContentStorage: NSTextContentStorage {
             var at = min(self.offset(from: documentRange.location, to: textLocation), len) - 1
             while at >= 0 {
                 let (r, whole) = chunkRange(at: at, in: text, limit: limit)
+                // Only the chunk holding `at`: never one after it.
+                guard let next = LargeDocument.backwardStep(from: at, chunk: r) else { return location(documentRange.location, offsetBy: at + 1) }
                 guard let p = element(for: r, in: storage, whole: whole) else { return nil }
                 if !block(p) { return p.elementRange?.location }
-                at = r.location - 1
+                at = next
             }
             return documentRange.location
         }
@@ -127,9 +129,13 @@ final class ChunkedContentStorage: NSTextContentStorage {
         var at = max(0, min(textLocation.map { self.offset(from: documentRange.location, to: $0) } ?? 0, len))
         while at < len {
             let (r, whole) = chunkRange(at: at, in: text, limit: limit)
+            // Only the chunk holding `at`, so the walk always moves on.
+            // One ending at `at` (a boundary moved back for an emoji or an
+            // accent, before 0.5.4) had TextKit ask from `at` again, forever.
+            guard let next = LargeDocument.forwardStep(from: at, chunk: r) else { return location(documentRange.location, offsetBy: at) }
             guard let p = element(for: r, in: storage, whole: whole) else { return nil }
             if !block(p) { return p.elementRange?.endLocation }
-            at = NSMaxRange(r)
+            at = next
         }
         return documentRange.endLocation
     }

@@ -40,7 +40,7 @@ public struct LlamaRuntime: BuiltInRuntime {
     /// fallback). Never called by the app.
     static func loadForTesting(path: String) throws -> LlamaModel {
         let model = try LlamaModel(path: path, api: api.get(), contextTokens: uncatalogedContextTokens)
-        LlamaModel.registerForExit(model)
+        guard LlamaModel.registerForExit(model) else { model.freeNow(); throw BuiltInError.cancelled }
         return model
     }
 
@@ -77,7 +77,8 @@ public struct LlamaRuntime: BuiltInRuntime {
                     }
                     do {
                         let model = try LlamaModel(path: url.path, api: Self.api.get(), contextTokens: contextTokens, stop: stop)
-                        LlamaModel.registerForExit(model)
+                        // The app is quitting: freed here, never handed out.
+                        guard LlamaModel.registerForExit(model) else { model.freeNow(); throw BuiltInError.cancelled }
                         do {
                             // The first decode, inside the watchdog's time.
                             try model.warmUp()
@@ -232,7 +233,7 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         if let model { L.llama_model_free!(model) }
         context = nil
         model = nil
-        Self.liveLock.withLock { Self.live[ObjectIdentifier(self)] = nil }
+        Self.exitRegistry.remove(self)
     }
 
     // MARK: Exit
@@ -244,26 +245,51 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     // handlers and C++ static destructors run in reverse order, so ours
     // runs before ggml's).
 
-    nonisolated(unsafe) private static var live: [ObjectIdentifier: LlamaModel] = [:]
-    private static let liveLock = NSLock()
+    static let exitRegistry = ExitRegistry<LlamaModel>()
+    private static let hookLock = NSLock()
     nonisolated(unsafe) private static var exitHookInstalled = false
 
-    static func registerForExit(_ model: LlamaModel) {
-        liveLock.withLock {
-            live[ObjectIdentifier(model)] = model
+    /// Records `model` for freeing at exit. False once exit has begun: the
+    /// caller (on `queue`) frees it and doesn't hand it out.
+    @discardableResult
+    static func registerForExit(_ model: LlamaModel) -> Bool {
+        hookLock.withLock {
             if !exitHookInstalled {
                 exitHookInstalled = true
                 atexit { LlamaModel.freeAllNow() }
             }
         }
+        return exitRegistry.register(model)
     }
 
-    /// Frees every loaded model synchronously (exit, app termination).
+    /// How long exit waits for llama.cpp's queue to free the models. A
+    /// request or warm-up stops at the abort flag (set first) within a
+    /// graph node or a batch; only a decode the flag can't reach (a GPU
+    /// that hung) or an unstoppable context creation takes longer.
+    static let exitWait: TimeInterval = 5
+
+    /// Frees every loaded model synchronously, at exit (the atexit hook):
+    /// `ExitRegistry.exit`, ending the process with `_exit` if llama.cpp's
+    /// queue doesn't get to it within `exitWait`.
+    ///
+    /// The model is registered before its warm-up decode, so a warm-up the
+    /// watchdog gave up on (a GPU that hung, the abort flag never read) is
+    /// registered while it blocks the queue. Waiting for the queue without
+    /// a limit made Quit hang there (0.5.3). Freeing would wait forever,
+    /// and running ggml's Metal device destructor with a context still
+    /// alive aborts, so the process ends at once instead.
     static func freeAllNow() {
-        let models = liveLock.withLock { Array(live.values) }
-        for m in models { m.stop.set() }
-        let free = { for m in models { m.freeOnQueue() } }
-        if DispatchQueue.getSpecific(key: queueKey) != nil { free() } else { queue.sync(execute: free) }
+        exitRegistry.exit(on: queue, onQueue: DispatchQueue.getSpecific(key: queueKey) != nil, timeout: exitWait,
+                          stop: { $0.stop.set() }, free: { $0.freeOnQueue() }, giveUp: { _exit(0) })
+    }
+
+    /// Runs `work` on `queue` and waits at most `timeout` seconds for it:
+    /// true if it ran, false if the queue was still busy (`work` stays
+    /// queued). Exit's wait (`freeAllNow`).
+    static func runBounded(on queue: DispatchQueue, timeout: TimeInterval, _ work: @escaping @Sendable () -> Void) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { work(); done.signal() }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     private static let queueKey = DispatchSpecificKey<Bool>()
@@ -476,5 +502,51 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         var size = MemoryLayout<Int32>.size
         if sysctlbyname("hw.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 { return Int(cores) }
         return ProcessInfo.processInfo.activeProcessorCount
+    }
+}
+
+/// The models to free at exit (ggml's Metal device must outlive no
+/// context: `LlamaModel.freeAllNow`). Generic so the exit path can be
+/// tested without llama.cpp.
+final class ExitRegistry<Model: AnyObject & Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var live: [ObjectIdentifier: Model] = [:]
+    private var closed = false
+
+    /// False once exit has begun: the caller frees `model` itself.
+    func register(_ model: Model) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            live[ObjectIdentifier(model)] = model
+            return true
+        }
+    }
+
+    func remove(_ model: Model) { lock.withLock { live[ObjectIdentifier(model)] = nil } }
+
+    var isClosed: Bool { lock.withLock { closed } }
+    var count: Int { lock.withLock { live.count } }
+
+    /// Exit: closes registration, asks every model registered now to
+    /// `stop` (a warm-up or request under way ends at its abort flag), then
+    /// frees on `queue` every model still registered when the queue gets
+    /// there, waiting at most `timeout`; `giveUp` if it didn't.
+    ///
+    /// Always goes through the queue, even with nothing registered: a load
+    /// running there is refused registration when it ends and frees its
+    /// model itself, and that must happen before exit carries on. Before
+    /// 0.5.4's review, the set was read before the wait and an empty one
+    /// returned at once, so a model registering in between was left
+    /// alive for ggml's teardown.
+    func exit(on queue: DispatchQueue, onQueue: Bool, timeout: TimeInterval,
+              stop: (Model) -> Void, free: @escaping @Sendable (Model) -> Void, giveUp: () -> Void) {
+        let now: [Model] = lock.withLock { closed = true; return Array(live.values) }
+        for m in now { stop(m) }
+        let freeAll: @Sendable () -> Void = { [self] in
+            for m in lock.withLock({ Array(live.values) }) { free(m) }
+        }
+        if onQueue { freeAll(); return }
+        if LlamaModel.runBounded(on: queue, timeout: timeout, freeAll) { return }
+        giveUp()
     }
 }

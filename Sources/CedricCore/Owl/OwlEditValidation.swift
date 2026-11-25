@@ -155,7 +155,10 @@ public enum OwlEditValidation {
         let ns = text as NSString
         guard ns.range(of: "import").location != NSNotFound || ns.range(of: "export").location != NSNotFound else { return false }
         let code: NSString
-        if let mask = CodeMask.make(ns, language: "javascript") {
+        // Interpolations split out of their strings: a comment inside
+        // `${ … }` is a comment span of its own, not merged into the
+        // string around it, so `${/* import */ 1}` doesn't count.
+        if let mask = CodeMask.make(ns, language: "javascript", splitInterpolations: true) {
             // Blank only the comments.
             code = CodeMask(ns, spans: mask.spans.filter { $0.kind == .comment }).codeNS
         } else {
@@ -764,7 +767,7 @@ public struct OwlEditGate: Sendable {
     /// The verdict and the check it came from.
     mutating func checked(_ p: OwlEditProposal, in s: OwlDocumentSnapshot) -> (verdict: Verdict, check: OwlEditCheck) {
         var p = p
-        p.check = OwlEditValidation.validate(p, in: s, script: script)
+        p.validate(in: s, script: script)
         if p.check.failsValidation, let feedback = p.check.retryFeedback {
             if batched, refusedInBatch { return (.retry(feedback), p.check) }
             if !retried, retryRoundLeft {
@@ -802,7 +805,27 @@ extension OwlEditGate {
     }
 }
 
+extension OwlEditValidation {
+    /// What a verdict depends on besides the text: the language
+    /// (`Language.rawValue`) and the file name's extension (a `.plist`
+    /// or `.json` file is parsed as one whatever its language).
+    public struct Target: Sendable, Equatable {
+        public let language: String
+        public let fileExtension: String
+        public init(language: String, fileName: String?) {
+            self.language = language
+            fileExtension = ((fileName ?? "") as NSString).pathExtension.lowercased()
+        }
+    }
+}
+
 extension OwlEditProposal {
+    /// Sets `check` for snapshot `s` and records what it was checked as.
+    public mutating func validate(in s: OwlDocumentSnapshot, script: (any OwlScriptSyntaxChecker)?) {
+        check = OwlEditValidation.validate(self, in: s, script: script)
+        checkedAs = OwlEditValidation.Target(language: s.language, fileName: s.fileName)
+    }
+
     /// The proposal with its validation redone against the live document,
     /// when the document changed since it was proposed (another card was
     /// applied, the user typed): the edit applied to the live text where
@@ -810,17 +833,34 @@ extension OwlEditProposal {
     /// snapshot. Unchanged when the generation is the proposal's, the
     /// anchor isn't text, or the text no longer applies (that is stale
     /// anyway). The panel uses it for the card refresh and the Apply guard.
+    ///
+    /// Also redone, at the same generation, when the tab's language or file
+    /// type is no longer what the verdict was worked out for (`checkedAs`):
+    /// a proposal checked as Plain Text kept its clean verdict after the
+    /// status bar switched the tab to JSON (0.5.3), so Apply could break
+    /// valid JSON. The text is unchanged then, so the proposal's own range
+    /// is used, whatever its anchor.
     public func revalidated(text: NSString, generation: Int, language: String, fileName: String?,
                             script: (any OwlScriptSyntaxChecker)?) -> OwlEditProposal {
-        guard generation != self.generation, anchor == .text else { return self }
-        let hits = Self.occurrences(of: original, in: text)
-        guard hits.count == 1, let r = hits.first else { return self }
+        let target = OwlEditValidation.Target(language: language, fileName: fileName)
+        let retargeted = checkedAs.map { $0 != target } ?? false
+        let r: NSRange
+        if generation == self.generation {
+            guard retargeted, NSMaxRange(range) <= text.length, text.substring(with: range) == original else { return self }
+            r = range
+        } else {
+            guard anchor == .text else { return self }
+            let hits = Self.occurrences(of: original, in: text)
+            guard hits.count == 1, let h = hits.first else { return self }
+            r = h
+        }
         let after = text.replacingCharacters(in: r, with: replacement)
         var line = 1
         for u in text.substring(to: r.location).utf16 where u == 10 { line += 1 }
         var p = self
         p.check = OwlEditValidation.validate(language: language, fileName: fileName, before: text as String, after: after,
                                              original: original, replacement: replacement, firstLine: line, script: script)
+        p.checkedAs = target
         return p
     }
 }
