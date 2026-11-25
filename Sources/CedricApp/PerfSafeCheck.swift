@@ -86,6 +86,7 @@ extension DevChecks {
         var builds = 0
         var savedFontSize: Any?
         let savedProseSwitch = UserDefaults.standard.object(forKey: "useProseFont") as? NSObject
+        let savedProseName = UserDefaults.standard.object(forKey: "proseFontName") as? NSObject
         var themePasses = 0
         run([
             sync {
@@ -198,7 +199,11 @@ extension DevChecks {
                 expect(lastLine.hasPrefix("let value599") && distant == NSColor(hex: tab.palette.color(for: .keyword))
                        && distant != NSColor(hex: tab.palette.foreground),
                        "the last line's \"let\" is in the keyword colour", "\(lastLine.prefix(14)) \(String(describing: distant))")
-                tab.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+                // Scrolled to the very top, not only until line 1 shows.
+                if let clip = tab.textView.enclosingScrollView?.contentView {
+                    clip.scroll(to: .zero)
+                    tab.textView.enclosingScrollView?.reflectScrolledClipView(clip)
+                }
             },
             // Line 1 stayed coloured from before: wait for the viewport
             // itself to be back at the top too.
@@ -218,18 +223,25 @@ extension DevChecks {
                 expect(keyword == NSColor(hex: tab.palette.color(for: .keyword)), "Swift again: \"let\" coloured")
                 colorsAreCurrent("Swift again: no stale colour")
 
-                // The prose font on (for this step only): Plain Text takes
-                // it, its appearance pass recolours as well as the language
-                // change, and neither leaves a stale colour; Swift again
-                // takes the code font back.
+                // The prose font on (for this step only), in a font other
+                // than the code font: Plain Text takes it, so the language
+                // pass and the appearance (font) pass both run, and neither
+                // leaves a stale colour; Swift again takes the code font
+                // back, with both passes again.
+                Settings.shared.proseFontNameOverride = ProseFont.systemSerif
+                if Settings.shared.proseFont.fontName == Settings.shared.font.fontName {
+                    Settings.shared.proseFontNameOverride = "Helvetica"
+                }
                 Settings.shared.useProseFontOverride = true
                 made = tab.colorizer.fullPasses
                 tab.setLanguage(.plain)
                 let prose = Settings.shared.font(for: .plain)
-                expect(prose == Settings.shared.proseFont && tab.editorFont == prose && tab.textView.font == prose
+                expect(prose == Settings.shared.proseFont && prose.fontName != Settings.shared.font.fontName,
+                       "the prose font differs from the code font", "\(prose.fontName) vs \(Settings.shared.font.fontName)")
+                expect(tab.editorFont == prose && tab.textView.font == prose
                        && (tab.textView.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont) == prose,
                        "the prose font on: Plain Text in it", "\(String(describing: tab.textView.font)) vs \(prose)")
-                expect(tab.colorizer.fullPasses >= made + 1, "the prose font's Plain Text: the whole-text pass runs",
+                expect(tab.colorizer.fullPasses == made + 2, "the prose font's Plain Text: the language and appearance passes run",
                        "\(tab.colorizer.fullPasses - made)")
                 colorsAreCurrent("the prose font's Plain Text: every character in the text colour", tokensAllowed: false)
                 attributesMatchAFreshMeasure("the prose font")
@@ -237,12 +249,16 @@ extension DevChecks {
                 tab.setLanguage(.swift)
                 expect(tab.editorFont == Settings.shared.font && tab.textView.font == Settings.shared.font,
                        "the prose font on: Swift in the code font", "\(String(describing: tab.textView.font))")
-                expect(tab.colorizer.fullPasses >= made + 1, "the prose font's Swift: the whole-text pass runs",
+                expect(tab.colorizer.fullPasses == made + 2, "the prose font's Swift: the language and appearance passes run",
                        "\(tab.colorizer.fullPasses - made)")
                 let proseKeyword = tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
                 expect(proseKeyword == NSColor(hex: tab.palette.color(for: .keyword)), "the prose font's Swift: \"let\" coloured")
                 colorsAreCurrent("the prose font's Swift: no stale colour")
                 Settings.shared.useProseFontOverride = false
+                Settings.shared.proseFontNameOverride = nil
+                expect(UserDefaults.standard.object(forKey: "proseFontName") as? NSObject == savedProseName,
+                       "the saved prose font is left as it was",
+                       "\(String(describing: UserDefaults.standard.object(forKey: "proseFontName")))")
                 expect(UserDefaults.standard.object(forKey: "useProseFont") as? NSObject == savedProseSwitch,
                        "the saved prose font switch is left as it was",
                        "\(String(describing: UserDefaults.standard.object(forKey: "useProseFont")))")
