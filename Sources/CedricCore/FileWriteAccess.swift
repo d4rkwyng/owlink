@@ -260,16 +260,25 @@ public enum DocumentWrite {
     }
 
     /// Whether what is at `name` now may be replaced by a save that
-    /// checked `checked` (`st_ino` 0: nothing was there): the same file,
-    /// gone, or something that holds no text (a FIFO, a socket). A link,
-    /// or a regular file other than the checked one (another app's file,
-    /// one a link was pointed at), may hold someone's data: not replaced.
+    /// checked `checked` (`st_ino` 0: nothing was there): the same file
+    /// as checked, gone, or something that holds no text (a FIFO, a
+    /// socket). A link, a regular file other than the checked one
+    /// (another app's file, one a link was pointed at), or the checked
+    /// file written since (another app's in-place edit while the new file
+    /// was written: same inode, other size or times) may hold someone's
+    /// data: not replaced.
     static func nothingElseAt(_ name: String, in dir: Int32, checked: stat) -> Bool {
         var now = stat()
         guard fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0 else { return true }
         switch now.st_mode & S_IFMT {
         case S_IFLNK: return false
-        case S_IFREG: return checked.st_ino != 0 && now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
+        case S_IFREG:
+            return checked.st_ino != 0 && now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
+                && now.st_size == checked.st_size
+                && now.st_mtimespec.tv_sec == checked.st_mtimespec.tv_sec
+                && now.st_mtimespec.tv_nsec == checked.st_mtimespec.tv_nsec
+                && now.st_ctimespec.tv_sec == checked.st_ctimespec.tv_sec
+                && now.st_ctimespec.tv_nsec == checked.st_ctimespec.tv_nsec
         default: return true
         }
     }
