@@ -161,6 +161,19 @@ public struct EditedState {
         breaksDiffer = (breaks?.others ?? []) != savedBreaks || endingDiffers
     }
 
+    /// Follow File: text and breaks added to a saved tab, still saved.
+    /// The baseline lets go of its copy of the breaks while `change`
+    /// mutates them, then takes the result: a baseline still sharing the
+    /// array had every append to a growing mixed log copy all its breaks
+    /// so far, on the main thread (quadratic; Sol round 2).
+    public mutating func extendSaved(breaks: inout LineBreaks?, _ change: (inout LineBreaks?) -> Void) {
+        savedBreaks = []
+        change(&breaks)
+        savedBreaks = breaks?.others ?? []
+        if let dominant = breaks?.dominant { savedEnding = dominant }
+        breaksDiffer = false
+    }
+
     /// Encoding or line endings changed (applied on save).
     public mutating func noteFormatChange() { formatChanged = true }
 

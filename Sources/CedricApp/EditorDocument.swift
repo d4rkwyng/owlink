@@ -103,6 +103,14 @@ final class EditorDocument {
         updateEdited { $0.breaksChanged(to: lineBreaks, ending: lineEnding) }
     }
 
+    /// Follow File appended `odd` (its breaks of another kind) at
+    /// `offset`: the breaks grow in place, and the saved baseline with
+    /// them (EditedState.extendSaved; no copy of every break per append).
+    func appendFollowedBreaks(_ odd: LineBreaks, at offset: Int) {
+        if lineBreaks == nil { lineBreaks = LineBreaks(dominant: lineEnding) }
+        edited.extendSaved(breaks: &lineBreaks) { $0?.append(odd, at: offset) }
+    }
+
     /// Encoding or line endings changed: unsaved until written, whatever the text.
     func noteFormatChange() {
         changeCount += 1

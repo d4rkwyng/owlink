@@ -150,6 +150,33 @@ import Testing
         #expect(long.isDirty)
     }
 
+    /// Follow File's appends grow the breaks in place: the saved baseline
+    /// shared their array, so each append to a growing mixed log copied
+    /// every break so far (Sol round 2). In place, the storage moves only
+    /// when it grows (log2 of the count), not at every append.
+    @Test func followAppendsGrowTheBreaksInPlace() {
+        var breaks: LineBreaks? = LineBreaks(dominant: .lf, others: [LineBreaks.entry(1, .crlf)])
+        var e = EditedState(savedText: nil)
+        e.saved("a\nb\n" as NSString, breaks: breaks, ending: .lf)
+        let chunk = LineBreaks(dominant: .lf, others: [LineBreaks.entry(1, .crlf)])
+        var moves = 0
+        var address = breaks?.othersAddress
+        let appends = 2_000
+        for k in 0..<appends {
+            e.extendSaved(breaks: &breaks) { $0?.append(chunk, at: 4 + 2 * k) }
+            #expect(!e.isDirty)
+            // What markSaved does after each append: the baseline shares them again.
+            e.saved("a\nb\n" as NSString, breaks: breaks, ending: .lf)
+            if breaks?.othersAddress != address { moves += 1; address = breaks?.othersAddress }
+        }
+        #expect(breaks?.others.count == appends + 1)
+        #expect(breaks?.others.last == LineBreaks.entry(4 + 2 * (appends - 1) + 1, .crlf))
+        #expect(moves < 40, "the breaks were copied \(moves) times for \(appends) appends")
+        // The baseline is the grown breaks: an edit back to them is clean.
+        e.breaksChanged(to: breaks, ending: .lf)
+        #expect(!e.isDirty)
+    }
+
     /// The line ending a save writes counts too, not just the odd breaks:
     /// an LF file rewritten as CRLF with the same text and reloaded, then
     /// ⌘Z, had the same text and no odd breaks either way, and the tab

@@ -127,6 +127,9 @@ public struct LineBreaks: Sendable, Equatable {
         return left
     }
 
+    /// Where `others` is stored (tests: an append made in place keeps it).
+    var othersAddress: UnsafeRawPointer? { others.withUnsafeBufferPointer { $0.baseAddress.map(UnsafeRawPointer.init) } }
+
     /// Text was added at the end (`offset`, its start: Follow File):
     /// `added`'s breaks, by offsets in that text, follow. Its own dominant
     /// kind must be this one's (only its odd breaks are kept).

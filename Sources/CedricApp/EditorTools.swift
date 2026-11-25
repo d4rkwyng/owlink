@@ -361,10 +361,7 @@ extension EditorWindowController {
             storage.append(NSAttributedString(string: s, attributes: baseAttributes()))
             storage.endEditing()
             // Its breaks of another kind than the text's most common one.
-            if let odd = shown.lineBreaks {
-                if doc.lineBreaks == nil { doc.lineBreaks = LineBreaks(dominant: doc.lineEnding) }
-                doc.lineBreaks?.append(odd, at: at)
-            }
+            if let odd = shown.lineBreaks { doc.appendFollowedBreaks(odd, at: at) }
             // A followed log can grow past the auto-review cap.
             updateAutoReviewCap(newText: false)
         case .reset(let s):
