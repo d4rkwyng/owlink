@@ -361,18 +361,22 @@ import CedricCore
     ///
     /// Virtual time (`StreamClock`): on the wall clock a CI runner stalled
     /// for 23 s made this take 23.3 s (run 45676438347). Now the text
-    /// comes 4 s in (the stub waits until it has been read), then the
-    /// stall is exactly 4 s, past the 0.3 s idle limit but inside the 30 s
-    /// first-byte wait, and the stub holds `[DONE]` until the deadline loop
-    /// has read the clock at that point: an idle limit that didn't fire
-    /// gets `[DONE]` and an answer, not `.timedOut`. No URLSession timeout
-    /// of its own (`requestTimeout`).
+    /// comes 4 s in, and the clock only moves on once `onText` has had
+    /// both deltas: the chunk ends with the newline of the second, so by
+    /// then the reader has taken (and touched on) every byte of it. Then
+    /// the stall is exactly 4 s, past the 0.3 s idle limit but inside the
+    /// 30 s first-byte wait, and the stub holds `[DONE]` until the deadline
+    /// loop has decided at that instant: an idle limit that didn't fire
+    /// finds time left, gets `[DONE]` and an answer, not `.timedOut`. No
+    /// URLSession timeout of its own (`requestTimeout`).
     @Test(.timeLimit(.minutes(1))) func chatStreamStallAfterFirstByteHitsTheIdleLimit() async {
         let clock = StreamClock()
         let server = StubServer()
+        // "data: {w0}\n\ndata: {w1}\n": no byte after the line that yields "w1 ".
+        let text = Self.deltas(2).dropLast().reduce(Data(), +).dropLast()
         server.route("/v1/chat/completions") { _, _ in
-            StubServer.Response(body: Data(), chunks: [Self.deltas(2).dropLast().reduce(Data(), +), Data("data: [DONE]\n".utf8)],
-                                every: 4, clock: clock)
+            StubServer.Response(body: Data(), chunks: [Data(text), Data("data: [DONE]\n".utf8)],
+                                every: 4, clock: clock, heard: [1: "w0 w1 "])
         }
         var client = LocalModelClient(baseURL: server.baseURL, timeout: 30, session: server.session)
         client.streamIdleLimit = 0.3
@@ -381,10 +385,13 @@ import CedricCore
         let seen = Locked("")
         let start = clock.now
         await #expect(throws: LocalAIError.timedOut) {
-            _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { t in seen.mutate { $0 += t } }
+            _ = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { t in
+                seen.mutate { $0 += t }
+                clock.hear(t)
+            }
         }
         let took = clock.now - start
-        #expect(took < 10, "idle limit, not the 30 s first-byte wait")
+        #expect(took == 8, "ended at the stall's virtual instant: idle limit, not the 30 s first-byte wait")
         #expect(seen.mutate { $0 } == "w0 w1 ")
     }
 
@@ -394,10 +401,10 @@ import CedricCore
     /// Virtual time (`StreamClock`): on the wall clock a 23 s stall of a CI
     /// runner ran past the 10 s too (run 45676438347). Now the wait is
     /// exactly 0.6 s, and the stub holds the answer until the deadline loop
-    /// has read the clock then: a 0.2 s idle limit applied to the first
-    /// byte ends it with `.timedOut`. No URLSession timeout of its own
-    /// (`requestTimeout`). The 0.2 s idle limit against the 0.6 s wait is
-    /// what this checks.
+    /// has found time left then (it never sends it otherwise): a 0.2 s idle
+    /// limit applied to the first byte ends it with `.timedOut`. No
+    /// URLSession timeout of its own (`requestTimeout`). The 0.2 s idle
+    /// limit against the 0.6 s wait is what this checks.
     @Test(.timeLimit(.minutes(1))) func chatStreamFirstByteGetsTheLongerWait() async throws {
         let clock = StreamClock()
         let server = StubServer()
