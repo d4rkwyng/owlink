@@ -226,4 +226,56 @@ import Testing
             }
         }
     }
+    /// Follow File: BOMs that come as appends, each write on its own, then
+    /// Follow stopped and the tab saved unedited. A BOM written to a file
+    /// of which nothing is shown is that version's own (a reset); any
+    /// after it, or after text, is text (U+FEFF) and must be shown and
+    /// saved as such. 0.5.4 at d3d28d1 decoded appends with Foundation,
+    /// which on macOS 26 drops a U+FEFF that starts the bytes decoded, so
+    /// a second BOM appended on its own vanished from the tab while Follow
+    /// stamped its bytes as shown: ⌘S wrote the file three bytes short.
+    @Test func followAppendedBOMsAreShownAndSaved() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let b = Self.bom, x = Array("x".utf8)
+        // (case, the file when Follow starts, the writes, the text shown after)
+        let cases: [(String, [UInt8], [[UInt8]], String)] = [
+            ("empty, BOM, then BOM+x", [], [b, b + x], "\u{FEFF}x"),
+            ("BOM, then BOM+x", b, [b + x], "\u{FEFF}x"),
+            ("BOM+text, then BOM+x", b + Array("a\n".utf8), [b + x], "a\n\u{FEFF}x"),
+            ("text, then BOM+x", Array("a\n".utf8), [b + x], "a\n\u{FEFF}x"),
+            ("BOM, then a BOM split 1+3", b, [[0xEF], [0xBB, 0xBF] + x], "\u{FEFF}x"),
+            ("BOM, then a BOM split 2+2", b, [[0xEF, 0xBB], [0xBF] + x], "\u{FEFF}x"),
+            ("empty, BOM, then a BOM split 2+2", [], [b, [0xEF, 0xBB], [0xBF] + x], "\u{FEFF}x"),
+            ("empty, a BOM split 2+1, then BOM+x", [], [[0xEF, 0xBB], [0xBF], b + x], "\u{FEFF}x"),
+            ("empty, two BOMs and x in one write", [], [b + b + x], "\u{FEFF}x"),
+            ("BOM, then BOM alone, then x", b, [b, x], "\u{FEFF}x"),
+        ]
+        for (note, start, writes, shown) in cases {
+            for base in Self.bases {
+                let label = "\(note), opened as \(base?.rawValue ?? "detected")"
+                let url = dir.appendingPathComponent("appended.log")
+                try Data(start).write(to: url)
+                let (d0, s0) = try DocumentRead.read(url, encoding: base)
+                let f = try Following(url, tab: Tab(d0, stamp: s0))
+                f.catchUp()
+                var all = start
+                for w in writes {
+                    let fh = try FileHandle(forWritingTo: url)
+                    try fh.seekToEnd()
+                    try fh.write(contentsOf: Data(w))
+                    try fh.close()
+                    all += w
+                    f.catchUp()
+                }
+                f.tail.stop()
+                #expect(f.tab.text == shown, "\(label): text")
+                #expect(f.tab.text.unicodeScalars.map(\.value) == shown.unicodeScalars.map(\.value), "\(label): scalars")
+                #expect(f.tab.encoding == (all.starts(with: b) ? .utf8BOM : .utf8), "\(label): encoding")
+                #expect(f.events.all.last?.1.bytes == UInt64(all.count), "\(label): bytes shown")
+                let saved = try f.tab.save(to: url)
+                #expect(saved == all, "\(label): saved bytes")
+            }
+        }
+    }
 }

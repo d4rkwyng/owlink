@@ -324,7 +324,7 @@ public final class FileTail: @unchecked Sendable {
             // Hold back a character cut in half at the end (all of it while
             // no whole character has come yet).
             var text: String?
-            if let (s, used) = Self.decodePrefix(bytes, encoding, { String(data: $0, encoding: encoding.foundation) }) {
+            if let (s, used) = Self.decodePrefix(bytes, encoding, { Self.decodeAppended($0, encoding) }) {
                 text = s
                 heldCount = UInt64(bytes.count - used)
             } else {
@@ -349,6 +349,22 @@ public final class FileTail: @unchecked Sendable {
         } catch {
             return
         }
+    }
+
+    /// Appended bytes as text, nil if they aren't text in `encoding`. They
+    /// come after bytes already shown, so a U+FEFF at their start is text,
+    /// never a BOM: UTF-8 is checked and decoded by the project's own
+    /// strict decoder (TextCodec.isValidUTF8, then the standard library,
+    /// which keeps U+FEFF), the same on every macOS. Foundation's UTF-8
+    /// decoding drops a leading U+FEFF on macOS 26, and Follow stamped the
+    /// bytes as shown all the same: a second BOM appended on its own was
+    /// missing from the tab, and ⌘S wrote the file three bytes short.
+    static func decodeAppended(_ bytes: Data, _ encoding: TextEncoding) -> String? {
+        if encoding.base == .utf8 {
+            guard TextCodec.isValidUTF8(bytes) else { return nil }
+            return bytes.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
+        }
+        return String(data: bytes, encoding: encoding.foundation)
     }
 
     /// Decodes the longest prefix of `bytes` that ends on a whole character:
