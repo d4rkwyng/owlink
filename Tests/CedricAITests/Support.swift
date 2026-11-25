@@ -344,13 +344,15 @@ func context(_ text: String = "let value = items.count + 1", gen: Int = 1, doc: 
 
 extension LocalModelClient {
     /// This client with a deadline (`withDeadline`) that never passes on
-    /// its own: it only ends when the request does, so the client's own
+    /// its own, and no timeout of URLSession's own on its requests
+    /// (`requestTimeout`): it only ends when the request does, so the client's own
     /// logic (the answer, an error, the policy), not how long a busy CI
     /// runner takes to schedule URLSession's work, decides the result. For
     /// tests whose point isn't the deadline; they carry a `.timeLimit` so
     /// a hang still ends. `asked` gets each deadline's length in seconds.
     func withoutRealDeadline(_ asked: Locked<[TimeInterval]>? = nil) -> LocalModelClient {
         var c = self
+        c.requestTimeout = .infinity
         c.deadlineSleep = { seconds in
             asked?.mutate { $0.append(seconds) }
             while true { try await Task.sleep(nanoseconds: 3_600 * 1_000_000_000) }

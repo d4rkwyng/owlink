@@ -307,8 +307,8 @@ final class OneShotHTTPServer: @unchecked Sendable {
             let c = accept(listener, nil, nil)
             guard c >= 0 else { return }
             defer { close(c) }
-            var tv = timeval(tv_sec: 5, tv_usec: 0)
-            setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            // No read timeout, as accept has none: a busy runner may send the
+            // request late, and the test's time limit bounds the wait.
             var got = [UInt8]()
             var buf = [UInt8](repeating: 0, count: 4096)
             while !String(decoding: got, as: UTF8.self).contains("\r\n\r\n") {
