@@ -60,6 +60,7 @@ extension DevChecks {
         let url2 = dir.appendingPathComponent("bigopen-2.log")
         let url3 = dir.appendingPathComponent("bigopen-3.log")
         let marker = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cedric-wait.bigopen\(getpid())").path
+        let marker2 = marker + "again"
         var arrived2: [EditorWindowController] = []
         var alerts = 0
         var dismissTimer: Timer?
@@ -168,6 +169,15 @@ extension DevChecks {
                 expect(app.backgroundReading == url2.standardizedFileURL, "…one at a time: the first is read, the second waits")
                 expect(FileManager.default.fileExists(atPath: marker), "the script waits")
                 try? FileManager.default.removeItem(at: url3)
+                // `cedric -w` on it again, now it is gone and still waiting
+                // its turn (0.5.4 QA, Codex review): the pending read's, not
+                // a new file's empty tab that would save over one put back.
+                FileManager.default.createFile(atPath: marker2, contents: nil)
+                openURL(app, "cedric://open?path=\(enc(url3.path))&wait=\(enc(marker2))")
+                expect(!app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == url3.standardizedFileURL },
+                       "a second open of the gone file while it waits makes no new-file tab")
+                expect(app.backgroundOpens.count == 2 && app.backgroundOpens[url3.standardizedFileURL] != nil,
+                       "…it waits on the read already pending", "\(app.backgroundOpens.count)")
                 // Its "couldn't open" alert is answered.
                 let dismiss = Timer(timeInterval: 0.2, repeats: true) { _ in
                     MainActor.assumeIsolated { if NSApp.modalWindow != nil { alerts += 1; NSApp.abortModal() } }
@@ -186,6 +196,7 @@ extension DevChecks {
                 expect(!app.tabs.contains { $0.doc.fileURL?.standardizedFileURL == url3.standardizedFileURL }, "the gone one has no tab")
                 expect(alerts == 1, "…and says so", "\(alerts)")
                 expect(!FileManager.default.fileExists(atPath: marker), "cedric -w on it returns (its marker is deleted)")
+                expect(!FileManager.default.fileExists(atPath: marker2), "…and so does the second (one alert for both)")
                 arrived2.first?.doc.markSaved()
             },
         ])

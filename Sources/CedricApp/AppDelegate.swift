@@ -370,7 +370,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let failed = {
             if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
         }
-        if FileManager.default.fileExists(atPath: path) {
+        let pendingStd = url.standardizedFileURL
+        // Already being read in the background (or open): that job's tab,
+        // or its failure, even if the file is gone meanwhile. Gone, it used
+        // to take the new-file branch below: an empty tab that saved over
+        // a file put back there, while the read's text was thrown away.
+        if backgroundOpens[pendingStd] != nil || FileManager.default.fileExists(atPath: path) {
             open(url, background: true, then: arrived, failed: failed)
         } else {
             // A new file: an empty tab that saves there.
