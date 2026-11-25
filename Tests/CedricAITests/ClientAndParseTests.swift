@@ -248,25 +248,38 @@ import CedricCore
 
     /// Every request carries `requestTimeout` as its own URLSession timeout
     /// when it's set (the tests that take time off the wall clock rely on
-    /// it), and its usual one when it isn't: `timeout` for a request or a
-    /// stream, 2 s for `enrich`'s best-effort lookups (here both of them:
-    /// LM Studio's list is missing, so Ollama's tags are asked too).
-    @Test(.timeLimit(.minutes(1))) func everyRequestCarriesItsOwnTimeout() async throws {
-        for override in [4321.5, nil] as [TimeInterval?] {
-            let server = StubServer()
-            server.json("/v1/models", ["data": [["id": "m"]]])
-            server.json("/v1/chat/completions", chatCompletion("ok"))
-            var client = LocalModelClient(baseURL: server.baseURL, timeout: 37, session: server.session).withoutRealDeadline()
-            client.requestTimeout = override
-            _ = try await client.listModels()
-            _ = try await client.chat(model: "m", messages: [], maxTokens: 1)
-            let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
-            #expect(acc.content == "ok")
-            let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
-            #expect(got == ["/v1/models \(override ?? 37)", "/api/v0/models \(override ?? 2)",
-                            "/api/tags \(override ?? 2)", "/v1/chat/completions \(override ?? 37)",
-                            "/v1/chat/completions \(override ?? 37)"])
-        }
+    /// it): `send` and both of `enrich`'s lookups (LM Studio's list is
+    /// missing here, so Ollama's tags are asked too).
+    ///
+    /// Few requests per test, one after another, and no short real timer:
+    /// on a starved pool each request can wait seconds for a thread (with
+    /// ten in one test, one run took the whole minute).
+    @Test(.timeLimit(.minutes(1))) func discoveryCarriesRequestTimeout() async throws {
+        let server = StubServer()
+        server.json("/v1/models", ["data": [["id": "m"]]])
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3_700, session: server.session).withoutRealDeadline()
+        client.requestTimeout = 4_321.5
+        let models = try await client.listModels()
+        #expect(models.map(\.id) == ["m"])
+        let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
+        #expect(got == ["/v1/models 4321.5", "/api/v0/models 4321.5", "/api/tags 4321.5"])
+    }
+
+    /// The same for a chat and a streamed chat; without `requestTimeout`
+    /// they keep `timeout` (an hour, so it can't fire here either).
+    @Test(.timeLimit(.minutes(1)), arguments: [4_321.5, nil] as [TimeInterval?])
+    func chatCarriesRequestTimeout(_ override: TimeInterval?) async throws {
+        let server = StubServer()
+        server.json("/v1/chat/completions", chatCompletion("ok"))
+        var client = LocalModelClient(baseURL: server.baseURL, timeout: 3_700, session: server.session).withoutRealDeadline()
+        client.requestTimeout = override
+        let reply = try await client.chat(model: "m", messages: [], maxTokens: 1)
+        let acc = try await client.chatStream(model: "m", messages: [], tools: nil, maxTokens: 1) { _ in }
+        #expect(reply.content == "ok")
+        #expect(acc.content == "ok")
+        let want = override ?? 3_700
+        let got = server.recordedTimeouts.map { "\($0.path) \($0.timeout)" }
+        #expect(got == ["/v1/chat/completions \(want)", "/v1/chat/completions \(want)"])
     }
 
     @Test(.timeLimit(.minutes(1))) func retriesWithoutSchemaOn400() async throws {
