@@ -10,6 +10,11 @@ final class EditorTextView: NSTextView {
     var showInvisibles = false { didSet { needsDisplay = true } }
     /// Limits continuous spell checking to comments, strings and prose (Spelling.swift).
     weak var spelling: EditorSpelling?
+    /// The text-checking types set aside while spell checking is off
+    /// (EditorSpelling.apply); nil while it is on.
+    var savedCheckingTypes: NSTextCheckingTypes?
+    /// AppKit's text-checking passes that reached this view (checks).
+    var textCheckingPasses = 0
     /// Misspellings the checker has marked (in scope), for the checks.
     var markedMisspellings: [NSRange] = []
     /// Grammar in prose (Grammar.swift): the issues' ranges, drawn as

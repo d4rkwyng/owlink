@@ -44,7 +44,20 @@ final class EditorSpelling {
         let on = Settings.shared.checkSpellingWhileTyping && !tab.extrasPaused && checksThisDocument
         let tv = tab.primaryTextView
         tv.spelling = self
+        // Back on: the checking types set aside below come back first.
+        if on, let saved = tv.savedCheckingTypes {
+            tv.enabledTextCheckingTypes = saved
+            tv.savedCheckingTypes = nil
+        }
         if tv.isContinuousSpellCheckingEnabled != on { tv.isContinuousSpellCheckingEnabled = on }
+        // Off: nothing left to check, so no AppKit text-checking pass
+        // (orthography, data detectors) about 1 s after every layout.
+        // AppKit's automatic text completion (bit 13 of the default
+        // types) goes too: on its own it still schedules that pass.
+        if !on, tv.enabledTextCheckingTypes != 0 {
+            tv.savedCheckingTypes = tv.enabledTextCheckingTypes
+            tv.enabledTextCheckingTypes = 0
+        }
     }
 
     /// Not data (JSON, YAML, TOML/INI/.env, XML, CSV/TSV): no underlines, no typo hints there.
@@ -139,6 +152,7 @@ extension EditorTextView {
                                             types checkingTypes: NSTextCheckingTypes,
                                             options: [NSSpellChecker.OptionKey: Any] = [:],
                                             orthography: NSOrthography, wordCount: Int) {
+        textCheckingPasses += 1
         guard let spelling else {
             super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options,
                                             orthography: orthography, wordCount: wordCount)
