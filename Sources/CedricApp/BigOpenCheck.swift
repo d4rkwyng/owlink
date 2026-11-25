@@ -48,7 +48,9 @@ extension DevChecks {
         var registered: [(tab: EditorWindowController, length: Int, whole: Bool)] = []
         AppDelegate.tabMadeForChecks = { t in
             guard t.doc.fileURL?.standardizedFileURL == std else { return }
-            registered.append((t, (t.text as NSString).length, t.text.utf8.count == originalBytes.count))
+            // The text itself, not its length: same-length corruption
+            // (a chunk read twice, one dropped) passed a length check.
+            registered.append((t, (t.text as NSString).length, Data(t.text.utf8) == originalBytes))
         }
         let t0 = DevHooks.now()
         let first = app.open(url, background: true) { arrived.append($0) }
