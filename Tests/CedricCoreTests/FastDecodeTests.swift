@@ -94,6 +94,14 @@ import Testing
               sourceLocation: SourceLocation = #_sourceLocation) {
         let data = Data(bytes)
         for enc in encodings {
+            // A leading UTF-8 BOM read as UTF-8: as `oneBOMOut`, not Foundation.
+            if Self.leadingBOMReadAsUTF8(bytes, as: enc) {
+                let rest = Data(bytes.dropFirst(3))
+                let raw = Reference.isValidUTF8(rest) ? String(decoding: rest, as: UTF8.self) : nil
+                oneBOMOut(bytes, as: enc, note, text: raw.map(Reference.normalize),
+                          ending: raw.map { Reference.detectLineEnding($0).0 } ?? .lf, sourceLocation: sourceLocation)
+                continue
+            }
             let new = TextCodec.decode(data, as: enc), old = Reference.decode(data, as: enc)
             let label = "\(note) as \(enc.map(\.rawValue) ?? "detected")"
             #expect((new == nil) == (old == nil), "\(label): nil-ness", sourceLocation: sourceLocation)
@@ -155,23 +163,36 @@ import Testing
     /// second one is text, U+FEFF), and the encoding is UTF-8 with BOM, so
     /// a save writes it back. Expected outright for text and encoding; the
     /// rest (line ending, mixed, binary, nil-ness) still as `Reference`.
-    func oneBOMOut(_ bytes: [UInt8], as enc: TextEncoding?, _ note: String, text: String, ending: LineEnding,
+    /// `text` nil: the bytes after the BOM aren't UTF-8, so nil.
+    func oneBOMOut(_ bytes: [UInt8], as enc: TextEncoding?, _ note: String, text: String?, ending: LineEnding,
                    sourceLocation: SourceLocation = #_sourceLocation) {
         let data = Data(bytes)
         let label = "\(note) as \(enc.map(\.rawValue) ?? "detected")"
         let new = TextCodec.decode(data, as: enc), old = Reference.decode(data, as: enc)
         #expect((new == nil) == (old == nil), "\(label): nil-ness", sourceLocation: sourceLocation)
-        guard let new = new else { Issue.record("\(label): nil", sourceLocation: sourceLocation); return }
+        #expect((new == nil) == (text == nil), "\(label): nil-ness as expected", sourceLocation: sourceLocation)
+        guard let new, text != nil else { return }
         #expect(new.text == text, "\(label): text", sourceLocation: sourceLocation)
         #expect(new.encoding == .utf8BOM, "\(label): encoding", sourceLocation: sourceLocation)
         #expect(new.lineEnding == ending, "\(label): ending", sourceLocation: sourceLocation)
         #expect(!new.encodingGuessed, "\(label): not a guess", sourceLocation: sourceLocation)
-        #expect(TextCodec.encode(new.text, encoding: new.encoding, lineEnding: new.lineEnding) == data,
+        #expect(TextCodec.encodeDocument(new.text, encoding: new.encoding, lineEnding: new.lineEnding,
+                                         lineBreaks: new.mixedLineEndings ? new.lineBreaks : nil) == data,
                 "\(label): saved as it was", sourceLocation: sourceLocation)
         guard let old else { return }
         #expect(new.lineEnding == old.lineEnding, "\(label): ending", sourceLocation: sourceLocation)
         #expect(new.mixedLineEndings == old.mixedLineEndings, "\(label): mixed", sourceLocation: sourceLocation)
         #expect(new.looksBinary == old.looksBinary, "\(label): binary", sourceLocation: sourceLocation)
+    }
+
+    /// A UTF-8 BOM at the start read as UTF-8 by Foundation in `Reference`
+    /// (whose BOM handling there differs by macOS): asked for as UTF-8, or
+    /// a second BOM after the one a UTF-8-with-BOM decode drops itself.
+    static func leadingBOMReadAsUTF8(_ bytes: [UInt8], as enc: TextEncoding?) -> Bool {
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        guard bytes.starts(with: bom) else { return false }
+        if enc == .utf8 { return true }
+        return (enc == nil || enc == .utf8BOM) && bytes.dropFirst(3).starts(with: bom)
     }
 
     /// BOMs (UTF-8, UTF-16 LE/BE), a second UTF-8 BOM, a BOM with "as
