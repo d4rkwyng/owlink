@@ -32,6 +32,9 @@ public final class FileTail: @unchecked Sendable {
     /// The last reset showed lossy text: appends after it aren't the
     /// file's bytes either, until the next faithful reset.
     private var lossy = false
+    /// Tests only: how many of the next reset reads fail (as a read error
+    /// would), on this tail alone.
+    private var failingResetReads = 0
 
     /// What the text shown after an event stands for.
     public struct Shown: Sendable, Equatable {
@@ -141,6 +144,9 @@ public final class FileTail: @unchecked Sendable {
     /// Checks the file now (the watcher calls this; tests may too).
     public func poll() { queue.async { [self] in check() } }
 
+    /// Tests only: the next `count` reset reads fail.
+    func failResetReads(_ count: Int) { queue.sync { failingResetReads = count } }
+
     /// How many of this process's file descriptors are open on `url`'s
     /// file (by its real path), for the tests and checks that a stopped
     /// tail leaves none behind.
@@ -224,13 +230,20 @@ public final class FileTail: @unchecked Sendable {
         if stamp.identity != identity || size < offset {
             // Replaced or truncated: start over.
             let replaced = stamp.identity != identity
-            identity = stamp.identity
             if replaced || source == nil { watch() }
             // Empty now (truncated to nothing, or rotated to a new empty
             // file) is a reset too: readToEnd says nil at the end, which
             // left the old text and offset in place.
             let data: Data
-            do { data = try fh.readToEnd() ?? Data() } catch { return }
+            do {
+                if failingResetReads > 0 { failingResetReads -= 1; throw CocoaError(.fileReadUnknown) }
+                data = try fh.readToEnd() ?? Data()
+            } catch { return }
+            // The new file is the one followed only once it is read: had
+            // its identity been taken before a failed read, the next check
+            // appended its bytes past the old offset to the old file's
+            // text, stamped as the new file (Sol round 3).
+            identity = stamp.identity
             // The same decode Follow starts with: a character cut in half
             // at the end (the writer still busy) waits for the next append.
             if let (d, used) = Self.decodeWhole(data, as: encoding) {

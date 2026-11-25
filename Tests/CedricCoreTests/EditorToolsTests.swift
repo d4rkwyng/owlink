@@ -796,6 +796,44 @@ import Testing
         #expect(first.1.stamp == DiskStamp.of(url))
     }
 
+    /// Sol round 3: a rotation whose reset read failed had already taken
+    /// the new file's identity, so the next check saw the same file and
+    /// appended the new file's bytes past the old offset to the old text,
+    /// stamped as the new file: ⌘S after stopping wrote that mix over it.
+    /// The identity is taken only once the reset read succeeds.
+    @Test func aRotationWhoseResetReadFailsIsResetLater() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(got.all.isEmpty)
+        // Rotated to a larger file; its first reset read fails.
+        tail.failResetReads(1)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("NEW FILE\nmore\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        tail.poll()
+        settle(tail, callbacks)
+        let events = got.all
+        #expect(!events.contains { if case .appended = $0.0 { return true } else { return false } },
+                "no part of the new file appended to the old text: \(events.map(\.0))")
+        let last = try #require(events.last)
+        #expect(last.0 == .reset("NEW FILE\nmore\n"), "the new file whole, once it reads")
+        #expect(last.1.bytes == 14)
+        #expect(last.1.stamp == DiskStamp.of(url))
+    }
+
     /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
     /// (its bytes counted as read), and the next good append stamped the
     /// whole file's size: ⌘S then dropped the skipped bytes with no
