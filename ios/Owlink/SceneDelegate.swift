@@ -135,24 +135,41 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 enum TestLaunch {
     static var active: Bool { ProcessInfo.processInfo.arguments.contains("-OwlinkOpen") }
 
-    static func documentToOpen() -> URL? {
+    @MainActor static func documentToOpen() -> URL? {
         let args = ProcessInfo.processInfo.arguments
         guard let i = args.firstIndex(of: "-OwlinkOpen"), i + 1 < args.count else { return nil }
         let name = args[i + 1]
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let url = docs.appendingPathComponent(name)
-        let fresh = args.contains("-OwlinkFreshSample")
+        // Once per process: a second window (New Window, ⌥⌘N) must not wipe
+        // the document, or its recovery record, under the first one's editor.
+        let fresh = claimFreshSample(requested: args.contains("-OwlinkFreshSample"))
         if fresh || !FileManager.default.fileExists(atPath: url.path),
            let sample = Bundle.main.url(forResource: (name as NSString).deletingPathExtension,
                                         withExtension: (name as NSString).pathExtension, subdirectory: "Samples") {
             if fresh {
-                prepareFreshSample(sample, at: url, recovery: SaveSafetyStores.recovery)
+                prepareFreshSample(sample, at: url, recovery: SaveSafetyStores.recovery, queue: SaveSafetyStores.queue)
             } else {
                 try? FileManager.default.copyItem(at: sample, to: url)
             }
         }
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
+
+    /// Whether `-OwlinkFreshSample` has been acted on in this process.
+    @MainActor private(set) static var freshSampleConsumed = false
+
+    /// True the first time it is asked with `requested` set, false after
+    /// (and whenever `requested` is false).
+    @MainActor static func claimFreshSample(requested: Bool) -> Bool {
+        guard requested, !freshSampleConsumed else { return false }
+        freshSampleConsumed = true
+        return true
+    }
+
+    #if DEBUG
+    @MainActor static func resetFreshSampleClaim() { freshSampleConsumed = false }
+    #endif
 
     /// `-OwlinkFreshSample`: puts the bundled `sample` at `url` as if it
     /// were new. An earlier test's unsaved text for that document (its
@@ -161,13 +178,38 @@ enum TestLaunch {
     /// so no "Owlink closed with unsaved changes… Restore?" comes up over
     /// the next test. Other documents' records are left alone, and launches
     /// without `-OwlinkFreshSample` keep the recovery offer as it is.
-    static func prepareFreshSample(_ sample: URL, at url: URL, recovery: RecoveryStore, now: Date = Date()) {
+    ///
+    /// The record is cleared only once the copy is in place and dated: a
+    /// failed fixture keeps it (and says so in the log). With `queue` (the
+    /// recovery stores' queue) the clear runs on it, after any write this
+    /// process already queued, so such a write can't bring the record back.
+    @discardableResult
+    static func prepareFreshSample(_ sample: URL, at url: URL, recovery: RecoveryStore,
+                                   queue: DispatchQueue? = nil, now: Date = Date()) -> Bool {
         let fm = FileManager.default
-        try? fm.removeItem(at: url)
-        try? fm.copyItem(at: sample, to: url)
-        try? fm.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+        do {
+            // Staged beside it first: a sample that can't be copied leaves
+            // the document as it was.
+            let staged = url.deletingLastPathComponent()
+                .appendingPathComponent(".fresh-\(UUID().uuidString)-\(url.lastPathComponent)")
+            try fm.copyItem(at: sample, to: staged)
+            do {
+                if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
+                try fm.moveItem(at: staged, to: url)
+            } catch {
+                try? fm.removeItem(at: staged)
+                throw error
+            }
+            try fm.setAttributes([.modificationDate: now], ofItemAtPath: url.path)
+        } catch {
+            NSLog("Owlink: -OwlinkFreshSample couldn't put %@ at %@ (%@); its recovery record is kept",
+                  sample.path, url.path, String(describing: error))
+            return false
+        }
         let paths = Set([url.standardizedFileURL.path, url.resolvingSymlinksInPath().standardizedFileURL.path])
-        for path in paths { recovery.clear(documentPath: path) }
+        let clear = { for path in paths { recovery.clear(documentPath: path) } }
+        if let queue { queue.sync(execute: clear) } else { clear() }
+        return true
     }
 }
 
