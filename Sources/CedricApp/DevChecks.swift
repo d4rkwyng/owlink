@@ -237,8 +237,11 @@ enum DevChecks {
         case "readable": readableWidthCheck(app)
         case "writingrestore": writingRestoreCheck(app)
         case "settings": settingsCheck(app)
+        case "splittyping": splitTypingCheck(app)
+        case "perfsafe": perfSafeCheck(app)
+        case "spell": spellTypesCheck(app)
         default:
-            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !bigFileCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
+            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
         }
     }
 
@@ -587,7 +590,182 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ])
+        ] + followHeldBytes(app) + followLineBreaks(app))
+    }
+
+    /// 0.5.4 QA (should round 2): Follow's appended text came with every
+    /// break as LF, and a rotation kept the previous file's odd breaks, so
+    /// an edit and ⌘S after Follow stopped rewrote the file's endings.
+    /// Each append and reset now brings its own breaks.
+    static func followLineBreaks(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let grows = write("follow-crlf-append.log", "one\n")
+        let rotates = write("follow-rotate.log", "p\nq\r\nr\n")
+        var tabs: [String: EditorWindowController] = [:]
+        func bytes(_ u: URL) -> String { String(decoding: (try? Data(contentsOf: u)) ?? Data(), as: UTF8.self) }
+        /// Stops Follow, types `s` at the end, saves: the file's bytes.
+        func stopTypeSave(_ name: String, _ url: URL, _ want: String) {
+            guard let tab = tabs[name] else { expect(false, "\(name): has its tab"); return }
+            tab.toggleFollow()
+            focus(tab)
+            tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+            type("!")
+            let saved = tab.save()
+            expect(saved && bytes(url) == want, "\(name): saved after Follow, each break as the file has it",
+                   "saved \(saved): \(bytes(url).debugDescription)")
+        }
+        return [
+            sync {
+                guard let tab = app.open(grows) else { expect(false, "follow-crlf-append.log opens"); return }
+                tabs["append"] = tab
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                let fh = try! FileHandle(forWritingTo: grows)
+                fh.seekToEndOfFile()
+                fh.write(Data("two\r\nthree\n".utf8))
+                fh.closeFile()
+                tab.tail?.poll()
+            },
+            waitFor("append: the CRLF line shows") { tabs["append"]?.text == "one\ntwo\nthree\n" },
+            sync {
+                // The notices know the file is mixed now (review 3: they
+                // kept the state from before the append).
+                let last = tabs["append"]?.lastLineEndingShown
+                expect(last?.mixed == true && last?.ending == .lf, "append: the mixed-endings notice follows the appended CRLF",
+                       "\(String(describing: last))")
+            },
+            sync { stopTypeSave("append", grows, "one\ntwo\r\nthree\n!") },
+            sync {
+                guard let tab = app.open(rotates) else { expect(false, "follow-rotate.log opens"); return }
+                tabs["rotate"] = tab
+                expect(tab.doc.mixedLineEndings, "rotate: the first file is mixed")
+                tab.toggleFollow()
+                _ = tab.tail?.isWatching
+                // Rotated to a plain LF file (another inode).
+                let next = dir.appendingPathComponent("follow-rotate.next")
+                try? Data("x\ny\nz\n".utf8).write(to: next)
+                _ = rename(next.path, rotates.path)
+                tab.tail?.poll()
+            },
+            waitFor("rotate: the new file shows") { tabs["rotate"]?.text == "x\ny\nz\n" },
+            sync {
+                expect(tabs["rotate"]?.doc.mixedLineEndings == false, "rotate: the new file's breaks, not the old file's")
+                stopTypeSave("rotate", rotates, "x\ny\nz\n!")
+            },
+        ]
+    }
+
+    /// Waits (polling every 50 ms, at most `seconds`) for `cond`; a
+    /// timeout is a failed check named `what`, and the run goes on.
+    static func waitFor(_ what: String, _ seconds: Double = 5, _ cond: @escaping () -> Bool) -> (@escaping () -> Void) -> Void {
+        { next in
+            let deadline = Date().addingTimeInterval(seconds)
+            @MainActor func poll() {
+                if cond() { next(); return }
+                guard Date() < deadline else { expect(false, "\(what) (waited \(seconds) s)"); next(); return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: poll)
+            }
+            poll()
+        }
+    }
+
+    /// Codex 0.5.4 review 2: a UTF-16 file with an odd byte count (the
+    /// writer mid-character) followed and then stopped: the tab showed
+    /// only the whole characters but was stamped with the whole file, so
+    /// ⌘S wrote it back without the last byte. Now the stamp covers only
+    /// the bytes shown and ⌘S asks. Once for Follow started on the odd
+    /// file, once for an odd append while following.
+    /// Review 3: the stamp is the one the tail read the bytes at, not the
+    /// path's when the event reaches the main thread (a same-size file
+    /// put there in between); and stopping Follow catches up off the
+    /// main thread.
+    static func followHeldBytes(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let u16 = { (s: String) in Data([0xFF, 0xFE]) + s.data(using: .utf16LittleEndian)! }
+        let started = dir.appendingPathComponent("odd-start.log"), appended = dir.appendingPathComponent("odd-append.log")
+        let raced = dir.appendingPathComponent("raced.log")
+        try? u16("one\n").write(to: started)
+        try? u16("one\n").write(to: appended)
+        try? Data("one\n".utf8).write(to: raced)
+        let odd = u16("one\nab").dropLast()   // half of "b"
+        var tabs: [String: EditorWindowController] = [:]
+        func addBytes(_ url: URL, _ bytes: Data) {
+            let fh = try! FileHandle(forWritingTo: url)
+            fh.seekToEndOfFile()
+            fh.write(bytes)
+            fh.closeFile()
+        }
+        /// Opens and follows `url` (its watcher armed before the step ends).
+        func follow(_ url: URL, _ name: String, before: () -> Void = {}) {
+            guard let tab = app.open(url) else { expect(false, "\(name) opens"); return }
+            tabs[name] = tab
+            before()
+            tab.toggleFollow()
+            _ = tab.tail?.isWatching   // its queue has run start()
+        }
+        /// Stop following, ⌘S: nothing written, the conflict sheet asks.
+        func stopAndSave(_ name: String, _ url: URL, _ want: String, _ onDisk: Data) {
+            guard let tab = tabs[name] else { expect(false, "\(name): has its tab"); return }
+            tab.toggleFollow()
+            expect(!tab.isFollowing, "\(name): Follow stopped")
+            expect(tab.text == want, "\(name): the tab shows what Follow showed", tab.text.debugDescription)
+            let saved = tab.save()
+            let now = (try? Data(contentsOf: url)) ?? Data()
+            expect(!saved && now == onDisk, "\(name): ⌘S doesn't write over bytes it never showed",
+                   "saved \(saved), \(now.count) bytes, want \(onDisk.count)")
+            expect(tab.window?.attachedSheet != nil || tab.diskBar != nil, "\(name): …it says the file differs")
+            if let sheet = tab.window?.attachedSheet { tab.window?.endSheet(sheet) }
+        }
+        let tail = odd.suffix(odd.count - u16("one\n").count)
+        return [
+            sync {
+                // Opened whole; the writer then adds "a" and half of "b".
+                follow(started, "started odd") { addBytes(started, tail) }
+                expect(tabs["started odd"]?.isFollowing == true && tabs["started odd"]?.text == "one\na",
+                       "Follow on an odd UTF-16 file shows the whole characters", (tabs["started odd"]?.text).debugDescription)
+            },
+            sync { stopAndSave("started odd", started, "one\na", odd) },
+            sync {
+                follow(appended, "appended odd")
+                expect(tabs["appended odd"]?.text == "one\n", "following the even file")
+                addBytes(appended, tail)
+            },
+            waitFor("appended odd: the whole characters show") { tabs["appended odd"]?.text == "one\na" },
+            sync { stopAndSave("appended odd", appended, "one\na", odd) },
+            sync {
+                // An append read by the tail, then (before its event
+                // reaches the main thread) the file rewritten in place at
+                // the same size: no event of its own (nothing appended),
+                // a new date. (FileTailTests race an atomic replace.)
+                follow(raced, "raced")
+                guard let tab = tabs["raced"], let t = tab.tail else { return }
+                addBytes(raced, Data("two\n".utf8))
+                t.poll()
+                _ = t.isWatching   // read and queued for the main thread
+                let read = DiskStamp.of(raced)
+                let fh = try! FileHandle(forWritingTo: raced)
+                fh.write(Data("ONE\nTWO\n".utf8))
+                fh.closeFile()
+                // Both writes can fall in one clock tick: the date moved on
+                // as a later write's would.
+                try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: raced.path)
+                expect(DiskStamp.changed(known: read, current: DiskStamp.of(raced)), "raced: the rewrite is a change on disk")
+            },
+            waitFor("raced: the append shows") { tabs["raced"]?.text == "one\ntwo\n" },
+            sync {
+                // Stopped and saved in one turn: the catch-up read (off
+                // the main thread) can't have landed.
+                stopAndSave("raced", raced, "one\ntwo\n", Data("ONE\nTWO\n".utf8))
+                expect(tabs["raced"]?.catchUpReads == 1, "raced: stopping Follow reads the file off the main thread",
+                       "\(tabs["raced"]?.catchUpReads ?? -1)")
+            },
+            waitFor("raced: the catch-up shows the file now") {
+                tabs["raced"]?.catchUpReads == 0 && tabs["raced"]?.text == "ONE\nTWO\n"
+            },
+            sync {
+                guard let tab = tabs["raced"] else { return }
+                expect(!tab.doc.isDirty && tab.diskBar == nil, "raced: …clean, no bar")
+                expect(tab.save(), "raced: ⌘S after the catch-up saves")
+            },
+        ]
     }
 
     // MARK: Open Recent

@@ -462,5 +462,77 @@ check "old session: the markdown tab is restored" "^tab: name=old.md"
 grep -q "^preview:" "$W/dump.txt" && { echo "session-check: FAIL an old session opened a preview" >&2; fail=1; } \
     || echo "session-check: OK   old session without previewShown leaves the preview closed"
 
+# 12. A file with mixed line endings, edited and not saved, then a crash:
+# its own line breaks come back from the unsaved buffer, even after the
+# file on disk was replaced by one with a single kind (never read again).
+export CEDRIC_SESSION_DIR="$W/session12"
+printf 'one\r\ntwo\nthree\rfour\r\n' > "$W/mixed.txt"
+env CEDRIC_OPEN="$W/mixed.txt" CEDRIC_TEST_TYPE="five" "$BIN" -ApplePersistenceIgnoreState YES >/dev/null 2>&1 &
+pid=$!
+# Killed only once the autosave is on disk: the session's entry for the
+# tab (unsaved, mixed) and its buffer with the edit and its own breaks
+# (a fixed sleep raced a slow launch). At most 20 s.
+saved12=no
+for _ in $(seq 1 80); do
+    if python3 -I - "$W/session12" "$W/mixed.txt" <<'PY12'
+import json, os, sys
+d, path = sys.argv[1], sys.argv[2]
+try:
+    s = json.load(open(os.path.join(d, "session.json")))
+except Exception:
+    sys.exit(1)
+for w in s.get("windows", []):
+    for t in w.get("tabs", []):
+        if t.get("path") == path and t.get("hasBuffer") and t.get("mixedLineEndings"):
+            try:
+                b = open(os.path.join(d, t["id"] + ".txt"), "rb").read()
+            except OSError:
+                sys.exit(1)
+            sys.exit(0 if b == b"one\r\ntwo\nthree\rfour\r\nfive" else 1)
+sys.exit(1)
+PY12
+    then saved12=yes; break; fi
+    sleep 0.25
+done
+kill -9 $pid; wait $pid 2>/dev/null || true
+if [ $saved12 = yes ]; then echo "session-check: OK   mixed: the unsaved buffer and its session entry were on disk before the crash"
+else echo "session-check: FAIL mixed: no unsaved buffer with its breaks on disk within 20 s" >&2; fail=1; fi
+printf 'one\ntwo\n' > "$W/mixed.txt"
+mkdir -p "$W/saveas12"
+env CEDRIC_SESSION_DUMP=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_TEST_SAVE_AS_DIR="$W/saveas12" "$BIN" -ApplePersistenceIgnoreState YES > "$W/dump.txt" 2>/dev/null || true
+cat "$W/dump.txt"
+check "mixed: the unsaved edit restored" "file=$W/mixed.txt dirty=true .*text=one\\\\ntwo\\\\nthree\\\\nfour\\\\nfive"
+if grep -qF 'breaks: name=mixed.txt saves="one\r\ntwo\nthree\rfour\r\nfive"' "$W/dump.txt"; then
+    echo "session-check: OK   mixed: each line break as it was, from the buffer, not the replaced file"
+else echo "session-check: FAIL mixed: restored breaks are '$(grep '^breaks: name=mixed.txt' "$W/dump.txt" || echo none)'" >&2; fail=1; fi
+# What Save As really wrote, read back from disk.
+if [ -f "$W/saveas12/mixed.txt" ] && cmp -s "$W/saveas12/mixed.txt" <(printf 'one\r\ntwo\nthree\rfour\r\nfive'); then
+    echo "session-check: OK   mixed: Save As after the restore writes each break as it was"
+else echo "session-check: FAIL mixed: Save As wrote '$(od -c "$W/saveas12/mixed.txt" 2>/dev/null | head -3 | tr -s ' ' || echo nothing)'" >&2; fail=1; fi
+
+# 13. A session saved before 0.5.4 (a date-only stamp) with unsaved text
+# for a file opened through a symbolic link: that date was the link's
+# own, so it can't tell which file it was. Restored, ⌘S asks first even
+# when the date matches the file the link points at now.
+export CEDRIC_SESSION_DIR="$W/session13"
+printf 'on disk\n' > "$W/legacy-target.md"
+ln -sf legacy-target.md "$W/legacy-link.md"
+python3 -I - "$W" <<'PY13'
+import os, json, uuid, sys
+w = sys.argv[1]
+d = os.path.join(w, "session13")
+os.makedirs(d, exist_ok=True)
+tid = str(uuid.uuid4()).upper()
+open(os.path.join(d, tid + ".txt"), "w").write("unsaved\n")
+mtime = os.stat(os.path.join(w, "legacy-target.md")).st_mtime - 978307200  # since 2001, as JSONEncoder writes dates
+tab = {"id": tid, "path": os.path.join(w, "legacy-link.md"), "hasBuffer": True, "encoding": "utf8", "lineEnding": "lf",
+       "selectionLocation": 0, "selectionLength": 0, "topLine": 0, "fileModified": mtime}
+json.dump({"version": 1, "untitledCounter": 0, "windows": [{"tabs": [tab], "selectedTab": 0}]},
+          open(os.path.join(d, "session.json"), "w"))
+PY13
+dump
+check "legacy link: the unsaved text restored" "file=$W/legacy-link.md dirty=true .*text=unsaved"
+check "legacy link: a date-only stamp through a link is unverified, ⌘S asks first" "^stamp: name=legacy-link.md asks=true"
+
 [ $fail = 0 ] && echo "session-check: all OK"
 exit $fail

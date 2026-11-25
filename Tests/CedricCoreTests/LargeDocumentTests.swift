@@ -29,6 +29,29 @@ import Testing
         #expect(LargeDocument.reason(for: index) == .size)
     }
 
+    /// The setup decision is exactly `reason(for:)` and `needsChunks(_:)`:
+    /// empty, short, at and one past each threshold, a long line in a
+    /// short or size-large document, and size-large with short lines.
+    @Test func setupDecisionMatchesReasonAndNeedsChunks() {
+        let t = LargeDocument.lineThreshold, big = LargeDocument.sizeThreshold
+        var texts = ["", "a", "a\nb\n", Self.line(t), Self.line(t + 1), Self.line(t - 1) + "\n", Self.line(t) + "\n",
+                     "a\n" + Self.line(t - 1) + "\nb\n", "a\n" + Self.line(t + 1) + "\nb\n",
+                     String(repeating: "x\n", count: t / 2 + 1), Self.line(636_293)]
+        let row = Self.line(99) + "\n"
+        let rows = String(repeating: row, count: big / 100)
+        texts += [rows, rows + Self.line(big - rows.utf16.count), rows + Self.line(big - rows.utf16.count + 1),
+                  rows + "a" + Self.line(t + 1), rows + Self.line(t)]
+        var seen = Set<String>()
+        for text in texts {
+            let index = LineIndex(text as NSString)
+            let d = LargeDocument.setupDecision(for: index)
+            #expect(d.reason == LargeDocument.reason(for: index) && d.needsChunks == LargeDocument.needsChunks(index),
+                    "\(index.length) units, longest \(index.longestLine)")
+            seen.insert("\(d.reason?.rawValue ?? "none") \(d.needsChunks)")
+        }
+        #expect(seen == ["none false", "longLine true", "size false", "size true"], "\(seen)")
+    }
+
     @Test func anEditCanMakeItLarge() {
         // A paste of a long line into a small document: only the edited
         // lines are looked at.

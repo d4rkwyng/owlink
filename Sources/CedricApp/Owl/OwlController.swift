@@ -18,9 +18,17 @@ final class OwlOverlay: NSView {
         return v === self ? nil : v
     }
 
+    private var laidOutSize: NSSize?
+
     override func layout() {
         super.layout()
         controller?.layoutViews()
+        // A resized pane (a split opened or closed) moves the owl while
+        // the caret stays put.
+        if laidOutSize != bounds.size {
+            if laidOutSize != nil { controller?.paneLayoutChanged() }
+            laidOutSize = bounds.size
+        }
     }
 }
 
@@ -575,26 +583,82 @@ final class OwlController: NSObject, NSPopoverDelegate {
         owl.needsDisplay = true
     }
 
+    /// A caret look put off until TextKit has finished an edit.
+    private(set) var caretLookPending = false
+    /// Calls that came from inside an edit (checks).
+    private(set) var caretMovesInEdit = 0
+    /// Caret looks that got as far as placing the caret (checks).
+    private(set) var caretLooks = 0
+    /// Calls to paneLayoutChanged: a resize or a new viewport laid out (checks).
+    private(set) var layoutRechecks = 0
+    /// The primary pane was resized (a split opened or closed), or TextKit
+    /// laid out a new viewport there (its viewport lags a scroll or a
+    /// resize by a layout pass). The caret is looked at again once that
+    /// pass is over, from the fragments it laid out: a caret judged out of
+    /// view from the old viewport may be in this one, and a resized pane
+    /// moves the owl while the caret stays put.
+    func paneLayoutChanged() {
+        layoutRechecks += 1
+        guard !caretLookPending else { return }
+        caretLookPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.caretLookPending = false
+            self.caretMoved()
+        }
+    }
+
     /// Fades the owl (and the bubble) while the caret is close to them.
     /// `byUser`: a selection change or typing (ends the just-turned-on hold).
     func caretMoved(byUser: Bool = false) {
         if byUser { holdVisible = false }
         guard !holdVisible || bubble != nil, !isDragging else { return }
         guard let tv = tab?.primaryTextView, let window = tv.window else { return }
+        // TextKit fixes the selection up from inside an edit
+        // (NSTextContentStorage synchronizeTextLayoutManagers), so the
+        // window hears of the new selection before the layout manager has
+        // taken the edit in. Any layout question then runs on half-updated
+        // layout: in a chunked long line, after the split was closed,
+        // ensureLayoutForBounds walked the chunks over and over and never
+        // came back (0.5.4 QA hang). Look once the edit is over.
+        if tv.textLayoutManager?.textContentManager?.hasEditingTransaction == true {
+            caretMovesInEdit += 1
+            guard !caretLookPending else { return }
+            caretLookPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.caretLookPending = false
+                self.caretMoved()
+            }
+            return
+        }
         let sel = tv.selectedRange()
         let caretAt = sel.location + sel.length
-        // In a chunked long line (large mode), a caret scrolled out of
-        // view can't be near the owl. (Asking TextKit for its rect lays
-        // out up to it, which re-anchored the viewport there: scrolling
-        // stalled near the caret.)
+        // In a chunked long line (large mode), a caret outside what TextKit
+        // has laid out for the viewport is out of view: it can't be near
+        // the owl. Never ask for more layout here: the caret's rect lays out
+        // up to it (that re-anchored the viewport there: scrolling stalled
+        // near the caret), and the visible rect's fragments can mean
+        // estimating across millions of characters.
+        // TextKit's viewport can lag (a scroll, a split resize):
+        // paneLayoutChanged looks again once the new one is laid out.
+        // Inside it, firstRect is answered from fragments already laid out.
+        // The viewport's end is the start of the next chunk, maybe not laid
+        // out: asking firstRect there laid it out on the main thread. So in
+        // chunks the rect comes only from fragments already laid out
+        // (laidOutCaretRect), and none is out of view.
+        let offscreen = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
         let caret: NSRect
-        if tv.contentStorage?.chunkLimit != nil, let vis = tv.visibleCharacterRange, !NSLocationInRange(caretAt, NSRange(location: vis.location, length: vis.length + 1)) {
-            caret = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
+        if tv.contentStorage?.chunkLimit != nil {
+            caret = tv.laidOutCaretRect(at: caretAt).map { overlay.convert($0, from: tv) } ?? offscreen
         } else {
+            // No rect: the caret is clipped out of the pane (a split just
+            // shrank it under the caret). Out of view, not "don't know":
+            // returning kept a fade that no longer fit.
             let screen = tv.firstRect(forCharacterRange: NSRange(location: caretAt, length: 0), actualRange: nil)
-            guard screen != .zero else { return }
-            caret = overlay.convert(window.convertFromScreen(screen), from: nil)
+            caret = screen == .zero ? offscreen : overlay.convert(window.convertFromScreen(screen), from: nil)
         }
+        caretLooks += 1
         let nearOwl = caret.insetBy(dx: -28, dy: -18).intersects(owl.frame)
         let nearBubble = bubble.map { caret.insetBy(dx: -12, dy: -12).intersects($0.frame) } ?? false
         if nearOwl != owlFaded {
@@ -678,8 +742,45 @@ final class OwlController: NSObject, NSPopoverDelegate {
     /// `own`: the hint is about this tab's document (its actions apply);
     /// otherwise (its document is closed) only OK.
     func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
+        guard tab != nil else { return }
+        let replay = OwlCoordinator.replay(shown, document: document)
+        // "Looks like JSON. Format it?" in an open document: checked again
+        // on the text now, off the main thread (formatting up to 64 KB, or
+        // the long one-line file's shape check over the whole file, can
+        // take a while; Sol round 3: that scan ran in the click), and
+        // shown only if the tab still holds that text: its text revision
+        // unchanged (EditorDocument.textRevision), not the whole text
+        // compared again on the main thread when the check comes back.
+        guard replay.hint.id == RulesHintProvider.jsonID else { showReplay(replay, own: own); return }
+        guard let document, let doc = tab?.doc else {
+            showReplay(RulesHintProvider.pastJSON(closed: true, source: replay.hint.source), own: own); return
+        }
+        let revision = doc.textRevision
+        let text = document.copy() as! String
+        let source = replay.hint.source
+        replayToken &+= 1
+        let token = replayToken
+        pendingRechecks += 1
+        Task { @MainActor [weak self] in
+            let r = await Task.detached(priority: .userInitiated) { RulesHintProvider.resolveJSONReplay(replay, document: text) }.value
+            guard let self else { return }
+            self.pendingRechecks -= 1
+            // Another bubble came (or went) meanwhile: that one stays.
+            guard self.replayToken == token, let tab = self.tab else { return }
+            // Nothing has touched the text since it was copied.
+            let current = tab.doc === doc && doc.textRevision == revision
+            self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
+        }
+    }
+
+    /// Bumped by every bubble shown or hidden: a JSON replay checked off
+    /// the main thread is dropped if anything came first.
+    private var replayToken = 0
+    /// JSON replays being checked (checks).
+    private(set) var pendingRechecks = 0
+
+    private func showReplay(_ r: OwlCoordinator.Replay, own: Bool) {
         guard let tab else { return }
-        let r = OwlCoordinator.replay(shown, document: document)
         replays += 1
         presented = (r.hint, r.documentRange, r.expected)
         let buttons = own ? buttons(for: r.hint, tab: tab, isStale: r.isStale)
@@ -729,6 +830,13 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let hub = OwlHub.shared
         if hint.id == RulesHintProvider.letterID {
             return [.init(title: String(localized: "No thanks, I’m an owl"), isDefault: false) { [weak self] in self?.hideBubble() }]
+        }
+        if RulesHintProvider.isPastJSONHint(hint) {
+            // "Looked like JSON (the text has changed since).": asks nothing.
+            return [.init(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() },
+                    .init(title: String(localized: "Don’t show again"), isDefault: false) { [weak self] in
+                        hub.coordinator.neverShowAgain(hint.id); self?.hideBubble()
+                    }]
         }
         if hint.id == Self.askIntroID {
             return [.init(title: String(localized: "Ask Cedric…"), isDefault: true) { [weak self, weak tab] in
@@ -837,6 +945,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     private func showBubble(_ hint: OwlHint, buttons: [OwlBubble.Button]) {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         let onlyButton = hint.id == RulesHintProvider.letterID
         let grammar = GrammarMap.isGrammarHint(hint.id)
@@ -858,6 +967,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     func hideBubble() {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         bubble = nil
         presented = nil
@@ -892,7 +1002,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         guard let p = presented, let range = p.range, let expected = p.expected, let rep = p.hint.replacement,
               let tv = tab?.textView, let storage = tv.textStorage else { return false }
         let ns = tv.string as NSString
-        guard NSMaxRange(range) <= ns.length, ns.substring(with: range) == expected else {
+        guard RulesHintProvider.stillApplies(p.hint, range: range, expected: expected, in: ns) else {
             NSSound.beep()
             return false
         }
@@ -984,10 +1094,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         for r in recent {
             // A button that looks like the label it was: shows the hint again.
             let time = f.string(from: r.date)
-            var spoken = "\(time), \(r.hint.title)"
-            if let d = r.hint.detail, !d.isEmpty {
-                spoken += ". " + (d.count > 120 ? String(d.prefix(120)) + "…" : d)
-            }
+            let spoken = OwlCoordinator.spokenRecent(time: time, title: r.hint.title, detail: r.hint.detail)
             let row = OwlRecentHintRow(text: "\(time)  \(r.hint.title)", accessibilityText: spoken,
                                        toolTip: r.hint.detail) { [weak self] in self?.replay(r) }
             stack.addArrangedSubview(row)

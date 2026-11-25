@@ -10,6 +10,11 @@ final class EditorTextView: NSTextView {
     var showInvisibles = false { didSet { needsDisplay = true } }
     /// Limits continuous spell checking to comments, strings and prose (Spelling.swift).
     weak var spelling: EditorSpelling?
+    /// The text-checking types set aside while spell checking is off
+    /// (EditorSpelling.apply); nil while it is on.
+    var savedCheckingTypes: NSTextCheckingTypes?
+    /// AppKit's text-checking passes that reached this view (checks).
+    var textCheckingPasses = 0
     /// Misspellings the checker has marked (in scope), for the checks.
     var markedMisspellings: [NSRange] = []
     /// Grammar in prose (Grammar.swift): the issues' ranges, drawn as
@@ -24,6 +29,19 @@ final class EditorTextView: NSTextView {
     var occurrenceRanges: [NSRange] = []
     var markRanges: [NSRange] = []
     var bracketRanges: [NSRange] = []
+    /// Told of every change before NSTextView registers its undo for it
+    /// (EditorWindowController.textWillChange).
+    var beforeChange: (([NSValue]) -> Void)?
+
+    override func shouldChangeText(inRanges affectedRanges: [NSValue], replacementStrings: [String]?) -> Bool {
+        beforeChange?(affectedRanges)
+        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    override func shouldChangeText(in affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        beforeChange?([NSValue(range: affectedCharRange)])
+        return super.shouldChangeText(in: affectedCharRange, replacementString: replacementString)
+    }
 
     // MARK: Multiple carets (MultiCaretEditing.swift)
 
@@ -164,6 +182,107 @@ final class EditorTextView: NSTextView {
         return NSRange(location: start, length: max(0, offset(of: vr.endLocation) - start))
     }
 
+    /// Called after TextKit laid out a different viewport: other
+    /// characters, or the same ones somewhere else (a scroll or a resize
+    /// within one chunk of a long line). The owl rechecks the caret from
+    /// the fragments just laid out: its viewport answer can lag a scroll
+    /// or a split resize.
+    var onViewportLayout: (() -> Void)?
+    private var lastLaidOutViewport: (range: NSRange?, bounds: CGRect)?
+    /// Viewport passes reported (checks); those TextKit's own word reported.
+    private(set) var viewportLayoutsReported = 0
+    private(set) var viewportLayoutsReportedByTextKit = 0
+
+    override func layout() {
+        super.layout()
+        installViewportProxy()
+        viewportLaidOut()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installViewportProxy()
+    }
+
+    /// TextKit's own word that a viewport pass is over
+    /// (`textViewportLayoutControllerDidLayout`). It can come outside
+    /// NSView.layout(): a scroll lays out the new viewport without one.
+    /// NSTextView, the controller's delegate, has the method, but only the
+    /// macOS 27 SDK declares it on NSTextView, so an override neither built
+    /// with an older SDK nor passed the availability check for macOS 14.
+    /// Instead the controller's delegate is a proxy that hands every call
+    /// to the text view's own delegate methods and hears `didLayout` on
+    /// its way through.
+    private var viewportProxy: ViewportDelegateProxy?
+
+    private func installViewportProxy() {
+        guard let controller = textLayoutManager?.textViewportLayoutController else { return }
+        if let proxy = viewportProxy, controller.delegate === proxy { return }
+        // A new controller (layout manager replaced): wrap its delegate,
+        // which is this view; never wrap a proxy in a proxy.
+        guard let original = controller.delegate, !(original is ViewportDelegateProxy) else { return }
+        let proxy = ViewportDelegateProxy(original: original) { [weak self] in
+            guard let self else { return }
+            if self.viewportLaidOut() { self.viewportLayoutsReportedByTextKit += 1 }
+        }
+        viewportProxy = proxy
+        controller.delegate = proxy
+    }
+
+    /// Reports a viewport pass that laid out something new; true if it did.
+    @discardableResult fileprivate func viewportLaidOut() -> Bool {
+        guard let tlm = textLayoutManager else { return false }
+        let now = (range: viewportCharacterRange, bounds: tlm.textViewportLayoutController.viewportBounds)
+        if let last = lastLaidOutViewport, last.range == now.range, last.bounds == now.bounds { return false }
+        lastLaidOutViewport = now
+        viewportLayoutsReported += 1
+        onViewportLayout?()
+        return true
+    }
+
+    /// The caret's rect at `offset` (view coordinates), from the layout
+    /// fragments TextKit has already laid out for the viewport; nil when
+    /// the caret isn't in one, or isn't in the visible rect. Never asks
+    /// for layout: firstRect lays out up to the caret, and a caret at the
+    /// start of the next, unlaid chunk of a long line had it lay out (and
+    /// estimate) on the main thread.
+    ///
+    /// A caret at a fragment's end belongs to the fragment after it (the
+    /// next chunk, the next paragraph), so the viewport's end is out of it
+    /// (nil), unless it is the end of the document, where it ends the last
+    /// fragment. Reading it from the fragment before placed it there.
+    func laidOutCaretRect(at offset: Int) -> NSRect? {
+        guard let tlm = textLayoutManager, let tcm = tlm.textContentManager,
+              let vr = tlm.textViewportLayoutController.viewportRange else { return nil }
+        let vStart = self.offset(of: vr.location), vEnd = self.offset(of: vr.endLocation)
+        let docEnd = self.offset(of: tcm.documentRange.endLocation)
+        let atDocEnd = offset == docEnd && vEnd == docEnd
+        guard offset >= vStart, offset < vEnd || atDocEnd else { return nil }
+        var hit: (frag: NSTextLayoutFragment, local: Int)?
+        tlm.enumerateTextLayoutFragments(from: vr.location, options: []) { frag in
+            let start = self.offset(of: frag.rangeInElement.location)
+            guard start <= offset else { return false }
+            let end = self.offset(of: frag.rangeInElement.endLocation)
+            if offset < end || atDocEnd && offset == end {
+                hit = frag.state == .layoutAvailable ? (frag, offset - start) : nil
+                return false
+            }
+            return end < vEnd || atDocEnd
+        }
+        guard let (frag, local) = hit else { return nil }
+        let lines = frag.textLineFragments
+        // Inside a line, else (the document's end) the last line it ends.
+        guard let line = lines.first(where: { NSLocationInRange(local, $0.characterRange) })
+                ?? (atDocEnd ? lines.last(where: { NSMaxRange($0.characterRange) == local }) : nil)
+        else { return nil }
+        let at = line.locationForCharacter(at: local)
+        let box = line.typographicBounds
+        let origin = frag.layoutFragmentFrame.origin
+        let rect = NSRect(x: origin.x + box.minX + at.x + textContainerOrigin.x, y: origin.y + box.minY + textContainerOrigin.y,
+                          width: 1, height: max(1, box.height))
+        return rect.intersects(visibleRect) ? rect : nil
+    }
+
     /// The layout fragment at the top of the visible rect (laid out if
     /// needed), else the viewport's first: TextKit's viewport can lag a
     /// scroll by a layout pass.
@@ -175,10 +294,14 @@ final class EditorTextView: NSTextView {
     }
 
     /// Characters from the top of the visible rect to its bottom, joined
-    /// with TextKit's viewport range.
+    /// with TextKit's viewport range. Inside an edit (a selection change
+    /// TextKit makes while it takes the edit in) only the viewport range:
+    /// laying out there runs on half-updated layout (it never came back
+    /// in a chunked long line).
     var visibleCharacterRange: NSRange? {
         guard let tlm = textLayoutManager else { return nil }
         var result = viewportCharacterRange
+        if tlm.textContentManager?.hasEditingTransaction == true { return result }
         let top = CGPoint(x: 0, y: max(0, visibleRect.minY - textContainerOrigin.y))
         let bottom = CGPoint(x: 0, y: max(0, visibleRect.maxY - textContainerOrigin.y))
         if let a = tlm.textLayoutFragment(for: top), let b = tlm.textLayoutFragment(for: bottom) ?? tlm.textLayoutFragment(for: top) {
@@ -950,5 +1073,48 @@ final class GutterView: NSView {
         }
         // The last empty line after a trailing newline has no fragment in
         // some TextKit versions; number it from the previous one.
+    }
+}
+
+/// The viewport layout controller's delegate in front of the text view's
+/// own (EditorTextView.installViewportProxy): every call goes on to it
+/// (the protocol's methods, and any other selector TextKit sends its
+/// delegate, by forwarding), and `didLayout` also runs `onDidLayout`.
+/// The original is held weakly: it is the text view, which holds this.
+final class ViewportDelegateProxy: NSObject, NSTextViewportLayoutControllerDelegate {
+    private weak var original: (any NSTextViewportLayoutControllerDelegate)?
+    private let onDidLayout: () -> Void
+
+    init(original: any NSTextViewportLayoutControllerDelegate, onDidLayout: @escaping () -> Void) {
+        self.original = original
+        self.onDidLayout = onDidLayout
+    }
+
+    func viewportBounds(for textViewportLayoutController: NSTextViewportLayoutController) -> CGRect {
+        original?.viewportBounds(for: textViewportLayoutController) ?? .zero
+    }
+
+    func textViewportLayoutController(_ textViewportLayoutController: NSTextViewportLayoutController,
+                                      configureRenderingSurfaceFor textLayoutFragment: NSTextLayoutFragment) {
+        original?.textViewportLayoutController(textViewportLayoutController, configureRenderingSurfaceFor: textLayoutFragment)
+    }
+
+    func textViewportLayoutControllerWillLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        original?.textViewportLayoutControllerWillLayout?(textViewportLayoutController)
+    }
+
+    func textViewportLayoutControllerDidLayout(_ textViewportLayoutController: NSTextViewportLayoutController) {
+        original?.textViewportLayoutControllerDidLayout?(textViewportLayoutController)
+        onDidLayout()
+    }
+
+    override func responds(to aSelector: Selector!) -> Bool {
+        if super.responds(to: aSelector) { return true }
+        return (original as? NSObject)?.responds(to: aSelector) ?? false
+    }
+
+    override func forwardingTarget(for aSelector: Selector!) -> Any? {
+        if let target = original as? NSObject, target.responds(to: aSelector) { return target }
+        return super.forwardingTarget(for: aSelector)
     }
 }

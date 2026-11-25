@@ -37,6 +37,17 @@ public enum LargeDocument {
         return nil
     }
 
+    /// Setting up a whole text (open, reload, restore, a replace-all):
+    /// `reason(for:)` and `needsChunks(_:)` together, with one walk of the
+    /// line starts (`longestLine`) instead of one each. The same
+    /// thresholds, strictly over; `.size` before `.longLine`.
+    public static func setupDecision(for index: LineIndex) -> (reason: Reason?, needsChunks: Bool) {
+        guard index.length > lineThreshold else { return (nil, false) }
+        let longLine = index.longestLine > lineThreshold
+        if index.length > sizeThreshold { return (.size, longLine) }
+        return (longLine ? .longLine : nil, longLine)
+    }
+
     /// After an edit: lines `lines` changed. Cheap (the edited lines only),
     /// for typing and pasting into a document that wasn't large.
     public static func reason(afterEditOf lines: Range<Int>, in index: LineIndex) -> Reason? {

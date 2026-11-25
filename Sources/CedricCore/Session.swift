@@ -21,6 +21,12 @@ public struct SessionTab: Codable, Equatable, Sendable {
     /// file changed on disk since, the buffer still wins (it is the
     /// user's unsaved work) but the tab says so.
     public var fileModified: Date?
+    /// The file's size and identity with `fileModified` (DiskStamp); nil
+    /// in sessions saved before 0.5.4, which then compare the date only.
+    public var fileSize: Int?
+    public var fileID: DiskStamp.FileID?
+    /// What the file looked like when the buffer was saved.
+    public var diskStamp: DiskStamp { DiskStamp(modified: fileModified, size: fileSize, identity: fileID) }
     /// Bookmarked lines (0-based); nil in sessions saved before bookmarks.
     public var bookmarks: [Int]?
     /// Indentation picked for this tab (nil: the file's own or the default).
@@ -56,6 +62,14 @@ public struct SessionTab: Codable, Equatable, Sendable {
     public var certificate: OfficeTabState?
     /// A text tab whose name looks like a PDF; older sessions omit this.
     public var explicitText: Bool?
+    /// The encoding was Owlink's guess (not valid UTF-8) and the user
+    /// hadn't kept it or picked one. Only `true` is stored.
+    public var encodingGuessed: Bool?
+    /// The file mixed line endings and saving kept each one (LineBreaks):
+    /// the buffer holds the text with those breaks written in, read back
+    /// against `lineEnding` (the most common kind), never from the file.
+    /// Only `true` is stored.
+    public var mixedLineEndings: Bool?
 
     /// View › Writing Mode's switches for this tab (nil: both off, and in
     /// sessions saved before 0.4.0).
@@ -73,6 +87,7 @@ public struct SessionTab: Codable, Equatable, Sendable {
     public init(id: UUID = UUID(), path: String? = nil, untitledName: String? = nil, hasBuffer: Bool = false,
                 encoding: TextEncoding = .utf8, lineEnding: LineEnding = .lf, language: Language? = nil,
                 selectionLocation: Int = 0, selectionLength: Int = 0, topLine: Int = 0, fileModified: Date? = nil,
+                fileSize: Int? = nil, fileID: DiskStamp.FileID? = nil,
                 bookmarks: [Int]? = nil, indentation: Indentation? = nil, previewDetached: Bool? = nil, previewFrame: String? = nil,
                 previewShown: Bool? = nil, previewWidth: Double? = nil, pdf: PDFTabState? = nil,
                 image: ImageTabState? = nil, office: OfficeTabState? = nil, certificate: OfficeTabState? = nil, folds: [Int]? = nil,
@@ -88,6 +103,8 @@ public struct SessionTab: Codable, Equatable, Sendable {
         self.selectionLength = selectionLength
         self.topLine = topLine
         self.fileModified = fileModified
+        self.fileSize = fileSize
+        self.fileID = fileID
         self.bookmarks = bookmarks
         self.indentation = indentation
         self.previewDetached = previewDetached

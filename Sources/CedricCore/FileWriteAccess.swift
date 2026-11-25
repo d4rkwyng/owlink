@@ -126,12 +126,65 @@ public enum DocumentWrite {
     /// a read-only file of the same name. A folder that refuses the new
     /// file (0555) gets the checked file written in place instead, still
     /// through the open folder (`overwrite`).
-    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default) throws {
-        try write(data, to: url, fileManager: fm, afterCheck: nil)
+    ///
+    /// Returns the stamp of the file it wrote (from the open file, before
+    /// the rename): the date, size and identity a tab should compare with
+    /// later, not whatever the path shows by the time it asks.
+    ///
+    /// `expecting`: the stamp the tab knows the file by (its ⌘S conflict
+    /// check passed against it). The file the writer itself finds and
+    /// checks, through the open folder, must still match it, or nothing is
+    /// written (EBUSY, "replaced or changed while saving"): a link pointed
+    /// at another writable file after the tab's check otherwise had the
+    /// save go there. Nil (Save As, a copy, an export): no such check.
+    ///
+    /// `seen`: the file exactly as that ⌘S check saw it (DiskStamp.Exact
+    /// from the same `stat`). The writer's file must match it to the
+    /// nanosecond, size, inode and change time included, or nothing is
+    /// written (EBUSY): `expecting` alone is compared within the session
+    /// file's millisecond tolerance, so a same-size edit in between could
+    /// pass and become the baseline the rename is then checked against.
+    @discardableResult
+    public static func write(_ data: Data, to url: URL, fileManager fm: FileManager = .default,
+                             expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: fm, afterCheck: nil, expecting: expecting, seen: seen)
+    }
+
+    /// Failures the tests (and the app's check builds) inject into the
+    /// in-place save (`overwrite`).
+    public struct Faults: Sendable {
+        /// Write this many bytes of the new text, then fail with EIO.
+        public var failWriteAfter: Int?
+        /// Fail putting the file back with EIO.
+        public var failRestore = false
+        /// Skip the file-size limit check (and the preallocation, which
+        /// can also fail with EFBIG), so the kernel's limit is hit part
+        /// way through the write itself.
+        public var skipSizeLimit = false
+        /// The atomic save's last look before the rename (`nothingElseAt`)
+        /// fails with these errors, one per attempt, before it really looks.
+        public var preRenameStatErrors: [Int32] = []
+        public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false,
+                    preRenameStatErrors: [Int32] = []) {
+            self.failWriteAfter = failWriteAfter
+            self.failRestore = failRestore
+            self.skipSizeLimit = skipSizeLimit
+            self.preRenameStatErrors = preRenameStatErrors
+        }
+    }
+
+    /// `write(_:to:)` with `faults` injected into an in-place save (check
+    /// builds: a save that fails part way through the file, in the app).
+    @discardableResult
+    public static func write(_ data: Data, to url: URL, faults: Faults, expecting: DiskStamp? = nil,
+                             seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
+        try write(data, to: url, fileManager: .default, afterCheck: nil, faults: faults, expecting: expecting, seen: seen)
     }
 
     /// `afterCheck`: tests only, runs between the check and the write.
-    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?) throws {
+    @discardableResult
+    static func write(_ data: Data, to url: URL, fileManager fm: FileManager, afterCheck: (() -> Void)?,
+                      faults: Faults? = nil, expecting: DiskStamp? = nil, seen: DiskStamp.Exact? = nil) throws -> DiskStamp {
         // Again only if the target became a link while it was resolved.
         for _ in 0..<3 {
             let target = SafePaths.writeTarget(for: url, fileManager: fm)
@@ -144,13 +197,22 @@ public enum DocumentWrite {
             if let reason = FileWriteAccess.blocked(in: dir, name: name, checked: &checked) {
                 throw ReadOnlyFileError(url: url, reason: reason)
             }
+            // The file found here is the one the tab checked (a file that
+            // has gone since is written anew, as a save of a deleted file is).
+            if let expecting, checked.st_ino != 0, DiskStamp.changed(known: expecting, current: DiskStamp(checked)) {
+                throw writeError(EBUSY, url)
+            }
+            // …and exactly the file that check saw: any write since, even
+            // the same size within the tolerance above, is a change.
+            if let seen, checked.st_ino != 0, !seen.matches(checked) {
+                throw writeError(EBUSY, url)
+            }
             afterCheck?()
-            if try replace(name, in: dir, with: data, url: url) { return }
+            if let stamp = try replace(name, in: dir, with: data, url: url, checked: checked, faults: faults) { return stamp }
             // The folder refuses a new file (0555, or search-only 0100):
             // write the checked file in place, through the same folder.
             guard checked.st_ino != 0 else { throw writeError(EACCES, url) }
-            try overwrite(name, in: dir, checked: checked, with: data, url: url)
-            return
+            return try overwrite(name, in: dir, checked: checked, with: data, url: url, faults: faults)
         }
         throw CocoaError(.fileWriteUnknown, userInfo: [NSURLErrorKey: url, NSFilePathErrorKey: url.path])
     }
@@ -174,18 +236,20 @@ public enum DocumentWrite {
     }
 
     /// Writes `data` to a new file in `dir` and renames it over `name`.
-    /// False, with nothing written, when the folder refuses a new file
-    /// (`overwrite` then writes the checked file in place).
-    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL) throws -> Bool {
+    /// The new file's stamp; nil, with nothing written, when the folder
+    /// refuses a new file (`overwrite` then writes the checked file in place).
+    private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL, checked: stat,
+                                faults: Faults?) throws -> DiskStamp? {
         let temp = ".owlink-save-\(UUID().uuidString)"
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
         guard fd >= 0 else {
             let code = errno
-            if code == EACCES || code == EPERM { return false }
+            if code == EACCES || code == EPERM { return nil }
             throw writeError(code, url)
         }
         var renamed = false
         defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
+        var written = stat()
         do {
             // What an atomic save keeps of the file it replaces.
             // Only a regular file's, and never a blocking open: a FIFO
@@ -199,61 +263,328 @@ public enum DocumentWrite {
                     close(old)
                 }
             }
-            try writeAll(data, to: fd, url: url)
+            try writeAll(data, to: fd, at: 0, url: url)
+            guard fstat(fd, &written) == 0 else { throw writeError(errno, url) }
         } catch {
             close(fd)
             throw error
         }
         guard close(fd) == 0 else { throw writeError(errno, url) }
+        // Just before the rename: no other file put in the checked one's
+        // place meanwhile (EBUSY). Narrows the window to the rename itself.
+        guard try nothingElseAt(name, in: dir, checked: checked, url: url, failing: faults?.preRenameStatErrors ?? [])
+        else { throw writeError(EBUSY, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
-        return true
+        return DiskStamp(written)
+    }
+
+    /// Whether what is at `name` now may be replaced by a save that
+    /// checked `checked` (`st_ino` 0: nothing was there): the same file
+    /// as checked, gone, or something that holds no text (a FIFO, a
+    /// socket). A link, a regular file other than the checked one
+    /// (another app's file, one a link was pointed at), or the checked
+    /// file written since (another app's in-place edit while the new file
+    /// was written: same inode, other size or times) may hold someone's
+    /// data: not replaced.
+    ///
+    /// Only "no such file" (ENOENT) is gone. Any other failure to look
+    /// (EIO on a network volume, EACCES on a folder whose permissions
+    /// changed) throws that error and nothing is renamed: 0.5.4 before
+    /// review 3 took every failure for "gone" and renamed over whatever
+    /// was there unchecked. An interrupted call (EINTR) is tried again.
+    /// `failing`: errors to fail with first, one per attempt (Faults).
+    static func nothingElseAt(_ name: String, in dir: Int32, checked: stat, url: URL,
+                              failing: [Int32] = []) throws -> Bool {
+        var now = stat()
+        var faults = failing[...]
+        while true {
+            let code: Int32
+            if let f = faults.popFirst() {
+                code = f
+            } else if fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0 {
+                break
+            } else {
+                code = errno
+            }
+            if code == EINTR { continue }
+            if code == ENOENT { return true }
+            throw writeError(code, url)
+        }
+        switch now.st_mode & S_IFMT {
+        case S_IFLNK: return false
+        case S_IFREG:
+            return checked.st_ino != 0 && unchanged(now, since: checked)
+        default: return true
+        }
+    }
+
+    /// Whether `now` is the file `checked` looked at, not written since:
+    /// the same device and inode, size, modification and change times.
+    static func unchanged(_ now: stat, since checked: stat) -> Bool {
+        now.st_ino == checked.st_ino && now.st_dev == checked.st_dev
+            && now.st_size == checked.st_size
+            && now.st_mtimespec.tv_sec == checked.st_mtimespec.tv_sec
+            && now.st_mtimespec.tv_nsec == checked.st_mtimespec.tv_nsec
+            && now.st_ctimespec.tv_sec == checked.st_ctimespec.tv_sec
+            && now.st_ctimespec.tv_nsec == checked.st_ctimespec.tv_nsec
     }
 
     /// The save into a folder that refuses a new file (a writable file
     /// in a 0555 folder): not atomic, but bound to the checked file. It
-    /// is opened for writing through the same open folder, never through
-    /// a link (`O_NOFOLLOW`), and only if it is still the file the check
-    /// looked at (device and inode) is it truncated and written. Opening
-    /// for writing is itself the kernel's permission check on that very
-    /// file, so a read-only file put in its place can't be opened, and a
-    /// different writable one fails the identity match: either way the
-    /// save fails with an error and nothing else is touched. The open
-    /// doesn't block (`O_NONBLOCK`): a FIFO put there with no reader
-    /// fails it (ENXIO) instead of stalling the save before the
-    /// regular-file check. (0.5.3 fell back to Foundation's atomic write
-    /// by path here.)
-    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL) throws {
-        let fd = openat(dir, name, O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    /// is opened through the same open folder, never through a link
+    /// (`O_NOFOLLOW`), and only if it is still the file the check looked
+    /// at (device and inode) is it written. Opening for writing is itself
+    /// the kernel's permission check on that very file, so a read-only
+    /// file put in its place can't be opened, and a different writable
+    /// one fails the identity match: either way the save fails with an
+    /// error and nothing else is touched. The open doesn't block
+    /// (`O_NONBLOCK`): a FIFO put there fails the regular-file check
+    /// instead of stalling the save. (0.5.3 fell back to Foundation's
+    /// atomic write by path here.)
+    ///
+    /// A failed write never leaves the file destroyed. 0.5.4 before QA
+    /// truncated it to nothing first, so a full disk (ENOSPC), a quota or
+    /// a file-size limit part way through left it empty or holding the
+    /// start of the new text. Now:
+    ///
+    /// - The save is refused before anything is written when the new text
+    ///   is larger than the process's file-size limit (RLIMIT_FSIZE; the
+    ///   app catches SIGXFSZ, `catchFileSizeSignal`, so a limit hit
+    ///   anyway is an EFBIG error, not a crash), when the volume has less
+    ///   free space than the new text, or can't preallocate the growth.
+    /// - The file as it is is copied to a recovery copy in a private
+    ///   temporary folder (`makeRecoveryCopy`, 4 MB at a time) and the
+    ///   copy is flushed to disk. If the copy can't be made, or the file
+    ///   is shorter than it was or changed while it was copied, nothing is
+    ///   written.
+    /// - The new bytes are written over the old ones, the file is cut to
+    ///   the new length and flushed; then the recovery copy is deleted.
+    /// - If any of that fails, the file is put back from the recovery copy
+    ///   (bytes and length) and the error is thrown. If putting it back
+    ///   fails too, the recovery copy is kept and the error's recovery
+    ///   suggestion says where it is.
+    ///
+    /// Not covered (0.6): another program writing the file during the
+    /// save; its changes can be lost, as with any in-place write.
+    private static func overwrite(_ name: String, in dir: Int32, checked: stat, with data: Data, url: URL,
+                                  faults: Faults?) throws -> DiskStamp {
+        let fd = openat(dir, name, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw writeError(errno, url) }
-        do {
-            var st = stat()
-            guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
-            guard st.st_mode & S_IFMT == S_IFREG, st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else {
-                throw writeError(EBUSY, url)
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw writeError(errno, url) }
+        guard st.st_dev == checked.st_dev, st.st_ino == checked.st_ino else { throw writeError(EBUSY, url) }
+        // The checked file written in place since the check (same inode,
+        // other size or times: another app's edit): the recovery copy
+        // below would take their edit as the file to put back, and the
+        // save would overwrite it. Checked before preallocating, which
+        // can touch the times itself.
+        guard unchanged(st, since: checked) else { throw writeError(EBUSY, url) }
+        // The checked file itself is a pipe, socket or device: nothing a
+        // save can write a document into (not "changed while saving").
+        guard st.st_mode & S_IFMT == S_IFREG else { throw writeError(ENXIO, url) }
+        // The checked regular file: back to ordinary blocking I/O.
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
+        if faults?.skipSizeLimit != true, !withinFileSizeLimit(data.count) { throw writeError(EFBIG, url) }
+        var fs = statfs()
+        if fstatfs(fd, &fs) == 0, !enoughSpace(for: data.count, in: fs) { throw writeError(ENOSPC, url) }
+        let oldCount = Int(st.st_size)
+        if data.count > oldCount, faults?.skipSizeLimit != true {
+            var store = fstore_t(fst_flags: UInt32(F_ALLOCATEALL), fst_posmode: F_PEOFPOSMODE,
+                                 fst_offset: 0, fst_length: off_t(data.count - oldCount), fst_bytesalloc: 0)
+            if fcntl(fd, F_PREALLOCATE, &store) == -1, errno == ENOSPC || errno == EDQUOT || errno == EFBIG {
+                throw writeError(errno, url)
             }
-            // The checked regular file: back to ordinary blocking writes.
-            let flags = fcntl(fd, F_GETFL)
-            guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw writeError(errno, url) }
-            guard ftruncate(fd, 0) == 0 else { throw writeError(errno, url) }
-            try writeAll(data, to: fd, url: url)
-        } catch {
-            close(fd)
-            throw error
         }
-        guard close(fd) == 0 else { throw writeError(errno, url) }
+        // Changed while it was copied (another program writing it): the
+        // copy may not be the file, so nothing is written. (The baseline
+        // is taken after preallocating, which can touch the times.)
+        var before = stat(), now = stat(), written = stat()
+        guard fstat(fd, &before) == 0, before.st_size == st.st_size else { throw writeError(EBUSY, url) }
+        let recovery = try makeRecoveryCopy(of: fd, count: oldCount, name: name, url: url)
+        guard fstat(fd, &now) == 0, now.st_size == before.st_size,
+              now.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, now.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+              now.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec, now.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else {
+            removeRecoveryCopy(recovery)
+            throw writeError(EBUSY, url)
+        }
+        do {
+            if let n = faults?.failWriteAfter {
+                try writeAll(data.prefix(n), to: fd, at: 0, url: url)
+                throw writeError(EIO, url)
+            }
+            try writeAll(data, to: fd, at: 0, url: url)
+            if data.count < oldCount, ftruncate(fd, off_t(data.count)) != 0 { throw writeError(errno, url) }
+            guard fsync(fd) == 0, fstat(fd, &written) == 0 else { throw writeError(errno, url) }
+        } catch {
+            // From here on the error says Owlink wrote into the file, and
+            // how it left it (DiskConflict: "Owlink's last save … didn't finish").
+            do {
+                if faults?.failRestore == true { throw writeError(EIO, url) }
+                try restore(fd, from: recovery, count: oldCount, url: url)
+            } catch {
+                throw leftFile(fd, keptRecoveryCopy(recovery, after: error, url: url))
+            }
+            removeRecoveryCopy(recovery)
+            throw leftFile(fd, error)
+        }
+        removeRecoveryCopy(recovery)
+        return DiskStamp(written)
     }
 
-    private static func writeAll(_ data: Data, to fd: Int32, url: URL) throws {
+    /// For the app to call once at launch: a write past the file-size
+    /// limit (RLIMIT_FSIZE) then fails with EFBIG, which a save can
+    /// recover from, instead of SIGXFSZ ending the app.
+    ///
+    /// Caught by a handler that does nothing, not ignored (SIG_IGN): an
+    /// ignored signal stays ignored across exec, so git and every other
+    /// program Owlink starts ran with SIGXFSZ ignored; a caught one goes
+    /// back to its default action in the new program. The handler touches
+    /// no state at all (it may run on any thread, at any point): a count
+    /// it kept was an unsynchronized read-modify-write. Tests that need to
+    /// see the signal arrive install their own, signal-safe, handler.
+    public static func catchFileSizeSignal() {
+        var action = sigaction()
+        action.__sigaction_u.__sa_handler = { _ in }
+        sigemptyset(&action.sa_mask)
+        action.sa_flags = 0
+        _ = sigaction(SIGXFSZ, &action, nil)
+    }
+
+    /// Whether a `count`-byte file is within this process's file-size limit.
+    static func withinFileSizeLimit(_ count: Int) -> Bool {
+        var lim = rlimit()
+        // RLIM_INFINITY, a macro Swift doesn't import.
+        let infinity = (rlim_t(1) << 63) - 1
+        guard getrlimit(RLIMIT_FSIZE, &lim) == 0, lim.rlim_cur < infinity else { return true }
+        return UInt64(count) <= UInt64(lim.rlim_cur)
+    }
+
+    /// Copies the first `count` bytes of `fd` to a new file named `name`
+    /// in a new private (0700) folder in this user's temporary folder,
+    /// and flushes it to disk. Throws, leaving nothing behind, if the copy
+    /// fails or `fd` holds fewer than `count` bytes.
+    /// `parent` is the temporary folder (a test's own, to see that nothing is left in it).
+    static func makeRecoveryCopy(of fd: Int32, count: Int, name: String, url: URL,
+                                 parent: String = NSTemporaryDirectory()) throws -> URL {
+        var template = Array((parent as NSString).appendingPathComponent("owlink-recovery-XXXXXX").utf8CString)
+        guard mkdtemp(&template) != nil else { throw writeError(errno, url) }
+        let folder = URL(fileURLWithPath: String(cString: template), isDirectory: true)
+        let copy = folder.appendingPathComponent(name)
+        do {
+            let out = open(copy.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard out >= 0 else { throw writeError(errno, url) }
+            defer { close(out) }
+            let copied = try copyBytes(from: fd, to: out, count: count, url: url)
+            guard copied == count else { throw writeError(EBUSY, url) }
+            guard fsync(out) == 0 else { throw writeError(errno, url) }
+        } catch {
+            removeRecoveryCopy(copy)
+            throw error
+        }
+        return copy
+    }
+
+    /// Puts the file back from its recovery copy: its bytes, its length, flushed.
+    private static func restore(_ fd: Int32, from recovery: URL, count: Int, url: URL) throws {
+        let src = open(recovery.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard src >= 0 else { throw writeError(errno, url) }
+        defer { close(src) }
+        guard try copyBytes(from: src, to: fd, count: count, url: url) == count else { throw writeError(EIO, url) }
+        guard ftruncate(fd, off_t(count)) == 0, fsync(fd) == 0 else { throw writeError(errno, url) }
+    }
+
+    private static func removeRecoveryCopy(_ copy: URL) {
+        _ = unlink(copy.path)
+        _ = rmdir(copy.deletingLastPathComponent().path)
+    }
+
+    /// The key under which a failed save's error carries the stamp of
+    /// the file as that save left it (`fileLeft(by:)`).
+    static let leftStampKey = "OwlinkSaveLeftFile"
+
+    /// The file as a failed save left it, when that save wrote into it
+    /// (an in-place write that stopped part way, put back or not): read
+    /// from the open file by the writer itself. Nil when the save failed
+    /// before touching the file, whatever happened to the file meanwhile.
+    public static func fileLeft(by error: Error) -> DiskStamp? {
+        (error as NSError).userInfo[leftStampKey] as? DiskStamp
+    }
+
+    /// `error`, carrying the stamp of `fd` now (`fileLeft(by:)`).
+    private static func leftFile(_ fd: Int32, _ error: Error) -> Error {
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { return error }
+        let ns = error as NSError
+        var info = ns.userInfo
+        info[leftStampKey] = DiskStamp(st)
+        return CocoaError(CocoaError.Code(rawValue: ns.domain == NSCocoaErrorDomain ? ns.code : CocoaError.fileWriteUnknown.rawValue),
+                          userInfo: info)
+    }
+
+    /// The save's error, saying where the recovery copy is: the file
+    /// couldn't be put back, so the copy is the only whole one left.
+    private static func keptRecoveryCopy(_ copy: URL, after error: Error, url: URL) -> Error {
+        let ns = error as NSError
+        var info = ns.userInfo
+        info[NSURLErrorKey] = url
+        info[NSFilePathErrorKey] = url.path
+        info[NSLocalizedRecoverySuggestionErrorKey] = String(localized: """
+            Owlink couldn’t put “\(url.lastPathComponent)” back as it was before the save. \
+            A copy of it as it was is at \(copy.path). Your text is still in the tab.
+            """)
+        info["OwlinkRecoveryCopy"] = copy.path
+        return CocoaError(CocoaError.Code(rawValue: ns.domain == NSCocoaErrorDomain ? ns.code : CocoaError.fileWriteUnknown.rawValue),
+                          userInfo: info)
+    }
+
+    /// Whether the volume `fs` describes has room for a `count`-byte
+    /// save. The whole new text must fit in the space this user may use
+    /// (`f_bavail`), as it must for the usual replace: a copy-on-write
+    /// volume (APFS) needs new blocks even to write over old ones.
+    static func enoughSpace(for count: Int, in fs: statfs) -> Bool {
+        let free = UInt64(fs.f_bavail).multipliedReportingOverflow(by: UInt64(fs.f_bsize))
+        return free.overflow || free.partialValue >= UInt64(count)
+    }
+
+    /// How much `copyBytes` reads and writes at a time: 256 read/write
+    /// pairs per GB rather than the 16,384 a 64 KB buffer took.
+    static let copyChunk = 1 << 22
+
+    /// Copies up to `count` bytes from the start of `src` to the start of
+    /// `dst`, `copyChunk` (4 MB) at a time; how many it copied (fewer if
+    /// `src` ends).
+    static func copyBytes(from src: Int32, to dst: Int32, count: Int, url: URL) throws -> Int {
+        var buffer = Data(count: min(count, copyChunk))
+        var done = 0
+        while done < count {
+            let want = min(buffer.count, count - done)
+            let n = buffer.withUnsafeMutableBytes { pread(src, $0.baseAddress, want, off_t(done)) }
+            if n < 0 {
+                if errno == EINTR { continue }
+                throw writeError(errno, url)
+            }
+            if n == 0 { break }
+            try writeAll(buffer.prefix(n), to: dst, at: off_t(done), url: url)
+            done += n
+        }
+        return done
+    }
+
+    private static func writeAll(_ data: Data, to fd: Int32, at offset: off_t, url: URL) throws {
         try data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
             guard let base = buf.baseAddress else { return }
             var done = 0
             while done < buf.count {
-                let n = Darwin.write(fd, base + done, buf.count - done)
+                let n = pwrite(fd, base + done, buf.count - done, offset + off_t(done))
                 if n < 0 {
                     if errno == EINTR { continue }
                     throw writeError(errno, url)
                 }
+                // No progress and no error: fail rather than loop forever.
+                if n == 0 { throw writeError(EIO, url) }
                 done += n
             }
         }

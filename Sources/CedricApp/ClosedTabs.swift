@@ -23,14 +23,14 @@ extension AppDelegate {
         guard needsBuffer(t) else { return true }
         let d = t.doc
         if !sessionSaving {
-            closedTexts[d.id] = t.text
+            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
             return true
         }
         if d.sessionChangeCount == d.changeCount, FileManager.default.fileExists(atPath: store.bufferURL(d.id).path) { return true }
-        let text = t.text, id = d.id, store = self.store
+        let text = t.text, breaks = d.lineBreaks, id = d.id, store = self.store
         var failure: Error?
         sessionQueue.sync {
-            do { try store.writeBuffer(id, text: text) } catch { failure = error }
+            do { try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks)) } catch { failure = error }
         }
         if let failure {
             FileHandle.standardError.write(Data("session: closing tab, buffer write failed: \(failure)\n".utf8))
@@ -58,20 +58,22 @@ extension AppDelegate {
         // A tab closed without windowShouldClose (programmatically): write now.
         if keepText, !keepTextForClose(t) {
             // Couldn't write it: keep it in memory at least, for this run.
-            closedTexts[d.id] = t.text
+            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
         }
         if !keepText { store.removeBuffer(d.id) }
         // Kept for ⇧⌘T, but the file wasn't written: say so once (ClosedNotice.swift).
         if keepText, d.fileURL != nil, d.isDirty { noteClosedUnsaved(id: d.id, name: d.displayName) }
         let sel = t.primaryTextView.selectedRange()
-        let entry = SessionTab(id: d.id, path: d.fileURL?.path, untitledName: d.fileURL == nil ? d.untitledName : nil,
+        var entry = SessionTab(id: d.id, path: d.fileURL?.path, untitledName: d.fileURL == nil ? d.untitledName : nil,
                                hasBuffer: keepText, encoding: d.encoding, lineEnding: d.lineEnding,
                                language: d.languageIsManual ? d.language : nil,
                                selectionLocation: sel.location, selectionLength: sel.length, topLine: t.primaryTopLine,
                                fileModified: d.fileModified,
+                               fileSize: d.diskStamp.size, fileID: d.diskStamp.identity,
                                bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                indentation: d.indentation, folds: t.sessionFolds, split: t.sessionSplit,
                                writing: t.sessionWriting, wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil)
+        d.noteFormat(in: &entry)
         let r = ClosedTabs.push(entry, onto: closedTabs)
         closedTabs = r.list
         for gone in r.dropped {
@@ -107,15 +109,18 @@ extension AppDelegate {
         if url == nil, openNames.contains(name) { name = UntitledNames.next(open: openNames, base: name) }
         let doc = EditorDocument(id: st.id, fileURL: url, untitledName: name)
         doc.indentation = st.indentation
+        let fromBuffer = text != nil
         if text == nil, let url, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             text = d.text
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.fileModified = st.fileModified
+            // A pre-0.5.4 date-only stamp through a link: unverified (⌘S asks).
+            doc.noteDisk(url.map { DiskStamp.restored(st.diskStamp, for: $0) } ?? st.diskStamp)
         }
+        if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else {
             // The file has gone and there was no unsaved text.
             NSSound.beep()

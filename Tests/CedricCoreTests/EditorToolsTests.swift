@@ -375,6 +375,121 @@ import Testing
         #expect(events.all.last == .appended("after\n"))
     }
 
+    /// Lets every check the tail has queued run, and every event it sent
+    /// reach `events`: no sleeps. The tail's queue is serial (`isWatching`
+    /// waits on it), and so is the callback queue.
+    func settle(_ tail: FileTail, _ callbacks: DispatchQueue) {
+        _ = tail.isWatching
+        callbacks.sync {}
+    }
+
+    func appendBytes(_ url: URL, _ bytes: [UInt8]) throws {
+        let fh = try FileHandle(forWritingTo: url)
+        try fh.seekToEnd()
+        try fh.write(contentsOf: Data(bytes))
+        try fh.close()
+    }
+
+    /// Follow's first read and a reset share one decode: a character cut
+    /// in half at the end is left out, and the offset stops before it.
+    @Test func decodeWholeLeavesAHalfCharacterOut() throws {
+        let le = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61, 0x00, 0x62]), as: .utf16LE))
+        #expect(le.0.text == "a" && le.1 == 4)
+        let be = try #require(FileTail.decodeWhole(Data([0xFE, 0xFF, 0x00, 0x61, 0x00]), as: .utf16BE))
+        #expect(be.0.text == "a" && be.1 == 4)
+        let bomAndHalf = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61]), as: .utf16LE))
+        #expect(bomAndHalf.0.text == "" && bomAndHalf.1 == 2)
+        let even = try #require(FileTail.decodeWhole(Data([0xFF, 0xFE, 0x61, 0x00]), as: .utf16LE))
+        #expect(even.0.text == "a" && even.1 == 4)
+        // UTF-8 cut inside "é" (c3 a9).
+        let u8 = try #require(FileTail.decodeWhole(Data([0x61, 0xC3]), as: .utf8))
+        #expect(u8.0.text == "a" && u8.1 == 1)
+    }
+
+    /// Codex 0.5.4 review: Follow started on a UTF-16 file cut mid-character
+    /// failed to decode it (odd UTF-16 is refused), kept the stale text,
+    /// and followed from the full size, so the next append was read out of
+    /// alignment. Started where decodeWhole stops, the tail completes the
+    /// character from the append.
+    @Test func followStartedOnAUTF16FileCutMidCharacter() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        // BOM, "ab", half of "c".
+        let data = Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00, 0x63])
+        try data.write(to: url)
+        let (first, used) = try #require(FileTail.decodeWhole(data, as: .utf16LE))
+        #expect(first.text == "ab" && used == 6)
+        let events = Events()
+        let callbacks = DispatchQueue(label: "t")
+        // As the app starts it: the half character counts as read, held.
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(used), held: UInt64(data.count - used),
+                            callbackQueue: callbacks, stamped: { e, _ in events.add(e) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(events.all.isEmpty, "the half character alone shows nothing")
+        try appendBytes(url, [0x00, 0x64, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("cd")])
+    }
+
+    /// An append of an odd number of UTF-16 bytes keeps the odd byte for
+    /// the next one (Foundation decodes it by dropping the byte).
+    @Test func aUTF16AppendWithAnOddByteKeepsIt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        try Data([0xFF, 0xFE]).write(to: url)
+        let events = Events()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 2, callbackQueue: callbacks) { events.add($0) }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, [0x61, 0x00, 0x62])
+        tail.poll()
+        settle(tail, callbacks)
+        try appendBytes(url, [0x00, 0x63, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("bc")])
+    }
+
+    /// A followed UTF-16 log replaced by one cut mid-character (odd size,
+    /// the writer still busy): the reset shows the whole characters and
+    /// keeps the half for the next append.
+    @Test func aUTF16ResetCutMidCharacterKeepsTheHalf() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let start = Data([0xFF, 0xFE]) + "start\n".data(using: .utf16LittleEndian)!
+        try start.write(to: url)
+        let events = Events()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: UInt64(start.count), callbackQueue: callbacks) { events.add($0) }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(events.all.isEmpty)
+
+        // Replaced (a new file renamed over it): BOM, "ab", half of "c".
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x61, 0x00, 0x62, 0x00, 0x63]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        try #require(events.all == [.reset("ab")])
+        try appendBytes(url, [0x00, 0x64, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.reset("ab"), .appended("cd")])
+    }
+
     /// 0.2.1 review M5: closing a followed tab stops its tail (EditorWindowController.windowWillClose);
     /// a stopped tail, or one freed without `stop`, holds no descriptor or timer.
     @Test func stopLeavesNoDescriptor() async throws {
@@ -442,5 +557,702 @@ import Testing
         try fh.close()
         await waitFor(events, count: 2)
         #expect(events.all == [.appended("a"), .appended("é\n")])
+    }
+
+    final class Shown: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [UInt64?] = []
+        func add(_ n: UInt64?) { lock.lock(); list.append(n); lock.unlock() }
+        var all: [UInt64?] { lock.lock(); defer { lock.unlock() }; return list }
+    }
+
+    /// Codex 0.5.4 review 2: Follow stamped its tab with the whole file's
+    /// size while the text left out bytes the tail held back, so stopping
+    /// Follow and pressing ⌘S wrote the shorter text over them. Each event
+    /// now says how many bytes the text shown stands for: never the held
+    /// back half character or trailing CR.
+    @Test func eachEventSaysHowManyBytesItShows() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        try Data([0xFF, 0xFE]).write(to: url)
+        let events = Events(), shown = Shown()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 2, callbackQueue: callbacks) { e, n in
+            events.add(e); shown.add(n)
+        }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // "a" and half of "b": 5 bytes on disk, 4 shown.
+        try appendBytes(url, [0x61, 0x00, 0x62])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a")])
+        #expect(shown.all == [4], "the odd byte isn't shown")
+        // The rest of "b" and a CR that may start a CRLF: 8 on disk, 6 shown.
+        try appendBytes(url, [0x00, 0x0D, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("b")])
+        #expect(shown.all == [4, 6], "the held CR isn't shown")
+        try appendBytes(url, [0x0A, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all == [.appended("a"), .appended("b"), .appended("\n")])
+        #expect(shown.all == [4, 6, 10], "all of it once the CRLF is whole")
+
+        // Replaced by a file cut mid-character: the reset shows 4 of 5.
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x63, 0x00, 0x64]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all.last == .reset("c"))
+        #expect(shown.all.last == 4)
+    }
+
+    /// A reset that can't decode shows UTF-8 with replacements: not the
+    /// file's bytes, nor are appends after it.
+    @Test func aLossyResetShowsNoBytes() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let start = Data([0xFF, 0xFE, 0x61, 0x00])
+        try start.write(to: url)
+        let events = Events(), shown = Shown()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, encoding: .utf16LE, offset: 4, callbackQueue: callbacks) { e, n in
+            events.add(e); shown.add(n)
+        }
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // A lone low surrogate before two more characters: not UTF-16,
+        // even with the last character or two cut off.
+        let next = dir.appendingPathComponent("next.log")
+        try Data([0xFF, 0xFE, 0x00, 0xDC, 0x61, 0x00, 0x62, 0x00]).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        try #require(events.all.count == 1 && Self.isReset(events.all[0]))
+        #expect(shown.all == [nil])
+        try appendBytes(url, [0x62, 0x00])
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(events.all.count == 2)
+        #expect(shown.all == [nil, nil])
+    }
+
+    /// The stamp Follow gives its tab: with bytes left out, the file no
+    /// longer matches it, so ⌘S asks instead of writing over them.
+    @Test func aStampShowingFewerBytesIsAChange() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("u16.log")
+        let odd = Data([0xFF, 0xFE, 0x61, 0x00, 0x62])
+        try odd.write(to: url)
+        let (_, used) = try #require(FileTail.decodeWhole(odd, as: .utf16LE))
+        let stamp = try #require(DiskStamp.of(url))
+        #expect(DiskStamp.changed(known: stamp.showing(UInt64(used)), current: DiskStamp.of(url)))
+        #expect(DiskStamp.changed(known: stamp.showing(nil), current: DiskStamp.of(url)))
+        #expect(!DiskStamp.changed(known: stamp.showing(UInt64(odd.count)), current: DiskStamp.of(url)))
+        #expect(stamp.showing(UInt64(odd.count)) == stamp)
+    }
+
+    final class Stamps: @unchecked Sendable {
+        private let lock = NSLock()
+        private var list: [(FileTail.Event, FileTail.Shown)] = []
+        func add(_ e: FileTail.Event, _ s: FileTail.Shown) { lock.lock(); list.append((e, s)); lock.unlock() }
+        var all: [(FileTail.Event, FileTail.Shown)] { lock.lock(); defer { lock.unlock() }; return list }
+    }
+
+    /// Codex 0.5.4 review 3: Follow stamped its tab with the path's stamp
+    /// when a tail event reached the main thread. A same-size file put in
+    /// place after the tail read (an atomic replace) lent the old text its
+    /// identity and date, and ⌘S after stopping wrote the old text over
+    /// it. Each event now carries the stamp the bytes were read at.
+    @Test func anAppendCarriesTheStampItWasReadAt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // The viewer is busy: the event waits. Resumed on every way out:
+        // a suspended queue released crashes, and a throw before `resume`
+        // left it suspended.
+        callbacks.suspend()
+        var suspended = true
+        defer { if suspended { callbacks.resume() } }
+        try appendBytes(url, Array("two\n".utf8))
+        tail.poll()
+        _ = tail.isWatching   // read, and queued for the viewer
+        let read = try #require(DiskStamp.of(url))
+        // A same-size file put in its place before the viewer gets to it.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("ONE\nTWO\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        let replaced = try #require(DiskStamp.of(url))
+        #expect(replaced.size == read.size && replaced.identity != read.identity)
+        callbacks.resume()
+        suspended = false
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .appended("two\n"))
+        #expect(first.1.bytes == 8)
+        #expect(first.1.stamp == read, "the stamp of the file the bytes came from")
+        #expect(DiskStamp.changed(known: first.1.stamp, current: DiskStamp.of(url)),
+                "…so the file put there since is a change: ⌘S asks")
+    }
+
+    /// The same for a reset: the stamp of the file the reset read, not of
+    /// one put there after.
+    @Test func aResetCarriesTheStampItWasReadAt() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        callbacks.suspend()
+        var suspended = true
+        defer { if suspended { callbacks.resume() } }
+        let b = dir.appendingPathComponent("b.log"), c = dir.appendingPathComponent("c.log")
+        try Data("bb\n".utf8).write(to: b)
+        #expect(rename(b.path, url.path) == 0)
+        tail.poll()
+        _ = tail.isWatching
+        let read = try #require(DiskStamp.of(url))
+        try Data("cc\n".utf8).write(to: c)
+        #expect(rename(c.path, url.path) == 0)
+        callbacks.resume()
+        suspended = false
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .reset("bb\n"))
+        #expect(first.1.stamp == read)
+        #expect(DiskStamp.changed(known: first.1.stamp, current: DiskStamp.of(url)))
+    }
+
+    /// Follow's first read: the bytes and the stamp of the file they came
+    /// from, from one descriptor; a FIFO put at the path is refused, not
+    /// waited on.
+    @Test func readStampedReadsOneFile() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        #expect(data == Data("one\n".utf8))
+        #expect(stamp == DiskStamp.of(url))
+        let fifo = dir.appendingPathComponent("p")
+        #expect(mkfifo(fifo.path, 0o600) == 0)
+        #expect(throws: (any Error).self) { try FileTail.readStamped(fifo) }
+        #expect(throws: (any Error).self) { try FileTail.readStamped(dir.appendingPathComponent("gone")) }
+    }
+
+    /// 0.5.4 QA (follow round 2): a file put in place of the followed one
+    /// after Follow's first read but before the tail watched was taken as
+    /// the file followed; a larger one then had its tail appended to the
+    /// old text, stamped as the new file whole, and ⌘S after stopping
+    /// wrote that mix over it. The tail starts from the first read's
+    /// identity: a different file is a reset.
+    @Test func aRotationBeforeTheTailStartsIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        // Rotated to a larger file before the tail starts.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("NEW FILE\nmore\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        tail.poll()
+        settle(tail, callbacks)
+        let first = try #require(got.all.first)
+        #expect(first.0 == .reset("NEW FILE\nmore\n"), "the new file whole, not its tail after the old text")
+        #expect(first.1.bytes == 14)
+        #expect(first.1.stamp == DiskStamp.of(url))
+    }
+
+    /// Sol round 3: a rotation whose reset read failed had already taken
+    /// the new file's identity, so the next check saw the same file and
+    /// appended the new file's bytes past the old offset to the old text,
+    /// stamped as the new file: ⌘S after stopping wrote that mix over it.
+    /// The identity is taken only once the reset read succeeds.
+    @Test func aRotationWhoseResetReadFailsIsResetLater() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(got.all.isEmpty)
+        // Rotated to a larger file; its first reset read fails.
+        tail.failResetReads(1)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("NEW FILE\nmore\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        tail.poll()
+        settle(tail, callbacks)
+        let events = got.all
+        #expect(!events.contains { if case .appended = $0.0 { return true } else { return false } },
+                "no part of the new file appended to the old text: \(events.map(\.0))")
+        let last = try #require(events.last)
+        #expect(last.0 == .reset("NEW FILE\nmore\n"), "the new file whole, once it reads")
+        #expect(last.1.bytes == 14)
+        #expect(last.1.stamp == DiskStamp.of(url))
+    }
+
+    /// 0.5.4 QA review 3: a truncation (same inode) whose reset read
+    /// failed was forgotten. Grown past the old offset again before the
+    /// next check, the file's bytes from the old offset on were appended
+    /// to the old text and stamped as current. The reset stays pending
+    /// until a reset read succeeds.
+    @Test func aTruncationWhoseResetReadFailsIsResetAfterItRegrows() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old line one\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(data.count), callbackQueue: callbacks, startedFrom: stamp,
+                            stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // Every reset read fails for now (the watcher may check too).
+        tail.failResetReads(1000)
+        let inode = DiskStamp.of(url)?.identity
+        #expect(truncate(url.path, 0) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.isEmpty, "the reset read failed: nothing shown yet")
+        // The same file grows past the old offset again.
+        try appendBytes(url, Array("NEW CONTENT, LONGER\n".utf8))
+        #expect(DiskStamp.of(url)?.identity == inode, "the same file")
+        tail.poll()
+        settle(tail, callbacks)
+        tail.failResetReads(0)
+        tail.poll()
+        settle(tail, callbacks)
+        let events = got.all
+        #expect(!events.contains { if case .appended = $0.0 { return true } else { return false } },
+                "no part of the regrown file appended to the old text: \(events.map(\.0))")
+        let last = try #require(events.last)
+        #expect(last.0 == .reset("NEW CONTENT, LONGER\n"), "the file whole, once it reads")
+        #expect(last.1.bytes == 20)
+        #expect(last.1.stamp == DiskStamp.of(url))
+    }
+
+    /// What a tab following `url` shows, and the bytes ⌘S would write
+    /// after Follow stops (EditorDocument.encoded and appendFollowedBreaks).
+    final class FollowedTab: @unchecked Sendable {
+        private let lock = NSLock()
+        private var text = "", ending = LineEnding.lf, breaks: LineBreaks?
+        func show(_ d: DecodedText) {
+            lock.lock(); defer { lock.unlock() }
+            text = d.text; ending = d.lineEnding; breaks = d.mixedLineEndings ? d.lineBreaks : nil
+        }
+        func event(_ e: FileTail.Event, _ s: FileTail.Shown) {
+            lock.lock(); defer { lock.unlock() }
+            switch e {
+            case .appended(let added):
+                if let odd = s.lineBreaks {
+                    if breaks == nil { breaks = LineBreaks(dominant: ending) }
+                    breaks?.append(odd, at: (text as NSString).length)
+                }
+                text += added
+            case .reset(let all):
+                text = all
+                if let le = s.lineEnding { ending = le }
+                breaks = s.lineBreaks
+            }
+        }
+        var shown: String { lock.lock(); defer { lock.unlock() }; return text }
+        var saved: Data? {
+            lock.lock(); defer { lock.unlock() }
+            if let breaks { return TextCodec.encode(breaks.output(text), encoding: .utf8, lineEnding: .lf) }
+            return TextCodec.encode(text, encoding: .utf8, lineEnding: ending)
+        }
+    }
+
+    /// 0.5.4 QA review 3: a CR at the end of Follow's first read (or a
+    /// reset's) was taken as a break; the LF that finished that CRLF then
+    /// came as a second one, and a save wrote two breaks for one. It is
+    /// held, as an append holds it, and the CRLF is saved as it is.
+    @Test func aCRLFSplitAtFollowsFirstReadIsOneBreak() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\ntwo\r".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        #expect(d.text == "one\ntwo" && used == 7, "the trailing CR is held: \(d.text.debugDescription) \(used)")
+        let tab = FollowedTab()
+        tab.show(d)
+        let callbacks = DispatchQueue(label: "t")
+        // As the app starts it: the held CR counts as read.
+        let tail = FileTail(url: url, offset: UInt64(used), held: UInt64(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, Array("\nthree\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "one\ntwo\nthree\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
+    /// The same across a reset: a rotated file ending in a CR.
+    @Test func aCRLFSplitAtAResetIsOneBreak() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        let tab = FollowedTab()
+        tab.show(d)
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
+                            lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("x\ny\r".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "x\ny", "the reset holds the CR: \(tab.shown.debugDescription)")
+        try appendBytes(url, Array("\nz\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "x\ny\nz\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
+    /// Sol, 0.5.4 QA round 4: the CR held at Follow's first read was
+    /// counted out of the bytes read, so `old\r` rewritten in place as
+    /// `new` (the size the tail thought it had read) went unseen, and the
+    /// LF after it showed `old\n`, stamped as the file. The held bytes
+    /// count as read: the file cut below them is a reset.
+    @Test func aFileRewrittenBelowAHeldCRAtTheFirstReadIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\r".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        #expect(d.text == "old" && used == 3)
+        let tab = FollowedTab()
+        tab.show(d)
+        // Rewritten in place (same file) before the tail's first look.
+        let fh = try FileHandle(forWritingTo: url)
+        try fh.truncate(atOffset: 0)
+        try fh.write(contentsOf: Data("new".utf8))
+        try fh.close()
+        #expect(DiskStamp.of(url)?.identity == stamp.identity, "the same file")
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), held: UInt64(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(tab.shown == "new", "the rewrite is a reset: \(tab.shown.debugDescription)")
+        try appendBytes(url, Array("\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == "new\n", "\(tab.shown.debugDescription)")
+        #expect(tab.saved == (try Data(contentsOf: url)), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+    }
+
+    /// The same after a reset: a CR held there counts as read, so the file
+    /// cut to the bytes shown is seen (a reset, stamped as the file now).
+    @Test func aFileCutBelowAResetsHeldCRIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        final class Got: @unchecked Sendable {
+            private let lock = NSLock()
+            private var list: [(FileTail.Event, FileTail.Shown)] = []
+            func add(_ e: FileTail.Event, _ s: FileTail.Shown) { lock.lock(); list.append((e, s)); lock.unlock() }
+            var all: [(FileTail.Event, FileTail.Shown)] { lock.lock(); defer { lock.unlock() }; return list }
+        }
+        let got = Got()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
+                            lineEnding: d.lineEnding, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data("ab\r".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .reset("ab") && got.all.last?.1.bytes == 2, "\(got.all.map(\.0))")
+        let before = got.all.count
+        #expect(truncate(url.path, 2) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        let after = got.all.dropFirst(before)
+        #expect(after.contains { $0.0 == .reset("ab") }, "the cut is a reset: \(after.map(\.0))")
+        let last = try #require(got.all.last)
+        #expect(last.1.bytes == 2 && last.1.stamp == DiskStamp.of(url), "stamped as the file now")
+    }
+
+    /// Writes `bytes` at `offset` in `url` in one write (the same file).
+    func overwrite(_ url: URL, at offset: UInt64, _ bytes: [UInt8]) throws {
+        let fh = try FileHandle(forWritingTo: url)
+        defer { try? fh.close() }
+        try fh.seek(toOffset: offset)
+        try fh.write(contentsOf: Data(bytes))
+    }
+
+    /// 0.5.4 QA leftovers 2: the bytes held at Follow's first read were
+    /// kept, and decoded with the next append as they were then. A writer
+    /// that rewrote them before the first look (`C2` finished as `C3 A9`,
+    /// a CR rewritten as `X` and an LF) was shown as `©` or a CRLF, stamped
+    /// as the file, so ⌘S wrote that over the file's real bytes. The held
+    /// bytes are reread with the append.
+    @Test(arguments: [(Array("abc".utf8) + [0xC2], Array("abc".utf8) + [0xC3, 0xA9], "abc", "abcé"),
+                      (Array("old\r".utf8), Array("oldX\n".utf8), "old", "oldX\n")])
+    func heldBytesRewrittenBeforeTheFirstLookAreShownAsTheFileHasThem(_ c: ([UInt8], [UInt8], String, String)) throws {
+        let (first, now, shownFirst, shownNow) = c
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data(first).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        #expect(d.text == shownFirst && used == shownFirst.utf8.count, "the last byte is held")
+        let tab = FollowedTab()
+        tab.show(d)
+        let got = Stamps()
+        // The held byte rewritten (and the file grown) in one write, in place.
+        try overwrite(url, at: UInt64(used), Array(now[used...]))
+        #expect(DiskStamp.of(url)?.identity == stamp.identity, "the same file")
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), held: UInt64(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1); got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        #expect(tab.shown == shownNow, "as the file has it: \(tab.shown.debugDescription)")
+        #expect(tab.saved == Data(now), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+        let last = try #require(got.all.last)
+        #expect(last.1.bytes == UInt64(now.count) && last.1.stamp == DiskStamp.of(url), "stamped as the file now")
+    }
+
+    /// The same for the bytes a reset held.
+    @Test(arguments: [(Array("ab".utf8) + [0xC2], Array("ab".utf8) + [0xC3, 0xA9], "ab", "abé"),
+                      (Array("ab\r".utf8), Array("abX\n".utf8), "ab", "abX\n")])
+    func heldBytesRewrittenAfterAResetAreShownAsTheFileHasThem(_ c: ([UInt8], [UInt8], String, String)) throws {
+        let (first, now, shownFirst, shownNow) = c
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("old\n".utf8).write(to: url)
+        let (data, stamp) = try FileTail.readStamped(url)
+        let (d, used) = try #require(FileTail.decodeWhole(data, as: .utf8))
+        let tab = FollowedTab()
+        tab.show(d)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: UInt64(used), held: UInt64(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1); got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data(first).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == shownFirst, "the reset holds the last byte: \(tab.shown.debugDescription)")
+        try overwrite(url, at: UInt64(shownFirst.utf8.count), Array(now[shownFirst.utf8.count...]))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(tab.shown == shownNow, "as the file has it: \(tab.shown.debugDescription)")
+        #expect(tab.saved == Data(now), "saved as the file is: \(String(decoding: tab.saved ?? Data(), as: UTF8.self).debugDescription)")
+        let last = try #require(got.all.last)
+        #expect(last.1.bytes == UInt64(now.count) && last.1.stamp == DiskStamp.of(url), "stamped as the file now")
+    }
+
+    /// decodeWhole finds the CR to hold in the bytes (one decode), also
+    /// before a UTF-16 odd byte (maybe the first half of the LF).
+    @Test func decodeWholeHoldsACRFoundInTheBytes() throws {
+        #expect(FileTail.heldCR(Data("ab\r".utf8), .utf8) == 2)
+        #expect(FileTail.heldCR(Data("ab\r\n".utf8), .utf8) == nil)
+        #expect(FileTail.heldCR(Data("\r".utf8), .utf8) == 0)
+        #expect(FileTail.heldCR(Data(), .utf8) == nil)
+        let le = Data([0xFF, 0xFE, 0x61, 0x00, 0x0D, 0x00])
+        #expect(FileTail.heldCR(le, .utf16LE) == 4)
+        #expect(FileTail.heldCR(le + [0x0A], .utf16LE) == 4, "CR, then half an LF")
+        #expect(FileTail.heldCR(Data([0xFE, 0xFF, 0x00, 0x61, 0x00, 0x0D, 0x00]), .utf16BE) == 4)
+        let (d, used) = try #require(FileTail.decodeWhole(le + [0x0A], as: .utf16LE))
+        #expect(d.text == "a" && used == 4)
+        let (u8, n) = try #require(FileTail.decodeWhole(Data("one\ntwo\r".utf8), as: .utf8))
+        #expect(u8.text == "one\ntwo" && n == 7 && u8.lineEnding == .lf)
+    }
+
+    /// 0.5.4 QA (follow round 2): an append that didn't decode was skipped
+    /// (its bytes counted as read), and the next good append stamped the
+    /// whole file's size: ⌘S then dropped the skipped bytes with no
+    /// question. After a skip no event shows a size, until a reset.
+    @Test func aSkippedAppendLeavesTheTextLossy() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        // Not UTF-8 however it's cut: skipped.
+        try appendBytes(url, [0xFF, 0xFE, 0xFF, 0xFE, 0xFF])
+        tail.poll()
+        settle(tail, callbacks)
+        try appendBytes(url, Array("two\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        let appended = got.all.filter { $0.0 == .appended("two\n") }
+        try #require(appended.count == 1)
+        #expect(appended[0].1.bytes == nil, "no size: the skipped bytes aren't in the text")
+        #expect(DiskStamp.changed(known: appended[0].1.stamp, current: DiskStamp.of(url)), "so ⌘S asks")
+        // A faithful reset makes it whole again.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("fresh\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .reset("fresh\n"))
+        #expect(got.all.last?.1.bytes == 6)
+    }
+
+    /// 0.5.4 QA (follow round 2): truncated or rotated to an empty file,
+    /// the reset never came (readToEnd says nil at the end), so the old
+    /// text and offset stayed; a file growing back past that offset was
+    /// then followed as an append to the old text.
+    @Test func anEmptyRotationIsAReset() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\ntwo\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 8, callbackQueue: callbacks, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        let next = dir.appendingPathComponent("next.log")
+        try Data().write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.map(\.0) == [.reset("")])
+        #expect(got.all.first?.1.bytes == 0)
+        // Grows back past the old offset: followed from the new start.
+        try appendBytes(url, Array("ABCDEFGHIJ\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(Self.shown(got.all.map(\.0)) == "ABCDEFGHIJ\n")
+    }
+
+    /// 0.5.4 QA (should round 2): appended text comes with every break as
+    /// LF, so a CRLF line appended to an LF log, saved after Follow
+    /// stopped, became LF; and a rotation kept the previous file's breaks.
+    /// Each event now carries the breaks of the text it shows.
+    @Test func eventsCarryTheirLineBreaks() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("a.log")
+        try Data("one\n".utf8).write(to: url)
+        let got = Stamps()
+        let callbacks = DispatchQueue(label: "t")
+        let tail = FileTail(url: url, offset: 4, callbackQueue: callbacks, lineEnding: .lf, stamped: { got.add($0, $1) })
+        tail.start()
+        defer { tail.stop() }
+        settle(tail, callbacks)
+        try appendBytes(url, Array("ab\r\ncd\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        let a = try #require(got.all.first)
+        #expect(a.0 == .appended("ab\ncd\n"))
+        #expect(a.1.lineEnding == nil)
+        #expect(a.1.lineBreaks?.others == [LineBreaks.entry(2, .crlf)], "the CRLF, at its offset in the appended text")
+        // An append of the dominant kind only: none.
+        try appendBytes(url, Array("ef\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.1.lineBreaks == nil)
+
+        // Rotated to a CRLF file with one LF: its own breaks.
+        let next = dir.appendingPathComponent("next.log")
+        try Data("x\r\ny\r\nz\n".utf8).write(to: next)
+        #expect(rename(next.path, url.path) == 0)
+        tail.poll()
+        settle(tail, callbacks)
+        let r = try #require(got.all.last)
+        #expect(r.0 == .reset("x\ny\nz\n"))
+        #expect(r.1.lineEnding == .crlf)
+        #expect(r.1.lineBreaks?.others == [LineBreaks.entry(5, .lf)])
+        // Appends now count against CRLF: an LF one is odd, a CRLF isn't.
+        try appendBytes(url, Array("p\nq\r\n".utf8))
+        tail.poll()
+        settle(tail, callbacks)
+        #expect(got.all.last?.0 == .appended("p\nq\n"))
+        #expect(got.all.last?.1.lineBreaks?.others == [LineBreaks.entry(1, .lf)])
     }
 }

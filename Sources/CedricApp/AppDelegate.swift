@@ -56,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaunchTrace.mark("will_finish")
+        // A save past the file-size limit fails with an error the save
+        // recovers from, instead of SIGXFSZ ending the app mid-write.
+        // Caught, not ignored: git and other programs Owlink starts get
+        // the default action back.
+        DocumentWrite.catchFileSizeSignal()
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),
@@ -105,9 +110,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
             toOpen += list.split(separator: ":").map { URL(fileURLWithPath: String($0)) }
         }
-        for url in toOpen { open(url) }
+        for url in toOpen { open(url, background: true) }
         pendingOpen = []
-        if tabs.isEmpty && viewerTabs.isEmpty { newTab(nil) }
+        // A big file still reading: its tab is the launch's window.
+        if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
         schedulePendingRestore()
         LaunchTrace.mark("tabs_ready")
         recentMenu?.delegate = self
@@ -119,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard launched else { pendingOpen += urls; return }
-        for url in urls { open(url) }
+        for url in urls { open(url, background: true) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -165,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // off, files go to Reopen Closed Tab there and unsaved text reopens).
         saveSession()
         releaseAllWaiters()
+        failPendingBackgroundOpens()
         terminating = true
         sessionTimer?.invalidate()
     }
@@ -175,8 +182,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// dev hooks drive tabs open and shut, so it is off under them unless
     /// CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1.
     var quitsOnLastClose: Bool {
-        launched && !terminating && pendingRestore.isEmpty && DevHooks.allowsQuitOnLastClose
-            && Settings.shared.quitWhenLastWindowCloses
+        lastCloseMayQuit && DevHooks.allowsQuitOnLastClose && Settings.shared.quitWhenLastWindowCloses
+    }
+
+    /// Nothing still to come that a last close would throw away: launch
+    /// done, restored tabs built, no big file reading in the background
+    /// (its tab is on its way: closing the only other tab must not quit).
+    var lastCloseMayQuit: Bool {
+        launched && !terminating && pendingRestore.isEmpty && backgroundOpens.isEmpty
     }
 
     /// The document tabs' windows other than `window` (text and viewer tabs:
@@ -346,8 +359,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
             return
         }
-        if FileManager.default.fileExists(atPath: path) {
-            open(url)
+        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
+        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
+        // The file's tab, now or (a big file read in the background) when it is ready.
+        let arrived: (EditorWindowController) -> Void = { [weak self] tab in
+            if let line { tab.goToLine(line, column: col) }
+            // `cedric -w`: the script waits until this marker file goes.
+            if let marker = q["wait"] { self?.addWaiter(marker, for: tab) }
+        }
+        // No tab after all (unreadable, gone before it was read): the
+        // script stops waiting rather than hang.
+        let failed = {
+            if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
+        }
+        let pendingStd = url.standardizedFileURL
+        // Already being read in the background (or open): that job's tab,
+        // or its failure, even if the file is gone meanwhile. Gone, it used
+        // to take the new-file branch below: an empty tab that saved over
+        // a file put back there, while the read's text was thrown away.
+        if backgroundOpens[pendingStd] != nil || FileManager.default.fileExists(atPath: path) {
+            open(url, background: true, then: arrived, failed: failed)
         } else {
             // A new file: an empty tab that saves there.
             let doc = EditorDocument(fileURL: url, untitledName: url.lastPathComponent)
@@ -355,21 +386,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let tab = makeTab(doc, text: "")
             doc.markDirtyFromSession()
             tab.updateTitle()
+            arrived(tab)
         }
-        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
-        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
-        let tab = tabs.first { $0.doc.fileURL?.standardizedFileURL == url.standardizedFileURL }
+        let std = url.standardizedFileURL
+        guard !tabs.contains(where: { $0.doc.fileURL?.standardizedFileURL == std }), backgroundOpens[std] == nil else { return }
         // A PDF: `cedric file.pdf:3` opens it at page 3; -w waits for its tab.
-        if tab == nil, let pdf = pdfTab(for: url) {
+        if let pdf = pdfTab(for: url) {
             if let line { pdf.goToPage(OneBased.index(line, count: Int.max)) }
             if let marker = q["wait"] { addWaiter(marker, forID: pdf.id) }
-        } else if tab == nil, let viewer = viewerTab(for: url), let marker = q["wait"] {
+        } else if let viewer = viewerTab(for: url), let marker = q["wait"] {
             // An image or Office tab: -w waits for it too.
             addWaiter(marker, forID: viewer.id)
         }
-        if let line { tab?.goToLine(line, column: col) }
-        // `cedric -w`: the script waits until this marker file goes.
-        if let marker = q["wait"], let tab { addWaiter(marker, for: tab) }
     }
 
     // MARK: Tabs
@@ -384,8 +412,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @discardableResult
     func makeTab(_ doc: EditorDocument, text: String, in group: NSWindow? = nil, newWindow: Bool = false, show: Bool = true,
-                 tabIndex: Int? = nil) -> EditorWindowController {
-        let tab = EditorWindowController(doc: doc, text: text)
+                 tabIndex: Int? = nil, prepared: EditorWindowController.PreparedText? = nil) -> EditorWindowController {
+        let tab = EditorWindowController(doc: doc, text: text, prepared: prepared)
         if let path = doc.fileURL?.path { tab.editing.wordGoal = FileWordGoals.goal(for: path, in: fileWordGoals) }
         tab.onChange = { [weak self] _ in self?.scheduleSessionSave() }
         tab.onClose = { [weak self] t in
@@ -402,6 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if last { self.quitAfterLastClose() }
         }
         tabs.append(tab)
+        // Checks: every tab as it is registered, before it is shown.
+        if DevEnvironment.checksEnabled { Self.tabMadeForChecks?(tab) }
         guard let window = tab.window else { return tab }
         let host = newWindow ? nil : group ?? Self.documentKeyWindow ?? tabs.dropLast().last?.window
         if let tabIndex, let host = group, host !== window, let tg = host.tabGroup {
@@ -444,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.canChooseDirectories = false
         if let dir = currentTab?.doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         guard panel.runModal() == .OK else { return }
-        panel.urls.forEach { open($0) }
+        panel.urls.forEach { open($0, background: true) }
     }
 
     /// Set while the command palette validates the whole menu in one go
@@ -494,8 +524,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let w = NSApp.keyWindow, w.attachedSheet == nil { a.beginSheetModal(for: w) } else { a.runModal() }
     }
 
+    /// Opens a file. `background`: a text file of `backgroundOpenBytes`
+    /// or more is read, decoded and indexed off the main thread, and its
+    /// tab appears only when the text is ready (`then` runs with it), so
+    /// there is never a half-loaded tab to edit, save or close; this
+    /// returns nil for it. Otherwise the tab is made at once and returned
+    /// (and `then` runs with it too). `failed` runs instead if the file
+    /// can't be opened as text (now, or when read in the background).
     @discardableResult
-    func open(_ url: URL, asText: Bool = false) -> EditorWindowController? {
+    func open(_ url: URL, asText: Bool = false, background: Bool = false,
+              then: ((EditorWindowController) -> Void)? = nil, failed: (() -> Void)? = nil) -> EditorWindowController? {
         let std = url.standardizedFileURL
         // A folder (dropped on the Dock icon, `owlink dir`): the folder sidebar.
         if Self.isFolder(std) { openFolder(std); return nil }
@@ -512,7 +550,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
             existing.window?.makeKeyAndOrderFront(nil)
+            then?(existing)
             return existing
+        }
+        // Already being read in the background: one tab when it is ready.
+        if let pending = backgroundOpens[std] {
+            if let then { pending.thens.append(then) }
+            if let failed { pending.failures.append(failed) }
+            return nil
         }
         // A PDF (by its first bytes, or its name) opens in a viewer tab.
         if !asText {
@@ -527,33 +572,195 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .text: break
             }
         }
+        if background, let size = (try? std.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size >= Self.backgroundOpenBytes {
+            openInBackground(std, then: then, failed: failed)
+            return nil
+        }
         do {
-            let (d, mod) = try EditorDocument.read(std)
-            let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
-            doc.apply(d)
-            doc.fileModified = mod
+            // The text goes into the tab's storage (a copy) and is let go.
+            let (d, mod) = try EditorDocument.read(std, shareBytes: true)
             PerfTrace.mark("read_decode")
-            doc.languageChoice = .forFile(named: std.lastPathComponent, content: d.text)
+            let language = LanguageChoice.forFile(named: std.lastPathComponent, content: d.text)
             PerfTrace.mark("detect_language")
-            let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
-            // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
-            let tab = makeTab(doc, text: d.looksBinary ? "" : d.text)
-            if d.looksBinary { tab.holdBinary(d.text) }
-            blank?.window?.close()
-            OwlHub.shared.activity(in: tab)
-            tab.readQuarantineForOwl()
-            noteRecent(std)
-            // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
-            if Certificates.isCertificateText(d.text, fileName: std.lastPathComponent), !CertificatePanel.closedByUser {
-                DispatchQueue.main.async { [weak tab] in
-                    guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
-                    tab.togglePreview()
-                }
-            }
+            let certificate = Certificates.isCertificateText(d.text, fileName: std.lastPathComponent)
+            let tab = showRead(std, d, mod, language: language, certificate: certificate, prepared: nil)
+            then?(tab)
             return tab
         } catch {
+            failed?()
             NSAlert(error: error).runModal()
             return nil
+        }
+    }
+
+    /// A file read (on the main thread or off it): its tab.
+    private func showRead(_ std: URL, _ d: DecodedText, _ mod: DiskStamp?, language: LanguageChoice, certificate: Bool,
+                          prepared: EditorWindowController.PreparedText?) -> EditorWindowController {
+        let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
+        doc.apply(d)
+        doc.noteDisk(mod)
+        doc.languageChoice = language
+        let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
+        // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
+        let tab = makeTab(doc, text: d.looksBinary ? "" : d.text, prepared: d.looksBinary ? nil : prepared)
+        if d.looksBinary { tab.holdBinary(d.text) }
+        blank?.window?.close()
+        OwlHub.shared.activity(in: tab)
+        tab.readQuarantineForOwl()
+        noteRecent(std)
+        // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
+        if certificate, !CertificatePanel.closedByUser {
+            DispatchQueue.main.async { [weak tab] in
+                guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
+                tab.togglePreview()
+            }
+        }
+        return tab
+    }
+
+    // MARK: Background open
+
+    /// Text files this big (bytes) open in the background (`open`'s
+    /// `background`): a 1 GB log took 2.8 s to decode on the main thread.
+    static let backgroundOpenBytes = 16 * 1024 * 1024
+
+    /// A file being read off the main thread (or waiting its turn), and
+    /// what waits for its tab: `thens` with the tab, `failures` if none
+    /// comes (unreadable, gone, quitting), e.g. a `cedric -w` marker.
+    @MainActor final class BackgroundOpen {
+        var thens: [(EditorWindowController) -> Void] = []
+        var failures: [() -> Void] = []
+    }
+
+    /// Files being read in the background or waiting to be, by standardized URL.
+    private(set) var backgroundOpens: [URL: BackgroundOpen] = [:]
+    /// The files waiting their turn, first first. One is read at a time
+    /// and the next starts only once its tab is made: a multi-file open
+    /// of big logs never holds more than one decoded text waiting for
+    /// the main thread (each is the size of its file).
+    private var backgroundQueue: [URL] = []
+    /// The one being read (or its text waiting for the main thread).
+    private(set) var backgroundReading: URL?
+    /// The most background reads ever under way or done-not-shown at once (checks).
+    private(set) var mostBackgroundReadsForChecks = 0
+    /// The line index the last background open made (check builds only:
+    /// BigOpenCheck sees the tab use it rather than scan the text again).
+    var lastBackgroundIndexForChecks: LineIndex?
+    /// Checks only (DevEnvironment.checksEnabled): the next background
+    /// read waits for this before it reads (BigOpenCheck holds it there to
+    /// look at the app while the file can't be whole), and every tab made
+    /// is passed to `tabMadeForChecks` as it is registered.
+    static var backgroundReadGateForChecks: DispatchSemaphore?
+    static var tabMadeForChecks: ((EditorWindowController) -> Void)?
+    /// Run (once) when the last background open has finished (launch metrics).
+    var whenBackgroundOpensDone: [() -> Void] = []
+
+    /// Everything a background open makes before the tab.
+    struct BackgroundRead: Sendable {
+        let decoded: DecodedText
+        let stamp: DiskStamp?
+        let language: LanguageChoice
+        let certificate: Bool
+        let prepared: EditorWindowController.PreparedText?
+    }
+
+    private func openInBackground(_ std: URL, then: ((EditorWindowController) -> Void)?, failed: (() -> Void)?) {
+        let job = BackgroundOpen()
+        if let then { job.thens.append(then) }
+        if let failed { job.failures.append(failed) }
+        backgroundOpens[std] = job
+        backgroundQueue.append(std)
+        startNextBackgroundRead()
+    }
+
+    private func startNextBackgroundRead() {
+        guard backgroundReading == nil, !terminating, !backgroundQueue.isEmpty else { return }
+        let std = backgroundQueue.removeFirst()
+        guard let job = backgroundOpens[std] else { startNextBackgroundRead(); return }
+        backgroundReading = std
+        // Counted as the reads are: under way, or done and not yet shown.
+        backgroundReadsInFlight += 1
+        mostBackgroundReadsForChecks = max(mostBackgroundReadsForChecks, backgroundReadsInFlight)
+        let gate = DevEnvironment.checksEnabled ? Self.backgroundReadGateForChecks : nil
+        Self.backgroundReadGateForChecks = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            gate?.wait()
+            let result = Result { try Self.readInBackground(std) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.finishBackgroundOpen(std, job, result) }
+            }
+        }
+    }
+
+    private var backgroundReadsInFlight = 0
+
+    /// Quitting: whoever waits on a file still to be read stops waiting
+    /// (a `cedric -w` marker goes, as for a tab).
+    func failPendingBackgroundOpens() {
+        for job in backgroundOpens.values {
+            let failures = job.failures
+            job.failures = []
+            failures.forEach { $0() }
+        }
+    }
+
+    /// Off the main thread: read and decode, then (side by side) the line
+    /// index, the saved-text fingerprint, the language and the certificate
+    /// sniff. The text is immutable until the tab copies it.
+    nonisolated static func readInBackground(_ std: URL) throws -> BackgroundRead {
+        let (d, mod) = try EditorDocument.read(std, shareBytes: true)
+        let name = std.lastPathComponent
+        let text = d.text
+        let ns = text as NSString
+        nonisolated(unsafe) var index: LineIndex?
+        nonisolated(unsafe) var print: TextFingerprint?
+        nonisolated(unsafe) var language = LanguageChoice()
+        nonisolated(unsafe) var certificate = false
+        DispatchQueue.concurrentPerform(iterations: 3) { k in
+            switch k {
+            case 0: if !d.looksBinary { index = LineIndex(ns, expectedLineCount: d.newlineCount.map { $0 + 1 }) }
+            case 1: if !d.looksBinary, ns.length > EditedState.snapshotLimit { print = TextFingerprint(ns) }
+            default:
+                language = LanguageChoice.forFile(named: name, content: text)
+                certificate = Certificates.isCertificateText(text, fileName: name)
+            }
+        }
+        return BackgroundRead(decoded: d, stamp: mod, language: language, certificate: certificate,
+                              prepared: index.map { EditorWindowController.PreparedText(lineIndex: $0, fingerprint: print) })
+    }
+
+    private func finishBackgroundOpen(_ std: URL, _ job: BackgroundOpen, _ result: Result<BackgroundRead, Error>) {
+        backgroundOpens[std] = nil
+        defer {
+            // Its tab is made (or it failed): the next file's turn, after
+            // any alert, so no text waits on the main thread meanwhile.
+            backgroundReadsInFlight -= 1
+            backgroundReading = nil
+            startNextBackgroundRead()
+            if backgroundOpens.isEmpty {
+                let done = whenBackgroundOpensDone
+                whenBackgroundOpensDone = []
+                done.forEach { $0() }
+            }
+        }
+        // Quitting: nothing more to show (the session never had this tab).
+        guard !terminating else { job.failures.forEach { $0() }; return }
+        switch result {
+        case .failure(let error):
+            job.failures.forEach { $0() }
+            NSAlert(error: error).runModal()
+            // Opened at launch with nothing else: the usual new tab.
+            if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
+        case .success(let r):
+            // Opened another way meanwhile (a check, a session tab): that tab.
+            if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
+                existing.window?.makeKeyAndOrderFront(nil)
+                job.thens.forEach { $0(existing) }
+                return
+            }
+            let tab = showRead(std, r.decoded, r.stamp, language: r.language, certificate: r.certificate, prepared: r.prepared)
+            if DevEnvironment.checksEnabled { lastBackgroundIndexForChecks = r.prepared?.lineIndex }
+            job.thens.forEach { $0(tab) }
         }
     }
 
@@ -612,7 +819,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         finishRestore()
         var windows: [SessionWindow] = []
         var keep = Set<UUID>()
-        var buffers: [(UUID, String)] = []
+        var buffers: [(UUID, String, LineBreaks?)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
@@ -631,7 +838,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     keep.insert(d.id)
                     if d.sessionChangeCount != d.changeCount, d.sessionWritingCount != d.changeCount {
                         // One copy of the text (the storage keeps changing).
-                        buffers.append((d.id, t.text))
+                        // A mixed file's breaks go into the buffer with it (restoreFormat).
+                        buffers.append((d.id, t.text, d.lineBreaks))
                         written[d.id] = (d, d.changeCount)
                         // sessionChangeCount moves only once the write has
                         // worked (finished, below): hot close skips its own
@@ -652,6 +860,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               language: d.languageIsManual ? d.language : nil,
                                               selectionLocation: sel.location, selectionLength: sel.length,
                                               topLine: t.primaryTopLine, fileModified: d.fileModified,
+                                              fileSize: d.diskStamp.size, fileID: d.diskStamp.identity,
                                               bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                               indentation: d.indentation,
                                               previewDetached: t.previewDetached ? true : nil,
@@ -661,6 +870,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               folds: t.sessionFolds, split: t.sessionSplit, writing: t.sessionWriting,
                                               wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil,
                                               explicitText: d.fileURL.map { DocumentKind.hasPDFExtension($0.path) } == true ? true : nil))
+                d.noteFormat(in: &sessionTabs[sessionTabs.count - 1])
                 if t.window === NSApp.keyWindow || t.window?.tabGroup?.selectedWindow === t.window { selected = sessionTabs.count - 1 }
             }
             if !sessionTabs.isEmpty {
@@ -678,9 +888,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let toWrite = buffers, keeping = keep
         let write: @Sendable () -> Set<UUID> = {
             var ok = Set<UUID>()
-            for (id, text) in toWrite {
+            for (id, text, breaks) in toWrite {
                 do {
-                    try store.writeBuffer(id, text: text)
+                    try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks))
                     ok.insert(id)
                 } catch {
                     FileHandle.standardError.write(Data("session: buffer write failed: \(error)\n".utf8))
@@ -813,16 +1023,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var text: String?
         var binary = false
         if st.hasBuffer { text = store.readBuffer(st.id) }
-        if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
+        // The text goes into the tab's storage and is let go (shareBytes: no second copy of a big file).
+        let fromBuffer = text != nil
+        if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding, shareBytes: true) {
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             text = d.text
             binary = d.looksBinary
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.fileModified = st.fileModified
+            // A pre-0.5.4 date-only stamp through a link: unverified (⌘S asks).
+            doc.noteDisk(doc.fileURL.map { DiskStamp.restored(st.diskStamp, for: $0) } ?? st.diskStamp)
         }
+        if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else { return nil } // the file is gone and there was no buffer
         if let l = st.language {
             doc.languageChoice.choose(l)
@@ -983,6 +1197,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func pickLineEndingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let le = LineEnding(rawValue: raw) { currentTab?.convertLineEndings(to: le) }
     }
+    /// Format › Reopen with Encoding… (⌥⇧⌘R): the picker, under the status bar's encoding.
+    @objc func reopenWithEncodingMenu(_ sender: Any?) {
+        currentTab?.showReopenEncodingPicker()
+    }
+
     @objc func pickEncodingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let e = TextEncoding(rawValue: raw) { currentTab?.convertEncoding(to: e) }
     }
@@ -1057,6 +1276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(previewHomeMenu(_:)): return tab?.previewBarEnables(.home) == true
         case #selector(pickLanguageMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.language.rawValue ? .on : .off
         case #selector(pickLineEndingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.lineEnding.rawValue ? .on : .off
+        case #selector(reopenWithEncodingMenu(_:)): return tab?.doc.fileURL != nil
         case #selector(pickEncodingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.encoding.rawValue ? .on : .off
         case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty
         case #selector(toggleFloatOnTop(_:)):
