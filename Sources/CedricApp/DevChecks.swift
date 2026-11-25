@@ -590,7 +590,7 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ] + followHeldBytes(app) + followLineBreaks(app))
+        ] + followHeldBytes(app) + followLineBreaks(app) + bomPerVersion(app))
     }
 
     /// 0.5.4 QA (should round 2): Follow's appended text came with every
@@ -652,6 +652,67 @@ enum DevChecks {
                 stopTypeSave("rotate", rotates, "x\ny\nz\n!")
             },
         ]
+    }
+
+    /// 0.5.4 release review 5: whether a file has a UTF-8 BOM is up to
+    /// each version's own bytes. A tab that read a BOM kept UTF-8 with
+    /// BOM through Reload, so the save of a version without one added it;
+    /// Follow's rotation kept the tab's encoding, adding or dropping one.
+    /// Each case: the file replaced (another inode), the tab reloads or
+    /// follows it, then "!" typed at the end and ⌘S: the new version's
+    /// bytes and the "!", BOM as the new version has it.
+    static func bomPerVersion(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        let cases: [(name: String, first: Data, then: Data)] = [
+            ("follow BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("follow none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+            ("reload BOM -> none", bom + Data("a\n".utf8), Data("b\n".utf8)),
+            ("reload none -> BOM", Data("a\n".utf8), bom + Data("b\n".utf8)),
+        ]
+        var tabs: [String: EditorWindowController] = [:]
+        var urls: [String: URL] = [:]
+        func replace(_ url: URL, _ bytes: Data) {
+            let next = url.appendingPathExtension("next")
+            try? bytes.write(to: next)
+            _ = rename(next.path, url.path)
+        }
+        var steps: [(@escaping () -> Void) -> Void] = []
+        for (i, c) in cases.enumerated() {
+            let url = dir.appendingPathComponent("bom-version-\(i).log")
+            try? c.first.write(to: url)
+            urls[c.name] = url
+            let follows = c.name.hasPrefix("follow")
+            steps.append(sync {
+                guard let tab = app.open(url) else { expect(false, "\(c.name): opens"); return }
+                tabs[c.name] = tab
+                expect(tab.doc.encoding == (c.first.starts(with: bom) ? .utf8BOM : .utf8), "\(c.name): the first version's BOM",
+                       "\(tab.doc.encoding)")
+                if follows {
+                    tab.toggleFollow()
+                    _ = tab.tail?.isWatching
+                    replace(url, c.then)
+                    tab.tail?.poll()
+                } else {
+                    replace(url, c.then)
+                    tab.reloadIfChangedOnDisk()
+                }
+            })
+            steps.append(waitFor("\(c.name): the new version shows") { tabs[c.name]?.text == "b\n" })
+            steps.append(sync {
+                guard let tab = tabs[c.name] else { expect(false, "\(c.name): has its tab"); return }
+                let want: TextEncoding = c.then.starts(with: bom) ? .utf8BOM : .utf8
+                expect(tab.doc.encoding == want, "\(c.name): the new version's BOM, not the old one's", "\(tab.doc.encoding)")
+                if follows { tab.toggleFollow() }
+                focus(tab)
+                tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
+                type("!")
+                let saved = tab.save()
+                let got = (try? Data(contentsOf: url)) ?? Data()
+                expect(saved && got == c.then + Data("!".utf8), "\(c.name): saved with the new version's BOM",
+                       "saved \(saved): \([UInt8](got))")
+            })
+        }
+        return steps
     }
 
     /// Waits (polling every 50 ms, at most `seconds`) for `cond`; a
