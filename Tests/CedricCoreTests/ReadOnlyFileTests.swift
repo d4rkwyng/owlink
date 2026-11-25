@@ -388,9 +388,14 @@ import Testing
     /// way the child lives and the file keeps every original byte. 0.5.4
     /// before QA truncated first: 74,893 bytes became the first 100,000
     /// of the new text.
+    /// Two children: one makes the app-handler saves, the other only the
+    /// counted bypass save, so the SIGXFSZ it waits for can only be that
+    /// write's (a late signal from an earlier bypass write in the same
+    /// process could have passed for it).
     @Test func aFileSizeLimitInAChildProcessLeavesTheFileAsItWas() throws {
         if let path = ProcessInfo.processInfo.environment["OWLINK_FSIZE_CHILD"] {
-            Self.fileSizeChild(URL(fileURLWithPath: path))
+            Self.fileSizeChild(URL(fileURLWithPath: path),
+                               counted: ProcessInfo.processInfo.environment["OWLINK_FSIZE_COUNTED"] == "1")
         }
         let original = Data((0..<74_893).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ 7) })
         let url = try file("doc.md")
@@ -402,57 +407,62 @@ import Testing
         let args = CommandLine.arguments
         let bundle = try #require(args.firstIndex(of: "--test-bundle-path").map { args[$0 + 1] },
                                   "run by swiftpm-testing-helper: \(args)")
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: args[0])
-        child.arguments = ["--test-bundle-path", bundle, "--filter", "aFileSizeLimitInAChildProcessLeavesTheFileAsItWas",
-                           bundle, "--testing-library", "swift-testing"]
-        child.environment = ProcessInfo.processInfo.environment.merging(["OWLINK_FSIZE_CHILD": url.path]) { $1 }
-        let out = Pipe()
-        child.standardOutput = out
-        child.standardError = out
-        try child.run()
-        // Bounded: a child that hangs is ended, and the test fails, rather
-        // than waiting for EOF for ever.
-        final class Collected: @unchecked Sendable { var data = Data() }
-        let collected = Collected()
-        let readDone = DispatchSemaphore(value: 0)
-        let reader = out.fileHandleForReading
-        Thread {
-            collected.data = reader.readDataToEndOfFile()
-            readDone.signal()
-        }.start()
-        let inTime = readDone.wait(timeout: .now() + 60) == .success
-        var readFinished = inTime
-        if !inTime {
-            child.terminate()
-            readFinished = readDone.wait(timeout: .now() + 10) == .success
+        for counted in [false, true] {
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: args[0])
+            child.arguments = ["--test-bundle-path", bundle, "--filter", "aFileSizeLimitInAChildProcessLeavesTheFileAsItWas",
+                               bundle, "--testing-library", "swift-testing"]
+            child.environment = ProcessInfo.processInfo.environment.merging(["OWLINK_FSIZE_CHILD": url.path,
+                                                                             "OWLINK_FSIZE_COUNTED": counted ? "1" : "0"]) { $1 }
+            let out = Pipe()
+            child.standardOutput = out
+            child.standardError = out
+            try child.run()
+            // Bounded: a child that hangs is ended, and the test fails, rather
+            // than waiting for EOF for ever.
+            final class Collected: @unchecked Sendable { var data = Data() }
+            let collected = Collected()
+            let readDone = DispatchSemaphore(value: 0)
+            let reader = out.fileHandleForReading
+            Thread {
+                collected.data = reader.readDataToEndOfFile()
+                readDone.signal()
+            }.start()
+            let inTime = readDone.wait(timeout: .now() + 60) == .success
+            var readFinished = inTime
+            if !inTime {
+                child.terminate()
+                readFinished = readDone.wait(timeout: .now() + 10) == .success
+            }
+            #expect(inTime, "the child finished within 60 s")
+            // Its exit is bounded too: SIGKILL if it outlives its output.
+            func exited(within seconds: Double) -> Bool {
+                let end = Date(timeIntervalSinceNow: seconds)
+                while child.isRunning, Date() < end { usleep(10_000) }
+                return !child.isRunning
+            }
+            var gone = exited(within: 10)
+            if !gone {
+                _ = kill(child.processIdentifier, SIGKILL)
+                gone = exited(within: 10)
+            }
+            // The buffer is the reader's until it signals; never read before.
+            try #require(gone, "the child exited")
+            try #require(readFinished, "the child's output was read to its end")
+            let output = (counted ? "counted child: " : "saves child: ") + String(decoding: collected.data, as: UTF8.self)
+            #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
+            #expect(child.terminationStatus == 0, "\(output)")
+            #expect(output.contains("fsize child: ok"), "\(output)")
+            #expect(try Data(contentsOf: url) == original, "the file keeps every original byte, and its length")
         }
-        #expect(inTime, "the child finished within 60 s")
-        // Its exit is bounded too: SIGKILL if it outlives its output.
-        func exited(within seconds: Double) -> Bool {
-            let end = Date(timeIntervalSinceNow: seconds)
-            while child.isRunning, Date() < end { usleep(10_000) }
-            return !child.isRunning
-        }
-        var gone = exited(within: 10)
-        if !gone {
-            _ = kill(child.processIdentifier, SIGKILL)
-            gone = exited(within: 10)
-        }
-        // The buffer is the reader's until it signals; never read before.
-        try #require(gone, "the child exited")
-        try #require(readFinished, "the child's output was read to its end")
-        let output = String(decoding: collected.data, as: UTF8.self)
-        #expect(child.terminationReason == .exit, "not killed by a signal (SIGXFSZ): \(output)")
-        #expect(child.terminationStatus == 0, "\(output)")
-        #expect(output.contains("fsize child: ok"), "\(output)")
-        #expect(try Data(contentsOf: url) == original, "the file keeps every original byte, and its length")
         #expect(chmod(dir.path, 0o755) == 0)
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["doc.md"])
     }
 
     /// The child's half: exits 0 printing "fsize child: ok", else 1.
-    static func fileSizeChild(_ url: URL) -> Never {
+    /// `counted`: only the bypass save with the counting handler, the one
+    /// write past the limit this process makes; else the app-handler saves.
+    static func fileSizeChild(_ url: URL, counted only: Bool) -> Never {
         DocumentWrite.catchFileSizeSignal()
         var failures: [String] = []
         guard let original = try? Data(contentsOf: url) else { print("fsize child: can't read"); exit(1) }
@@ -470,9 +480,11 @@ import Testing
         if handler == unsafeBitCast(SIG_IGN, to: Int.self) || handler == unsafeBitCast(SIG_DFL, to: Int.self) {
             failures.append("catchFileSizeSignal installed no handler")
         }
-        // Run with the app's handler, then again with one that reports
-        // each signal (signal-safely: one byte down a pipe), to see the
-        // bypass really meets the kernel's limit.
+        // The saves child runs with the app's handler; the counted child
+        // swaps in one that reports each signal (signal-safely: one byte
+        // down a pipe), to see the bypass really meets the kernel's limit.
+        // Its one save is the only write past the limit in its process, so
+        // a signal counted is that save's.
         var pipeFDs: [Int32] = [-1, -1]
         guard pipe(&pipeFDs) == 0 else { print("fsize child: no pipe"); exit(1) }
         for fd in pipeFDs { _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) }
@@ -509,7 +521,7 @@ import Testing
             var current = sigset_t()
             _ = pthread_sigmask(SIG_BLOCK, nil, &current)
             if sigismember(&current, SIGXFSZ) != 0 { failures.append("the saving thread blocks SIGXFSZ") }
-            for (skip, counting) in [(false, false), (true, false), (true, true)] {
+            for (skip, counting) in only ? [(true, true)] : [(false, false), (true, false)] {
                 if counting {
                     var action = sigaction()
                     action.__sigaction_u.__sa_handler = { _ in
@@ -518,7 +530,7 @@ import Testing
                     }
                     sigemptyset(&action.sa_mask)
                     _ = sigaction(SIGXFSZ, &action, nil)
-                    _ = signalsCaught()
+                    if signalsCaught() != 0 { failures.append("counted: a SIGXFSZ came before the counted save") }
                 }
                 do {
                     try DocumentWrite.write(bigger, to: url, fileManager: .default, afterCheck: nil,
