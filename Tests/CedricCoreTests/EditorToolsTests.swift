@@ -925,8 +925,9 @@ import Testing
         let tab = FollowedTab()
         tab.show(d)
         let callbacks = DispatchQueue(label: "t")
-        let tail = FileTail(url: url, offset: UInt64(used), callbackQueue: callbacks, startedFrom: stamp,
-                            lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
+        // As the app starts it: the held CR counts as read.
+        let tail = FileTail(url: url, offset: UInt64(used), held: UInt64(data.count - used), callbackQueue: callbacks,
+                            startedFrom: stamp, lineEnding: d.lineEnding, stamped: { tab.event($0, $1) })
         tail.start()
         defer { tail.stop() }
         settle(tail, callbacks)
