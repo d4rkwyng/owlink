@@ -400,10 +400,11 @@ import Testing
 
             let outcome = Outcome()
             let done = DispatchSemaphore(value: 0)
-            // A thread of its own, not DispatchQueue.global(): GCD starts
-            // no thread there while as many as there are cores run CPU work
-            // at that QoS, and on a 3-core runner the save didn't start
-            // within the 20 s bound (run 45449763393, both jobs).
+            // A thread of its own, not DispatchQueue.global(): on a 3-core
+            // CI runner, with other tests' CPU work running at that QoS, the
+            // save didn't start there within the 20 s bound (run
+            // 45449763393, both jobs); the stall reproduces locally with
+            // that many CPU-bound blocks on the global queue.
             Thread.detachNewThread {
                 do {
                     try DocumentWrite.write(Data("saved\n".utf8), to: url, fileManager: .default) {

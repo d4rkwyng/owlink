@@ -149,11 +149,12 @@ import Testing
         // itself, not for `isClosed`, before checking what it did.
         let stopCalled = DispatchSemaphore(value: 0)
         // On a thread of its own, as the atexit hook runs on the exiting
-        // thread. Not DispatchQueue.global(): GCD starts no thread there
-        // while as many as there are cores run CPU work at that QoS, and on
-        // a 3-core runner other tests' work kept exit from starting for
-        // over 5 s (all four jobs of run 45449763393); the load was then
-        // let go first and registered, which looked like exit's fault.
+        // thread. Not DispatchQueue.global(): on a 3-core CI runner, with
+        // other tests' CPU work running at that QoS, exit didn't start
+        // there for over 5 s (all four jobs of run 45449763393), and the
+        // same stall reproduces locally with that many CPU-bound blocks on
+        // the global queue; the load was then let go first and registered,
+        // which looked like exit's fault.
         Thread.detachNewThread {
             reg.exit(on: q, onQueue: false, timeout: 5, stop: { $0.stopped.mutate { $0 += 1 }; stopCalled.signal() },
                      free: { $0.freed.mutate { $0 += 1 } }, giveUp: { gaveUp.mutate { $0 = true } })
