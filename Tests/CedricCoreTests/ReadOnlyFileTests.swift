@@ -769,6 +769,20 @@ nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
             let left = try FileManager.default.contentsOfDirectory(atPath: tmp).filter { $0.hasPrefix("owlink-recovery-") }
                 .filter { FileManager.default.fileExists(atPath: (tmp as NSString).appendingPathComponent("\($0)/\(unique)")) }
             #expect(left.isEmpty, "no recovery copy left: \(left)")
+            // Again in a folder of this test's own: refused as a short
+            // source (EBUSY), and neither the copy nor its (empty)
+            // recovery folder is left.
+            let parent = dir.appendingPathComponent("parent-\(size)")
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
+            var code: Int32?
+            do {
+                _ = try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: "copy", url: src, parent: parent.path)
+            } catch {
+                code = ((error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError).map { Int32($0.code) }
+            }
+            #expect(code == EBUSY, "a short source: EBUSY, got \(String(describing: code))")
+            #expect(try FileManager.default.contentsOfDirectory(atPath: parent.path).isEmpty,
+                    "nothing left in the parent: \((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? [])")
         }
     }
 }

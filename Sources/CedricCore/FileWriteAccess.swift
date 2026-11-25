@@ -466,8 +466,10 @@ public enum DocumentWrite {
     /// in a new private (0700) folder in this user's temporary folder,
     /// and flushes it to disk. Throws, leaving nothing behind, if the copy
     /// fails or `fd` holds fewer than `count` bytes.
-    static func makeRecoveryCopy(of fd: Int32, count: Int, name: String, url: URL) throws -> URL {
-        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("owlink-recovery-XXXXXX").utf8CString)
+    /// `parent` is the temporary folder (a test's own, to see that nothing is left in it).
+    static func makeRecoveryCopy(of fd: Int32, count: Int, name: String, url: URL,
+                                 parent: String = NSTemporaryDirectory()) throws -> URL {
+        var template = Array((parent as NSString).appendingPathComponent("owlink-recovery-XXXXXX").utf8CString)
         guard mkdtemp(&template) != nil else { throw writeError(errno, url) }
         let folder = URL(fileURLWithPath: String(cString: template), isDirectory: true)
         let copy = folder.appendingPathComponent(name)
