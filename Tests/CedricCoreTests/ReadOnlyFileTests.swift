@@ -761,10 +761,14 @@ nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
             #expect(try Data(contentsOf: copy) == bytes)
             try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
             // Asked for more than the file has: refused, nothing left behind.
-            let before = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("owlink-recovery-") })
-            #expect(throws: (any Error).self) { try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: "copy", url: src) }
-            let after = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("owlink-recovery-") })
-            #expect(after.subtracting(before).isEmpty, "no recovery folder left")
+            // (Other suites make recovery folders meanwhile: this one is
+            // known by its copy's unique name.)
+            let unique = "copy-\(UUID().uuidString)"
+            #expect(throws: (any Error).self) { try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: unique, url: src) }
+            let tmp = NSTemporaryDirectory()
+            let left = try FileManager.default.contentsOfDirectory(atPath: tmp).filter { $0.hasPrefix("owlink-recovery-") }
+                .filter { FileManager.default.fileExists(atPath: (tmp as NSString).appendingPathComponent("\($0)/\(unique)")) }
+            #expect(left.isEmpty, "no recovery copy left: \(left)")
         }
     }
 }
