@@ -159,7 +159,13 @@ public final class FileSearch: @unchecked Sendable {
                 summary.skippedFiles.append(SkippedFile(url: url, relativePath: rel, reason: reason))
             }
             if size > options.maxFileSize { skip(.tooLarge); continue }
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { continue }
+            // Bytes of its own, not mapped: a file rewritten in place while
+            // it's decoded gave text and line endings from other bytes. And
+            // a regular file still: one swapped for a FIFO since the walk
+            // blocked the search for good.
+            TextCodec.beforeReadForTesting?(url)
+            guard let data = try? TextCodec.snapshot(of: url) else { continue }
+            TextCodec.afterReadForTesting?(url)
             if Self.looksBinary(data) { skip(.binary); continue }
             guard let decoded = TextCodec.decode(data) else { skip(.binary); continue }
             summary.filesSearched += 1

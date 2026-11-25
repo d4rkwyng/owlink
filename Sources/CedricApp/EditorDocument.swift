@@ -160,23 +160,23 @@ final class EditorDocument {
     /// file's stamp. The stamp is taken before the bytes are read: if the
     /// file changes (or a link is pointed elsewhere) in between, the next
     /// check sees a change rather than missing one.
-    /// `shareBytes`: the bytes are read into memory of their own (not
-    /// mapped: TextCodec.snapshot), and a large ASCII file's text reads
-    /// them in place (TextCodec.decode), for opening into a tab: the file
-    /// changing meanwhile changes nothing already read.
+    /// The bytes are always read into memory of their own (not mapped:
+    /// TextCodec.readText), so the file changing meanwhile changes nothing
+    /// already read. `shareBytes`: a large ASCII file's text reads them in
+    /// place (TextCodec.decode), for opening into a tab.
     nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> (DecodedText, DiskStamp?) {
-        let data: Data
         if let kind = SpecialFile.kind(atPath: url.path) {
             throw LoadError.unreadable(url, NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey:
                 String(localized: "It is \(kind), not a regular file.")]))
         }
         let stamp = DiskStamp.of(url)
+        let read: DecodedText?
         do {
-            data = shareBytes ? try TextCodec.snapshot(of: url) : try Data(contentsOf: url, options: .mappedIfSafe)
+            read = try TextCodec.readText(at: url, as: encoding, shareBytes: shareBytes)
         } catch {
             throw LoadError.unreadable(url, error)
         }
-        guard let decoded = TextCodec.decode(data, as: encoding, shareBytes: shareBytes) else { throw LoadError.notText(url) }
+        guard let decoded = read else { throw LoadError.notText(url) }
         return (decoded, stamp)
     }
 

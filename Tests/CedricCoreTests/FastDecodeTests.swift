@@ -343,4 +343,94 @@ import Testing
         try Data("ok\n".utf8).write(to: file)
         #expect(try TextCodec.snapshot(of: file) == Data("ok\n".utf8))
     }
+
+    /// Reload, reopening and Find in Files read a file's bytes into memory
+    /// of their own before they're scanned and converted. Mapped, a
+    /// same-size rewrite in place in between (the CRLF count kept, a lone
+    /// CR added) gave the new bytes' text with the old scan's line-ending
+    /// notes, which a later save wrote back; and a truncation faulted
+    /// (0.5.4 QA, Codex review round 2). The rewrite here lands after the
+    /// read: the text, the line endings and the search hit are all the
+    /// bytes as read.
+    @Test func readTextAndFindInFilesDecodeTheBytesAsRead() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-owned-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("log.txt")
+        // 1 MiB, every line CRLF: big enough that Foundation would map it.
+        var bytes = Data("needle\r\n".utf8)
+        bytes.append(Data(String(repeating: "abcdef\r\n", count: 128 * 1024).utf8))
+        try bytes.write(to: file)
+        let path = file.standardizedFileURL.resolvingSymlinksInPath().path
+        // Same size, one CRLF still there, a lone CR added, the needle gone.
+        let rewrite = Data("zzzzz\r\r\n".utf8)
+        #expect(rewrite.count == 8)
+        func rewriteInPlace(_ url: URL) {
+            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path,
+                  let h = try? FileHandle(forUpdating: file) else { return }
+            try? h.seek(toOffset: 0)
+            try? h.write(contentsOf: rewrite)
+            try? h.synchronize()
+            try? h.close()
+        }
+        defer { TextCodec.afterReadForTesting = nil }
+
+        TextCodec.afterReadForTesting = rewriteInPlace
+        let d = try TextCodec.readText(at: file)
+        #expect(d?.text.hasPrefix("needle\nabcdef\n") == true, "the text of the bytes as read")
+        #expect(d?.lineEnding == .crlf)
+        #expect(d?.mixedLineEndings == false, "no lone CR noted that the bytes read don't have")
+        #expect(d?.lineBreaks == nil)
+
+        try bytes.write(to: file)
+        var hits: [FileSearchResult] = []
+        TextCodec.afterReadForTesting = rewriteInPlace
+        _ = try FileSearch(FileSearchOptions(root: dir, query: "needle")).run { hits.append($0) }
+        #expect(hits.map(\.line) == [1], "Find in Files searched the bytes as read")
+        TextCodec.afterReadForTesting = nil
+
+        // Checked as a file, swapped for a FIFO just before the read: Reload
+        // and the search come back (refused, skipped) instead of waiting
+        // for a writer forever. A watchdog opens the FIFO for writing so
+        // a stuck read ends and the test fails rather than hangs.
+        defer { TextCodec.beforeReadForTesting = nil }
+        func swapForFIFO(_ url: URL) {
+            guard url.standardizedFileURL.resolvingSymlinksInPath().path == path else { return }
+            try? FileManager.default.removeItem(at: file)
+            _ = mkfifo(file.path, 0o600)
+        }
+        func comesBack(_ what: String, _ body: @escaping @Sendable () -> Void) -> Bool {
+            let done = DispatchSemaphore(value: 0)
+            Thread { body(); done.signal() }.start()
+            if done.wait(timeout: .now() + 3) == .success { return true }
+            Issue.record("\(what) waited on a FIFO")
+            let w = Darwin.open(file.path, O_WRONLY | O_NONBLOCK)
+            if w >= 0 { close(w) }
+            _ = done.wait(timeout: .now() + 5)
+            return false
+        }
+        final class Box: @unchecked Sendable { var error: Error?; var hits = -1 }
+        let box = Box()
+        try bytes.write(to: file)
+        TextCodec.beforeReadForTesting = swapForFIFO
+        let readBack = comesBack("Reload") {
+            do { _ = try TextCodec.readText(at: file) } catch { box.error = error }
+        }
+        if readBack {
+            // Refused as what it is: Foundation's read said "you don't have
+            // permission to view it" (EACCES) for a FIFO.
+            let underlying = (box.error as? CocoaError)?.userInfo[NSUnderlyingErrorKey] as? POSIXError
+            #expect(underlying?.code == .EFTYPE, "a FIFO is refused as not a regular file: \(String(describing: box.error))")
+        }
+
+        try? FileManager.default.removeItem(at: file)
+        try bytes.write(to: file)
+        TextCodec.beforeReadForTesting = swapForFIFO
+        let searchBack = comesBack("Find in Files") {
+            var n = 0
+            _ = try? FileSearch(FileSearchOptions(root: dir, query: "needle")).run { _ in n += 1 }
+            box.hits = n
+        }
+        if searchBack { #expect(box.hits == 0) }
+    }
 }

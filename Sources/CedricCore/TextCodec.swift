@@ -301,6 +301,29 @@ public enum TextCodec {
         return Data(bytesNoCopy: buffer, count: count, deallocator: .free)
     }
 
+    /// The file at `url` read (`snapshot(of:)`, bytes of its own) and
+    /// decoded (`decode`); nil if the bytes aren't text in that encoding.
+    /// Reload, reopening and Find in Files read this way: mapped, a file
+    /// rewritten in place while it was scanned and converted gave text
+    /// with line-ending notes from other bytes (a same-size rewrite that
+    /// keeps the CRLF count and adds a lone CR fits the room the scan gave,
+    /// so nothing noticed), which a later save wrote back; and a file
+    /// truncated meanwhile faulted on the pages past its end. A path
+    /// swapped for a FIFO since it was checked is refused, not waited on
+    /// (reading it mapped blocked Reload or the search for good).
+    public static func readText(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> DecodedText? {
+        beforeReadForTesting?(url)
+        let data = try snapshot(of: url)
+        afterReadForTesting?(url)
+        return decode(data, as: encoding, shareBytes: shareBytes)
+    }
+
+    /// Tests only: run just before a file's bytes are read and after
+    /// they're read, before they're decoded (`readText`, Find in Files),
+    /// to swap or change the file there.
+    nonisolated(unsafe) public static var beforeReadForTesting: ((URL) -> Void)?
+    nonisolated(unsafe) public static var afterReadForTesting: ((URL) -> Void)?
+
     /// A FIFO, device or directory where a file was expected.
     static func notRegularFile(_ url: URL) -> CocoaError {
         CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path, NSURLErrorKey: url,
