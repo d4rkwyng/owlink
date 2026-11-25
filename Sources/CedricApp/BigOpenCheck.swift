@@ -109,7 +109,8 @@ extension DevChecks {
                 }
             }
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             heldTurn(1),
             sync {
                 // Typing and ⌘S while it is held: no tab takes them, the
@@ -189,6 +190,9 @@ extension DevChecks {
                 // Undo past the save: unsaved (the saved text is now the edited one).
                 tab.textView.undoManager?.undo()
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(tab.text == original && tab.doc.isDirty, "undo past the save is unsaved")
                 tab.textView.undoManager?.redo()
@@ -247,7 +251,9 @@ extension DevChecks {
                 expect(!FileManager.default.fileExists(atPath: marker2), "…and so does the second (one alert for both)")
                 arrived2.first?.doc.markSaved()
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
         return true
     }
 }

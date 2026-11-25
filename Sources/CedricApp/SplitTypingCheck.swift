@@ -116,7 +116,8 @@ extension DevChecks {
             }
             return false
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 tab.window?.makeFirstResponder(tab.textView)
@@ -184,6 +185,9 @@ extension DevChecks {
                 mark("caret by the owl again")
                 expect(caretByOwl(), "a laid-out place by the owl, again", String(describing: tab.primaryTextView.viewportCharacterRange))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(tab.owl?.owlFaded == true, "caret by the owl again: it fades", "faded \(String(describing: tab.owl?.owlFaded))")
                 // Scrolled away from the caret: the owl is back.
@@ -226,6 +230,9 @@ extension DevChecks {
                 tab.primaryPane.scrollView.reflectScrolledClipView(clip)
             },
             waitFor("the viewport at the top is laid out") { viewportLaidOutAtTop() },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 mark("caret at the viewport's end")
                 let tv = tab.primaryTextView
@@ -290,6 +297,9 @@ extension DevChecks {
                 clip.scroll(to: NSPoint(x: clip.bounds.minX, y: bottom - h))
                 tab.primaryPane.scrollView.reflectScrolledClipView(clip)
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             // A pass of TextKit's own after the scroll, not the one before
             // (its overdraw can cover the new visible rect already), and one
             // that ends the viewport with that chunk: then the caret's place
@@ -365,6 +375,8 @@ extension DevChecks {
                 for (k, v) in timings.ms.sorted(by: { $0.key < $1.key }) { print(String(format: "check: note: %@ %.0f ms", k, v)) }
                 tab.doc.markSaved()
             },
-        ], gap: 0.1)
+        ]
+        steps += steps4
+        run(steps, gap: 0.1)
     }
 }

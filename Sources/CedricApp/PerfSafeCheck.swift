@@ -88,7 +88,8 @@ extension DevChecks {
         let savedProseSwitch = UserDefaults.standard.object(forKey: "useProseFont") as? NSObject
         let savedProseName = UserDefaults.standard.object(forKey: "proseFontName") as? NSObject
         var themePasses = 0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 // A prose font in the user's settings must not change what
@@ -99,6 +100,9 @@ extension DevChecks {
                 themePasses = tab.colorizer.fullPasses
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "light", theme: .light, system: nil))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // The theme: the whole-text pass runs (text set in the text
                 // colour is not a reason to skip it).
@@ -175,6 +179,9 @@ extension DevChecks {
                 savedFontSize = UserDefaults.standard.object(forKey: "fontSize")
                 Settings.shared.fontSizeOverride = Settings.shared.fontSize == 20 ? 17 : 20
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 expect(tab.editorFont.pointSize == Settings.shared.fontSizeOverride, "zoomed for this run",
                        "\(tab.editorFont.pointSize)")
@@ -208,6 +215,9 @@ extension DevChecks {
             // Line 1 stayed coloured from before: wait for the viewport
             // itself to be back at the top too.
             waitFor("back at the top, coloured, in time") { tab.textView.visibleRect.minY < 1 && tab.colorizer.isColored(0) },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 expect(tab.textView.visibleRect.minY < 1, "back at the top", "\(tab.textView.visibleRect)")
                 var made = tab.colorizer.fullPasses
@@ -264,6 +274,9 @@ extension DevChecks {
                        "\(String(describing: UserDefaults.standard.object(forKey: "useProseFont")))")
                 TypingCheck.apply(TypingCheck.ThemeCase(name: "dracula", theme: .dracula, system: nil))
             },
+        ]
+        steps += steps4
+        let steps5: [Step] = [
             waitFor("the theme change reaches the tab, in time") {
                 tab.palette.name.lowercased().contains("dracula")
                     && (tab.textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor)
@@ -302,6 +315,8 @@ extension DevChecks {
                        "the end: the saved prose font switch is left as it was")
                 tab.doc.markSaved()
             },
-        ])
+        ]
+        steps += steps5
+        run(steps)
     }
 }

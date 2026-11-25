@@ -233,7 +233,8 @@ extension DevChecks {
         sized(tab)
         func caretTo(line: Int) { tab.textView.setSelectedRange(NSRange(location: tab.lineIndex.starts[line] + 1, length: 0)) }
         var marks: [Int] { tab.editing.bookmarks.lines }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 caretTo(line: 1)
@@ -287,6 +288,9 @@ extension DevChecks {
                 key(down, [.control, .command])
                 expect(marks == [5], "⌃⌘↓ takes the bookmark along", "\(marks)")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Bookmark All Matches on the word under the caret ("todo").
                 key(f2Key, [.command, .shift])
@@ -321,7 +325,10 @@ extension DevChecks {
                 click(g, at: NSPoint(x: g.bounds.width - 10, y: p.y))
                 expect(marks.isEmpty, "and a second click removes it", "\(marks)")
             },
-        ] + bookmarksThroughBigEdits(app))
+        ]
+        steps += steps2
+        steps += bookmarksThroughBigEdits(app)
+        run(steps)
     }
 
     /// Edits made in one go keep the bookmarks on lines whose text
@@ -579,7 +586,8 @@ extension DevChecks {
         let broken = app.open(write("broken.json", String(full.dropLast(3)) + "\n"))!
         sized(tab)
         var said: String?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let w = tab.owlContextWindow()
                 expect(!w.isWholeDocument, "the owl sees only the start of the file", "\((w.context.text as NSString).length)")
@@ -602,7 +610,10 @@ extension DevChecks {
                 expect(broken.text == String(full.dropLast(3)) + "\n", "a file that isn't valid JSON as a whole is left alone")
                 expect(said != nil, "and the reason is given", said ?? "-")
             },
-        ] + staleJSONHintSteps(app), gap: 0.6)
+        ]
+        steps += steps1
+        steps += staleJSONHintSteps(app)
+        run(steps, gap: 0.6)
     }
 
     /// "Looks like JSON. Format it?" shown again from Recent hints after
@@ -618,7 +629,8 @@ extension DevChecks {
             tab.textView.setSelectedRange(NSRange(location: 0, length: (tab.text as NSString).length))
             tab.textView.insertText(text, replacementRange: tab.textView.selectedRange())
         }
-        return [
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 guard let t = app.open(write("stale.json", first)) else { expect(false, "stale JSON: opened stale.json"); return }
                 tab = t
@@ -673,6 +685,9 @@ extension DevChecks {
                 // invalid text still matched its range and offered to format it.
                 replace(first + " and more")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 guard let tab, let owl = tab.owl, let shown else { return }
                 owl.showAgain(shown, document: tab.text as NSString, own: true)
@@ -728,6 +743,9 @@ extension DevChecks {
                 replace(second)
                 expect(tab.text == second, "stale JSON: edited and back to the same text")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             waitFor("stale JSON: the check comes back (edited and back)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
             sync {
                 guard let tab, let owl = tab.owl, let shown else { return }
@@ -774,6 +792,8 @@ extension DevChecks {
                 tab.window?.performClose(nil)
             },
         ]
+        steps += steps3
+        return steps
     }
 
     // MARK: Colouring stays right after edits
@@ -997,7 +1017,8 @@ extension DevChecks {
         let big = app.open(write("big.txt", String(repeating: "lorem ipsum dolor\n", count: 70_000)))! // 1.26 M: lines only
         sized(tab)
         var label: String { tab.statusBar.counts.stringValue }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: 0, length: 0))
@@ -1037,6 +1058,9 @@ extension DevChecks {
             waitFor("~1 M characters counted, in time", 10) {
                 mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters"
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "180,000 words · 36,000 lines · 972,000 characters", "and the counts arrive", l)
@@ -1111,6 +1135,8 @@ extension DevChecks {
                 expect(l4 == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters", "a selection of exactly the cap is counted", l4)
                 for t in [tab, mid, big] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

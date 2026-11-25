@@ -69,7 +69,8 @@ extension DevChecks {
         var md: EditorWindowController?
         var big: EditorWindowController?
         var firstSelBefore = NSRange(location: 0, length: 0)
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 let i = menuItem(action: #selector(AppDelegate.toggleSplitEditorMenu(_:)))
@@ -132,6 +133,9 @@ extension DevChecks {
                 expect(cs.primaryTextLayoutManager === first.textLayoutManager, "…and the primary layout manager")
                 key("z", [.command])
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(first.string == src, "⌘Z in pane 1 undoes pane 2's typing", String(first.string.prefix(40)))
                 // Type in pane 1, undo from pane 2 (Move Focus to Other Pane).
@@ -195,6 +199,9 @@ extension DevChecks {
                        "top1=\(l1)")
                 key("z", [.command])
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 expect(first.string == src, "undo the x")
                 // Fold from pane 2's gutter (a real click): both panes hide the lines.
@@ -257,6 +264,9 @@ extension DevChecks {
                 tab.editing.bookmarks = Bookmarks()
                 tab.setGuttersNeedDisplay()
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             snapshot("split-dark.png"),
             sync {
                 // Side by side and back.
@@ -323,6 +333,9 @@ extension DevChecks {
                 expect(subs2.count == 3 && subs2[0] === m.editorArea && subs2[2] === app.findInFiles, "Find in Files docks at the right too",
                        "\(subs2.map { Swift.type(of: $0) })")
             },
+        ]
+        steps += steps4
+        let steps5: [Step] = [
             snapshot("split-preview-dark.png"),
             sync {
                 guard let m = md else { return }
@@ -384,6 +397,9 @@ extension DevChecks {
                 expect(!tab.isSplit && first.string.contains("\njstruct Alpha"), "typed in pane 2, then unsplit")
                 key("z", [.command])
             },
+        ]
+        steps += steps5
+        let steps6: [Step] = [
             sync {
                 expect(first.string == src, "⌘Z in pane 1 undoes the gone pane's edit")
             },
@@ -429,6 +445,8 @@ extension DevChecks {
                 }
                 tab.doc.markSaved()
             },
-        ])
+        ]
+        steps += steps6
+        run(steps)
     }
 }

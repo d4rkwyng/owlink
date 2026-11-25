@@ -48,7 +48,8 @@ extension DevChecks {
         func arrowDown() { press(down, 125, [.numericPad, .function]) }
         func row(_ title: String) -> CommandPalette.Row? { palette?.shownRows.first { $0.candidate.title == title } }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 open()
@@ -103,6 +104,9 @@ extension DevChecks {
                 expect(CommandPalette.recents.ids.first == "Text › Text Tools › lowercase", "it is now a recent command")
                 expect(tab.window?.firstResponder === tab.textView, "the text view has the keyboard back")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 key("z", [.command])
                 expect(tab.text == "HELLO PALETTE\nSecond Line\n", "⌘Z undoes the palette's command", tab.text)
@@ -173,6 +177,9 @@ extension DevChecks {
                 expect(big.last! < 50, "opening over ~500 commands takes under 50 ms", "\(big)")
                 opens.removeLast(big.count)
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 // Any file type: an image tab.
                 let png = dir.appendingPathComponent("dot.png")
@@ -193,6 +200,8 @@ extension DevChecks {
                 press("\u{1b}", 53)
                 expect(palette?.isOpen == false, "Esc closes it there too")
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 }

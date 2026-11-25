@@ -29,7 +29,8 @@ extension DevChecks {
             v.keyDown(with: e)
         }
         func wait(_ s: Double) -> (@escaping () -> Void) -> Void { { next in DispatchQueue.main.asyncAfter(deadline: .now() + s) { next() } } }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 PDFOverlay.reduceMotionOverride = false
                 app.open(url)
@@ -100,6 +101,9 @@ extension DevChecks {
                     expect(abs(o.frame.midX - pf.midX) <= 1, "the capsule stays centred on the pages beside the sidebar", "\(o.frame) \(pf)")
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             snapshot("pdfoverlay-thumbnails-dark.png"),
             sync {
                 press(.thumbnails)
@@ -154,6 +158,9 @@ extension DevChecks {
                 if let e = NSEvent.mouseEvent(with: .mouseMoved, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
                                               context: nil, eventNumber: 0, clickCount: 0, pressure: 0) { o?.mouseExited(with: e) }
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             wait(2.6),
             sync {
                 expect(o?.shown == false, "and fades once the pointer leaves")
@@ -180,6 +187,8 @@ extension DevChecks {
                 tab?.togglePDFThumbnails(nil)
             },
             snapshot("pdfoverlay-narrow-light.png"),
-        ], gap: 0.3)
+        ]
+        steps += steps3
+        run(steps, gap: 0.3)
     }
 }

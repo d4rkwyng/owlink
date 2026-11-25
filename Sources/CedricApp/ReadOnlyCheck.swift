@@ -31,7 +31,8 @@ extension DevChecks {
         let mine = "disk one mine\n", theirs = "disk two, longer\n"
         var reloadTab: EditorWindowController?
         func becomeKey() { tab.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: tab.window)) }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 tab.window?.makeFirstResponder(tab.textView)
@@ -108,6 +109,9 @@ extension DevChecks {
                 type(" mine")
                 expect(r.text == mine && r.doc.isDirty, "reload: unsaved edits typed", r.text)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Its own run-loop turn: Undo groups by event.
                 guard let r = reloadTab else { return }
@@ -171,7 +175,10 @@ extension DevChecks {
                 // Leave nothing unsaved or read-only behind.
                 chmod(file.path, 0o644)
             },
-        ] + saveFailureSteps(app))
+        ]
+        steps += steps2
+        steps += saveFailureSteps(app)
+        run(steps)
         return true
     }
 }

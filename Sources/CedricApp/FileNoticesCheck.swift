@@ -64,7 +64,8 @@ extension DevChecks {
         var keepTab: EditorWindowController?
         var mixedTab: EditorWindowController?
         let encodings = TextEncoding.allCases.map(\.displayName)
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 expect(tab.doc.encoding == .latin1 && tab.doc.encodingGuessed, "invalid UTF-8 opens as Latin-1, a guess",
@@ -137,6 +138,9 @@ extension DevChecks {
                 key("s", [.command])
                 expect(bytes(mixed) == edited && !m.doc.isDirty, "⌘S writes the edit, each line's own ending", show(bytes(mixed)))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 guard let m = mixedTab, let um = m.textView.undoManager else { expect(false, "the mixed tab has an undo manager"); return }
                 var n = 0
@@ -205,7 +209,10 @@ extension DevChecks {
                 EditorWindowController.checkEncodingPicker = nil
                 s.window?.performClose(nil)
             },
-        ] + mixedSaveSteps(app) + [
+        ]
+        steps += steps2
+        steps += mixedSaveSteps(app)
+        let steps3: [Step] = [
             sync {
                 // Save with Encoding › the guessed one: the user's now, as Keep.
                 guard let g = app.open(put("invalid-pick.txt", [0x6E, 0x61, 0xEF, 0x76, 0x65, 0x0A])) else { expect(false, "opened invalid-pick.txt"); return }
@@ -218,7 +225,9 @@ extension DevChecks {
                 expect(g.statusBar.encodingButton.title == TextEncoding.latin1.displayName && !g.doc.isDirty,
                        "…the status bar drops (guessed), nothing to save", g.statusBar.encodingButton.title)
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
         return true
     }
 }
@@ -253,7 +262,8 @@ extension DevChecks {
         let crlfOnce = "a\r\nb\nc\nd\n"
         var moved: URL?
         var stepsChanged: [Bool] = []
-        return [
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 // Two lines alike: deleting the first and its CRLF keeps the second's own LF.
                 guard let t = open("alike.txt", "x\r\nx\nz") else { return }
@@ -318,6 +328,9 @@ extension DevChecks {
                 key("s", [.command])
                 expect(bytes(t.doc.fileURL!) == b("ab\nc\nd\n"), "…saved", show(bytes(t.doc.fileURL!)))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 guard let t = tab, let um = t.textView.undoManager else { expect(false, "crlf-typing: an undo manager"); return }
                 stepsChanged = []
@@ -384,6 +397,9 @@ extension DevChecks {
                 t.textView.setSelectedRange(NSRange(location: 3, length: 0))
                 type("!")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 // Its own event, as from the menu: one undo step of its own.
                 guard let t = tab else { return }
@@ -448,6 +464,9 @@ extension DevChecks {
                        show(bytes(t.doc.fileURL!)))
                 t.textView.undoManager?.undo()
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 guard let t = tab else { return }
                 key("s", [.command])
@@ -511,5 +530,7 @@ extension DevChecks {
                 close(t)
             },
         ]
+        steps += steps4
+        return steps
     }
 }

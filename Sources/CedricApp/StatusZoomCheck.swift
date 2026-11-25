@@ -22,7 +22,8 @@ extension DevChecks {
             guard let i = item(title), let a = i.action else { expect(false, "zoom item \(title)", "missing"); return }
             NSApp.sendAction(a, to: i.target, from: i)
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 Settings.shared.fontSize = Settings.defaultFontSize
@@ -82,6 +83,9 @@ extension DevChecks {
                        "items \(bar.itemsFrame) column \(column)")
                 tab.togglePreview()
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 tab.window?.layoutIfNeeded()
                 expect(abs(bar.itemsFrame.maxX - bar.bounds.maxX) < 1, "preview closed: back to the full width", "\(bar.itemsFrame)")
@@ -144,6 +148,9 @@ extension DevChecks {
                 expect(!csv.palette.isDark, "light theme")
                 expectCSVEye(csv, on: true, "CSV, light")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             snapshot("statusbar-csv-light-on.png"),
             sync {
                 guard let csv = namedTab(app, "status.csv") else { return }
@@ -193,7 +200,9 @@ extension DevChecks {
                     t.window?.performClose(nil)
                 }
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 
     private static func namedTab(_ app: AppDelegate, _ name: String) -> EditorWindowController? {

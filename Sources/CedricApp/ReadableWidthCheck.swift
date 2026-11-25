@@ -41,7 +41,8 @@ extension DevChecks {
         }()
         func lineStart(_ t: EditorWindowController, _ line: Int) -> Int { t.lineIndex.starts[line] }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 defaults.removeObject(forKey: "readableColumns")
                 defaults.removeObject(forKey: "readableWidthDefault")
@@ -100,6 +101,9 @@ extension DevChecks {
                 // Typewriter Scrolling and Focus in the column.
                 mdTab.setWriting(WritingModeState(typewriter: true, focus: true))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 guard let w = mdTab.window else { return }
                 let tv = mdTab.textView
@@ -145,6 +149,8 @@ extension DevChecks {
                     if let v { defaults.set(v, forKey: k) } else { defaults.removeObject(forKey: k) }
                 }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

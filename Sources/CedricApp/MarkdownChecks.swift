@@ -44,7 +44,8 @@ extension DevChecks {
         let fence = app.open(write("fence.md", "```\n- in code"))!
         sized(tab)
         let tv = tab.textView
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 caretAtEnd(tab)
@@ -98,6 +99,9 @@ extension DevChecks {
                 key("\t")
                 expect(fence.text.hasPrefix("```\n- in code\n") && fence.text != "```\n- in code\n", "and Tab types its usual indent", fence.text)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             snapshot("mdlists.png"),
             sync {
                 // Return in a 100,000-line document: the fence scan is cached
@@ -140,7 +144,9 @@ extension DevChecks {
                 expect(median < 5, "Return at the end of a 100,000-line Markdown file takes under 5 ms (median)", String(format: "%.2f ms", median))
                 expect(times[0] < 50, "the first one (which scans the fences once) under 50 ms", String(format: "%.2f ms", times[0]))
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     static func markdownFormat(_ app: AppDelegate) {

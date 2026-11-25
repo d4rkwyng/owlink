@@ -86,7 +86,8 @@ extension DevChecks {
             }
         }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync { focus(tab) },
             waitRender("the Certificate panel opens beside a PEM file and renders", after: { 0 }, panelOf: { panel }),
             sync {
@@ -146,6 +147,9 @@ extension DevChecks {
                 tab.textView.setSelectedRange(NSRange(location: caStart, length: 0))
                 tab.textView.insertText("x", replacementRange: NSRange(location: caStart, length: 5))
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             waitRender("an edit re-renders the panel", after: { renders }, panelOf: { panel }),
             sync {
                 expect(shown.contains("site.check") && !shown.contains("Check CA\n") && !shown.contains("2 of 2"),
@@ -203,6 +207,8 @@ extension DevChecks {
                 expect(UserDefaults.standard.object(forKey: "certificatePanelClosed") as? Bool == savedClosed as? Bool,
                        "the clipboard and the panel setting are put back")
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

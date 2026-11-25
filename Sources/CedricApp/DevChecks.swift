@@ -12,6 +12,9 @@ import CedricCore
 ///   CEDRIC_CHECK_OUT=/dir      where snapshots go (default: the temp folder)
 @MainActor
 enum DevChecks {
+    /// One check step: it does its work, then calls `next`.
+    typealias Step = (@escaping () -> Void) -> Void
+
     static var passed = 0, failed = 0
     static var out = URL(fileURLWithPath: NSTemporaryDirectory())
     static var dir = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -166,7 +169,7 @@ enum DevChecks {
 
     /// Runs `steps` one after another, `gap` seconds apart (each step may
     /// be async: it calls `next` when done).
-    static func run(_ steps: [(@escaping () -> Void) -> Void], gap: Double = 0.3, quit: Bool = false) {
+    static func run(_ steps: [Step], gap: Double = 0.3, quit: Bool = false) {
         var i = 0
         func step() {
             guard i < steps.count else { if quit { finishAndQuit() } else { finish() }; return }
@@ -357,7 +360,8 @@ enum DevChecks {
             expect(false, "src/main.swift opens"); finish(); return
         }
         main.window?.setContentSize(NSSize(width: 1300, height: 720))
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 main.window?.makeKeyAndOrderFront(nil)
                 key("f", [.command, .shift])
@@ -409,6 +413,9 @@ enum DevChecks {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 let t = app.tabs.first { $0.doc.fileURL?.lastPathComponent == "strings.swift" }
                 expect(t != nil, "clicking a result opens the file")
@@ -446,7 +453,9 @@ enum DevChecks {
                 }
                 p.startSearch()
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     // MARK: Compare
@@ -520,7 +529,8 @@ enum DevChecks {
             fh.write(Data(s.utf8))
             fh.closeFile()
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 key("t", [.command, .option])
@@ -558,6 +568,9 @@ enum DevChecks {
                 fh.closeFile()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { next() }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync { expect(tab.text == "restarted after truncate\n", "truncate reloads the file", tab.text) },
             { next in
                 try? FileManager.default.moveItem(at: log, to: dir.appendingPathComponent("app.log.1"))
@@ -590,8 +603,14 @@ enum DevChecks {
                 expect(FileTail.descriptorsOpen(on: log) == 0, "…and no descriptor is left on the file",
                        "\(FileTail.descriptorsOpen(on: log))")
             },
-        ] + followHeldBytes(app) + followLineBreaks(app) + bomPerVersion(app) + bomHeldBinaryReload(app)
-          + bomAppended(app))
+        ]
+        steps += steps2
+        steps += followHeldBytes(app)
+        steps += followLineBreaks(app)
+        steps += bomPerVersion(app)
+        steps += bomHeldBinaryReload(app)
+        steps += bomAppended(app)
+        run(steps)
     }
 
     /// 0.5.4 QA (should round 2): Follow's appended text came with every
@@ -768,6 +787,7 @@ enum DevChecks {
                        tab.text.debugDescription)
                 tab.binaryBar?.button.performClick(nil)
                 expect(tab.binary == .editable, "\(c.name): Allow Editing")
+                expect(!tab.doc.isDirty, "\(c.name): clean before save")
                 let saved = tab.save()
                 let got = (try? Data(contentsOf: url)) ?? Data()
                 expect(saved && got == c.then, "\(c.name): saved unedited, the new version byte for byte",
@@ -821,6 +841,7 @@ enum DevChecks {
                        "\(c.name): the tab shows the second BOM as U+FEFF", tab.text.debugDescription)
                 expect(tab.doc.encoding == .utf8BOM, "\(c.name): UTF-8 with BOM", "\(tab.doc.encoding)")
                 let all = Data(c.first + c.writes.flatMap { $0 })
+                expect(!tab.doc.isDirty, "\(c.name): clean before save")
                 let saved = tab.save()
                 let got = (try? Data(contentsOf: url)) ?? Data()
                 expect(saved && got == all, "\(c.name): saved unedited, byte for byte", "saved \(saved): \([UInt8](got))")

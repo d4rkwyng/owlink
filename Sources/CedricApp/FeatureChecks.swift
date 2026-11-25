@@ -66,7 +66,8 @@ extension DevChecks {
         var learnedThen = false
         func now() -> String { s?.current?.word ?? "-" }
         func progress() -> String { s?.progressLabel.stringValue ?? "-" }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(md)
                 tv.setSelectedRange(NSRange(location: ns.range(of: "A mispeled").location, length: 0))
@@ -134,6 +135,9 @@ extension DevChecks {
                 expect(progress() == "7 of 7", "7 of 7", progress())
                 expect(!md.text.contains("codde") || now() != "codde", "code spans and links are never stepped into")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 guard let p = s?.panel else { return }
                 keyTo(p, "\t", code: 48)
@@ -194,7 +198,9 @@ extension DevChecks {
                 st?.done(nil)
                 for t in [md, swift, large] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     // MARK: Detached preview
@@ -324,7 +330,8 @@ extension DevChecks {
         sized(a); sized(b); sized(csv); sized(html); sized(restored)
         let item = { menuItem(action: #selector(AppDelegate.toggleDetachPreview(_:))) }
         var pw: NSWindow? { a.previewWindow?.window }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(a)
                 key("p", [.command, .option])
@@ -395,6 +402,9 @@ extension DevChecks {
                 expect(a.previewDetached && pw?.isVisible == true, "⇧⌥⌘P with no preview opens it detached")
                 expectDetachedInFront(a, app, "Markdown, ⇧⌥⌘P with no preview")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync { focus(a) },
             snapshot("detached-preview-editor.png"),
             // Not Markdown only: a CSV grid (the header's Detach) and an
@@ -450,7 +460,10 @@ extension DevChecks {
                 expect(w?.delegate == nil && !(w?.contentView is PreviewPane) && w?.contentView?.subviews.contains { $0 is PreviewPane } != true,
                        "and cuts that window loose (no delegate, no pane)")
             },
-        ] + detachedPreviewCommands(app) + [
+        ]
+        steps += steps2
+        steps += detachedPreviewCommands(app)
+        let steps3: [Step] = [
             // 20 rounds of detach, attach, detach again, close the tab (the
             // preview's WKWebView loaded each time): the windows are torn
             // down without swapping a content view under the web view
@@ -499,7 +512,9 @@ extension DevChecks {
                 }
                 round()
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 
     // MARK: CSV grid
@@ -539,7 +554,8 @@ extension DevChecks {
         var g: CSVPreview? { tab.previewPane?.renderer as? CSVPreview }
         let ns = csv as NSString
         var before = 0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 expect(tab.doc.language == .csv, "a .csv file opens as CSV / TSV", tab.doc.language.rawValue)
@@ -595,6 +611,9 @@ extension DevChecks {
                 tab.textView.setSelectedRange(NSRange(location: ns.length, length: 0))
                 type("zed,Oslo,7")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             waitForGrid(tab, after: { before }, "typing updates the grid"),
             { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
             sync {
@@ -645,6 +664,9 @@ extension DevChecks {
                 focus(spaced)
                 key("p", [.command, .option])
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             snapshot("csv-grid-large.png", window: wide.window),
             waitForGrid(spaced, after: { 0 }, "comma-space: the grid renders"),
             sync {
@@ -682,6 +704,8 @@ extension DevChecks {
                 tricky.doc.markSaved()
             },
             snapshot("csv-grid-unclosed.png", window: tricky.window),
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 }

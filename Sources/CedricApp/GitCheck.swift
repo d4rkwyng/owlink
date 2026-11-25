@@ -115,7 +115,8 @@ extension DevChecks {
             return f
         }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync { focus(tab) },
             wait("the first git refresh") { (tab.gitState?.refreshCount ?? 0) > 0 },
             sync {
@@ -184,6 +185,9 @@ extension DevChecks {
                 // A commit made outside Cedric: the .git watcher notices.
                 git(["commit", "-qam", "second"])
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             wait("the watcher's refresh after a commit") { (tab.gitState?.refreshCount ?? 0) > refreshes && tab.gitState?.status?.changed == false },
             wait("the marks to clear") { tab.gitState?.changes.isEmpty == true },
             sync {
@@ -249,6 +253,9 @@ extension DevChecks {
                 key("s", [.command])
                 refreshes = h?.gitState?.refreshCount ?? 0
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             wait("the refresh after saving there") { (hostileTab?.gitState?.refreshCount ?? 0) > refreshes },
             sync {
                 let m = (try? FileManager.default.contentsOfDirectory(atPath: markers.path)) ?? []
@@ -303,6 +310,8 @@ extension DevChecks {
                 restoreSetting()
                 expect(offTab?.statusBar.gitButton.isHidden == false, "on again: the branch label is back")
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 }
