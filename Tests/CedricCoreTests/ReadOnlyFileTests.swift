@@ -726,3 +726,45 @@ import Testing
 /// before that handler is installed, then only read (by it), in a child
 /// process of its own.
 nonisolated(unsafe) private var fileSizeSignalPipe: Int32 = -1
+
+/// The recovery copy's byte copy (DocumentWrite.copyBytes), 4 MB at a
+/// time: every byte, for sizes around and across the chunk, a count short
+/// of the file (that many bytes), past its end (what there is, and a
+/// recovery copy refused with nothing left behind), and none.
+@Suite struct RecoveryCopyChunkTests {
+    @Test func copiesEveryByteAcrossChunks() throws {
+        let chunk = DocumentWrite.copyChunk
+        #expect(chunk == 1 << 22)
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-copy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var rng = SystemRandomNumberGenerator()
+        for size in [0, 1, chunk - 1, chunk, chunk + 1, 2 * chunk + 12_345] {
+            let bytes = Data((0..<size).map { _ in UInt8.random(in: 0...255, using: &rng) })
+            let src = dir.appendingPathComponent("src-\(size)")
+            try bytes.write(to: src)
+            let fd = open(src.path, O_RDONLY)
+            #expect(fd >= 0)
+            defer { close(fd) }
+            for count in Set([0, size / 2, size, size + 7, chunk + 3]) {
+                let dst = dir.appendingPathComponent("dst-\(size)-\(count)")
+                let out = open(dst.path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+                #expect(out >= 0)
+                let copied = try DocumentWrite.copyBytes(from: fd, to: out, count: count, url: src)
+                close(out)
+                let expected = bytes.prefix(count)
+                #expect(copied == expected.count, "size \(size) count \(count): copied \(copied)")
+                #expect(try Data(contentsOf: dst) == expected, "size \(size) count \(count): the bytes")
+            }
+            // A recovery copy of all of it: the same bytes, a private file.
+            let copy = try DocumentWrite.makeRecoveryCopy(of: fd, count: size, name: "copy", url: src)
+            #expect(try Data(contentsOf: copy) == bytes)
+            try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
+            // Asked for more than the file has: refused, nothing left behind.
+            let before = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("owlink-recovery-") })
+            #expect(throws: (any Error).self) { try DocumentWrite.makeRecoveryCopy(of: fd, count: size + 1, name: "copy", url: src) }
+            let after = Set(try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory()).filter { $0.hasPrefix("owlink-recovery-") })
+            #expect(after.subtracting(before).isEmpty, "no recovery folder left")
+        }
+    }
+}

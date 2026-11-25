@@ -354,7 +354,7 @@ public enum DocumentWrite {
     ///   anyway is an EFBIG error, not a crash), when the volume has less
     ///   free space than the new text, or can't preallocate the growth.
     /// - The file as it is is copied to a recovery copy in a private
-    ///   temporary folder (`makeRecoveryCopy`, 64 KB at a time) and the
+    ///   temporary folder (`makeRecoveryCopy`, 4 MB at a time) and the
     ///   copy is flushed to disk. If the copy can't be made, or the file
     ///   is shorter than it was or changed while it was copied, nothing is
     ///   written.
@@ -547,10 +547,15 @@ public enum DocumentWrite {
         return free.overflow || free.partialValue >= UInt64(count)
     }
 
+    /// How much `copyBytes` reads and writes at a time: 256 read/write
+    /// pairs per GB rather than the 16,384 a 64 KB buffer took.
+    static let copyChunk = 1 << 22
+
     /// Copies up to `count` bytes from the start of `src` to the start of
-    /// `dst`, 64 KB at a time; how many it copied (fewer if `src` ends).
-    private static func copyBytes(from src: Int32, to dst: Int32, count: Int, url: URL) throws -> Int {
-        var buffer = Data(count: min(count, 1 << 16))
+    /// `dst`, `copyChunk` (4 MB) at a time; how many it copied (fewer if
+    /// `src` ends).
+    static func copyBytes(from src: Int32, to dst: Int32, count: Int, url: URL) throws -> Int {
+        var buffer = Data(count: min(count, copyChunk))
         var done = 0
         while done < count {
             let want = min(buffer.count, count - done)
