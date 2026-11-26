@@ -466,8 +466,13 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
 
     /// A note made by path in a combining-mark folder, first-level and
     /// nested, lands in that folder inside the vault, not at its top; a
-    /// sibling folder named root + mark is outside and refused.
-    @Test func aNewNoteInACombiningMarkFolderStaysInThatFolder() throws {
+    /// sibling folder named root + mark is outside and refused. On the
+    /// fallback (no kernel-enforced beneath: macOS 14, or `walk` forced) a
+    /// note in a subfolder is refused as unsupported, by its exact path,
+    /// and nothing is made beside it or at the vault's top. Run with this
+    /// kernel's default and with the fallback forced.
+    @Test(arguments: [!Beneath.kernelEnforced, true])
+    func aNewNoteInACombiningMarkFolderStaysInThatFolder(walk: Bool) throws {
         let fm = FileManager.default
         let base = tempDir()
         let vault = base.appendingPathComponent("vault")
@@ -475,15 +480,26 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         let sibling = base.appendingPathComponent("vault\u{301}")
         for d in [first, nested, sibling] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
         defer { try? fm.removeItem(at: base) }
-        let a = try FolderActions.createFile(named: "A.md", in: first, within: vault)
-        let b = try FolderActions.createFile(named: "B.md", in: nested, within: vault)
-        #expect(fm.fileExists(atPath: first.appendingPathComponent("A.md").path))
-        #expect(fm.fileExists(atPath: nested.appendingPathComponent("B.md").path))
-        #expect(FolderTree.relativePath(of: a, in: vault) == "\u{301}x/A.md")
-        #expect(FolderTree.relativePath(of: b, in: vault) == "c/\u{301}y/B.md")
-        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("A.md").path), "not at the vault's top")
-        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("B.md").path), "not at the vault's top")
-        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "S.md", in: sibling, within: vault) }
+        for (folder, name, rel) in [(first, "A.md", "\u{301}x/A.md"), (nested, "B.md", "c/\u{301}y/B.md")] {
+            let want = folder.appendingPathComponent(name)
+            if walk {
+                do {
+                    _ = try FolderActions.createFile(named: name, in: folder, within: vault, walk: true)
+                    Issue.record("\(rel): a note in a subfolder is refused on the fallback")
+                } catch let e as NSError {
+                    #expect(e.domain == NSCocoaErrorDomain && e.code == NSFeatureUnsupportedError, "\(rel): \(e)")
+                    #expect((e.userInfo[NSFilePathErrorKey] as? String).map { Array($0.utf8) } == Array(want.path.utf8),
+                            "\(rel): refused by its exact path")
+                }
+                #expect(!fm.fileExists(atPath: want.path), "\(rel): nothing beside it on the fallback")
+            } else {
+                let made = try FolderActions.createFile(named: name, in: folder, within: vault, walk: false)
+                #expect(fm.fileExists(atPath: want.path))
+                #expect(FolderTree.relativePath(of: made, in: vault) == rel)
+            }
+            #expect(!fm.fileExists(atPath: vault.appendingPathComponent(name).path), "\(rel): not at the vault's top")
+        }
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "S.md", in: sibling, within: vault, walk: walk) }
         #expect(((try? fm.contentsOfDirectory(atPath: sibling.path)) ?? ["?"]).isEmpty, "the sibling folder is untouched")
     }
 
