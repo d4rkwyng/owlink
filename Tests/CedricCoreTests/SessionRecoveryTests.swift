@@ -165,6 +165,39 @@ import Testing
         }
     }
 
+    /// A damaged journal (an invalid id): launch scans, recovers an
+    /// unnamed buffer and reopens a closed tab near the end of its
+    /// retention. A new tab written before the first commit replaces the
+    /// damaged journal; a second crash must still bring back the scanned
+    /// buffer and keep the closed tab open, not just the new tab.
+    @Test func aRepairedJournalCarriesWhatTheScanFound() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        var closed = SessionTab(path: "/tmp/closed-with-text.txt", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(a.id, text: "a")
+        try s0.writeBuffer(closed.id, text: "closed text")
+        try s0.save(Session(windows: [SessionWindow(tabs: [a])], closedTabs: [closed]))
+        let orphan = UUID()
+        try s0.writeBuffer(orphan, text: "only copy, journal damaged")
+        try Data(#"{"generation": 2, "ids": ["not-an-id"]}"#.utf8).write(to: dir.appendingPathComponent("pending-buffers.json"))
+
+        let s1 = store(dir)
+        guard case .session(let first, let found) = s1.loadForLaunch(now: t1) else { Issue.record("readable"); return }
+        #expect(found == [orphan])
+        #expect(first.closedTabs == nil && first.allTabs.contains { $0.id == closed.id }, "the scan reopens the closed tab")
+        let new = UUID()
+        try s1.writeBuffer(new, text: "a new tab before the first commit")
+        // Killed before any commit; the next launch is a day later.
+        guard case .session(let second, let recovered) = store(dir).loadForLaunch(now: t1.addingTimeInterval(86_400)) else { Issue.record("readable"); return }
+        #expect(Set(recovered) == [orphan, new], "\(recovered)")
+        #expect(ClosedTabs.expire(second.closedTabs ?? [], now: t1.addingTimeInterval(86_400)).dropped.isEmpty, "nothing expires")
+        #expect(second.allTabs.contains { $0.id == closed.id && $0.hasBuffer }, "the closed tab stays open")
+    }
+
     // MARK: Reopened closed tabs
 
     /// A closed tab whose entry kept a buffer, closed just inside

@@ -71,8 +71,9 @@ them; orphan buffers are pruned after each save.
   couldn't read or list the store) never replaces the journal it found.
   It writes `pending-buffers.held-<uuid>.json` beside it, or the main
   journal unnumbered when there was none. A held run's journal is applied
-  whatever its number until a commit names it in `adoptedJournals`.
-  Rollback to an
+  whatever its number until a commit names it in `adoptedJournals`. A
+  damaged journal makes launch scan, and the scanned ids and reopen
+  decisions are carried into the journal that replaces it. Rollback to an
   older build with work pending is not supported: the 0.5 releases prune
   unnamed buffers. 1bb8787 reads the current journal as damaged and
   scans, so it reopens every unnamed buffer, but it can leave a reopened

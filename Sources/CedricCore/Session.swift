@@ -547,6 +547,13 @@ public final class SessionStore: @unchecked Sendable {
                 do { candidates = try bufferFiles() } catch { hold = "the session folder couldn’t be listed: \(error.localizedDescription)" }
                 reopened = Set(candidates)
             }
+            // What launch replays is what the journal says from now on: a
+            // journal written before the next commit (a new tab's first
+            // text) carries every id and reopen this launch found, from a
+            // scan or a held run's journal too, so a second crash brings
+            // back the same buffers and reopens the same closed tabs.
+            pending = candidates
+            pendingReopened = reopened.filter(committedClosed.contains).sorted { $0.uuidString < $1.uuidString }
             let r = Self.applyJournal(s, journal: candidates, reopened: reopened) { fm.fileExists(atPath: bufferURL($0).path) }
             return .session(r.session, recovered: r.recovered)
         }
