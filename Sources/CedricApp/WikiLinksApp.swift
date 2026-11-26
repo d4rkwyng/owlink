@@ -257,6 +257,9 @@ final class WikiTabState {
     static var confirmCreate: ((String) -> Bool)?
     /// Gets a failed create instead of an alert (the checks).
     static var createFailed: ((Error) -> Void)?
+    /// Forces the component walk (macOS 14's fallback, where a note in a
+    /// subfolder is refused) on a kernel that enforces beneath (the checks).
+    static var forceWalk = false
 }
 
 // MARK: - The [[ popup
@@ -712,7 +715,7 @@ extension EditorWindowController {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
                               userInfo: [NSLocalizedDescriptionKey: String(localized: "The open folder couldn’t be read, so the note wasn’t created.")])
             }
-            let url = try pinned.createFile(components)
+            let url = try pinned.createFile(components, walk: WikiTabState.forceWalk || !Beneath.kernelEnforced)
             if let s = FolderSidebar.shared, let rel = FolderTree.relativePath(of: folder, in: s.rootURL) {
                 let node = rel.isEmpty ? s.root : s.root.descendant(rel)
                 if let node, node.isLoaded { s.load(node) }

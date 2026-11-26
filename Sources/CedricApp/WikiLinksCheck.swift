@@ -70,18 +70,30 @@ extension DevChecks {
         var skipped = 0
         var oldNotes: WikiNotes?
         let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
-        /// The note offered and made from a link in a note at `rel`'s folder:
-        /// offered once by that path (compared as bytes), made there inside
-        /// the open folder, not at its top, and opened.
-        func besideChecks(_ rel: String, _ what: String) {
+        /// The note offered from a link in a note at `rel`'s folder: offered
+        /// once by that path (compared as bytes). Where the kernel enforces
+        /// beneath, made there inside the open folder, not at its top, and
+        /// opened. On the fallback (macOS 14, or `walk` forced) a note in a
+        /// subfolder is refused as unsupported (FolderActions.createFile):
+        /// nothing is made beside the note or at the folder's top, and
+        /// nothing opens.
+        func besideChecks(_ rel: String, _ what: String, walk: Bool = !Beneath.kernelEnforced) {
             let fm = FileManager.default
             let file = (rel as NSString).lastPathComponent
             let want = root.appendingPathComponent(rel)
-            expect(failures.isEmpty, "\(what): the create isn't refused", "\(failures)")
             expect(created.count == offersBefore + 1 && created.last.map { Array($0.utf8) } == Array(rel.utf8),
                    "\(what): the offer names the note beside it", "\(created.dropFirst(offersBefore))")
-            expect(fm.fileExists(atPath: want.path), "\(what): the note is made in that folder")
             expect(!fm.fileExists(atPath: root.appendingPathComponent(file).path), "\(what): not at the folder's top")
+            if walk {
+                let codes = failures.map { (($0 as NSError).domain, ($0 as NSError).code) }
+                expect(codes.count == 1 && codes.first.map { $0 == NSCocoaErrorDomain && $1 == NSFeatureUnsupportedError } == true,
+                       "\(what), fallback: the create is refused as unsupported", "\(failures)")
+                expect(!fm.fileExists(atPath: want.path), "\(what), fallback: nothing is made beside the note")
+                expect(tab(file) == nil, "\(what), fallback: nothing opens")
+                return
+            }
+            expect(failures.isEmpty, "\(what): the create isn't refused", "\(failures)")
+            expect(fm.fileExists(atPath: want.path), "\(what): the note is made in that folder")
             let opened = tab(file)?.doc.fileURL.map { FolderSidebar.realPath($0.path) }
             expect(opened.map { Array($0.utf8) } == Array(FolderSidebar.realPath(want.path).utf8),
                    "\(what): the new note opens from inside the open folder", opened ?? "-")
@@ -285,6 +297,22 @@ extension DevChecks {
             },
             sync {
                 besideChecks("sub/\u{301}n/Beside two.md", "a nested combining-mark folder")
+                // The first-level case again with the fallback forced (macOS 14's
+                // component walk), so its refusal is checked on any kernel.
+                failures = []
+                offersBefore = created.count
+                WikiTabState.forceWalk = true
+                guard let here = tab("Here.md") else { expect(false, "Here tab"); return }
+                setText(here, "Here [[Beside three]]\n")
+                focus(here)
+                commandClick(here, "[[Beside three]]")
+            },
+            wait("⌘-click on a missing note beside a note in a combining-mark folder, fallback forced, is answered") {
+                !failures.isEmpty || tab("Beside three.md") != nil
+            },
+            sync {
+                WikiTabState.forceWalk = false
+                besideChecks("\u{301}m/Beside three.md", "a first-level combining-mark folder", walk: true)
                 // The open folder replaced at its path between opening it and confirming:
                 // the note goes in the folder that was opened, and nothing opens.
                 failures = []
