@@ -155,7 +155,8 @@ if [ $APPCAST = 1 ]; then
         || fail "--appcast: no Sparkle sign_update (set CEDRIC_SPARKLE_BIN to the bin folder of Sparkle 2.10.1)"
     if [ -n "${CEDRIC_SPARKLE_APPCAST:-}" ]; then
         [ -f "$CEDRIC_SPARKLE_APPCAST" ] || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not a file"
-        grep -q '</channel>' "$CEDRIC_SPARKLE_APPCAST" || fail "--appcast: CEDRIC_SPARKLE_APPCAST has no </channel>"
+        Scripts/appcast-versions.sh "$CEDRIC_SPARKLE_APPCAST" 0 >/dev/null \
+            || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not an appcast (well-formed XML with one /rss/channel)"
     fi
     # bundle-app.sh bakes these two into Info.plist.
     export CEDRIC_SPARKLE_FEED_URL CEDRIC_SPARKLE_PUBLIC_KEY
@@ -181,6 +182,22 @@ if [ -n "${CEDRIC_VERSION:-}" ] && [ "$CEDRIC_VERSION" != "$SOURCE_VERSION" ]; t
 fi
 echo "Version: ${CEDRIC_VERSION:-$SOURCE_VERSION}"
 ZIP="dist/Owlink-${CEDRIC_VERSION:-$SOURCE_VERSION}.zip"
+
+# 0a. --appcast: a version the feed already lists is refused here, before
+#     anything is built and before $ZIP (which that feed's enclosure
+#     signature covers) is removed or rewritten. Both the feed the item
+#     would go into and the local dist/appcast.xml are checked, by XML
+#     value (Scripts/appcast-versions.sh), as appcast-item.sh does later.
+if [ $APPCAST = 1 ]; then
+    FEEDS=(dist/appcast.xml)
+    [ -z "${CEDRIC_SPARKLE_APPCAST:-}" ] || FEEDS+=("$CEDRIC_SPARKLE_APPCAST")
+    for f in "${FEEDS[@]}"; do
+        [ -f "$f" ] || continue
+        have=$(Scripts/appcast-versions.sh "$f" "${CEDRIC_VERSION:-$SOURCE_VERSION}") \
+            || fail "--appcast: can't check $f for version ${CEDRIC_VERSION:-$SOURCE_VERSION}"
+        [ "$have" = 0 ] || fail "--appcast: $f already has an item for ${CEDRIC_VERSION:-$SOURCE_VERSION}; nothing was built and $ZIP and the feed are as they were (bump the version, or move the feed aside to redo this one)"
+    done
+fi
 
 # 1. Signing identity.
 ID=${CEDRIC_SIGN_ID:-}

@@ -6,6 +6,8 @@
 #    private-key source is missing or wrong (always also --dry-run, so even
 #    a broken guard couldn't sign or upload anything; the script has no
 #    upload code at all);
+#  - release.sh --appcast refuses a version a feed already lists before it
+#    builds or touches the zip (dry run, from a temp copy of the scripts);
 #  - bundle-app.sh refuses a non-HTTPS feed;
 #  - sign-sparkle.sh signs in Sparkle's order and refuses --deep;
 #  - ed-verify.swift refuses malformed input;
@@ -90,6 +92,9 @@ refuses "no sign_update" "no Sparkle sign_update" "${SET[@]}" CEDRIC_SPARKLE_KEY
 if find .build/artifacts -maxdepth 5 -type f -path '*Sparkle*/bin/sign_update' 2>/dev/null | grep -q .; then
     refuses "an appcast copy that isn't there" "CEDRIC_SPARKLE_APPCAST is not a file" "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 \
         CEDRIC_SPARKLE_APPCAST="$W/none.xml"
+    printf '<rss version="2.0"><item/></rss>\n' > "$W/no-channel.xml"
+    refuses "an appcast copy with no channel" "CEDRIC_SPARKLE_APPCAST is not an appcast" "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 \
+        CEDRIC_SPARKLE_APPCAST="$W/no-channel.xml"
 else
     echo "note: no Sparkle tools in .build/artifacts (run swift build); appcast-copy refusal not checked"
 fi
@@ -285,6 +290,50 @@ for d in compact-channel one-line; do
         bad "appcast-item.sh with $d.xml: $(tail -2 "$W/item.out"); items: $(xmllint --xpath 'count(/rss/channel/item)' "$FEEDOUT" 2>&1) in channel, $(xmllint --xpath 'count(//item)' "$FEEDOUT" 2>&1) in all"
     fi
 done
+# release.sh --appcast refuses a version a feed already lists in its
+# preflight, before the build and before dist/Owlink-<version>.zip is
+# removed or rewritten. Run from a copy of the repository's scripts in a
+# temp folder (its own dist/, a stub bundle-app.sh, the stub sign_update),
+# always --dry-run; the existing zip and feed must stay byte-identical.
+R="$W/repo"
+mkdir -p "$R/Scripts" "$R/Sources/CedricCore" "$R/dist"
+cp Scripts/release.sh Scripts/appcast-versions.sh Scripts/sign-sparkle.sh "$R/Scripts/"
+cp Sources/CedricCore/Version.swift "$R/Sources/CedricCore/"
+printf '#!/bin/bash\ntouch "$(dirname "$0")/../bundle-app-ran"\n' > "$R/Scripts/bundle-app.sh"
+chmod +x "$R/Scripts/bundle-app.sh"
+RV=$(sed -n 's/.*static let source = "\([^"]*\)".*/\1/p' Sources/CedricCore/Version.swift)
+head -c 4096 /dev/urandom > "$R/dist/Owlink-$RV.zip"
+cp "$R/dist/Owlink-$RV.zip" "$W/zip-before"
+# Sparkle's namespace under another prefix, the value on its own line.
+printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:s="http://www.andymatuschak.org/xml-namespaces/sparkle">\n<channel><item><s:shortVersionString>\n  %s\n</s:shortVersionString></item></channel>\n</rss>\n' "$RV" > "$W/has-version.xml"
+printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">\n<channel><item><sparkle:shortVersionString>%s</sparkle:shortVersionString></item></channel>\n</rss>\n' "${RV//./-}" > "$W/other-version.xml"
+rel() { # dist-feed [CEDRIC_SPARKLE_APPCAST] -> output in $W/rel.out
+    rm -f "$R/dist/appcast.xml" "$R/bundle-app-ran"
+    [ -z "$1" ] || cp "$1" "$R/dist/appcast.xml"
+    local rc=0
+    env -u CEDRIC_VERSION -u TAG -u CEDRIC_SPARKLE_KEY_FILE "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 \
+        CEDRIC_SPARKLE_BIN="$W/stub" CEDRIC_SIGN_ID="Developer ID Application: TEST ONLY (TEAMID)" \
+        ${2:+CEDRIC_SPARKLE_APPCAST="$2"} "$R/Scripts/release.sh" --dry-run --appcast > "$W/rel.out" 2>&1 || rc=$?
+    return $rc
+}
+untouched() { cmp -s "$R/dist/Owlink-$RV.zip" "$W/zip-before" && { [ -z "$1" ] || cmp -s "$R/dist/appcast.xml" "$1"; } && [ ! -e "$R/bundle-app-ran" ]; }
+for how in "dist/appcast.xml" "CEDRIC_SPARKLE_APPCAST"; do
+    rc=0
+    if [ "$how" = dist/appcast.xml ]; then rel "$W/has-version.xml" || rc=$?; else rel "$W/other-version.xml" "$W/has-version.xml" || rc=$?; fi
+    if [ $rc != 0 ] && grep -q "already has an item for $RV" "$W/rel.out" && ! grep -qE '^\+ (Scripts/bundle-app.sh|rm|ditto|codesign|xcrun)' "$W/rel.out" \
+        && untouched "$([ "$how" = dist/appcast.xml ] && echo "$W/has-version.xml" || echo "$W/other-version.xml")"; then
+        ok "release.sh --appcast refuses $RV listed in $how before building; the zip and feed are byte-identical"
+    else
+        bad "release.sh --appcast with $RV in $how (exit $rc): $(grep -m2 -E 'release.sh:|^\+ ' "$W/rel.out" | tr '\n' ' ')"
+    fi
+done
+# A feed with ${RV//./-} only isn't a duplicate: the dry run goes on.
+rc=0; rel "$W/other-version.xml" "$W/other-version.xml" || rc=$?
+if [ $rc = 0 ] && ! grep -q 'already has an item' "$W/rel.out" && grep -q '^+ Scripts/bundle-app.sh' "$W/rel.out" && untouched "$W/other-version.xml"; then
+    ok "release.sh --appcast: a feed with ${RV//./-} only doesn't stop a dry run of $RV"
+else
+    bad "release.sh --appcast with ${RV//./-} only (exit $rc): $(grep -m2 'release.sh:' "$W/rel.out")"
+fi
 
 if [ -n "$APP" ]; then
     P="$APP/Contents/Info.plist"
