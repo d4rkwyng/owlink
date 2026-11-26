@@ -43,11 +43,14 @@ public enum MarkdownPaste {
 
     /// `file`'s path relative to `dir` when it's inside it (any depth),
     /// percent-encoded for a Markdown link (spaces as %20); nil otherwise.
+    /// Inside by the paths' bytes (`FolderTree.relativePath`): comparing
+    /// path components as Swift text calls canonically equivalent but
+    /// byte-distinct folders (the Ohm sign and Omega) the same.
     public static func relativePath(of file: URL, from dir: URL) -> String? {
-        let f = file.standardizedFileURL.resolvingSymlinksInPath().pathComponents
-        let d = dir.standardizedFileURL.resolvingSymlinksInPath().pathComponents
-        guard f.count > d.count, Array(f.prefix(d.count)) == d else { return nil }
-        return encode(f.dropFirst(d.count).joined(separator: "/"))
+        let f = file.standardizedFileURL.resolvingSymlinksInPath()
+        let d = dir.standardizedFileURL.resolvingSymlinksInPath()
+        guard let rel = FolderTree.relativePath(of: f, in: d), !rel.isEmpty else { return nil }
+        return encode(rel)
     }
 
     /// The link to `name` in the "images" folder next to the document, encoded.
@@ -89,17 +92,19 @@ public enum SafePaths {
         var u = url.standardizedFileURL
         var hops = 0
         while hops < 32, let dest = try? fm.destinationOfSymbolicLink(atPath: u.path) {
-            u = (dest.hasPrefix("/") ? URL(fileURLWithPath: dest) : u.deletingLastPathComponent().appendingPathComponent(dest)).standardizedFileURL
+            // Absolute when its first byte is "/", as the kernel reads it: a
+            // "/" followed by a combining mark isn't a text "/" prefix.
+            u = (dest.utf8.first == 0x2f ? URL(fileURLWithPath: dest) : u.deletingLastPathComponent().appendingPathComponent(dest)).standardizedFileURL
             hops += 1
         }
         return u
     }
 
-    /// `child` (symbolic links resolved) is `folder` or inside it.
+    /// `child` (symbolic links resolved) is `folder` or inside it, by the
+    /// paths' bytes (`FolderTree.relativePath`), not as Swift text.
     public static func isInside(_ child: URL, _ folder: URL) -> Bool {
-        let c = PreviewFolder.resolved(child.standardizedFileURL).path
-        let f = PreviewFolder.resolved(folder.standardizedFileURL).path
-        return c == f || c.hasPrefix(f.hasSuffix("/") ? f : f + "/")
+        FolderTree.relativePath(of: PreviewFolder.resolved(child.standardizedFileURL),
+                                in: PreviewFolder.resolved(folder.standardizedFileURL)) != nil
     }
 
     /// A pasted or dropped image file: a regular file (not a folder named

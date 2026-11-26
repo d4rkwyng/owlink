@@ -469,13 +469,16 @@ enum TreeWrite {
 
     /// The folder names from `root` down to `url`'s folder (empty when the
     /// file is directly in `root`); nil when `url` isn't under `root` as
-    /// written (or under `root` with its own links resolved).
+    /// written (or under `root` with its own links resolved). By the paths'
+    /// bytes (`FolderTree.relativePath`, `FolderTree.components`): comparing
+    /// path components as Swift text calls canonically equivalent but
+    /// byte-distinct folders the same; each folder is one name to the
+    /// kernel (`Beneath.isName`).
     static func relativeDirectories(of url: URL, under root: URL) -> [String]? {
-        let file = url.standardizedFileURL.pathComponents
-        for base in [root.standardizedFileURL.pathComponents, root.standardizedFileURL.resolvingSymlinksInPath().pathComponents] {
-            guard file.count > base.count, Array(file.prefix(base.count)) == base else { continue }
-            let dirs = Array(file.dropFirst(base.count).dropLast())
-            guard !dirs.contains(where: { $0 == ".." || $0 == "." || $0.isEmpty }) else { return nil }
+        for base in [root.standardizedFileURL, root.standardizedFileURL.resolvingSymlinksInPath()] {
+            guard let rel = FolderTree.relativePath(of: url, in: base), !rel.isEmpty else { continue }
+            let dirs = Array(FolderTree.components(rel).dropLast())
+            guard dirs.allSatisfy(Beneath.isName) else { return nil }
             return dirs
         }
         return nil

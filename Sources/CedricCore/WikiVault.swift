@@ -72,10 +72,9 @@ public final class WikiVault: @unchecked Sendable {
             let comps = c.pathComponents
             if comps.count < 3 { return false }
             if comps.count == 3, comps[1] == "Volumes" { return false }
-            for h in homes {
-                let hp = h.pathComponents
-                if hp.count >= comps.count, Array(hp.prefix(comps.count)) == comps { return false }
-            }
+            // The home folder or one above it, by the paths' bytes
+            // (`FolderTree.relativePath`), not components compared as text.
+            for h in homes where FolderTree.relativePath(of: h, in: c) != nil { return false }
             // A fresh URL per candidate: resource values are cached on the URL.
             if let v = try? URL(fileURLWithPath: c.path).resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
         }

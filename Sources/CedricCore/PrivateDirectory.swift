@@ -27,8 +27,10 @@ public enum PrivateDirectory {
                                                 attributes: [.posixPermissions: 0o700])
         tighten(dir.path)
         try verify(dir.path)
-        let r = root.standardizedFileURL.path, d = dir.standardizedFileURL.path
-        if d != r, d.hasPrefix(r.hasSuffix("/") ? r : r + "/") {
+        // Inside by the paths' bytes (`FolderTree.relativePath`): as text a
+        // first folder whose name starts with a combining mark wasn't.
+        if let rel = FolderTree.relativePath(of: dir, in: root), !rel.isEmpty {
+            let r = root.standardizedFileURL.path
             tighten(r)
             try verify(r)
         }
