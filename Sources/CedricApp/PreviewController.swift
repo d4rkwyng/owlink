@@ -758,9 +758,10 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         // The file is read from beneath the root it was approved under, by
         // descriptor (PreviewRead), so a folder or link swapped after this
         // check can't hand the page another file's bytes.
-        // The root is the descriptor pinned when it was granted
-        // (PreviewGrants), never reopened by path, so a folder renamed
-        // away and replaced can't become the root either.
+        // The root is the descriptor pinned when it was granted, or a
+        // site root found beneath those pins (PreviewGrants); nothing is
+        // opened by path here, so a folder renamed away and replaced
+        // can't become the root either.
         guard let url = task.request.url, let folder,
               let (root, parts, file) = grants.approve(url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))

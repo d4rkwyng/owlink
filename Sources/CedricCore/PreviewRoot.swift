@@ -101,9 +101,10 @@ extension PreviewFolder {
     /// `file(for:in:openedRoot:vaultRoot:scriptOn:vault:)` with the root
     /// it was approved under: the file is read from beneath that root's
     /// descriptor, pinned when the root was granted (`PreviewGrants`),
-    /// never by its path.
+    /// never by its path. `siteRoots: false` leaves out the site-root
+    /// search (`PreviewGrants` does that one by descriptor).
     public static func approved(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
-                                vault: WikiVault? = nil) -> (root: URL, file: URL)? {
+                                vault: WikiVault? = nil, siteRoots: Bool = true) -> (root: URL, file: URL)? {
         func containsFolder(_ root: URL) -> Bool {
             let base = resolved(root).path
             let path = resolved(folder).path
@@ -119,7 +120,7 @@ extension PreviewFolder {
         for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
             if let f = file(for: url, in: root, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return (root, f) }
         }
-        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+        guard siteRoots, let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
               let page = pageURL(forFile: hit.file),
               let f = file(for: page, in: hit.root, scriptOn: scriptOn) else { return nil }

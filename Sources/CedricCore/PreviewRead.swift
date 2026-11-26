@@ -111,6 +111,15 @@ public final class PinnedRoot: @unchecked Sendable {
         self.id = id
     }
 
+    /// Takes over `fd`, a folder open at `url` (closed here when it
+    /// isn't usable); nil then.
+    init?(adopting fd: Int32, url: URL) {
+        guard let id = Beneath.FileID(fd: fd) else { close(fd); return nil }
+        self.url = url.standardizedFileURL
+        self.fd = fd
+        self.id = id
+    }
+
     deinit { close(fd) }
 }
 
@@ -124,12 +133,25 @@ public final class PinnedRoot: @unchecked Sendable {
 /// its path later, whatever is there by then, and a document whose own
 /// folder was denied is refused altogether. Only a fresh grant (`revoke`,
 /// or a grant of other roots) tries it again.
+///
+/// Nothing is pinned by its path after the grant (batch 8c). A site root
+/// (`PreviewRoot`'s search) is found by descriptor: each folder searched
+/// is a granted root's pin, or a folder above the document's reached
+/// from that folder's pin by `..` and taken only when it is also what
+/// its path names now; the site layout's folder (`static/` and the rest)
+/// and the file are looked up beneath that, as the read does. The file
+/// is approved under the root so found and read beneath that same
+/// descriptor, so a root swapped once it is found is never the one read.
 public final class PreviewGrants: @unchecked Sendable {
     public static let limit = 64
     private let lock = NSLock()
     private var pins: [String: PinnedRoot] = [:]
     private var granted: [String] = []
     private var denied: Set<String> = []
+    /// Tests: called with a site root's path once its descriptor is found,
+    /// before the file is approved under it (under the lock: it must not
+    /// call back in).
+    var siteRootFound: ((URL) -> Void)?
 
     public init() {}
 
@@ -154,35 +176,101 @@ public final class PreviewGrants: @unchecked Sendable {
     /// Withdraws every grant and closes the pins (reads in flight keep theirs).
     public func revoke() { lock.lock(); pins = [:]; granted = []; denied = []; lock.unlock() }
 
-    /// The pinned descriptor for `root`: the one pinned when it was
-    /// granted or first approved, or else pinned now; nil for a granted
-    /// root that was denied.
-    public func pin(_ root: URL) -> PinnedRoot? {
-        let p = root.standardizedFileURL.path
+    /// The descriptor pinned for `root` (granted, or a site root found
+    /// before), or nil. Never opens anything.
+    public func pinned(_ root: URL) -> PinnedRoot? {
         lock.lock(); defer { lock.unlock() }
-        if let r = pins[p] { return r }
-        guard !denied.contains(p) else { return nil }
-        guard let r = PinnedRoot(root) else { return nil }
-        if pins.count < Self.limit { pins[p] = r }
-        return r
-    }
-
-    /// Whether `root` was granted and didn't open.
-    func isDenied(_ root: URL) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return denied.contains(root.standardizedFileURL.path)
+        return pins[root.standardizedFileURL.path]
     }
 
     /// What the preview reads for `url`: the file `PreviewFolder.approved`
-    /// approves, the pinned root it was approved under and the file's
-    /// validated parts below that root; nil when refused.
+    /// approves under a granted root, or else under a site root found by
+    /// descriptor (above); the pinned root and the file's validated parts
+    /// below it. nil when refused: the document's folder isn't granted
+    /// (or was denied), the root isn't pinned, or the rules refuse it.
+    /// `walk` is the lookup's, as in `Beneath.open` (tests).
     public func approve(_ url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
-                        vault: WikiVault? = nil) -> (root: PinnedRoot, parts: [String], file: URL)? {
-        guard !isDenied(folder), let hit = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot,
-                                               scriptOn: scriptOn, vault: vault),
-              let root = pin(hit.root),
-              let parts = PreviewRead.components(of: hit.file, below: root.url),
-              !scriptOn || PreviewRead.scriptSafe(parts) else { return nil }
-        return (root, parts, hit.file)
+                        vault: WikiVault? = nil, walk: Bool = !Beneath.kernelEnforced) -> (root: PinnedRoot, parts: [String], file: URL)? {
+        lock.lock(); defer { lock.unlock() }
+        let folderPath = folder.standardizedFileURL.path
+        guard granted.contains(folderPath), let docPin = pins[folderPath] else { return nil }
+        if let hit = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot,
+                                            scriptOn: scriptOn, vault: vault, siteRoots: false) {
+            let p = hit.root.standardizedFileURL.path
+            guard granted.contains(p), let root = pins[p],
+                  let parts = PreviewRead.components(of: hit.file, below: root.url),
+                  !scriptOn || PreviewRead.scriptSafe(parts) else { return nil }
+            return (root, parts, hit.file)
+        }
+        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+              let rel = PreviewRoot.parts(of: path), rel.allSatisfy(Beneath.isName),
+              let site = siteRoot(holding: rel, from: folder, docPin: docPin, openedRoot: openedRoot, walk: walk) else { return nil }
+        siteRootFound?(site.url)
+        // The path rules, as for any root (symbolic links; with script on
+        // images, fonts and CSS only, no dot files), judged by the paths;
+        // the read beneath `site` keeps to what that descriptor holds.
+        guard let page = PreviewFolder.pageURL(forFile: site.url.appendingPathComponent(rel.joined(separator: "/"))),
+              let file = PreviewFolder.file(for: page, in: site.url, scriptOn: scriptOn),
+              !scriptOn || PreviewRead.scriptSafe(rel) else { return nil }
+        if pins[site.url.path] == nil, pins.count < Self.limit { pins[site.url.path] = site }
+        return (site, rel, file)
+    }
+
+    /// The first site root holding `rel` (`PreviewRoot.resolve`'s order),
+    /// by descriptor: see the type's notes. Called with the lock held.
+    private func siteRoot(holding rel: [String], from folder: URL, docPin: PinnedRoot, openedRoot: URL?, walk: Bool) -> PinnedRoot? {
+        for dir in PreviewRoot.searchFolders(from: folder, openedRoot: openedRoot) {
+            guard let base = searchFolder(dir, docPin: docPin) else { continue }
+            for sub in PreviewRoot.siteFolders {
+                let url = sub.isEmpty ? base.url : base.url.appendingPathComponent(sub, isDirectory: true).standardizedFileURL
+                guard !denied.contains(url.path) else { continue }
+                let candidate: PinnedRoot
+                if let r = pins[url.path] {
+                    candidate = r
+                } else if sub.isEmpty {
+                    candidate = base
+                } else {
+                    let fd = Beneath.open(sub.split(separator: "/").map(String.init), beneath: base.fd,
+                                          flags: O_RDONLY | O_DIRECTORY, followLast: true, walk: walk)
+                    guard fd >= 0, let r = PinnedRoot(adopting: fd, url: url) else { continue }
+                    candidate = r
+                }
+                if Self.holds(rel, beneath: candidate, walk: walk) { return candidate }
+            }
+        }
+        return nil
+    }
+
+    /// The folder `dir` the site search looks in, open: its pin when it
+    /// is pinned, else (a folder above the document's) the document
+    /// folder's pin's parent the right number of levels up, taken only
+    /// when `dir`'s path names that same folder now. nil otherwise.
+    private func searchFolder(_ dir: URL, docPin: PinnedRoot) -> PinnedRoot? {
+        let p = dir.standardizedFileURL.path
+        guard !denied.contains(p) else { return nil }
+        if let r = pins[p] { return r }
+        let below = docPin.url.path
+        guard below.hasPrefix(p.hasSuffix("/") ? p : p + "/") else { return nil }
+        let levels = below.split(separator: "/").count - p.split(separator: "/").count
+        guard levels > 0 else { return nil }
+        var fd = openat(docPin.fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        for _ in 1..<levels where fd >= 0 {
+            let up = openat(fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            close(fd)
+            fd = up
+        }
+        guard fd >= 0, let r = PinnedRoot(adopting: fd, url: dir),
+              Beneath.FileID(path: p, followLast: true) == r.id else { return nil }
+        return r
+    }
+
+    /// Whether `rel` beneath `root` is there and isn't a folder (what
+    /// `PreviewRoot.resolve` asks of a path).
+    static func holds(_ rel: [String], beneath root: PinnedRoot, walk: Bool) -> Bool {
+        let fd = Beneath.open(rel, beneath: root.fd, flags: O_RDONLY | O_NONBLOCK, followLast: true, walk: walk)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var st = stat()
+        return fstat(fd, &st) == 0 && (st.st_mode & S_IFMT) != S_IFDIR
     }
 }

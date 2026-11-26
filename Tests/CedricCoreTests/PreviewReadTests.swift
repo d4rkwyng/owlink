@@ -289,6 +289,107 @@ import Testing
         _ = img
     }
 
+    /// Site roots whose first approval is raced (Astra review, batch 8c):
+    /// each found where the search looks for one (`static/` above the
+    /// document's folder, that folder above it itself, `static/` in a
+    /// folder between the document's and the opened one), with `a.png`
+    /// ("ORIG") in it.
+    struct Site {
+        let name: String
+        let doc: URL, opened: URL?, root: URL, request: URL
+    }
+
+    func siteRoots(_ t: URL) throws -> [Site] {
+        func req(_ p: String) -> URL { URL(string: PreviewFolder.scheme + "://doc/" + p)! }
+        let blog = t.appendingPathComponent("s/blog")
+        try fm.createDirectory(at: blog.appendingPathComponent("posts"), withIntermediateDirectories: true)
+        _ = try put(blog, "static/images/a.png", "ORIG")
+        let flat = t.appendingPathComponent("f/blog")
+        try fm.createDirectory(at: flat.appendingPathComponent("posts"), withIntermediateDirectories: true)
+        _ = try put(flat, "images/a.png", "ORIG")
+        let opened = t.appendingPathComponent("o/site")
+        try fm.createDirectory(at: opened.appendingPathComponent("a/b"), withIntermediateDirectories: true)
+        _ = try put(opened, "a/static/images/a.png", "ORIG")
+        return [
+            Site(name: "static above", doc: blog.appendingPathComponent("posts"), opened: nil,
+                 root: blog.appendingPathComponent("static"), request: req("images/a.png")),
+            Site(name: "folder above", doc: flat.appendingPathComponent("posts"), opened: nil, root: flat, request: req("images/a.png")),
+            Site(name: "inside the opened folder", doc: opened.appendingPathComponent("a/b"), opened: opened,
+                 root: opened.appendingPathComponent("a/static"), request: req("images/a.png")),
+        ]
+    }
+
+    /// Renames `root` away and puts another folder in its place, with the
+    /// same layout below it (the document's folder too, if it was inside)
+    /// and `a.png` saying "EVIL"; returns where the original went.
+    func replace(_ root: URL, doc: URL) throws -> URL {
+        let away = root.deletingLastPathComponent().appendingPathComponent(root.lastPathComponent + "-away")
+        try fm.moveItem(at: root, to: away)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        if doc.path.hasPrefix(root.path + "/") { try fm.createDirectory(at: doc, withIntermediateDirectories: true) }
+        _ = try put(root, "images/a.png", "EVIL")
+        return away
+    }
+
+    /// A site root swapped between its discovery and its first approval
+    /// and read (the hook runs there): the bytes found before the swap or
+    /// nothing, in both lookups. Before 8c the root was pinned by its
+    /// path after discovery, so the replacement's bytes were served.
+    @Test func aSiteRootReplacedBeforeItsFirstPinIsNeverRead() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        for s in try siteRoots(t) {
+            for scriptOn in [false, true] {
+                for walk in modes {
+                    let what = "\(s.name) scriptOn \(scriptOn) walk \(walk)"
+                    let grants = PreviewGrants()
+                    grants.grant([s.doc, s.opened])
+                    final class Moved { var to: URL? }
+                    let away = Moved()
+                    grants.siteRootFound = { root in
+                        #expect(root.standardizedFileURL == s.root.standardizedFileURL, "\(what)")
+                        away.to = try? self.replace(s.root, doc: s.doc)
+                    }
+                    let hit = grants.approve(s.request, in: s.doc, openedRoot: s.opened, scriptOn: scriptOn, walk: walk)
+                    let moved = try #require(away.to, "the hook ran: \(what)")
+                    if let hit {
+                        let got = PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn, walk: walk)
+                        #expect(got == nil || got == Data("ORIG".utf8), "\(what)")
+                    }
+                    try fm.removeItem(at: s.root)
+                    try fm.moveItem(at: moved, to: s.root)
+                }
+            }
+        }
+    }
+
+    /// A site root found once the folder it is looked for in has been
+    /// replaced after the grant: never the replacement's bytes.
+    @Test func aSearchFolderReplacedAfterTheGrantIsNeverRead() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        for s in try siteRoots(t) {
+            for scriptOn in [false, true] {
+                for walk in modes {
+                    let what = "\(s.name) scriptOn \(scriptOn) walk \(walk)"
+                    let grants = PreviewGrants()
+                    grants.grant([s.doc, s.opened])
+                    // The folder holding the root (or the root itself, for
+                    // a folder serving its own files), swapped.
+                    let swapped = s.root.lastPathComponent == "static" ? s.root.deletingLastPathComponent() : s.root
+                    let away = try replace(swapped, doc: s.doc)
+                    if swapped != s.root { _ = try put(s.root, "images/a.png", "EVIL") }
+                    if let hit = grants.approve(s.request, in: s.doc, openedRoot: s.opened, scriptOn: scriptOn, walk: walk) {
+                        let got = PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn, walk: walk)
+                        #expect(got == nil || got == Data("ORIG".utf8), "\(what)")
+                    }
+                    try fm.removeItem(at: swapped)
+                    try fm.moveItem(at: away, to: swapped)
+                }
+            }
+        }
+    }
+
     /// How many descriptors this process has open on something inside
     /// `t` (by the kernel's path for each, against `t`'s real path): other
     /// suites running alongside open files too, but never in this test's
