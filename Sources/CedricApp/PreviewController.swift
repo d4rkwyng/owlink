@@ -821,8 +821,12 @@ final class PreviewAssets: NSObject, WKURLSchemeHandler {
         }
     }
 
+    /// A check's stand-in for a build missing its bundled scripts: every
+    /// request is refused (check builds only).
+    static var refuseAllForCheck = false
+
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
-        guard scriptOn, let url = task.request.url, let rel = PreviewRich.assetPath(for: url), let dir = Self.directory,
+        guard scriptOn, !(DevEnvironment.checksEnabled && Self.refuseAllForCheck), let url = task.request.url, let rel = PreviewRich.assetPath(for: url), let dir = Self.directory,
               let data = try? Data(contentsOf: dir.appendingPathComponent(rel), options: .mappedIfSafe) else {
             refused.append(task.request.url?.absoluteString ?? "-")
             task.didFailWithError(URLError(.noPermissionsToReadFile))
