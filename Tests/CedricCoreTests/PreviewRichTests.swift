@@ -112,6 +112,22 @@ $not math$
         #expect(m("a $ b") == "<p>a $ b</p>\n")
     }
 
+    @Test func priceBeforeFormula() {
+        // Astra batch 4: the price's dollar no longer opens math that
+        // swallows " and $x"; the later dollar opens the formula.
+        #expect(m("Costs $5 and $x$.") == "<p>Costs $5 and <span class=\"math math-inline\">x</span>.</p>\n")
+        #expect(m("$5 or $10 for $n$ items") == "<p>$5 or $10 for <span class=\"math math-inline\">n</span> items</p>\n")
+        #expect(m("A $5 fee, then $x^2$ and $3.") == "<p>A $5 fee, then <span class=\"math math-inline\">x^2</span> and $3.</p>\n")
+        #expect(m("$a and $b$") == "<p>$a and <span class=\"math math-inline\">b</span></p>\n")
+        // Numeric formulas still render; price-only prose stays text.
+        #expect(m("$5$") == "<p><span class=\"math math-inline\">5</span></p>\n")
+        #expect(m("$5$ and $6$") == "<p><span class=\"math math-inline\">5</span> and <span class=\"math math-inline\">6</span></p>\n")
+        #expect(m("Costs $5 and $10.") == "<p>Costs $5 and $10.</p>\n")
+        // An escaped dollar doesn't take precedence; a space after one neither.
+        #expect(m("$a\\$b$") == "<p><span class=\"math math-inline\">a\\$b</span></p>\n")
+        #expect(m("$a $ b$") == "<p><span class=\"math math-inline\">a $ b</span></p>\n")
+    }
+
     @Test func escapedDollar() {
         // Literal in a document with math; as typed in one without.
         #expect(m("\\$5 and $x$") == "<p>$5 and <span class=\"math math-inline\">x</span></p>\n")

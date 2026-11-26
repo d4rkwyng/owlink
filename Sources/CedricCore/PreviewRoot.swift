@@ -95,25 +95,36 @@ extension PreviewFolder {
     /// `vaultRoot`: the Obsidian vault's folder, for `![[embeds]]` found there.
     public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                             vault: WikiVault? = nil) -> URL? {
+        approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault)?.file
+    }
+
+    /// `file(for:in:openedRoot:vaultRoot:scriptOn:vault:)` with the root
+    /// it was approved under: the file is read from beneath that root's
+    /// descriptor, pinned when the root was granted (`PreviewGrants`),
+    /// never by its path. `siteRoots: false` leaves out the site-root
+    /// search (`PreviewGrants` does that one by descriptor).
+    public static func approved(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
+                                vault: WikiVault? = nil, siteRoots: Bool = true) -> (root: URL, file: URL)? {
+        // `root` is `folder` or holds it, by bytes (`FolderTree.relativePath`):
+        // a text prefix missed a combining-mark folder under it (Astra batch 9b).
         func containsFolder(_ root: URL) -> Bool {
-            let base = resolved(root).path
-            let path = resolved(folder).path
-            return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+            FolderTree.relativePath(of: resolved(folder), in: resolved(root)) != nil
         }
-        if let f = file(for: url, in: folder, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
+        if let f = file(for: url, in: folder, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return (folder, f) }
         if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
             let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
             if resolver.documentFolder == folder.standardizedFileURL, containsFolder(resolver.root),
                let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
-               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return safe }
+               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return (resolver.root, safe) }
         }
         for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
-            if let f = file(for: url, in: root, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return f }
+            if let f = file(for: url, in: root, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return (root, f) }
         }
-        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+        guard siteRoots, let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
-              let page = pageURL(forFile: hit.file) else { return nil }
-        return file(for: page, in: hit.root, scriptOn: scriptOn)
+              let page = pageURL(forFile: hit.file),
+              let f = file(for: page, in: hit.root, scriptOn: scriptOn) else { return nil }
+        return (hit.root, f)
     }
 }
 
