@@ -33,7 +33,10 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     /// The spelling dictionary when the early check asked.
     public private(set) var dictionary: SpellDictionaryState?
     /// The words the early check's results marked (to see whether one
-    /// has been learned since).
+    /// has been learned since), each once, in the order first marked:
+    /// AppKit's pass asks the spell server about every one of them
+    /// (`hasLearnedWord`, a round trip each), and a page of text marks the
+    /// same few words many times over.
     public private(set) var markedWords: [String] = []
 
     public init() {}
@@ -84,7 +87,8 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     public mutating func resultsArrived(for checked: NSRange, marking words: [String] = []) {
         guard awaitsResults(for: checked) else { return }
         answered = true
-        markedWords = words
+        var seen = Set<String>()
+        markedWords = words.filter { seen.insert($0).inserted }
     }
 
     /// An edit, a setting change: nothing is known to be checked any more.
