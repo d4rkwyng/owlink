@@ -91,13 +91,19 @@ public final class WikiVault: @unchecked Sendable {
 
     /// The file a link names (`name` without its `#…`), or nil.
     public func resolve(_ name: String) -> URL? {
-        var n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty, !n.contains("\0") else { return nil }
+        // Parsed as the UTF-8 bytes the kernel gets, not as Swift text: a
+        // slash followed by a combining mark is one Swift character, so a
+        // text split misses it and could hide a ".." or make a path look
+        // like a bare name (Astra batch 6 must-fix 3).
+        var bytes = Array(name.trimmingCharacters(in: .whitespaces).utf8)
+        guard !bytes.isEmpty, !bytes.contains(0) else { return nil }
         // A leading slash is a path from the vault root (Obsidian), not a refusal.
-        let fromVaultRoot = n.hasPrefix("/")
-        if fromVaultRoot { n.removeFirst() }
-        let parts = n.split(separator: "/").map(String.init)
-        guard !parts.contains(".."), !parts.isEmpty else { return nil }
+        let fromVaultRoot = bytes.first == 0x2f
+        if fromVaultRoot { bytes.removeFirst() }
+        let n = String(decoding: bytes, as: UTF8.self)
+        let byteParts = bytes.split(separator: 0x2f)
+        guard !byteParts.isEmpty, !byteParts.contains(where: { $0.elementsEqual("..".utf8) }) else { return nil }
+        let parts = byteParts.map { String(decoding: $0, as: UTF8.self) }
         let hasExt = !(n as NSString).pathExtension.isEmpty
         let names = hasExt ? [n, n + ".md"] : [n + ".md", n]
         // A path: from the vault root when the link is root-absolute,
