@@ -18,6 +18,9 @@ import CedricCore
 ///   screen) in front throughout: AppKit's pass asks about the marked
 ///   words, and the same. Last of the dictionary steps: once loaded, the
 ///   panel makes every later first pass ask.
+/// - The same learned from a menu (its Learn Spelling, no notice), the
+///   panel never loaded: the menu's tracking notice alone makes AppKit's
+///   pass ask, and the same. Just before the panel step.
 /// - A word learned in another app after another app came to the front
 ///   (no notice): AppKit's pass asks, and the same. The lock screen coming
 ///   to the front doesn't count as another app.
@@ -41,9 +44,10 @@ extension DevChecks {
         var elsewhereTab: EditorWindowController?
         var lockTab: EditorWindowController?
         var silentTab: EditorWindowController?
+        var menuTab: EditorWindowController?
         // Made up, and learned only in the check's own dictionary.
         let learnedWord = "zqxfakelrn", elsewhereWord = "zqxfakeelse"
-        let silentWord = "zqxfakesil"
+        let silentWord = "zqxfakesil", menuWord = "zqxfakemnu"
         let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
         /// Another app (or the lock screen) activated, as NSWorkspace says
         /// it: only Owlink's own observer hears this in-process notice.
@@ -234,6 +238,41 @@ extension DevChecks {
             }
             expect(!SpellingPanel.inUse, "\(what): AppKit's spelling panel not loaded at the early check")
         }
+        steps += [
+            sync {
+                menuTab = app.open(write("learn-menu.txt", "A \(menuWord) and a wrnog there.\n"))
+                sized(menuTab)
+                if let menuTab { focus(menuTab) }
+            },
+            wait("the first-frame marks (learned silently from a menu)", 4) { early(menuTab, menuWord) },
+            sync {
+                inTheInterval(menuTab, "learned silently from a menu")
+                guard let v = menuTab?.primaryTextView else { return }
+                // Only the menu can flag it here: Owlink in front, the panel never loaded.
+                expect(!v.spellCoverage.asksLearned, "learned silently from a menu: Owlink in front at the early check, nothing asked yet",
+                       "active=\(NSApp.isActive)")
+                expect(!SpellingPanel.inUse, "learned silently from a menu: AppKit's spelling panel not loaded")
+                // A menu begins tracking (the context menu's or Edit's
+                // Learn Spelling), as AppKit says it in-process; no menu
+                // opens and nothing is chosen.
+                NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: NSMenu(title: "spellopen"))
+                expect(v.spellCoverage.asksLearned, "a menu opened: AppKit's pass will ask about the marked words")
+                // Its Learn Spelling, with no notice: nothing in Owlink hears of it.
+                dictionary.learnSilently(menuWord)
+                expect(!v.spellCoverage.isEmpty, "learned silently from a menu: no notice, the record stays")
+            },
+            wait("AppKit's pass after the word was learned silently from a menu", 4) {
+                menuTab.map { undrawn($0.primaryTextView, menuWord) } ?? true
+            },
+            pause(1.5),
+            sync {
+                expect(dictionary.asked.contains(menuWord), "AppKit's pass asked about the word learned from a menu", "\(dictionary.asked)")
+                expect(!SpellingPanel.inUse, "(the spelling panel is still not loaded)")
+                expect(!NSSpellChecker.shared.hasLearnedWord(menuWord), "(and the user's own dictionary doesn't have it)")
+                rebuilt(menuTab, "learned silently from a menu", menuWord)
+                close(menuTab)
+            },
+        ]
         steps += [
             sync {
                 silentTab = app.open(write("learn-silent.txt", "A \(silentWord) and a wrnog there.\n"))
