@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitsyncfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -18,6 +18,7 @@ extension DevChecks {
         case "closefail": closeAfterFailedSave(app)
         case "quitfail": quitAfterFailedSave(app)
         case "quitsyncfail": quitAfterFailedFlush(app)
+        case "backupfail": backupFailureNotice(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedmemory": closedTextOnlyInMemory(app)
         case "closedraw": closedTabsStillDrawn(app)
@@ -660,6 +661,66 @@ extension DevChecks {
                 expect(app.applicationShouldTerminate(NSApp) == .terminateNow, "flushes confirmed: the quit goes on")
                 expect(buffer() == "on disk one two\n", "with the latest text on disk", buffer() ?? "-")
                 AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// Timed session saves failing (SessionStore.checkFailWrites, as on a
+    /// full disk): the first failure is tried again quietly; once the
+    /// retry fails too, every text tab shows a notice that unsaved work
+    /// isn't being backed up, with Save As, and it stays until a save
+    /// writes everything. Needs session saving on and a short retry
+    /// (CEDRIC_SESSION_RETRY_DELAY=2: longer than the steps
+    /// between the first failure and its check; tools-check runs it so).
+    static func backupFailureNotice(_ app: AppDelegate) {
+        let file = app.open(write("backup-fail.txt", "on disk\n"))!
+        sized(file)
+        app.newTab(nil)
+        let untitled = app.tabs.last!
+        func says(_ t: EditorWindowController) -> Bool {
+            t.noticeBar?.isHidden == false && t.noticeBar?.label.stringValue.contains("isn’t being backed up") == true
+        }
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                expect(AppDelegate.sessionRetryDelay <= 3, "a short retry for this check", "\(AppDelegate.sessionRetryDelay)")
+                focus(untitled)
+                type("typed while the disk is full")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" edited")
+            },
+            // The typing's own saves first, so the failures below are the
+            // only saves (no timer armed by an edit).
+            waitFor("the typing is saved", 5) {
+                app.store.readBuffer(file.doc.id) == "on disk edited\n" && app.store.readBuffer(untitled.doc.id) != nil
+            },
+            sync {
+                app.store.checkFailWrites = true
+                app.saveSession(sync: false)
+            },
+            waitFor("the first save fails") { app.sessionSaveFailures >= 1 },
+            sync {
+                expect(!app.backupNoticeShown && !says(file), "one failed save: no notice yet (it is tried again)", "failures \(app.sessionSaveFailures)")
+            },
+            waitFor("the retry fails too", 8) { app.sessionSaveFailures >= 2 },
+            sync {
+                expect(app.backupNoticeShown, "then unsaved work isn't being backed up")
+                expect(says(file) && says(untitled), "every text tab says so", file.noticeBar?.label.stringValue ?? "-")
+                expect(file.noticeBar?.button("Save As…") != nil, "with Save As")
+                expect(file.noticeBar?.button("Dismiss") != nil, "and Dismiss (it is not modal)")
+            },
+            waitFor("more retries fail", 8) { app.sessionSaveFailures >= 3 },
+            sync {
+                expect(says(file) && says(untitled), "it stays while saves fail")
+                app.store.checkFailWrites = false
+            },
+            waitFor("a save that works clears it", 8) { !app.backupNoticeShown },
+            sync {
+                expect(app.store.readBuffer(file.doc.id) == "on disk edited\n", "a save that works writes the text",
+                       app.store.readBuffer(file.doc.id) ?? "-")
+                expect(app.store.load()?.allTabs.contains { $0.id == untitled.doc.id && $0.hasBuffer } == true, "and the session names both tabs")
+                expect(!says(file) && !says(untitled), "and the notice goes from every tab")
             },
         ])
     }

@@ -64,6 +64,11 @@ if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitsyncfail" 
     | grep -E "^check:" | tee "$OUT/quitsyncfail.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/quitsyncfail.txt" || { echo "tools-check: quitsyncfail FAILED" >&2; fail=1; }
 
+echo "== backupfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-backupfail" CEDRIC_SESSION_RETRY_DELAY=2 CEDRIC_CHECK=backupfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/backupfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/backupfail.txt" || { echo "tools-check: backupfail FAILED" >&2; fail=1; }
+
 echo "== quitfail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitfail" CEDRIC_CHECK=quitfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/quitfail.txt"; then fail=1; fi

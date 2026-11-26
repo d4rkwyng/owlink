@@ -1093,7 +1093,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if sync {
             let r = sessionQueue.sync(execute: write)
             finished(r.ok, r.missing)
-            if let first = r.failures.first { return first }
+            if !quitting { noteSessionSave(failure: r.failures.first) }
+            if let first = r.failures.first {
+                if !quitting { retrySessionSaveLater() }
+                return first
+            }
             guard quitting else { return nil }
             // Everything that needs its text kept has it on disk now.
             let unwritten = tabs.filter { t in
@@ -1111,6 +1115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         finished(r.ok, r.missing)
+                        self.noteSessionSave(failure: r.failures.first)
                         if !r.failures.isEmpty { self.retrySessionSaveLater() }
                     }
                 }
@@ -1121,7 +1126,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// After a failed timed save: try again a little later if nothing
     /// else saves meanwhile (a full disk may have room again).
-    static let sessionRetryDelay: TimeInterval = 10
+    /// CEDRIC_SESSION_RETRY_DELAY overrides it (check builds: backupfail).
+    static let sessionRetryDelay: TimeInterval = DevEnvironment.values["CEDRIC_SESSION_RETRY_DELAY"].flatMap(Double.init) ?? 10
+
+    /// Saves that failed in a row (none since the last complete one).
+    private static var failedSessionSaves = 0
+    /// The notice shown while unsaved work isn't backed up, if any.
+    private static var backupNotice: String?
+
+    /// One failure can pass (the retry may work); a second in a row means
+    /// unsaved work isn't being backed up: every text tab says so, with
+    /// Save As, until a save writes everything (buffers and session).
+    /// The notice stays: Dismiss hides it on that tab only until the next
+    /// failed save.
+    func noteSessionSave(failure: String?) {
+        guard let failure else {
+            Self.failedSessionSaves = 0
+            guard let shown = Self.backupNotice else { return }
+            Self.backupNotice = nil
+            for t in tabs where t.noticeBar?.isHidden == false && t.noticeBar?.label.stringValue == shown { t.noticeBar?.isHidden = true }
+            FileHandle.standardError.write(Data("session: saving again, backup notice cleared\n".utf8))
+            return
+        }
+        Self.failedSessionSaves += 1
+        guard Self.failedSessionSaves >= 2 else { return }
+        let text = String(localized: "Unsaved work isn’t being backed up: Owlink can’t save its session (\(failure)). It keeps trying. Save your tabs with File › Save As… to keep them.")
+        if Self.backupNotice == nil { FileHandle.standardError.write(Data("session: backup notice: \(failure)\n".utf8)) }
+        let previous = Self.backupNotice
+        Self.backupNotice = text
+        for t in tabs {
+            let label = t.noticeBar?.isHidden == false ? t.noticeBar?.label.stringValue : nil
+            if label == text { continue }
+            // Another notice showing (not an older one of these): left alone.
+            if label != nil, label != previous { continue }
+            t.showNotice(text, buttons: [(String(localized: "Save As…"), { [weak t] in _ = t?.saveAs() })])
+        }
+    }
+
+    /// Whether the not-backed-up notice is up (checks).
+    var backupNoticeShown: Bool { Self.backupNotice != nil }
+    /// Session saves failed in a row (checks).
+    var sessionSaveFailures: Int { Self.failedSessionSaves }
 
     private func retrySessionSaveLater() {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionRetryDelay) { [weak self] in
