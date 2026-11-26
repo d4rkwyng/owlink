@@ -157,9 +157,13 @@ public final class PreviewGrants: @unchecked Sendable {
     /// How many roots may be held open (`limit`; less in tests).
     public let capacity: Int
     private let lock = NSLock()
-    private var pins: [String: PinnedRoot] = [:]
-    private var granted: [String] = []
-    private var denied: Set<String> = []
+    // Keyed by the paths' bytes (`FolderTree.PathKey`): a `String` key is
+    // canonical, so two spellings a volume keeps apart (the Ohm sign and
+    // Omega) shared one pin, and a grant changed between them kept the
+    // old descriptor (Astra batch 13d, must 3).
+    private var pins: [FolderTree.PathKey: PinnedRoot] = [:]
+    private var granted: [FolderTree.PathKey] = []
+    private var denied: Set<FolderTree.PathKey> = []
     /// Tests: called with a site root's path once its descriptor is found,
     /// before the file is approved under it (under the lock: it must not
     /// call back in).
@@ -175,7 +179,7 @@ public final class PreviewGrants: @unchecked Sendable {
     /// that doesn't open, or comes past `capacity` distinct roots, is
     /// denied until the next fresh grant.
     public func grant(_ roots: [URL?]) {
-        let paths = roots.compactMap { $0?.standardizedFileURL.path }
+        let paths = roots.compactMap { $0.map(FolderTree.PathKey.init) }
         lock.lock(); defer { lock.unlock() }
         guard paths != granted else { return }
         granted = paths
@@ -183,7 +187,7 @@ public final class PreviewGrants: @unchecked Sendable {
         denied = []
         for p in paths where pins[p] == nil && !denied.contains(p) {
             // Past the cap a root is denied for this grant, never opened.
-            guard pins.count < capacity, let r = PinnedRoot(URL(fileURLWithPath: p)) else { denied.insert(p); continue }
+            guard pins.count < capacity, let r = PinnedRoot(URL(fileURLWithPath: p.string)) else { denied.insert(p); continue }
             pins[p] = r
         }
     }
@@ -195,7 +199,7 @@ public final class PreviewGrants: @unchecked Sendable {
     /// before), or nil. Never opens anything.
     public func pinned(_ root: URL) -> PinnedRoot? {
         lock.lock(); defer { lock.unlock() }
-        return pins[root.standardizedFileURL.path]
+        return pins[FolderTree.PathKey(root)]
     }
 
     /// What the preview reads for `url`: the file `PreviewFolder.approved`
@@ -207,11 +211,11 @@ public final class PreviewGrants: @unchecked Sendable {
     public func approve(_ url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                         vault: WikiVault? = nil, walk: Bool = !Beneath.kernelEnforced) -> (root: PinnedRoot, parts: [String], file: URL)? {
         lock.lock(); defer { lock.unlock() }
-        let folderPath = folder.standardizedFileURL.path
+        let folderPath = FolderTree.PathKey(folder)
         guard granted.contains(folderPath), let docPin = pins[folderPath] else { return nil }
         if let hit = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot,
                                             scriptOn: scriptOn, vault: vault, siteRoots: false) {
-            let p = hit.root.standardizedFileURL.path
+            let p = FolderTree.PathKey(hit.root)
             guard granted.contains(p), let root = pins[p],
                   let parts = PreviewRead.components(of: hit.file, below: root.url),
                   !scriptOn || PreviewRead.scriptSafe(parts) else { return nil }
@@ -227,9 +231,9 @@ public final class PreviewGrants: @unchecked Sendable {
         guard let page = PreviewFolder.pageURL(forFile: site.url.appendingPathComponent(rel.joined(separator: "/"))),
               let file = PreviewFolder.file(for: page, in: site.url, scriptOn: scriptOn),
               !scriptOn || PreviewRead.scriptSafe(rel) else { return nil }
-        if pins[site.url.path] == nil {
+        if pins[FolderTree.PathKey(site.url)] == nil {
             guard pins.count < capacity else { return nil }
-            pins[site.url.path] = site
+            pins[FolderTree.PathKey(site.url)] = site
         }
         return (site, rel, file)
     }
@@ -241,9 +245,9 @@ public final class PreviewGrants: @unchecked Sendable {
             guard let base = searchFolder(dir, docPin: docPin) else { continue }
             for sub in PreviewRoot.siteFolders {
                 let url = sub.isEmpty ? base.url : base.url.appendingPathComponent(sub, isDirectory: true).standardizedFileURL
-                guard !denied.contains(url.path) else { continue }
+                guard !denied.contains(FolderTree.PathKey(url)) else { continue }
                 let candidate: PinnedRoot
-                if let r = pins[url.path] {
+                if let r = pins[FolderTree.PathKey(url)] {
                     candidate = r
                 } else if sub.isEmpty {
                     candidate = base
@@ -265,8 +269,8 @@ public final class PreviewGrants: @unchecked Sendable {
     /// when `dir`'s path names that same folder now. nil otherwise.
     private func searchFolder(_ dir: URL, docPin: PinnedRoot) -> PinnedRoot? {
         let p = dir.standardizedFileURL.path
-        guard !denied.contains(p) else { return nil }
-        if let r = pins[p] { return r }
+        guard !denied.contains(FolderTree.PathKey(p)) else { return nil }
+        if let r = pins[FolderTree.PathKey(p)] { return r }
         let below = docPin.url.path
         guard below.hasPrefix(p.hasSuffix("/") ? p : p + "/") else { return nil }
         let levels = below.split(separator: "/").count - p.split(separator: "/").count

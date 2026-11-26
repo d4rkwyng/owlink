@@ -533,6 +533,33 @@ import Testing
                 #expect(grants.count == 1, "\(what)")
             }
         }
+        // Two spellings of one root, the Ohm sign (U+2126) and Omega
+        // (U+03A9): Swift text calls them equal, their bytes differ, and a
+        // volume that keeps names as bytes holds two folders (this one,
+        // APFS, folds them into one, so both paths open it). The grant
+        // keys them by bytes (Astra batch 13d, must 3).
+        let ohm = t.appendingPathComponent("\u{2126}"), omega = t.appendingPathComponent("\u{3A9}")
+        try fm.createDirectory(at: ohm, withIntermediateDirectories: true)
+        #expect(Array(ohm.standardizedFileURL.path.utf8) != Array(omega.standardizedFileURL.path.utf8), "two spellings")
+        func bytes(_ r: PinnedRoot?) -> [UInt8]? { r.map { Array($0.url.path.utf8) } }
+        // At capacity one, the second spelling is a second root: past the
+        // cap, denied, and no pin is handed out for it.
+        let both = PreviewGrants(capacity: 1)
+        both.grant([ohm, omega])
+        #expect(both.count == 1)
+        #expect(bytes(both.pinned(ohm)) == Array(ohm.standardizedFileURL.path.utf8))
+        #expect(both.pinned(omega) == nil, "the second spelling is refused, not given the first's pin")
+        // A sole grant changed from one spelling to the other is a new
+        // grant: the first pin is dropped and the second spelling pinned.
+        let sole = PreviewGrants(capacity: 1)
+        sole.grant([ohm])
+        let first = try #require(sole.pinned(ohm))
+        sole.grant([omega])
+        #expect(sole.count == 1)
+        #expect(sole.pinned(ohm) == nil, "the first spelling's pin is gone")
+        let second = try #require(sole.pinned(omega))
+        #expect(second !== first, "a fresh pin, not the previous descriptor")
+        #expect(bytes(second) == Array(omega.standardizedFileURL.path.utf8))
     }
 
     /// How many descriptors this process has open on something inside

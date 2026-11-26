@@ -150,6 +150,22 @@ public enum FolderTree {
     /// combining mark, which is one Swift character.
     public static func isDotName(_ name: String) -> Bool { name.utf8.first == 0x2e }
 
+    /// Whether two paths or names are the same UTF-8 bytes. Swift's `==`
+    /// is canonical equivalence: the Ohm sign (U+2126) and Omega (U+03A9)
+    /// compare equal, though a volume that keeps names as bytes holds
+    /// them as two files.
+    public static func sameBytes(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
+
+    /// A path or name as a dictionary or set key, by its UTF-8 bytes (see
+    /// `sameBytes`): a `String` key hashes and compares canonically.
+    public struct PathKey: Hashable, Sendable {
+        public let bytes: [UInt8]
+        public init(_ s: String) { bytes = Array(s.utf8) }
+        /// `url`'s standardized path.
+        public init(_ url: URL) { self.init(url.standardizedFileURL.path) }
+        public var string: String { String(decoding: bytes, as: UTF8.self) }
+    }
+
     /// The folder holding the file at `url` (File › Open Enclosing Folder),
     /// or nil for an untitled document, a non-file URL or the volume root.
     public static func enclosingFolder(of url: URL?) -> URL? {
