@@ -103,6 +103,68 @@ import Testing
         #expect(recovered == [b])
     }
 
+    /// The app dies after committing a session that let a buffer go,
+    /// before the journal that listed it is removed (or removing it
+    /// failed): the journal is spent, and the buffer doesn't come back.
+    @Test func aJournalLeftAfterItsCommitBringsNothingBack() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let dropped = UUID()
+        try s1.writeBuffer(dropped, text: "discarded before the commit")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        let left = try Data(contentsOf: journal)
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        // As if the removal never happened.
+        try left.write(to: journal)
+        guard case .session(let s, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered.isEmpty)
+        #expect(s.allTabs.map(\.id) == [a.id])
+    }
+
+    /// The same journal before its commit is pending, and a journal from
+    /// before commits were numbered (a bare array) always is.
+    @Test func aPendingOrUnnumberedJournalIsApplied() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let b = UUID()
+        try s1.writeBuffer(b, text: "b")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        let j = try JSONDecoder().decode(SessionStore.Journal.self, from: Data(contentsOf: journal))
+        #expect(j.ids == [b.uuidString] && j.generation == 2)
+        guard case .session(_, let pending) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(pending == [b])
+        try JSONEncoder().encode([b.uuidString]).write(to: journal)
+        guard case .session(_, let legacy) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(legacy == [b])
+    }
+
+    /// A journal that decodes but names something that isn't an id is
+    /// damaged: launch scans for every buffer the session doesn't name.
+    @Test func aJournalWithAnInvalidIdIsDamaged() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let b = UUID()
+        try s1.writeBuffer(b, text: "b")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        for bad in [#"["not-an-id"]"#, #"{"generation": 2, "ids": ["not-an-id"]}"#] {
+            try Data(bad.utf8).write(to: journal)
+            guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+            #expect(recovered == [b], "\(bad)")
+        }
+    }
+
     // MARK: Holds
 
     @Test func anUnreadableSessionThatCantBeMovedIsCopiedAside() throws {

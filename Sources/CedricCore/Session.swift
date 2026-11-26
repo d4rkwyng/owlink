@@ -277,6 +277,12 @@ public struct SessionFolder: Codable, Equatable, Sendable {
 /// A buffer that was deliberately let go (its tab saved, discarded or
 /// closed empty) is not in the journal once a session without it has
 /// been committed, so it never comes back.
+///
+/// Each commit is numbered (`generation` in `session.json`), and the
+/// journal says which commit it waits for. A journal whose commit is
+/// already in `session.json` (the app died after the commit, before the
+/// journal was removed, or removing it failed) is spent: launch ignores
+/// it, so a buffer that commit let go can't come back from it.
 public final class SessionStore: @unchecked Sendable {
     public let directory: URL
     private let fm = FileManager.default
@@ -286,6 +292,9 @@ public final class SessionStore: @unchecked Sendable {
     private var committed = Set<UUID>()
     /// Buffer ids written (or being written) since: the journal, in order.
     private var pending: [UUID] = []
+    /// The number of the last commit (`session.json`'s `generation`, or
+    /// above any journal launch found); the next commit is this + 1.
+    private var committedGeneration = 0
     /// Buffers launch couldn't read: never pruned, saved in the session.
     private var held = Set<UUID>()
     /// Set when launch couldn't make the store safe to write (an unreadable
@@ -339,11 +348,35 @@ public final class SessionStore: @unchecked Sendable {
         return loadUnlocked()
     }
 
-    private func loadUnlocked() -> Session? {
+    private func loadUnlocked() -> Session? { loadManifest()?.session }
+
+    /// The session and its commit number (0: saved before commits were numbered).
+    private func loadManifest() -> (session: Session, generation: Int)? {
         guard let data = try? Data(contentsOf: sessionFile),
               let s = try? JSONDecoder().decode(Session.self, from: data),
               s.version <= Session.currentVersion else { return nil }
-        return s
+        return (s, (try? JSONDecoder().decode(Generation.self, from: data))?.generation ?? 0)
+    }
+
+    /// `session.json`'s commit number, beside the session's own keys
+    /// (older versions ignore it). Not part of `Session`: it is the
+    /// store's bookkeeping, not what the user had open.
+    private struct Generation: Codable { var generation: Int? }
+    private struct Manifest: Encodable {
+        let session: Session
+        let generation: Int
+        func encode(to encoder: Encoder) throws {
+            try session.encode(to: encoder)
+            try Generation(generation: generation).encode(to: encoder)
+        }
+    }
+
+    /// The journal: buffer ids written since commit `generation` - 1, in
+    /// order. 0.6 before review wrote a bare array of ids (no number:
+    /// always pending).
+    struct Journal: Codable, Equatable {
+        var generation: Int?
+        var ids: [String]
     }
 
     /// What launch finds in the store (`loadForLaunch`).
@@ -377,9 +410,13 @@ public final class SessionStore: @unchecked Sendable {
     /// replaces the session file nor prunes until the next launch.
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
         lock.lock(); defer { lock.unlock() }
-        let journal = readJournal()
-        pending = journal.ids
-        if let s = loadUnlocked() {
+        var journal = readJournal()
+        committedGeneration = max(0, (journal.generation ?? 0) - 1)
+        if let (s, generation) = loadManifest() {
+            committedGeneration = max(committedGeneration, generation)
+            // Spent: the commit it waited for is in session.json already.
+            if let g = journal.generation, g <= generation, !journal.damaged { journal = ([], g, false) }
+            pending = journal.ids
             committed = s.bufferIDs
             held = Set(s.heldBuffers ?? [])
             var candidates = journal.ids
@@ -392,6 +429,7 @@ public final class SessionStore: @unchecked Sendable {
             let r = Self.applyJournal(s, journal: candidates) { fm.fileExists(atPath: bufferURL($0).path) }
             return .session(r.session, recovered: r.recovered)
         }
+        pending = journal.ids
         let listed: [UUID]
         do {
             listed = try bufferFiles()
@@ -461,12 +499,27 @@ public final class SessionStore: @unchecked Sendable {
         return (s, recovered)
     }
 
-    /// The journal's ids; `damaged` if the file is there but can't be read.
-    private func readJournal() -> (ids: [UUID], damaged: Bool) {
-        guard fm.fileExists(atPath: journalFile.path) else { return ([], false) }
-        guard let data = try? Data(contentsOf: journalFile),
-              let strings = try? JSONDecoder().decode([String].self, from: data) else { return ([], true) }
-        return (strings.compactMap(UUID.init(uuidString:)), false)
+    /// The journal's ids and commit number; `damaged` if the file is
+    /// there but can't be read, or names something that isn't an id
+    /// (then which buffers it listed is unknown: the caller scans).
+    private func readJournal() -> (ids: [UUID], generation: Int?, damaged: Bool) {
+        guard fm.fileExists(atPath: journalFile.path) else { return ([], nil, false) }
+        guard let data = try? Data(contentsOf: journalFile) else { return ([], nil, true) }
+        let j: Journal
+        if let object = try? JSONDecoder().decode(Journal.self, from: data) {
+            j = object
+        } else if let legacy = try? JSONDecoder().decode([String].self, from: data) {
+            j = Journal(generation: nil, ids: legacy)
+        } else {
+            return ([], nil, true)
+        }
+        let ids = j.ids.compactMap(UUID.init(uuidString:))
+        guard ids.count == j.ids.count else { return ([], j.generation, true) }
+        return (ids, j.generation, false)
+    }
+
+    private func encodeJournal(_ ids: [UUID]) throws -> Data {
+        try JSONEncoder().encode(Journal(generation: committedGeneration + 1, ids: ids.map(\.uuidString)))
     }
 
     /// The buffer files in the store, oldest first. Throws if the folder
@@ -498,10 +551,14 @@ public final class SessionStore: @unchecked Sendable {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty, let hook = checkBeforeCommit { hook() }
-        try PrivateDirectory.writePrivateFile(enc.encode(s), to: sessionFile)
+        let generation = committedGeneration + 1
+        try PrivateDirectory.writePrivateFile(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
+        committedGeneration = generation
         committed = s.bufferIDs
         // Every buffer written before this session's snapshot is named in
-        // it or was let go (writes are serialized with saves).
+        // it or was let go (writes are serialized with saves). If the app
+        // dies before this, or it fails, the journal is spent anyway: it
+        // waited for this commit.
         if !pending.isEmpty || fm.fileExists(atPath: journalFile.path) {
             pending = []
             try? fm.removeItem(at: journalFile)
@@ -515,7 +572,7 @@ public final class SessionStore: @unchecked Sendable {
         if !committed.contains(id), !pending.contains(id) {
             // Journaled before the buffer exists, so a buffer is never on
             // disk unnamed by both the session and the journal.
-            try PrivateDirectory.writePrivateFile(JSONEncoder().encode((pending + [id]).map(\.uuidString)), to: journalFile)
+            try PrivateDirectory.writePrivateFile(encodeJournal(pending + [id]), to: journalFile)
             pending.append(id)
         }
         try PrivateDirectory.writePrivateFile(Data(text.utf8), to: bufferURL(id))
