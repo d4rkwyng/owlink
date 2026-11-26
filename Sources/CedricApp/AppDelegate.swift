@@ -1003,8 +1003,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let host else { continue }
             if group.floatOnTop { setWindowFloats(true, host) }
             pendingRestore += rest.sorted().map { PendingTab(tab: openTabs[$0], group: group, index: $0) }
-            host.makeKeyAndOrderFront(nil)
+            orderInAlone(host, key: true)
         }
+    }
+
+    /// A restored window, ordered in on its own: AppKit's automatic
+    /// tabbing (`.preferred`) otherwise adds it to the window restored
+    /// before it, and a session saved with two windows comes back as one.
+    private func orderInAlone(_ window: NSWindow, key: Bool) {
+        let mode = window.tabbingMode
+        window.tabbingMode = .disallowed
+        if key { window.makeKeyAndOrderFront(nil) } else { window.orderFront(nil) }
+        window.tabbingMode = mode
     }
 
     /// Builds one saved tab; nil if its file has gone and it had no buffer.
@@ -1108,7 +1118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if let f = p.group.frame { w.setFrame(from: f) }
                 if p.group.floatOnTop { setWindowFloats(true, w) }
                 p.group.built.append((p.index, w))
-                w.orderFront(nil)
+                orderInAlone(w, key: false)
             }
             return
         }
