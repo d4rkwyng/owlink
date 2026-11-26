@@ -442,6 +442,48 @@ else
     bad "appcast-item.sh cleanup (exits $rc $rc2 $rc3): $(ls -A "$W/own" | tr '\n' ' ')"
 fi
 
+# release.sh's own nested-code loop (not a dry run, everything stubbed):
+# a find that prints one NUL-terminated path with a space in it and then
+# fails must stop the release before Sparkle.framework or the app is
+# signed. A temp repo whose bundle-app.sh makes an empty app skeleton;
+# `find` and `codesign` on PATH are stubs (codesign only logs), so nothing
+# is built, signed, notarized or launched.
+R2="$W/repo2"
+mkdir -p "$R2/Scripts" "$R2/Sources/CedricCore" "$W/relstub"
+cp Scripts/release.sh "$R2/Scripts/"
+cp Sources/CedricCore/Version.swift "$R2/Sources/CedricCore/"
+cat > "$R2/Scripts/bundle-app.sh" <<STUB
+#!/bin/bash
+# Test stub: an app skeleton with version $RV, no code.
+cd "\$(dirname "\$0")/.."
+mkdir -p dist/Owlink.app/Contents/MacOS dist/Owlink.app/Contents/Frameworks/llama.framework dist/Owlink.app/Contents/Frameworks/Sparkle.framework
+printf '<?xml version="1.0" encoding="UTF-8"?>\\n<plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>%s</string></dict></plist>\\n' "$RV" > dist/Owlink.app/Contents/Info.plist
+STUB
+printf '#!/bin/bash\ntouch "$(dirname "$0")/../sign-sparkle-ran"\n' > "$R2/Scripts/sign-sparkle.sh"
+cat > "$W/relstub/find" <<'STUB'
+#!/bin/bash
+# Test stub: the nested-code search lists one path (with a space), then fails.
+case " $* " in *" -print0 "*) printf '%s\0' "$1/Frameworks/llama space.framework"; echo "find: $1/Resources/x: Permission denied" >&2; exit 1 ;; esac
+exec /usr/bin/find "$@"
+STUB
+cat > "$W/relstub/codesign" <<'STUB'
+#!/bin/bash
+# Test stub: logs its last argument, signs nothing.
+printf '%s\n' "${@: -1}" >> "$CODESIGN_LOG"
+STUB
+chmod +x "$R2/Scripts/bundle-app.sh" "$R2/Scripts/sign-sparkle.sh" "$W/relstub/find" "$W/relstub/codesign"
+: > "$W/codesign.log"
+rc=0; env -u CEDRIC_VERSION -u TAG -u CEDRIC_SPARKLE_FEED_URL -u CEDRIC_SPARKLE_PUBLIC_KEY PATH="$W/relstub:$PATH" CODESIGN_LOG="$W/codesign.log" \
+    CEDRIC_SIGN_ID="Developer ID Application: TEST ONLY (TEAMID)" \
+    "$R2/Scripts/release.sh" --host-arch --skip-notarize --skip-launch-check > "$W/rel2.out" 2>&1 || rc=$?
+if [ $rc != 0 ] && grep -q 'could not find and sign all nested code' "$W/rel2.out" \
+    && [ "$(cat "$W/codesign.log")" = "dist/Owlink.app/Contents/Frameworks/llama space.framework" ] \
+    && [ ! -e "$R2/sign-sparkle-ran" ] && ! grep -q '^+ Scripts/sign-sparkle.sh' "$W/rel2.out"; then
+    ok "release.sh stops when the nested-code search fails part way (path with a space signed whole), before Sparkle and the app"
+else
+    bad "release.sh with a failing nested-code search (exit $rc, sign-sparkle $([ -e "$R2/sign-sparkle-ran" ] && echo RAN || echo "not run")): codesign on: $(tr '\n' '|' < "$W/codesign.log") $(grep -m2 'release.sh:' "$W/rel2.out")"
+fi
+
 if [ -n "$APP" ]; then
     P="$APP/Contents/Info.plist"
     v() { plutil -extract "$1" raw "$P" 2>/dev/null; }
