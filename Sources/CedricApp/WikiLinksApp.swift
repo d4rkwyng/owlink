@@ -669,8 +669,10 @@ extension EditorWindowController {
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
         let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
         // The note's path in the folder, as names: beside this note when it is
-        // in the folder and the link names no folder, else from the top.
-        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL)?.split(separator: "/").dropLast().map(String.init) ?? [])
+        // in the folder and the link names no folder, else from the top. Its
+        // folders split at the "/" bytes (FolderTree.components): a text
+        // split keeps a slash before a combining mark inside one name.
+        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL).map { Array(FolderTree.components($0).dropLast()) } ?? [])
         let components = besideDoc + parts.dropLast() + [file]
         // Each one name by the bytes the kernel gets, before a path is built,
         // shown or probed: a slash before a combining mark is one Swift
