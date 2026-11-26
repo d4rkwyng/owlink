@@ -8,7 +8,8 @@
 #
 #   --dry-run        print every command instead of running it (the identity
 #                    lookup still runs: it only reads the keychain)
-#   --host-arch      build only this Mac's architecture (default: universal)
+#   --host-arch      build only this Mac's architecture (default: universal);
+#                    not with --appcast
 #   --skip-notarize  sign and verify only
 #   --skip-launch-check
 #                    don't real-launch the signed app (Scripts/launch-check.sh);
@@ -142,6 +143,9 @@ if [ $APPCAST = 1 ]; then
         fail "--appcast: no EdDSA private key: set CEDRIC_SPARKLE_KEY_FILE (a file outside the repo) or CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT (docs/updates.md)"
     fi
     [ $NOTARIZE = 1 ] || fail "--appcast: an update must be notarized; drop --skip-notarize"
+    # The appcast item names no architecture, so every installed copy, Intel
+    # or Apple silicon, would be offered this zip: it must run on both.
+    [ $UNIVERSAL = 1 ] || fail "--appcast: an update must be universal (arm64 and x86_64): its appcast item is offered to every Mac; drop --host-arch"
     if [ -n "${CEDRIC_SPARKLE_BIN:-}" ]; then
         SPARKLE_SIGN_UPDATE="$CEDRIC_SPARKLE_BIN/sign_update"
     else
@@ -151,7 +155,8 @@ if [ $APPCAST = 1 ]; then
         || fail "--appcast: no Sparkle sign_update (set CEDRIC_SPARKLE_BIN to the bin folder of Sparkle 2.10.1)"
     if [ -n "${CEDRIC_SPARKLE_APPCAST:-}" ]; then
         [ -f "$CEDRIC_SPARKLE_APPCAST" ] || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not a file"
-        grep -q '</channel>' "$CEDRIC_SPARKLE_APPCAST" || fail "--appcast: CEDRIC_SPARKLE_APPCAST has no </channel>"
+        Scripts/appcast-versions.sh "$CEDRIC_SPARKLE_APPCAST" 0 >/dev/null \
+            || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not an appcast (well-formed XML with one /rss/channel)"
     fi
     # bundle-app.sh bakes these two into Info.plist.
     export CEDRIC_SPARKLE_FEED_URL CEDRIC_SPARKLE_PUBLIC_KEY
@@ -177,6 +182,29 @@ if [ -n "${CEDRIC_VERSION:-}" ] && [ "$CEDRIC_VERSION" != "$SOURCE_VERSION" ]; t
 fi
 echo "Version: ${CEDRIC_VERSION:-$SOURCE_VERSION}"
 ZIP="dist/Owlink-${CEDRIC_VERSION:-$SOURCE_VERSION}.zip"
+
+# 0a. --appcast: a version the feed already lists is refused here, before
+#     anything is built and before $ZIP (which that feed's enclosure
+#     signature covers) is removed or rewritten. Both the feed the item
+#     would go into and the local dist/appcast.xml are checked, by XML
+#     value (Scripts/appcast-versions.sh), as appcast-item.sh does later.
+if [ $APPCAST = 1 ]; then
+    # The new feed is renamed onto dist/appcast.xml at the end; onto a
+    # folder (or a link to one) that rename would put it inside the folder
+    # and still report success, so anything there that isn't a file is
+    # refused now.
+    if [ -e dist/appcast.xml ] && [ ! -f dist/appcast.xml ]; then
+        fail "--appcast: dist/appcast.xml is not a file (a folder, or a link to one); nothing was built and $ZIP is as it was (move it aside)"
+    fi
+    FEEDS=(dist/appcast.xml)
+    [ -z "${CEDRIC_SPARKLE_APPCAST:-}" ] || FEEDS+=("$CEDRIC_SPARKLE_APPCAST")
+    for f in "${FEEDS[@]}"; do
+        [ -f "$f" ] || continue
+        have=$(Scripts/appcast-versions.sh "$f" "${CEDRIC_VERSION:-$SOURCE_VERSION}") \
+            || fail "--appcast: can't check $f for version ${CEDRIC_VERSION:-$SOURCE_VERSION}"
+        [ "$have" = 0 ] || fail "--appcast: $f already has an item for ${CEDRIC_VERSION:-$SOURCE_VERSION}; nothing was built and $ZIP and the feed are as they were (bump the version, or move the feed aside to redo this one)"
+    done
+fi
 
 # 1. Signing identity.
 ID=${CEDRIC_SIGN_ID:-}
@@ -284,13 +312,16 @@ else
     SIGN=(codesign --force --options runtime --timestamp -s "$ID")
 fi
 if [ $DRY = 0 ]; then
-    nested=0
-    while IFS= read -r -d '' f; do
-        run "${SIGN[@]}" "$f"
-        nested=$((nested + 1))
-    done < <(find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
-                 -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0)
-    [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+    # A pipe, so pipefail sees find's status (as in Scripts/sign-adhoc.sh).
+    find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
+            -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0 | {
+        nested=0
+        while IFS= read -r -d '' f; do
+            run "${SIGN[@]}" "$f" || fail "codesign failed on $f"
+            nested=$((nested + 1))
+        done
+        [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+    } || fail "could not find and sign all nested code in $APP"
     echo "+ Scripts/sign-sparkle.sh $SPARKLE_FW $(printf '%q ' "${SIGN[@]}")"
     Scripts/sign-sparkle.sh "$SPARKLE_FW" "${SIGN[@]}"
 else
@@ -409,18 +440,18 @@ echo "Release ready: $ZIP"
 
 # 7. The update (--appcast): Sparkle's EdDSA signature for the zip, checked
 #    against the public key the app ships, an appcast item for it in a
-#    local dist/appcast.xml (a copy of CEDRIC_SPARKLE_APPCAST, or a new
+#    local dist/appcast.xml (CEDRIC_SPARKLE_APPCAST plus the item, or a new
 #    feed), the feed signed too (SURequireSignedFeed), and a list of what
-#    to upload. This script uploads nothing.
+#    to upload. dist/appcast.xml is replaced only by a feed that verified.
+#    This script uploads nothing.
 VERSION=${CEDRIC_VERSION:-$SOURCE_VERSION}
 APPCAST_OUT=dist/appcast.xml
 ENCLOSURE=${CEDRIC_SPARKLE_DOWNLOAD_URL//\{version\}/$VERSION}
 if [ $DRY = 1 ]; then
     echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$ZIP")"
     echo "+ swift Scripts/ed-verify.swift <CEDRIC_SPARKLE_PUBLIC_KEY> <signature> $ZIP"
-    echo "+ (add the $VERSION item, enclosure $ENCLOSURE, to $APPCAST_OUT)"
-    echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
-    echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" --verify "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
+    echo "+ Scripts/appcast-item.sh --out $APPCAST_OUT --version $VERSION --url $ENCLOSURE${CEDRIC_SPARKLE_APPCAST:+ --from $CEDRIC_SPARKLE_APPCAST} …"
+    echo "+   (the new feed in a temp .xml beside $APPCAST_OUT: xmllint, $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}")<temp>.xml, then --verify, then renamed over $APPCAST_OUT)"
     exit 0
 fi
 # The app as built must carry this feed and key.
@@ -433,43 +464,14 @@ ED_LEN=$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<<"$ATTRS")
 [ -n "$ED_SIG" ] && [ "$ED_LEN" = "$(stat -f '%z' "$ZIP")" ] || fail "sign_update's output isn't a signature and length for $ZIP: $ATTRS"
 swift Scripts/ed-verify.swift "$CEDRIC_SPARKLE_PUBLIC_KEY" "$ED_SIG" "$ZIP" \
     || fail "the private key doesn't match CEDRIC_SPARKLE_PUBLIC_KEY: installed copies would refuse this update"
-if [ -n "${CEDRIC_SPARKLE_APPCAST:-}" ]; then
-    [ "$(cd "$(dirname "$CEDRIC_SPARKLE_APPCAST")" && pwd -P)/$(basename "$CEDRIC_SPARKLE_APPCAST")" = "$(pwd -P)/$APPCAST_OUT" ] \
-        || cp "$CEDRIC_SPARKLE_APPCAST" "$APPCAST_OUT"
-else
-    cat > "$APPCAST_OUT" <<'FEED'
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <channel>
-        <title>Owlink</title>
-    </channel>
-</rss>
-FEED
-fi
-grep -q "<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>" "$APPCAST_OUT" \
-    && fail "$APPCAST_OUT already has an item for $VERSION"
-ITEM=$(mktemp)
-trap 'rm -f "$ITEM"' EXIT
-cat > "$ITEM" <<ITEMXML
-        <item>
-            <title>Version $VERSION</title>
-            <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
-            <sparkle:version>$VERSION</sparkle:version>
-            <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="$ENCLOSURE" length="$ED_LEN" type="application/octet-stream" sparkle:edSignature="$ED_SIG"/>
-        </item>
-ITEMXML
-# The new item goes before the first existing one (else at the end of the
-# channel). Sparkle offers the highest version, whatever the order.
-awk -v item="$ITEM" '
-    !done && (/<item[ >]/ || /<\/channel>/) { while ((getline l < item) > 0) print l; done = 1 }
-    { print }
-' "$APPCAST_OUT" > "$APPCAST_OUT.new" && mv "$APPCAST_OUT.new" "$APPCAST_OUT"
-xmllint --noout "$APPCAST_OUT" || fail "$APPCAST_OUT is not well-formed XML"
-echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
-"$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT" || fail "sign_update could not sign $APPCAST_OUT"
-"$SPARKLE_SIGN_UPDATE" --verify "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT" || fail "$APPCAST_OUT's signature doesn't verify"
+# The feed: built, checked, signed and verified in a temp file beside
+# $APPCAST_OUT, which is replaced only once all of that succeeds
+# (Scripts/appcast-item.sh), so a failure keeps the last signed feed and a
+# retry isn't refused as a duplicate.
+Scripts/appcast-item.sh --out "$APPCAST_OUT" --sign-update "$SPARKLE_SIGN_UPDATE" \
+    --version "$VERSION" --url "$ENCLOSURE" --length "$ED_LEN" --signature "$ED_SIG" \
+    ${CEDRIC_SPARKLE_APPCAST:+--from "$CEDRIC_SPARKLE_APPCAST"} -- "${SPARKLE_SIGN_ARGS[@]}" \
+    || fail "no new $APPCAST_OUT (the one there, if any, is unchanged); fix the cause and run again"
 echo
 echo "Nothing was uploaded. To publish this update, by hand:"
 echo "  1. $ZIP  ->  $ENCLOSURE"

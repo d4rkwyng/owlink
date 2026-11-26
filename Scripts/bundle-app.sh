@@ -382,18 +382,11 @@ Scripts/doctypes-check.sh "$APP" | grep -v ' PASS ' >&2 || true
 Scripts/doctypes-check.sh "$APP" >/dev/null
 
 if [ "$SIGN" = adhoc ]; then
-    # Ad-hoc: no identity, no Gatekeeper approval. No App Sandbox: an
-    # editor opens arbitrary files by path from the command line.
-    # --deep --force re-signs every nested piece the same way, so a
-    # release build's Sparkle.framework is signed again after it in
-    # Sparkle's own inside-out order (Scripts/sign-sparkle.sh), then the
-    # app once more, so its seal covers the framework as signed last.
-    codesign -s - --force --deep "$APP"
-    if [ -d "$SPARKLE_FW" ]; then
-        Scripts/sign-sparkle.sh "$SPARKLE_FW" codesign -s - --force
-        codesign -s - --force "$APP"
-    fi
-    codesign --verify --deep --strict "$APP"
+    # Ad-hoc, inside out: llama.framework (and any other nested code) on
+    # its own, a release build's Sparkle.framework in Sparkle's order
+    # (Downloader.xpc keeps its entitlements), then the app once. Never
+    # --deep to sign, only to verify (--deep --strict).
+    Scripts/sign-adhoc.sh "$APP"
 fi
 
 echo "==> $APP ($VERSION): $(lipo -archs "$APP/Contents/MacOS/Cedric"), signing: $SIGN, $([ $CHECKS = 1 ] && echo "CHECK build (dev switches on; don't ship)" || echo "release build (dev switches off)"), updates: $([ -d "$SPARKLE_FW" ] && echo "Sparkle embedded, " || echo "no Sparkle, ")$([ -n "$SPARKLE_FEED" ] && [ -n "$SPARKLE_KEY" ] && echo "feed and key set" || echo "off (no feed/key)")"

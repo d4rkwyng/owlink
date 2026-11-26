@@ -11,8 +11,8 @@
 #   Scripts/sign-sparkle.sh dist/Owlink.app/Contents/Frameworks/Sparkle.framework \
 #       codesign --force --options runtime --timestamp -s "Developer ID Application: …"
 #
-# Used by Scripts/bundle-app.sh (ad hoc) and Scripts/release.sh (Developer
-# ID). Sign the app itself afterwards.
+# Used by Scripts/sign-adhoc.sh (bundle-app.sh's ad-hoc signing) and
+# Scripts/release.sh (Developer ID). Sign the app itself afterwards.
 set -euo pipefail
 DRY=0
 if [ "${1:-}" = --dry-run ]; then DRY=1; shift; fi

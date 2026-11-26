@@ -19,7 +19,7 @@ final class Updater: NSObject {
     /// What the Info.plist allows; `.disabled(.frameworkMissing)` once a
     /// load has failed.
     private(set) var config: UpdateConfig
-    /// The SPUStandardUpdaterController, once started.
+    /// The SPUStandardUpdaterController (started as it was created).
     private var controller: NSObject?
 
     override init() {
@@ -27,9 +27,10 @@ final class Updater: NSObject {
         super.init()
     }
 
-    /// After the first frame: loads Sparkle and starts it, only when the
-    /// build is set up for updates. Starting is quiet: with automatic
-    /// checks off (the default) Sparkle checks only when asked.
+    /// After the first frame: loads Sparkle and creates the controller,
+    /// which starts the updater, only when the build is set up for updates.
+    /// Starting is quiet: with automatic checks off (the default) Sparkle
+    /// checks only when asked.
     func startIfConfigured() {
         guard config.isEnabled, controller == nil else { return }
         guard let c = Self.makeController() else {
@@ -37,7 +38,6 @@ final class Updater: NSObject {
             return
         }
         controller = c
-        c.perform(NSSelectorFromString("startUpdater"))
     }
 
     var canCheck: Bool {
@@ -76,7 +76,10 @@ final class Updater: NSObject {
     }
 
     /// Sparkle.framework from Contents/Frameworks, and a new
-    /// SPUStandardUpdaterController (not started), or nil.
+    /// SPUStandardUpdaterController, or nil. This initializer starts the
+    /// updater itself (SPUStandardUpdaterController.h in Sparkle 2.10.1:
+    /// "The updater is started automatically"), so nothing calls
+    /// -startUpdater again.
     private static func makeController() -> NSObject? {
         guard let dir = Bundle.main.privateFrameworksURL else { return nil }
         let binary = dir.appendingPathComponent("Sparkle.framework/Sparkle").path

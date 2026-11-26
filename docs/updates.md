@@ -31,9 +31,10 @@ never loaded, and nothing goes to the network.
   EdDSA signature), `SUVerifyUpdateBeforeExtraction` = true,
   `SUEnableAutomaticChecks` = false, `SUAutomaticallyUpdate` = false (never
   installs without asking).
-- **Signing order** (`Scripts/sign-sparkle.sh`, used by bundle-app.sh and
-  release.sh): Installer.xpc, Downloader.xpc (keeps its entitlements),
-  Autoupdate, Updater.app, the framework, then the app. Never `--deep`.
+- **Signing order** (`Scripts/sign-sparkle.sh`, used by release.sh and by
+  bundle-app.sh's ad-hoc signing, `Scripts/sign-adhoc.sh`): Installer.xpc,
+  Downloader.xpc (keeps its entitlements), Autoupdate, Updater.app, the
+  framework, then the app. Never `--deep` to sign, only to verify.
   release.sh checks that all of them have the app's Team ID and the hardened
   runtime.
 - **`Scripts/release.sh --appcast`** (off by default; the normal release is
@@ -41,10 +42,14 @@ never loaded, and nothing goes to the network.
   signature against `CEDRIC_SPARKLE_PUBLIC_KEY` (`Scripts/ed-verify.swift`, so
   a key mismatch stops the release), adds an `<item>` to a local
   `dist/appcast.xml`, signs that feed, verifies it, and prints the two files
-  to upload and where. **It uploads nothing.** It refuses to start without a
+  to upload and where. The new feed is built, signed and verified in a temp
+  `.xml` beside `dist/appcast.xml` (`Scripts/appcast-item.sh`) and replaces
+  it only once it verifies, so a failed run keeps the last signed feed and
+  can simply be run again. **It uploads nothing.** It refuses to start without a
   feed URL, public key, download URL and exactly one private-key source.
   It also refuses a key file inside the repository or one others can read, and
-  a release that skips notarization. `Scripts/updates-check.sh` tests those
+  a release that skips notarization or is built for one architecture only
+  (`--host-arch`: the appcast item is offered to every Mac). `Scripts/updates-check.sh` tests those
   refusals.
 
 ## Decisions and OKs needed
