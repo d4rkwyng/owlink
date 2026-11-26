@@ -413,6 +413,17 @@ ENTS
     else
         echo "note: no Sparkle.framework in .build/artifacts (run swift build); ad-hoc Sparkle signing not checked"
     fi
+    # A nested-code search that fails part way (an unreadable folder in
+    # the bundle, after llama.framework is found) stops sign-adhoc.sh.
+    B="$W/findfail/Owlink.app"
+    mkdir -p "$W/findfail" && ditto "$APP" "$B" && mkdir -p "$B/Contents/Resources/zz-unreadable" && chmod 000 "$B/Contents/Resources/zz-unreadable"
+    rc=0; out=$(Scripts/sign-adhoc.sh "$B" 2>&1) || rc=$?
+    chmod 755 "$B/Contents/Resources/zz-unreadable"
+    if [ $rc != 0 ] && grep -q 'could not find and sign all nested code' <<<"$out" && ! grep -qF "$B: replacing existing signature" <<<"$out"; then
+        ok "sign-adhoc.sh stops when the search for nested code fails, before signing the app"
+    else
+        bad "sign-adhoc.sh with a failing nested-code search (exit $rc): $(tail -2 <<<"$out")"
+    fi
 fi
 
 echo "updates-check: $pass passed, $failed failed"

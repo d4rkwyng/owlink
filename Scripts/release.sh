@@ -305,13 +305,16 @@ else
     SIGN=(codesign --force --options runtime --timestamp -s "$ID")
 fi
 if [ $DRY = 0 ]; then
-    nested=0
-    while IFS= read -r -d '' f; do
-        run "${SIGN[@]}" "$f"
-        nested=$((nested + 1))
-    done < <(find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
-                 -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0)
-    [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+    # A pipe, so pipefail sees find's status (as in Scripts/sign-adhoc.sh).
+    find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
+            -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0 | {
+        nested=0
+        while IFS= read -r -d '' f; do
+            run "${SIGN[@]}" "$f" || fail "codesign failed on $f"
+            nested=$((nested + 1))
+        done
+        [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+    } || fail "could not find and sign all nested code in $APP"
     echo "+ Scripts/sign-sparkle.sh $SPARKLE_FW $(printf '%q ' "${SIGN[@]}")"
     Scripts/sign-sparkle.sh "$SPARKLE_FW" "${SIGN[@]}"
 else

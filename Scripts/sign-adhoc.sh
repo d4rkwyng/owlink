@@ -21,14 +21,19 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
 SIGN=(codesign -s - --force)
 
-nested=0
-while IFS= read -r -d '' f; do
-    "${SIGN[@]}" "$f"
-    nested=$((nested + 1))
-done < <(find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
-             -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0)
 [ -d "$APP/Contents/Frameworks/llama.framework" ] || fail "no llama.framework in $APP"
-[ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+# A pipe, not process substitution, so pipefail sees find's exit status: a
+# traversal that fails part way stops here, even after it found llama.
+# The count is checked inside the consumer, where it is known.
+find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
+        -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0 | {
+    nested=0
+    while IFS= read -r -d '' f; do
+        "${SIGN[@]}" "$f" || fail "codesign failed on $f"
+        nested=$((nested + 1))
+    done
+    [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+} || fail "could not find and sign all nested code in $APP"
 if [ -d "$SPARKLE_FW" ]; then
     "$HERE/sign-sparkle.sh" "$SPARKLE_FW" "${SIGN[@]}"
 fi
