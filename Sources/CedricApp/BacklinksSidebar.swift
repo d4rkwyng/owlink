@@ -23,8 +23,13 @@ final class BacklinksSidebar: NSView, NSTableViewDataSource, NSTableViewDelegate
     /// Lists applied (the checks wait for one).
     private(set) var builds = 0
     private(set) var partial = false
-    /// The latest list asked for (a result for an older one is dropped).
-    var request = 0
+    /// The latest list asked for (a result for an older one is dropped,
+    /// and one still queued behind a newer one isn't computed).
+    let latest = LatestRequest()
+    var request: Int {
+        get { latest.value }
+        set { latest.value = newValue }
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -211,19 +216,33 @@ extension EditorWindowController {
         // (a change posts didChange, which asks again).
         let scan = notes.scan, gen = notes.generation, partial = notes.isPartial
         side.request += 1
-        let token = side.request
+        let token = side.request, gate = side.latest, delay = WikiNotes.queryDelay
         let me = WeakRef(self), pane = WeakRef(side), model = WeakRef(notes)
         WikiNotes.queryQueue.async {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            // A newer refresh (or a message) came while this waited: skip the walk.
+            guard gate.isLatest(token) else { return }
             let found = scan.backlinks(to: rel, in: idx)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
+                    // Applied only from the sidebar's current notes (a folder closed or
+                    // replaced since asks again: wikiFolderChanged).
                     guard let tab = me.value, let side = pane.value, let notes = model.value,
+                          FolderSidebar.shared?.wikiNotes === notes,
                           side.request == token, notes.generation == gen, tab.wiki.backlinks === side, tab.wiki.backlinksVisible,
                           notes.relativePath(of: tab.doc.fileURL) == rel else { return }
                     side.set(found, message: nil, partial: partial)
                 }
             }
         }
+    }
+
+    /// The sidebar's folder was closed or replaced: an open `[[` list goes
+    /// (its names, and any keys held for it, were the old folder's) and a
+    /// visible Backlinks pane asks the new folder (or says there is none).
+    func wikiFolderChanged() {
+        wiki.completion?.hide()
+        if wiki.backlinksVisible { refreshBacklinks() }
     }
 
     private func openBacklink(_ b: BacklinkScan.Backlink) {

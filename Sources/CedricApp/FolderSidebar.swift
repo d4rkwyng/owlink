@@ -105,6 +105,7 @@ extension AppDelegate {
             self.findInFiles?.folderField.stringValue = dir.path
         }
         if state?.visible ?? true { s.show(in: tab) }
+        tabs.forEach { $0.wikiFolderChanged() }
         scheduleSessionSave()
     }
 
@@ -112,6 +113,7 @@ extension AppDelegate {
         FolderSidebar.shared?.close()
         FolderSidebar.shared = nil
         FolderSidebar.pendingFolder = nil
+        tabs.forEach { $0.wikiFolderChanged() }
         if let t = currentTab { t.window?.makeFirstResponder(t.textView) }
         scheduleSessionSave()
     }
