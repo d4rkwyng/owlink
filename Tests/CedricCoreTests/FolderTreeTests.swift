@@ -444,6 +444,65 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/x"), in: root) == nil)
     }
 
+    /// Astra batch 7b: a folder whose name starts with a combining mark,
+    /// first-level or nested, is inside the root (a text prefix test made
+    /// "/a/b/" + mark one character and missed it), and the root's own name
+    /// with a mark appended is a sibling, outside.
+    @Test func relativePathsByBytesWithCombiningMarks() {
+        let root = URL(fileURLWithPath: "/a/b")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/\u{301}x/d.md"), in: root) == "\u{301}x/d.md")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/\u{301}x"), in: root) == "\u{301}x")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/c/\u{301}x/d.md"), in: root) == "c/\u{301}x/d.md")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b\u{301}/d.md"), in: root) == nil)
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b\u{301}"), in: root) == nil)
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/"), in: URL(fileURLWithPath: "/a/b/")) == "")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/\u{301}x/d.md"), in: URL(fileURLWithPath: "/")) == "\u{301}x/d.md")
+        // Split at the slash bytes, so the mark stays at the start of its name.
+        #expect(FolderTree.components("c/\u{301}x/d.md") == ["c", "\u{301}x", "d.md"])
+        #expect(FolderTree.components("\u{301}x/d.md") == ["\u{301}x", "d.md"])
+        #expect(FolderTree.components("") == [])
+        #expect(FolderTree.components("a//b/") == ["a", "b"])
+    }
+
+    /// A note made by path in a combining-mark folder, first-level and
+    /// nested, lands in that folder inside the vault, not at its top; a
+    /// sibling folder named root + mark is outside and refused. On the
+    /// fallback (no kernel-enforced beneath: macOS 14, or `walk` forced) a
+    /// note in a subfolder is refused as unsupported, by its exact path,
+    /// and nothing is made beside it or at the vault's top. Run with this
+    /// kernel's default and with the fallback forced.
+    @Test(arguments: [!Beneath.kernelEnforced, true])
+    func aNewNoteInACombiningMarkFolderStaysInThatFolder(walk: Bool) throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault")
+        let first = vault.appendingPathComponent("\u{301}x"), nested = vault.appendingPathComponent("c/\u{301}y")
+        let sibling = base.appendingPathComponent("vault\u{301}")
+        for d in [first, nested, sibling] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: base) }
+        for (folder, name, rel) in [(first, "A.md", "\u{301}x/A.md"), (nested, "B.md", "c/\u{301}y/B.md")] {
+            let want = folder.appendingPathComponent(name)
+            if walk {
+                do {
+                    _ = try FolderActions.createFile(named: name, in: folder, within: vault, walk: true)
+                    Issue.record("\(rel): a note in a subfolder is refused on the fallback")
+                } catch let e as NSError {
+                    #expect(e.domain == NSCocoaErrorDomain && e.code == NSFeatureUnsupportedError, "\(rel): \(e)")
+                    #expect((e.userInfo[NSFilePathErrorKey] as? String).map { Array($0.utf8) } == Array(want.path.utf8),
+                            "\(rel): refused by its exact path")
+                }
+                #expect(!fm.fileExists(atPath: want.path), "\(rel): nothing beside it on the fallback")
+            } else {
+                let made = try FolderActions.createFile(named: name, in: folder, within: vault, walk: false)
+                #expect(fm.fileExists(atPath: want.path))
+                #expect(FolderTree.relativePath(of: made, in: vault) == rel)
+            }
+            #expect(!fm.fileExists(atPath: vault.appendingPathComponent(name).path), "\(rel): not at the vault's top")
+        }
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "S.md", in: sibling, within: vault, walk: walk) }
+        #expect(((try? fm.contentsOfDirectory(atPath: sibling.path)) ?? ["?"]).isEmpty, "the sibling folder is untouched")
+    }
+
     @Test func enclosingFolderOfAFile() {
         #expect(FolderTree.enclosingFolder(of: URL(fileURLWithPath: "/a/b/c.md"))?.path == "/a/b")
         #expect(FolderTree.enclosingFolder(of: URL(fileURLWithPath: "/a/b/c.md"))?.hasDirectoryPath == true)

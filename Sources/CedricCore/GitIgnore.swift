@@ -49,19 +49,22 @@ public struct GitIgnoreRules: Sendable, Equatable {
         var negated = false
         if line[0] == "!" { negated = true; line.removeFirst() }
         else if line.count >= 2, line[0] == "\\", line[1] == "#" || line[1] == "!" { line.removeFirst() }
+        // The slashes by their bytes: a "/" before a combining mark is one
+        // Swift character with it, but still anchors the pattern.
+        var bytes = Array(String(line).utf8)
         var dirOnly = false
-        if line.last == "/" { dirOnly = true; while line.last == "/" { line.removeLast() } }
-        guard !line.isEmpty else { return nil }
-        let anchored = line.contains("/")
-        if line.first == "/" { line.removeFirst() }
-        guard !line.isEmpty else { return nil }
-        return Pattern(glob: String(line), negated: negated, dirOnly: dirOnly, anchored: anchored)
+        if bytes.last == 0x2f { dirOnly = true; while bytes.last == 0x2f { bytes.removeLast() } }
+        guard !bytes.isEmpty else { return nil }
+        let anchored = bytes.contains(0x2f)
+        if bytes.first == 0x2f { bytes.removeFirst() }
+        guard !bytes.isEmpty else { return nil }
+        return Pattern(glob: String(decoding: bytes, as: UTF8.self), negated: negated, dirOnly: dirOnly, anchored: anchored)
     }
 
     /// The last pattern matching `path` (relative to the rules' folder, no
     /// leading "/"): true ignored, false re-included, nil no opinion.
     public func decision(_ path: String, isDirectory: Bool) -> Bool? {
-        let name = path.split(separator: "/").last.map(String.init) ?? path
+        let name = FolderTree.components(path).last ?? path
         for p in patterns.reversed() {
             if p.dirOnly && !isDirectory { continue }
             if GitIgnore.wildmatch(p.glob, p.anchored ? path : name) { return !p.negated }
@@ -79,7 +82,6 @@ public final class GitIgnore {
     /// folder when it isn't in a repository: its .gitignore files still
     /// apply (a copy of a repo without its .git).
     public let root: URL
-    private let rootPath: String
     private let exclude: GitIgnoreRules?
     private var rules: [String: GitIgnoreRules?] = [:]
     private var ignoredDirs: [String: Bool] = [:]
@@ -102,7 +104,6 @@ public final class GitIgnore {
             path = parent
         }
         root = repo ?? start
-        rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
         if let repo, let gitDir = Self.gitDirectory(repo),
            let text = try? String(contentsOf: gitDir.appendingPathComponent("info/exclude"), encoding: .utf8) {
             exclude = GitIgnoreRules(text)
@@ -129,16 +130,20 @@ public final class GitIgnore {
     }
 
     /// Whether `url` (symbolic links resolved by the caller) is ignored.
-    /// Paths outside `root` never are.
+    /// Paths outside `root`, and `root` itself, never are. Placed by the
+    /// path bytes (FolderTree.relativePath): a text prefix test fused
+    /// "root/" with a name starting with a combining mark.
     public func isIgnored(_ url: URL, isDirectory: Bool) -> Bool {
-        let p = url.path
-        guard p.hasPrefix(rootPath) else { return false }
-        return isIgnored(relative: String(p.dropFirst(rootPath.count)), isDirectory: isDirectory)
+        guard let rel = FolderTree.relativePath(of: url, in: root), !rel.isEmpty else { return false }
+        return isIgnored(relative: rel, isDirectory: isDirectory)
     }
 
-    /// `rel`: relative to `root`, "/"-separated.
+    /// `rel`: relative to `root`, "/"-separated, split at the "/" bytes
+    /// (FolderTree.components): a text split fused a folder with a child
+    /// whose name starts with a combining mark, and skipped the folder's
+    /// own .gitignore.
     public func isIgnored(relative rel: String, isDirectory: Bool) -> Bool {
-        let comps = rel.split(separator: "/").map(String.init)
+        let comps = FolderTree.components(rel)
         guard !comps.isEmpty else { return false }
         // A path in an ignored folder is ignored, whatever its own rules say.
         var prefix = ""
@@ -151,7 +156,7 @@ public final class GitIgnore {
 
     private func dirIgnored(_ rel: String) -> Bool {
         if let d = ignoredDirs[rel] { return d }
-        let comps = rel.split(separator: "/").map(String.init)
+        let comps = FolderTree.components(rel)
         var parentIgnored = false
         if comps.count > 1 { parentIgnored = dirIgnored(comps.dropLast().joined(separator: "/")) }
         let d = parentIgnored || ownDecision(comps, isDirectory: true)

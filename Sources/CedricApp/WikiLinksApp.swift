@@ -257,6 +257,9 @@ final class WikiTabState {
     static var confirmCreate: ((String) -> Bool)?
     /// Gets a failed create instead of an alert (the checks).
     static var createFailed: ((Error) -> Void)?
+    /// Forces the component walk (macOS 14's fallback, where a note in a
+    /// subfolder is refused) on a kernel that enforces beneath (the checks).
+    static var forceWalk = false
 }
 
 // MARK: - The [[ popup
@@ -669,9 +672,21 @@ extension EditorWindowController {
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
         let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
         // The note's path in the folder, as names: beside this note when it is
-        // in the folder and the link names no folder, else from the top.
-        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL)?.split(separator: "/").dropLast().map(String.init) ?? [])
+        // in the folder and the link names no folder, else from the top. Its
+        // folders split at the "/" bytes (FolderTree.components): a text
+        // split keeps a slash before a combining mark inside one name.
+        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL).map { Array(FolderTree.components($0).dropLast()) } ?? [])
         let components = besideDoc + parts.dropLast() + [file]
+        // Each one name by the bytes the kernel gets, before a path is built,
+        // shown or probed: a slash before a combining mark is one Swift
+        // character, so the text split above leaves it inside a component
+        // (Astra batch 6). Refused as a bad name, as createFile would.
+        guard components.allSatisfy(Beneath.isName) else {
+            let error = CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: target])
+            if let report = WikiTabState.createFailed { report(error); return }
+            NSAlert(error: error).runModal()
+            return
+        }
         let folder = components.dropLast().reduce(notes.root) { $0.appendingPathComponent($1, isDirectory: true) }
         let shown = components.joined(separator: "/")
         let ok: Bool
@@ -700,7 +715,7 @@ extension EditorWindowController {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
                               userInfo: [NSLocalizedDescriptionKey: String(localized: "The open folder couldn’t be read, so the note wasn’t created.")])
             }
-            let url = try pinned.createFile(components)
+            let url = try pinned.createFile(components, walk: WikiTabState.forceWalk || !Beneath.kernelEnforced)
             if let s = FolderSidebar.shared, let rel = FolderTree.relativePath(of: folder, in: s.rootURL) {
                 let node = rel.isEmpty ? s.root : s.root.descendant(rel)
                 if let node, node.isLoaded { s.load(node) }

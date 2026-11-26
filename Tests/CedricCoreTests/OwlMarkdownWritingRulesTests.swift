@@ -86,6 +86,47 @@ import Testing
         #expect(MarkdownRules.rewrite("a.md", to: "new b.md", encode: false) == "new b.md")
     }
 
+    /// Astra batch 9b: Markdown and images in a folder whose name starts
+    /// with a combining mark, first-level and nested, are listed by their
+    /// own paths (a text prefix test fused "folder/" and the mark and
+    /// dropped them); a sibling named folder + mark isn't.
+    @Test func folderScanKeepsCombiningMarkFolders() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("owl-scan-\(UUID().uuidString)")
+        let dir = base.appendingPathComponent("doc")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let fm = FileManager.default
+        for p in ["doc/\u{301}m/a.md", "doc/\u{301}m/i.png", "doc/s/\u{301}n/b.md", "doc/c.md", "doc\u{301}/out.md"] {
+            let u = base.appendingPathComponent(p)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: u)
+        }
+        let got = Set(OwlFileProbe.scan(folder: dir).map { Array($0.utf8) })
+        #expect(got == Set(["\u{301}m/a.md", "\u{301}m/i.png", "s/\u{301}n/b.md", "c.md"].map { Array($0.utf8) }))
+    }
+
+    /// Astra batch 12b: symlink resolution is now deferred to the
+    /// fallback. Scanned through a symlinked folder, a real file, a
+    /// symlinked file (one pointing inside, one outside the folder) and a
+    /// file in a combining-mark folder are still listed by their own
+    /// relative paths.
+    @Test func folderScanResolvesThroughSymlinks() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("owl-scan-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let fm = FileManager.default
+        for p in ["real/a.md", "real/\u{301}m/b.md", "elsewhere/x.md"] {
+            let u = base.appendingPathComponent(p)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: u)
+        }
+        try fm.createSymbolicLink(at: base.appendingPathComponent("real/in.md"), withDestinationURL: base.appendingPathComponent("real/a.md"))
+        try fm.createSymbolicLink(at: base.appendingPathComponent("real/out.md"), withDestinationURL: base.appendingPathComponent("elsewhere/x.md"))
+        let link = base.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: base.appendingPathComponent("real"))
+        let want = Set(["a.md", "\u{301}m/b.md", "in.md", "out.md"].map { Array($0.utf8) })
+        #expect(Set(OwlFileProbe.scan(folder: link).map { Array($0.utf8) }) == want)
+        #expect(Set(OwlFileProbe.scan(folder: base.appendingPathComponent("real")).map { Array($0.utf8) }) == want)
+    }
+
     @Test func folderScanIsBoundedAndSkipsHiddenAndInstalledCopies() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("owl-scan-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -122,13 +122,27 @@ public enum FolderTree {
     }
 
     /// `url`'s path relative to `root` ("" for the root itself), or nil if
-    /// it isn't inside it.
+    /// it isn't inside it. Compared as the UTF-8 bytes the kernel gets, not
+    /// as Swift text: a slash followed by a combining mark is one Swift
+    /// character, so a text prefix test misses a folder whose name starts
+    /// with one (Astra batch 7b). Inside means the same bytes, or the
+    /// root's bytes followed by a `/` byte; the root's name with a mark
+    /// appended is a sibling, outside.
     public static func relativePath(of url: URL, in root: URL) -> String? {
-        let r = root.standardizedFileURL.path, p = url.standardizedFileURL.path
+        var r = Array(root.standardizedFileURL.path.utf8)
+        let p = Array(url.standardizedFileURL.path.utf8)
+        while r.count > 1, r.last == 0x2f { r.removeLast() }
         if p == r { return "" }
-        let prefix = r.hasSuffix("/") ? r : r + "/"
-        guard p.hasPrefix(prefix) else { return nil }
-        return String(p.dropFirst(prefix.count))
+        let cut = r == [0x2f] ? 1 : r.count + 1
+        guard p.count > cut, p.starts(with: r), p[cut - 1] == 0x2f else { return nil }
+        return String(decoding: p[cut...], as: UTF8.self)
+    }
+
+    /// The names in `relativePath` (as `relativePath(of:in:)` gives it),
+    /// split at each `/` byte, empty ones dropped: a text split keeps a
+    /// slash before a combining mark inside a name.
+    public static func components(_ relativePath: String) -> [String] {
+        relativePath.utf8.split(separator: 0x2f).map { String(decoding: $0, as: UTF8.self) }
     }
 
     /// The folder holding the file at `url` (File › Open Enclosing Folder),
@@ -247,8 +261,8 @@ public final class FolderNode {
     /// The node at `relativePath` below this one, walking only loaded folders.
     public func descendant(_ relativePath: String) -> FolderNode? {
         var n: FolderNode? = self
-        for part in relativePath.split(separator: "/") where !part.isEmpty {
-            n = n?.child(named: String(part))
+        for part in FolderTree.components(relativePath) {
+            n = n?.child(named: part)
         }
         return n
     }

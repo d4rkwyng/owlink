@@ -375,6 +375,31 @@ import Testing
         #expect(try Data(contentsOf: w) == Data("x\n".utf8))
     }
 
+    /// Astra batch 6 must-fix 1: the name is checked as the bytes the
+    /// kernel gets. A NUL would cut "a\0b" short to "a"; a slash before a
+    /// combining mark is one Swift character, so a text search for "/"
+    /// misses it, but fstatat/openat/renameat would follow it into "sub".
+    /// Both are refused as a bad name and every file keeps its bytes.
+    @Test func replaceRefusesANameThatIsNotOneNameByItsBytes() throws {
+        let root = try dir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = try put(root, "a", Data("a original\n".utf8))
+        let nested = try put(root, "sub/\u{301}x", Data("nested original\n".utf8))
+        let dirfd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        #expect(dirfd >= 0)
+        defer { close(dirfd) }
+        for name in ["a\0b", "a\0", "sub/\u{301}x", "sub/x", "/\u{301}", "", ".", ".."] {
+            #expect(throws: CocoaError(.fileWriteInvalidFileName), "\(name.debugDescription)") {
+                try TreeWrite.replace(Data("new\n".utf8), name: name, in: dirfd, mode: 0o644)
+            }
+        }
+        #expect(try Data(contentsOf: a) == Data("a original\n".utf8), "a name with a NUL wrote over the file before it")
+        #expect(try Data(contentsOf: nested) == Data("nested original\n".utf8), "a slash before a combining mark wrote into the subfolder")
+        let fm = FileManager.default
+        #expect(try fm.contentsOfDirectory(atPath: root.path).sorted() == ["a", "sub"])
+        #expect(try fm.contentsOfDirectory(atPath: root.appendingPathComponent("sub").path) == ["\u{301}x"])
+    }
+
     @Test func undoOverAReadOnlyFileIsReportedAndCanBeRetried() throws {
         let root = try dir()
         defer { chmod(root.appendingPathComponent("a.txt").path, 0o644); try? FileManager.default.removeItem(at: root) }
