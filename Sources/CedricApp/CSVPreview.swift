@@ -139,7 +139,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
                     guard gen == self.parseRevision else { return }
                     self.parsed = (gen, t)
                     // A sort picked while this parsed: sort this table by it.
-                    if sortGen == self.sortRevision { self.apply(t, order: order, parse: gen) } else { self.sort(t, parse: gen) }
+                    if sortGen == self.sortRevision { self.apply(t, order: order) } else { self.sort(t, parse: gen) }
                 }
             }
         }
@@ -154,7 +154,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard parse == self.parseRevision, sortGen == self.sortRevision else { return }
-                    self.apply(t, order: order, parse: parse)
+                    self.apply(t, order: order)
                 }
             }
         }
@@ -165,7 +165,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         return CSV.sortedOrder(rows, column: col, ascending: sort.ascending)
     }
 
-    private func apply(_ t: CSV.Table, order: [Int], parse: Int) {
+    private func apply(_ t: CSV.Table, order: [Int]) {
         data = t
         self.order = order
         let header = t.rows.first ?? []
