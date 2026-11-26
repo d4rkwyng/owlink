@@ -129,13 +129,17 @@ import Testing
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
         c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        #expect(!c.awaitsResults(for: NSRange(location: 0, length: 10)))
         c.resultsArrived(for: NSRange(location: 0, length: 10), marking: ["other"])
         #expect(c.markedWords.isEmpty && !c.answered)
+        #expect(c.awaitsResults(for: r))
         c.resultsArrived(for: r, marking: ["tpyo"])
+        #expect(!c.awaitsResults(for: r))
         c.resultsArrived(for: r, marking: ["again"])
         #expect(c.markedWords == ["tpyo"])
         c.clear()
         #expect(c.markedWords.isEmpty && c.dictionary == nil)
+        #expect(!c.awaitsResults(for: r) && !SpellCheckCoverage().awaitsResults(for: r))
     }
 
     /// One-shot: whatever the first request was, the next one is checked.

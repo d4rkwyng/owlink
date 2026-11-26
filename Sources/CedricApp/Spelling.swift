@@ -253,7 +253,9 @@ extension EditorTextView {
             marked.append(d)
         }
         let length = ns.length
-        spellCoverage.resultsArrived(for: range, marking: marked.map { ns.substring(with: $0) })
+        if spellCoverage.awaitsResults(for: range) {
+            spellCoverage.resultsArrived(for: range, marking: marked.map { ns.substring(with: $0) })
+        }
         markedMisspellings.removeAll { NSIntersectionRange($0, range).length > 0 || NSMaxRange($0) > length }
         markedMisspellings += marked
         super.handleTextCheckingResults(kept, forRange: range, types: checkingTypes, options: options,

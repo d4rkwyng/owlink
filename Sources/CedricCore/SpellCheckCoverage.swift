@@ -72,10 +72,17 @@ public struct SpellCheckCoverage: Equatable, Sendable {
         markedWords = []
     }
 
+    /// The early check's results for `checked` haven't come back yet.
+    public func awaitsResults(for checked: NSRange) -> Bool {
+        guard !answered, let range else { return false }
+        return NSEqualRanges(range, checked)
+    }
+
     /// Results came back for `checked`, marking `words`: if that is the
-    /// early check's range, it is done.
+    /// early check's range, it is done. (The view builds `words` only when
+    /// `awaitsResults(for:)`, not on every typing or scrolling pass.)
     public mutating func resultsArrived(for checked: NSRange, marking words: [String] = []) {
-        guard !answered, let range, NSEqualRanges(range, checked) else { return }
+        guard awaitsResults(for: checked) else { return }
         answered = true
         markedWords = words
     }
