@@ -324,6 +324,9 @@ final class SpellStepController: NSObject, NSTableViewDataSource, NSTableViewDel
     /// Ignore All and Learn Word: the underlines go too.
     private func recheckMarks() {
         guard let tv = tab?.textView, tv.isContinuousSpellCheckingEnabled else { return }
+        // The dictionary changed: AppKit's next pass must run, even the
+        // one the first-frame check would have stood in for.
+        tab?.primaryTextView.spellCoverage.clear()
         tv.isContinuousSpellCheckingEnabled = false
         tv.isContinuousSpellCheckingEnabled = true
     }

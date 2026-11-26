@@ -2314,8 +2314,14 @@ files; checking is off for those tabs, so no underlines and no typo
 hint). On TextKit 2 a pass that doesn't start at the top of the text
 hands its results over relative to the checked range (`{15, 4}` for a
 word 15 characters into `{14875, 1215}`); the scope test and the record
-use document offsets (`TextCheckingOffset`: relative when every result
-fits within the checked range's length). Until 0.6 the results were read
+use document offsets (TextKit 1 hands over document offsets). The
+convention (`TextCheckingOffset`) comes from the batch when only one
+reading fits (a result before the range's start can't be a document
+offset, one past its length can't be relative); when both fit (`{10,
+1000}` with one misspelling at `{20, 3}`), from the text: each spelling
+result must cover a whole word under the reading chosen; and if the text
+can't tell, from the callback path (relative on TextKit 2, the editor's
+layout, document offsets on TextKit 1). Until 0.6 the results were read
 as document offsets, so nothing scrolled to was ever marked.
 
 **The first check of an opened file.** AppKit's continuous checking
@@ -2328,17 +2334,34 @@ an `AfterFirstFrame` block: the view's own `checkText(in:types:options:)`,
 so the same request, results and marks), and the marks show ~50 ms later.
 `SpellCheckCoverage` (CedricCore) records the range and the public
 checking types asked for (the view's enabled ones plus correction, which
-AppKit's pass asks for even with autocorrection off; AppKit's private bits
-differ and aren't compared). `EditorTextView.checkText` skips AppKit's
-request when it asks for nothing more, once the early results are back
-and with no edit since; the first request, skipped or not, clears the
-record, as do an edit, a language or settings change, so scrolling, typing,
-Learn/Ignore and Check Document Now are always AppKit's own passes. The
-rest of the text is checked when it is scrolled to, as before.
+AppKit's pass asks for even with autocorrection off) and the spelling
+dictionary's state (`SpellDictionaryState`: the checker's language and
+Automatic by Language, the document's ignored words, and later which of
+the early marks have been learned). `EditorTextView.checkText` skips
+AppKit's request only when it asks for nothing more: a range inside the
+early one, no public type it didn't ask for, no options (AppKit's
+scheduled pass passes none), no checking-type bit outside the public ones
+and the two AppKit's passes carry on macOS 27 (13 and 28), the early
+results back, and the same dictionary state. The first request, skipped
+or not, clears the record, as do an edit, a language or settings change,
+turning continuous checking off or on (Fix Typos' Ignore All and Learn
+Word redraw the marks that way, and clear it first themselves), Ignore
+Spelling, and opening the context menu (its Learn, Ignore and Unlearn),
+so scrolling, typing, Learn/Ignore and Check Document Now are always
+AppKit's own passes. The early check is optional, so it isn't made once
+the text has been edited or while an input method is composing. The rest
+of the text is checked when it is scrolled to, as before.
 `CEDRIC_CHECK=spellopen` (tools-check): marks before AppKit's pass, only
 visible text, AppKit's first pass skipped once and the text checked once,
 scrolled-to and typed misspellings marked, an edit after the early check
-lets AppKit's pass run, JSON checked not at all.
+lets AppKit's pass run; Fix Typos' Ignore All and a word ignored through
+the spell checker between the early reply and AppKit's pass (the ignored
+word's mark goes, the other's stays); an edit and an IME composition
+before the queued check (no early check, AppKit's pass marks); JSON
+checked not at all. A mark only counts when AppKit draws it: the text
+layout manager's `.spellingState` rendering attribute at the word and not
+at the words either side (after a scroll down too), and it has to go when
+the word is corrected, not Owlink's own record of what it passed on.
 
 The marks are
 the text view's spelling state, a drawing attribute, so text colours are

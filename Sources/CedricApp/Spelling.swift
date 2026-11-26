@@ -80,13 +80,18 @@ final class EditorSpelling {
     /// nothing more (`SpellCheckCoverage`), so the marks show about a
     /// second sooner and the text is checked once, not twice. Visible text
     /// only, as AppKit's pass: the rest is checked when it is scrolled to.
+    /// Optional, so not once the text has been edited (typing got there
+    /// first: AppKit checks what was typed) or while an input method is
+    /// composing (its marked text isn't the text yet).
     func checkVisibleNow() {
         guard let tab else { return }
         let tv = tab.primaryTextView
         guard tv.isContinuousSpellCheckingEnabled, tv.window?.isVisible == true,
+              tab.textEditCount == 0, !tv.hasMarkedText(),
               let r = tv.visibleCharacterRange, r.length > 0 else { return }
         let types = SpellCheckCoverage.earlyTypes(enabled: tv.enabledTextCheckingTypes)
-        tv.spellCoverage.checked(r, types: types)
+        tv.spellCoverage.checked(r, types: types, dictionary: tv.spellDictionaryState())
+        tv.earlyTextChecks += 1
         tv.checkingVisibleNow = true
         tv.checkText(in: r, types: types, options: [:])
         tv.checkingVisibleNow = false
@@ -183,17 +188,45 @@ extension EditorTextView {
     /// first-frame check is skipped when that check already did it.
     override func checkText(in range: NSRange, types checkingTypes: NSTextCheckingTypes,
                             options: [NSSpellChecker.OptionKey: Any] = [:]) {
-        if !checkingVisibleNow, !spellCoverage.isEmpty, spellCoverage.take(range, types: checkingTypes) {
+        if !checkingVisibleNow, !spellCoverage.isEmpty,
+           spellCoverage.take(range, types: checkingTypes, hasOptions: !options.isEmpty,
+                              dictionary: spellDictionaryState(learnedAmong: spellCoverage.markedWords)) {
             skippedTextChecks += 1
             return
         }
         super.checkText(in: range, types: checkingTypes, options: options)
     }
 
+    /// The spell checker's state for this document (SpellDictionaryState):
+    /// `learnedAmong`, the early check's marked words now learned.
+    func spellDictionaryState(learnedAmong words: [String] = []) -> SpellDictionaryState {
+        let sc = NSSpellChecker.shared
+        return SpellDictionaryState(language: sc.language(), automaticByLanguage: sc.automaticallyIdentifiesLanguages,
+                                    ignored: Set(sc.ignoredWords(inSpellDocumentWithTag: spellCheckerDocumentTag) ?? []),
+                                    learned: Set(words.filter { sc.hasLearnedWord($0) }))
+    }
+
+    /// Turning continuous checking off and on is how Fix Typos' Ignore
+    /// All and Learn Word redraw the marks: AppKit's next pass is its own.
+    override var isContinuousSpellCheckingEnabled: Bool {
+        get { super.isContinuousSpellCheckingEnabled }
+        set {
+            spellCoverage.clear()
+            super.isContinuousSpellCheckingEnabled = newValue
+        }
+    }
+
+    /// Ignore Spelling (the spelling panel): the marks are redrawn by AppKit.
+    override func ignoreSpelling(_ sender: Any?) {
+        spellCoverage.clear()
+        super.ignoreSpelling(sender)
+    }
+
     /// Every batch of continuous-checking results: only misspellings in
     /// scope are kept (see EditorSpelling). Recorded for the checks.
     /// The results' ranges can be relative to `range` (TextKit 2 hands
-    /// them over so when the pass doesn't start at the top of the text):
+    /// them over so when the pass doesn't start at the top of the text;
+    /// TextKit 1 as document offsets; TextCheckingOffset says which):
     /// the scope and the record use document offsets, AppKit gets the
     /// results it handed over.
     override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange,
@@ -201,14 +234,16 @@ extension EditorTextView {
                                             options: [NSSpellChecker.OptionKey: Any] = [:],
                                             orthography: NSOrthography, wordCount: Int) {
         textCheckingPasses += 1
-        spellCoverage.resultsArrived(for: range)
         guard let spelling else {
+            spellCoverage.resultsArrived(for: range)
             super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options,
                                             orthography: orthography, wordCount: wordCount)
             return
         }
         let scope = spelling.scope(for: range)
-        let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range))
+        let ns = string as NSString
+        let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range),
+                                                           expected: textLayoutManager != nil ? .relative : .document)
         var kept: [NSTextCheckingResult] = []
         var marked: [NSRange] = []
         for (r, d) in zip(results, inDocument) {
@@ -217,7 +252,10 @@ extension EditorTextView {
             kept.append(r)
             marked.append(d)
         }
-        let length = (string as NSString).length
+        let length = ns.length
+        if spellCoverage.awaitsResults(for: range) {
+            spellCoverage.resultsArrived(for: range, marking: marked.map { ns.substring(with: $0) })
+        }
         markedMisspellings.removeAll { NSIntersectionRange($0, range).length > 0 || NSMaxRange($0) > length }
         markedMisspellings += marked
         super.handleTextCheckingResults(kept, forRange: range, types: checkingTypes, options: options,

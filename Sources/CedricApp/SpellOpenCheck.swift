@@ -7,8 +7,11 @@ import CedricCore
 /// only the visible text is checked, and AppKit's first pass over that
 /// same text is skipped, once. Every later pass is AppKit's own: text
 /// scrolled to is checked when it is shown, typing is checked, and an edit
-/// after the first-frame check means AppKit's first pass runs. A data file
-/// (JSON) gets no check at all.
+/// after the first-frame check means AppKit's first pass runs. Ignore,
+/// edits and compositions: SpellOpenDictionaryCheck.swift. A data file
+/// (JSON) gets no check at all. A mark counts when AppKit draws it (its
+/// spelling attribute at the word, not beside it), and goes when the word
+/// is corrected.
 extension DevChecks {
     static func spellOpenCheck(_ app: AppDelegate) {
         let savedOverride = Settings.shared.checkSpellingOverride
@@ -22,6 +25,7 @@ extension DevChecks {
         var tv: EditorTextView { tab.primaryTextView }
         var firstMarks: TimeInterval = -1
         var visibleAtOpen = NSRange(location: 0, length: 0)
+        var corrected = NSRange(location: 0, length: 0)
         var passes = 0
 
         func wait(_ what: String, _ seconds: Double = 6, _ cond: @escaping () -> Bool) -> Step {
@@ -43,16 +47,31 @@ extension DevChecks {
             let ns = v.string as NSString
             return Set(marks(v).map { ns.substring(with: $0) })
         }
-        func occurrences(_ word: String, in r: NSRange, of v: EditorTextView) -> Int {
+        func ranges(of word: String, in r: NSRange, of v: EditorTextView) -> [NSRange] {
             let ns = v.string as NSString
-            var n = 0, from = r.location
+            var found: [NSRange] = [], from = r.location
             while from < NSMaxRange(r) {
-                let f = ns.range(of: word, range: NSRange(location: from, length: NSMaxRange(r) - from))
+                let f = ns.range(of: word, options: [], range: NSRange(location: from, length: NSMaxRange(r) - from))
                 guard f.location != NSNotFound else { break }
-                n += 1
+                found.append(f)
                 from = NSMaxRange(f)
             }
-            return n
+            return found
+        }
+        func occurrences(_ word: String, in r: NSRange, of v: EditorTextView) -> Int { ranges(of: word, in: r, of: v).count }
+        /// Every whole-word `word` in `r` carries AppKit's own spelling
+        /// mark (spellingMarked), and the words either side of each don't.
+        func nativeMarks(_ word: String, in r: NSRange, of v: EditorTextView) -> (marked: Int, of: Int, neighboursMarked: Int) {
+            let ns = v.string as NSString
+            let found = ranges(of: word, in: r, of: v)
+            var neighbours = 0
+            for f in found {
+                // " has a tpyo in": "a" before, "in" after.
+                let before = ns.rangeOfCharacter(from: .letters, options: .backwards, range: NSRange(location: 0, length: f.location))
+                let after = ns.rangeOfCharacter(from: .letters, options: [], range: NSRange(location: NSMaxRange(f), length: ns.length - NSMaxRange(f)))
+                for n in [before, after] where n.location != NSNotFound && spellingMarked(v, n) { neighbours += 1 }
+            }
+            return (found.filter { spellingMarked(v, $0) }.count, found.count, neighbours)
         }
         func type(_ s: String, at loc: Int, in v: EditorTextView) {
             v.window?.makeFirstResponder(v)
@@ -83,6 +102,10 @@ extension DevChecks {
                        "visible \(visibleAtOpen), last mark \(m.map(NSMaxRange).max() ?? -1) of \((tv.string as NSString).length)")
                 let shown = occurrences("tpyo", in: visibleAtOpen, of: tv)
                 expect(shown > 0 && m.count == shown, "every visible misspelling is marked", "\(m.count) of \(shown)")
+                let n = nativeMarks("tpyo", in: visibleAtOpen, of: tv)
+                expect(n.of > 0 && n.marked == n.of, "AppKit draws each one (its spelling attribute at the word)", "\(n.marked) of \(n.of)")
+                expect(n.neighboursMarked == 0 && !spellingMarked(tv, ranges(of: "has", in: visibleAtOpen, of: tv).first ?? NSRange()),
+                       "and not the words beside it", "\(n.neighboursMarked) neighbours marked")
             },
         ]
         steps += [
@@ -109,10 +132,36 @@ extension DevChecks {
                 let near = marks(tv).filter { $0.location > ns.length - 400 }
                 expect(!near.isEmpty && near.allSatisfy { ns.substring(with: $0) == "tpyo" },
                        "scrolled to: the misspellings marked where they are", near.map { ns.substring(with: $0) }.joined(separator: ","))
+                let visible = tv.visibleCharacterRange ?? NSRange()
+                expect(tv.visibleRect.minY > 0 && visible.location > 0, "(scrolled down)", "\(tv.visibleRect.minY) \(visible)")
+                let n = nativeMarks("tpyo", in: NSRange(location: ns.length - 400, length: 400), of: tv)
+                expect(n.of > 0 && n.marked == n.of && n.neighboursMarked == 0,
+                       "scrolled to: AppKit draws them at the words, not beside them",
+                       "\(n.marked) of \(n.of), \(n.neighboursMarked) neighbours")
+                // Corrected: the last one is "typo" now.
+                let lastTypo = ranges(of: "tpyo", in: NSRange(location: ns.length - 400, length: 400), of: tv).last ?? NSRange()
+                corrected = lastTypo
+                tv.window?.makeFirstResponder(tv)
+                tv.insertText("typo", replacementRange: lastTypo)
+            },
+            // AppKit drops the mark with the edit; whatever it checks
+            // after, the mark must not come back.
+            wait("the corrected word's mark gone", 6) { !spellingMarked(tab.primaryTextView, corrected) },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { next() } },
+            sync {
+                let ns = tv.string as NSString
+                expect(ns.substring(with: corrected) == "typo", "(corrected)", ns.substring(with: corrected))
+                expect(!spellingMarked(tv, corrected), "corrected: AppKit's mark is gone, and stays gone")
+                let n = nativeMarks("tpyo", in: NSRange(location: ns.length - 400, length: 400), of: tv)
+                expect(n.of > 0 && n.marked == n.of, "the other lines' misspellings stay drawn", "\(n.marked) of \(n.of)")
                 passes = tv.textCheckingPasses
                 type(" wrnog ", at: (tv.string as NSString).length - 1, in: tv)
             },
-            wait("a typed misspelling, marked", 6) { words(tab.primaryTextView).contains("wrnog") },
+            wait("a typed misspelling, marked", 6) {
+                let v = tab.primaryTextView
+                return words(v).contains("wrnog") && ranges(of: "wrnog", in: NSRange(location: 0, length: (v.string as NSString).length), of: v)
+                    .allSatisfy { spellingMarked(v, $0) }
+            },
             sync {
                 expect(tv.skippedTextChecks == 1, "typing: AppKit's pass is not skipped", "\(tv.skippedTextChecks)")
                 tab.doc.markSaved()
@@ -140,6 +189,18 @@ extension DevChecks {
                 expect(words(e) == ["Thrid", "tpyo"], "both misspellings marked", "\(words(e))")
                 edited?.doc.markSaved()
                 edited?.window?.close()
+            },
+        ]
+        steps += spellOpenDictionarySteps(app, marked: { v, word in
+            // Recorded and drawn: every whole "word" in the text.
+            let all = ranges(of: word, in: NSRange(location: 0, length: (v.string as NSString).length), of: v)
+            return words(v).contains(word) && !all.isEmpty && all.allSatisfy { spellingMarked(v, $0) }
+        }, drawn: { v, word in
+            let all = ranges(of: word, in: NSRange(location: 0, length: (v.string as NSString).length), of: v)
+            return (all.filter { spellingMarked(v, $0) }.count, all.count)
+        })
+        steps += [
+            sync {
                 json = app.open(write("data.json", "{\"tpyo\": \"wrnog\"}\n"))
                 sized(json)
             },
@@ -154,5 +215,25 @@ extension DevChecks {
         ]
         steps.append(snapshot("spellopen.png", window: tab.window))
         run(steps, gap: 0.05)
+    }
+
+    /// AppKit's own spelling mark over any of `r`: on TextKit 2 the
+    /// layout manager's `.spellingState` rendering attribute, which is
+    /// what it draws the red underline from (not Owlink's record).
+    static func spellingMarked(_ v: NSTextView, _ r: NSRange) -> Bool {
+        guard r.length > 0, let tlm = v.textLayoutManager else { return false }
+        let doc = tlm.documentRange.location
+        guard let from = tlm.location(doc, offsetBy: r.location) else { return false }
+        var hit = false
+        tlm.enumerateRenderingAttributes(from: from, reverse: false) { lm, attrs, range in
+            let a = lm.offset(from: doc, to: range.location), b = lm.offset(from: doc, to: range.endLocation)
+            if a >= NSMaxRange(r) { return false }
+            if b > r.location, let state = attrs[.spellingState] as? Int, state & NSAttributedString.SpellingState.spelling.rawValue != 0 {
+                hit = true
+                return false
+            }
+            return true
+        }
+        return hit
     }
 }

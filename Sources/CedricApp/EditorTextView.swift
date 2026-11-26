@@ -24,6 +24,8 @@ final class EditorTextView: NSTextView {
     var checkingVisibleNow = false
     /// AppKit passes skipped because the first-frame check had done them (checks).
     var skippedTextChecks = 0
+    /// First-frame checks made (checks).
+    var earlyTextChecks = 0
     /// Grammar in prose (Grammar.swift): the issues' ranges, drawn as
     /// green dotted underlines; their suggestions in the right-click menu.
     weak var grammar: EditorGrammar?
