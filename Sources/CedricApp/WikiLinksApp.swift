@@ -37,7 +37,12 @@ final class WikiNotes {
     /// Some Backlinks pane shows: the notes' links are kept read.
     var wantsBacklinks = false { didSet { if wantsBacklinks && !oldValue { scheduleScan() } } }
     /// Some Tags pane shows: the notes' tags are read too (TagsSidebar.swift).
-    var wantsTags = false { didSet { if wantsTags && !oldValue { scheduleScan() } } }
+    var wantsTags = false {
+        didSet {
+            if wantsTags && !oldValue { scheduleScan() }
+            if !wantsTags { tagTree = nil }
+        }
+    }
     /// A pane wants the notes read.
     var wantsScan: Bool { wantsBacklinks || wantsTags }
     /// Waiting for the names (a ⌘-click before the index landed).
@@ -56,7 +61,23 @@ final class WikiNotes {
     static var queryDelay: TimeInterval = 0
     /// Bumped whenever `notes` or `scan` changes: a query result made from
     /// an older snapshot is dropped.
-    private(set) var generation = 0
+    private(set) var generation = 0 {
+        didSet {
+            latestGeneration.value = generation
+            tagTree = nil
+        }
+    }
+    /// `generation`, readable on the query queue: a tag tree for an older
+    /// one is not made.
+    let latestGeneration = LatestRequest()
+    /// The tag tree made for `generation`, one for every Tags pane.
+    private var tagTree: (gen: Int, tree: TagTree)?
+    /// A tree is being made (for the generation then current).
+    private var tagTreeBuilding = false
+    /// Panes waiting for the tree.
+    private var tagTreeWaiting: [@MainActor (TagTree) -> Void] = []
+    /// Tag trees made (the checks).
+    private(set) var tagTreesBuilt = 0
 
     init(sidebar: FolderSidebar) {
         self.sidebar = sidebar
@@ -169,6 +190,47 @@ final class WikiNotes {
     }
 
     func url(of rel: String) -> URL { root.appendingPathComponent(rel) }
+
+    /// Calls `f` on the main thread, later, with the tag tree for the
+    /// current generation: made once on the query queue and kept until the
+    /// notes change, however many Tags panes ask. A build whose generation
+    /// was superseded while it waited is skipped before it starts, and the
+    /// tree is made again for the panes still waiting.
+    func withTagTree(_ f: @escaping @MainActor (TagTree) -> Void) {
+        if let c = tagTree, c.gen == generation {
+            let box = MainBox(value: (f, c.tree))
+            DispatchQueue.main.async { MainActor.assumeIsolated { box.value.0(box.value.1) } }
+            return
+        }
+        tagTreeWaiting.append(f)
+        if !tagTreeBuilding { buildTagTree() }
+    }
+
+    private func buildTagTree() {
+        tagTreeBuilding = true
+        let gen = generation, gate = latestGeneration, delay = WikiNotes.queryDelay
+        let box = MainBox(value: scan), ref = WeakRef(self)
+        Self.queryQueue.async {
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            let tree = gate.isLatest(gen) ? TagTree(files: box.value.tagsByNote) : nil
+            let out = MainBox(value: tree)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let me = ref.value else { return }
+                    me.tagTreeBuilding = false
+                    guard let t = out.value, me.generation == gen else {
+                        if !me.tagTreeWaiting.isEmpty { me.buildTagTree() }
+                        return
+                    }
+                    me.tagTreesBuilt += 1
+                    if me.wantsTags { me.tagTree = (gen, t) }
+                    let waiting = me.tagTreeWaiting
+                    me.tagTreeWaiting = []
+                    waiting.forEach { $0(t) }
+                }
+            }
+        }
+    }
 }
 
 extension FolderSidebar {

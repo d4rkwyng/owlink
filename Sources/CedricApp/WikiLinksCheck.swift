@@ -302,7 +302,9 @@ extension DevChecks {
                 type("[[b")
                 alphaTab?.refreshBacklinks()
                 expect(popup?.ranking == true, "a list is ranking when the folder closes")
+                let applied = side?.builds ?? -1
                 app.closeFolder()
+                expect(side?.builds == applied + 1, "closing the folder refreshes the backlinks pane once", "\(applied) → \(side?.builds ?? -1)")
                 expect(popup?.isActive != true && draft.textView.commandInterceptor == nil, "closing the folder drops the list and its key handling")
                 expect(side?.links.isEmpty == true && side?.message.hasPrefix("Open a folder") == true,
                        "and the backlinks pane says no folder is open", side?.message ?? "-")
@@ -320,7 +322,9 @@ extension DevChecks {
                 type("[[b")
                 expect(popup?.ranking == true, "a list is ranking when the folder is replaced")
                 oldNotes = FolderSidebar.shared?.wikiNotes
+                let applied = side?.builds ?? -1
                 app.openFolder(root)
+                expect(side?.builds == applied + 1, "replacing the folder refreshes the backlinks pane once", "\(applied) → \(side?.builds ?? -1)")
                 expect(popup?.isActive != true && draft.textView.commandInterceptor == nil, "replacing the folder drops the list too")
                 expect(FolderSidebar.shared?.wikiNotes !== oldNotes, "the backlinks pane asks the new folder")
             },

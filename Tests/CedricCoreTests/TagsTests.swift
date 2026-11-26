@@ -36,6 +36,14 @@ private func refNames(_ text: String) -> [String] { Tags.refs(in: text).map(\.na
         #expect(names("issue #123 and #2024/11 and #42nd and #y2k and #1984a") == ["42nd", "y2k", "1984a"])
     }
 
+    @Test func digitsOfAnyScriptAloneAreNot() {
+        // Arabic-Indic, Extended Arabic-Indic and Devanagari digits are digits too.
+        #expect(names("#١٢٣ #۱۲ #२०२४ #٤٥a #१/x") == ["٤٥a", "१/x"])
+        #expect(refNames("---\ntags: [١٢٣, ok]\n---\n") == ["ok"])
+        // Number words and ideographs that have a numeric value are letters, not digits.
+        #expect(names("#二月 #一") == ["二月", "一"])
+    }
+
     @Test func escapesAndPunctuationEndATag() {
         #expect(names(#"\#nope #yes"#) == ["yes"])
         #expect(names("#end. #comma, #paren) #q? #colon: #semi;") == ["end", "comma", "paren", "q", "colon", "semi"])
@@ -72,6 +80,14 @@ private func refNames(_ text: String) -> [String] { Tags.refs(in: text).map(\.na
         #expect(refs.map(\.name) == ["alpha", "beta/gamma", "quoted", "inline"])
         #expect(refs.map(\.line) == [3, 4, 5, 10])
         #expect(refs[0].snippet == "- alpha")
+    }
+
+    @Test func frontMatterListItemComments() {
+        // A YAML comment after an item goes; a `#` inside quotes is the value's.
+        let text = "---\ntags:\n  - project # the main one\n  - \"#beta\" # quoted\n  - 'a # b'\n  - gamma\t# tab\n---\n"
+        #expect(refNames(text) == ["project", "beta", "gamma"])
+        #expect(Tags.refs(in: text).map(\.line) == [2, 3, 5])
+        #expect(refNames("---\ntags: \"solo\" # comment\n---\n") == ["solo"])
     }
 
     @Test func frontMatterInline() {

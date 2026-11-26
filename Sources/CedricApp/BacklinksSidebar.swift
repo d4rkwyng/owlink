@@ -226,7 +226,7 @@ extension EditorWindowController {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Applied only from the sidebar's current notes (a folder closed or
-                    // replaced since asks again: wikiFolderChanged).
+                    // replaced since asks again: WikiNotes.didChange).
                     guard let tab = me.value, let side = pane.value, let notes = model.value,
                           FolderSidebar.shared?.wikiNotes === notes,
                           side.request == token, notes.generation == gen, tab.wiki.backlinks === side, tab.wiki.backlinksVisible,
@@ -238,11 +238,11 @@ extension EditorWindowController {
     }
 
     /// The sidebar's folder was closed or replaced: an open `[[` list goes
-    /// (its names, and any keys held for it, were the old folder's) and a
-    /// visible Backlinks pane asks the new folder (or says there is none).
+    /// (its names, and any keys held for it, were the old folder's). The
+    /// visible Backlinks and Tags panes follow from the `WikiNotes.didChange`
+    /// posted with the change (each refreshes once).
     func wikiFolderChanged() {
         wiki.completion?.hide()
-        if wiki.backlinksVisible { refreshBacklinks() }
     }
 
     private func openBacklink(_ b: BacklinkScan.Backlink) {

@@ -105,7 +105,8 @@ extension AppDelegate {
             self.findInFiles?.folderField.stringValue = dir.path
         }
         if state?.visible ?? true { s.show(in: tab) }
-        // Backlinks and Tags panes follow the new folder.
+        // Backlinks and Tags panes follow the new folder (the notification);
+        // an open `[[` list goes (wikiFolderChanged).
         NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
         tabs.forEach { $0.wikiFolderChanged() }
         scheduleSessionSave()
