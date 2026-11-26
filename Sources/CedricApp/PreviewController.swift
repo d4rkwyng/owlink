@@ -92,7 +92,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// What the page loaded last needed of Mermaid and KaTeX (none with
     /// JavaScript off).
     private(set) var lastNeeds: PreviewRich.Needs = []
-    /// The HTML of the page loaded last, as handed to WebKit (for checks).
+    /// The HTML of the page loaded last, as handed to WebKit (for checks;
+    /// kept in a check build only).
     private(set) var lastPageHTML: String?
     /// The live document's Allow JavaScript, whichever entry is showing.
     var liveDocumentJavaScript: Bool { homeJavaScript }
@@ -382,7 +383,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             self.loadingShell = true
             self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
-            self.lastPageHTML = html
+            if DevEnvironment.checksEnabled { self.lastPageHTML = html }
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }
@@ -800,15 +801,28 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
 @MainActor
 final class PreviewAssets: NSObject, WKURLSchemeHandler {
     var scriptOn = false
-    /// What was asked for (for the checks): served paths, and refused URLs.
+    /// What was asked for (for the checks): served paths, and refused
+    /// URLs. Kept in a check build only, and only the latest `logLimit`.
     private(set) var served: [String] = []
     private(set) var refused: [String] = []
+    static let logLimit = 256
 
+    private func log(_ entry: String, in list: inout [String]) {
+        guard DevEnvironment.checksEnabled else { return }
+        if list.count >= Self.logLimit { list.removeFirst(list.count - Self.logLimit + 1) }
+        list.append(entry)
+    }
+
+    /// The bundle's Preview folder. The source tree's is a fallback only
+    /// for a development build run unbundled (`swift run`): a packaged app
+    /// missing its resources serves nothing (fails closed).
     nonisolated static let directory: URL? = {
         var candidates: [URL] = []
         if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("Preview")) }
-        candidates.append(URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-            .appendingPathComponent("../../Resources/Preview").standardizedFileURL)
+        if DevEnvironment.checksEnabled, Bundle.main.bundleURL.pathExtension != "app" {
+            candidates.append(URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../../Resources/Preview").standardizedFileURL)
+        }
         return candidates.first { FileManager.default.fileExists(atPath: $0.appendingPathComponent(PreviewRich.glueScript).path) }
     }()
 
@@ -828,11 +842,11 @@ final class PreviewAssets: NSObject, WKURLSchemeHandler {
     func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
         guard scriptOn, !(DevEnvironment.checksEnabled && Self.refuseAllForCheck), let url = task.request.url, let rel = PreviewRich.assetPath(for: url), let dir = Self.directory,
               let data = try? Data(contentsOf: dir.appendingPathComponent(rel), options: .mappedIfSafe) else {
-            refused.append(task.request.url?.absoluteString ?? "-")
+            log(task.request.url?.absoluteString ?? "-", in: &refused)
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
-        served.append(rel)
+        log(rel, in: &served)
         task.didReceive(URLResponse(url: url, mimeType: Self.mimeType(rel), expectedContentLength: data.count, textEncodingName: rel.hasSuffix(".woff2") ? nil : "utf-8"))
         task.didReceive(data)
         task.didFinish()
