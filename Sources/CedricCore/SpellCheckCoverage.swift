@@ -28,9 +28,11 @@ import Foundation
 ///
 /// Learned words are the spell server's, a round trip per word to ask
 /// about, so the marked words are asked about at AppKit's pass only when
-/// another app could have learned one: when Owlink wasn't the active app
-/// all along since the early check (`asksLearned`). While Owlink is the
-/// active app, a word is learned only in Owlink, and that clears the record.
+/// another app could have learned one: when something other than Owlink
+/// or the lock screen has been the frontmost app since the early check
+/// (`asksLearned`). Words are learned where the user types; while Owlink
+/// is in front a word is learned only in Owlink, which clears the record,
+/// and while the screen is locked nobody types into any app.
 public struct SpellCheckCoverage: Equatable, Sendable {
     /// What the early check covered; nil when there is nothing to skip.
     public private(set) var range: NSRange?
@@ -45,9 +47,9 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     /// (`hasLearnedWord`), and a page of text marks the same few words
     /// many times over.
     public private(set) var markedWords: [String] = []
-    /// Owlink hasn't been the active app all along since the early check,
-    /// so a word may have been learned in another app (nothing tells
-    /// Owlink): AppKit's pass asks about the marked words.
+    /// Another app may have been in front since the early check, so a word
+    /// may have been learned there (nothing tells Owlink): AppKit's pass
+    /// asks about the marked words.
     public private(set) var asksLearned = true
 
     public init() {}
@@ -77,24 +79,24 @@ public struct SpellCheckCoverage: Equatable, Sendable {
 
     public var isEmpty: Bool { range == nil }
 
-    /// The early check is about to check `range` for `types`; `appActive`:
-    /// Owlink is the active app.
-    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, appActive: Bool) {
+    /// The early check is about to check `range` for `types`;
+    /// `onlyOwlinkInFront`: the frontmost app is Owlink or the lock screen.
+    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, onlyOwlinkInFront: Bool) {
         self.range = range
         self.types = types & Self.publicTypes
         self.dictionary = dictionary
         answered = false
         markedWords = []
-        asksLearned = !appActive
+        asksLearned = !onlyOwlinkInFront
     }
 
     /// The marked words AppKit's pass must ask the spell server about
     /// (`hasLearnedWord`): all of them when another app could have learned
-    /// one since the early check, none while Owlink was the active app all along.
+    /// one since the early check, none while only Owlink or the lock screen was in front.
     public var wordsToAskLearned: [String] { asksLearned ? markedWords : [] }
 
-    /// Owlink stopped being the active app: another app may learn a word.
-    public mutating func appResignedActive() {
+    /// Another app came (or may have come) to the front: a word may be learned there.
+    public mutating func anotherAppInFront() {
         asksLearned = true
     }
 

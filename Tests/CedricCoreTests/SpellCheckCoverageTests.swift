@@ -19,9 +19,9 @@ import Testing
     let dict = SpellDictionaryState(language: "en", automaticByLanguage: true, ignored: [])
 
     /// The early check of `r`, its results back.
-    func covering(_ r: NSRange, marking words: [String] = [], appActive: Bool = true) -> SpellCheckCoverage {
+    func covering(_ r: NSRange, marking words: [String] = [], onlyOwlinkInFront: Bool = true) -> SpellCheckCoverage {
         var c = SpellCheckCoverage()
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: appActive)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: onlyOwlinkInFront)
         c.resultsArrived(for: r, marking: words)
         return c
     }
@@ -141,8 +141,8 @@ import Testing
         }
     }
 
-    /// Owlink the active app all along, nothing changed: the pass is skipped
-    /// without one question about learned words.
+    /// Only Owlink (or the lock screen) in front all along, nothing changed:
+    /// the pass is skipped without one question about learned words.
     @Test func activeAllAlongAsksNoLearnedWords() {
         var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
         #expect(!c.asksLearned && c.wordsToAskLearned.isEmpty)
@@ -152,12 +152,12 @@ import Testing
         #expect(server.asked.isEmpty)
     }
 
-    /// Owlink stopped being the active app after the early check (the user
-    /// went to another app, which may learn a word): the marked words are
-    /// asked about, and a learned one means AppKit's pass runs.
+    /// Another app came to the front after the early check (it may learn a
+    /// word): the marked words are asked about, and a learned one means
+    /// AppKit's pass runs.
     @Test func learnedInAnotherAppAfterLeavingIsCaught() {
         var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
-        c.appResignedActive()
+        c.anotherAppInFront()
         #expect(c.asksLearned && c.wordsToAskLearned == ["tpyo", "wrnog"])
         let server = Server()
         server.learned = ["tpyo"]
@@ -166,17 +166,17 @@ import Testing
         #expect(server.asked == ["tpyo", "wrnog"])
         // Left and came back, nothing learned: asked, and skipped.
         var back = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
-        back.appResignedActive()
+        back.anotherAppInFront()
         let quiet = Server()
         let tookBack = back.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: quiet.now(back))
         #expect(tookBack)
         #expect(quiet.asked == ["tpyo", "wrnog"])
     }
 
-    /// Owlink wasn't the active app at the early check (opened in the
-    /// background): another app may already be learning, so it asks.
+    /// Another app was in front at the early check (Owlink opened in the
+    /// background): it may already be learning a word, so it asks.
     @Test func notActiveAtTheEarlyCheckAsks() {
-        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"], appActive: false)
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"], onlyOwlinkInFront: false)
         #expect(c.asksLearned)
         let server = Server()
         server.learned = ["tpyo"]
@@ -219,9 +219,9 @@ import Testing
     /// forgets that it was.
     @Test func activeStateIsPerEarlyCheck() {
         var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"])
-        c.appResignedActive()
+        c.anotherAppInFront()
         #expect(c.asksLearned)
-        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: true)
+        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.asksLearned)
         c.clear()
         #expect(c.asksLearned)
@@ -242,7 +242,7 @@ import Testing
     @Test func theMarkedWordsAreTheEarlyChecks() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: true)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.awaitsResults(for: NSRange(location: 0, length: 10)))
         c.resultsArrived(for: NSRange(location: 0, length: 10), marking: ["other"])
         #expect(c.markedWords.isEmpty && !c.answered)
@@ -286,7 +286,7 @@ import Testing
     @Test func skipsNothingUntilTheEarlyResultsAreBack() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: true)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.isEmpty && !c.answered)
         let took15 = c.take(r, types: scheduled, dictionary: dict)
         #expect(!took15)
@@ -296,7 +296,7 @@ import Testing
     @Test func onlyTheEarlyChecksOwnResultsCount() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: true)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         c.resultsArrived(for: NSRange(location: 0, length: 100))
         #expect(!c.answered)
         c.resultsArrived(for: r)
@@ -307,7 +307,7 @@ import Testing
 
     @Test func aNewEarlyCheckWaitsForItsOwnResults() {
         var c = covering(NSRange(location: 0, length: 2899))
-        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, appActive: true)
+        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.answered)
     }
 

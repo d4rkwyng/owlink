@@ -91,7 +91,7 @@ final class EditorSpelling {
               let r = tv.visibleCharacterRange, r.length > 0 else { return }
         let types = SpellCheckCoverage.earlyTypes(enabled: tv.enabledTextCheckingTypes)
         tv.watchSpellDictionary()
-        tv.spellCoverage.checked(r, types: types, dictionary: tv.spellDictionaryState(), appActive: NSApp.isActive)
+        tv.spellCoverage.checked(r, types: types, dictionary: tv.spellDictionaryState(), onlyOwlinkInFront: EditorTextView.onlyOwlinkInFront)
         tv.earlyTextChecks += 1
         tv.checkingVisibleNow = true
         tv.checkText(in: r, types: types, options: [:])
@@ -189,6 +189,7 @@ extension EditorTextView {
     /// first-frame check is skipped when that check already did it.
     override func checkText(in range: NSRange, types checkingTypes: NSTextCheckingTypes,
                             options: [NSSpellChecker.OptionKey: Any] = [:]) {
+        if !checkingVisibleNow, !spellCoverage.isEmpty, !Self.onlyOwlinkInFront { spellCoverage.anotherAppInFront() }
         if !checkingVisibleNow, !spellCoverage.isEmpty,
            spellCoverage.take(range, types: checkingTypes, hasOptions: !options.isEmpty,
                               dictionary: spellDictionaryState(learnedAmong: spellCoverage.wordsToAskLearned)) {
@@ -214,11 +215,18 @@ extension EditorTextView {
     static let spellCheckerLearnedNames = [Notification.Name("NSSpellCheckerDidLearnWordNotification"),
                                            Notification.Name("NSSpellCheckerDidUnlearnWordNotification")]
 
+    /// The frontmost app is Owlink, or the lock screen (loginwindow): the
+    /// user can't be typing, nor learning a word, in any other app.
+    /// (NSWorkspace keeps it in-process: no round trip once it's known.)
+    static var onlyOwlinkInFront: Bool {
+        NSApp.isActive || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.loginwindow"
+    }
+
     /// Once per view, before its first early check: a word learned in
-    /// Owlink clears the record, and Owlink stopping being the active app
-    /// (another app could learn one) makes AppKit's pass ask about the
-    /// marked words (SpellCheckCoverage.asksLearned). Selector-based, so
-    /// removed with the view.
+    /// Owlink clears the record, and another app coming to the front (it
+    /// could learn one) makes AppKit's pass ask about the marked words
+    /// (SpellCheckCoverage.asksLearned). Selector-based, so removed with
+    /// the view.
     func watchSpellDictionary() {
         guard !watchesSpellDictionary else { return }
         watchesSpellDictionary = true
@@ -226,7 +234,9 @@ extension EditorTextView {
         for name in Self.spellCheckerLearnedNames {
             nc.addObserver(self, selector: #selector(spellDictionaryLearned(_:)), name: name, object: nil)
         }
-        nc.addObserver(self, selector: #selector(appResignedActive(_:)), name: NSApplication.didResignActiveNotification, object: nil)
+        nc.addObserver(self, selector: #selector(anotherAppInFront(_:)), name: NSApplication.didResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(anotherAppInFront(_:)),
+                                                          name: NSWorkspace.didActivateApplicationNotification, object: nil)
     }
 
     /// Posted on the thread that learned the word: on the main thread at
@@ -240,9 +250,13 @@ extension EditorTextView {
         }
     }
 
-    @objc private func appResignedActive(_ note: Notification) {
+    /// Owlink resigned active, or some app was activated: unless that is
+    /// Owlink (or the lock screen), a word may be learned there.
+    @objc private func anotherAppInFront(_ note: Notification) {
         guard !spellCoverage.isEmpty else { return }
-        spellCoverage.appResignedActive()
+        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+        if let app, app.processIdentifier == ProcessInfo.processInfo.processIdentifier || app.bundleIdentifier == "com.apple.loginwindow" { return }
+        spellCoverage.anotherAppInFront()
     }
 
     /// Turning continuous checking off and on is how Fix Typos' Ignore
