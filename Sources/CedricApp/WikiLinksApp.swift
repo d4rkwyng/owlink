@@ -26,6 +26,8 @@ final class WikiNotes {
     weak var sidebar: FolderSidebar?
     let root: URL
     let realRoot: String
+    /// The sidebar's pinned root (new notes are made beneath it).
+    let folderRoot: FolderRoot?
     private(set) var notes: NoteIndex?
     private(set) var scan: BacklinkScan
     /// Folders changed since the last scan (relative); nil: all of them.
@@ -50,6 +52,7 @@ final class WikiNotes {
         self.sidebar = sidebar
         root = sidebar.rootURL
         realRoot = sidebar.realRoot
+        folderRoot = sidebar.folderRoot
         scan = BacklinkScan(root: sidebar.rootURL)
     }
 
@@ -535,10 +538,12 @@ extension EditorWindowController {
         let parts = name.split(separator: "/").map(String.init)
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
         let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
-        let base = parts.count > 1 ? notes.root
-            : (notes.relativePath(of: doc.fileURL) != nil ? doc.fileURL!.deletingLastPathComponent() : notes.root)
-        let folder = parts.dropLast().reduce(base) { $0.appendingPathComponent($1, isDirectory: true) }
-        let shown = FolderTree.relativePath(of: folder.appendingPathComponent(file), in: notes.root) ?? file
+        // The note's path in the folder, as names: beside this note when it is
+        // in the folder and the link names no folder, else from the top.
+        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL)?.split(separator: "/").dropLast().map(String.init) ?? [])
+        let components = besideDoc + parts.dropLast() + [file]
+        let folder = components.dropLast().reduce(notes.root) { $0.appendingPathComponent($1, isDirectory: true) }
+        let shown = components.joined(separator: "/")
         let ok: Bool
         if let confirm = WikiTabState.confirmCreate {
             ok = confirm(shown)
@@ -557,10 +562,15 @@ extension EditorWindowController {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
                               userInfo: [NSLocalizedDescriptionKey: String(localized: "The folder “\(folder.lastPathComponent)” doesn’t exist.")])
             }
-            // The parent is judged against the open folder's real root, and the
-            // note made relative to that checked folder (a symlinked parent that
-            // leads out is refused; O_EXCL keeps an existing file).
-            let url = try FolderActions.createFile(named: file, in: folder, within: URL(fileURLWithPath: notes.realRoot))
+            // Made beneath the folder pinned when the sidebar opened it, never
+            // its path looked up again (a parent that leads out is refused,
+            // O_EXCL keeps an existing file), and opened only if its URL is
+            // still the file made.
+            guard let pinned = notes.folderRoot else {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
+                              userInfo: [NSLocalizedDescriptionKey: String(localized: "The open folder couldn’t be read, so the note wasn’t created.")])
+            }
+            let url = try pinned.createFile(components)
             if let s = FolderSidebar.shared, let rel = FolderTree.relativePath(of: folder, in: s.rootURL) {
                 let node = rel.isEmpty ? s.root : s.root.descendant(rel)
                 if let node, node.isLoaded { s.load(node) }

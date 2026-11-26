@@ -5,7 +5,8 @@ import CedricCore
 /// `[[` typed with real key events (the list, filtering, ↑/↓, Return,
 /// Tab, ⎋, nothing in a code span or fence), ⌘-click on links (the right
 /// tab, a heading, a missing note created, none outside the folder
-/// through a symlinked parent), Backlinks (the list, its
+/// through a symlinked parent, none opened when the folder was replaced
+/// at its path before confirming), Backlinks (the list, its
 /// snippets, a click to the line; the list and the backlinks computed
 /// off the main thread), a note renamed on disk (names and
 /// backlinks follow), and no list in large mode.
@@ -62,6 +63,7 @@ extension DevChecks {
         var failures: [Error] = []
         var builds = 0
         let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
+        let movedRoot = dir.appendingPathComponent("wl-moved", isDirectory: true)
 
         run([
             sync {
@@ -170,6 +172,29 @@ extension DevChecks {
                 expect(((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty,
                        "confirming leaves the outside folder untouched", "\((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])")
                 expect(!failures.isEmpty && tab("Escape.md") == nil, "the create is refused and nothing opens", "\(failures)")
+                // The open folder replaced at its path between opening it and confirming:
+                // the note goes in the folder that was opened, and nothing opens.
+                failures = []
+                WikiTabState.confirmCreate = { shown in
+                    created.append(shown)
+                    try? FileManager.default.moveItem(at: root, to: movedRoot)
+                    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                    return true
+                }
+                setText(draft, "Draft [[Swapped]]\n")
+                commandClick(draft, "[[Swapped]]")
+            },
+            wait("⌘-click on a missing note after the folder was replaced is answered") { !failures.isEmpty || tab("Swapped.md") != nil },
+            sync {
+                let fm = FileManager.default
+                expect(!failures.isEmpty && tab("Swapped.md") == nil, "a replaced open folder: the create is reported and nothing opens", "\(failures)")
+                expect(!fm.fileExists(atPath: root.appendingPathComponent("Swapped.md").path), "nothing is made in the folder now at its path")
+                expect(fm.fileExists(atPath: movedRoot.appendingPathComponent("Swapped.md").path), "the note is in the folder that was opened")
+                // Put the folder back (the replacement is moved aside, never deleted).
+                try? fm.moveItem(at: root, to: dir.appendingPathComponent("wl-replaced", isDirectory: true))
+                try? fm.moveItem(at: movedRoot, to: root)
+                expect(fm.fileExists(atPath: root.appendingPathComponent("Alpha.md").path), "the folder is back")
+                WikiTabState.confirmCreate = { created.append($0); return true }
                 WikiTabState.createFailed = nil
                 guard let a = alphaTab else { expect(false, "Alpha tab"); return }
                 focus(a)

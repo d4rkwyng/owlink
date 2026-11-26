@@ -72,6 +72,59 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         #expect(fm.fileExists(atPath: vault.appendingPathComponent("D.md").path))
     }
 
+    /// The open folder replaced at its path between opening it and
+    /// confirming a new note: the note goes in the folder that was opened,
+    /// and its URL (now another folder's) is refused, not opened.
+    @Test func aNewNoteGoesInTheFolderThatWasOpenedEvenIfItsPathIsReplaced() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), moved = base.appendingPathComponent("vault-moved")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let pinned = try FolderRoot(vault)
+        let made = try pinned.createFile(["sub", "First.md"])
+        #expect(made.path == vault.appendingPathComponent("sub/First.md").path && fm.fileExists(atPath: made.path))
+        // Replaced: the old folder moved away, a new one (with the same subfolder) at its path.
+        try fm.moveItem(at: vault, to: moved)
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try pinned.createFile(["sub", "Second.md"]) }
+        #expect(fm.fileExists(atPath: moved.appendingPathComponent("sub/Second.md").path), "made in the folder that was opened")
+        #expect(((try? fm.contentsOfDirectory(atPath: vault.appendingPathComponent("sub").path)) ?? ["?"]).isEmpty,
+                "nothing made in the folder now at the path")
+        // A link swapped in for the root's path leads nowhere new either.
+        try fm.removeItem(at: vault)
+        try fm.createSymbolicLink(at: vault, withDestinationURL: base.appendingPathComponent("elsewhere"))
+        #expect(throws: (any Error).self) { try pinned.createFile(["Third.md"]) }
+        #expect(!fm.fileExists(atPath: base.appendingPathComponent("elsewhere").path))
+    }
+
+    /// Where the kernel can't keep a lookup beneath a folder, the path is
+    /// walked one name at a time without following links: a symbolic link
+    /// to a folder, even one inside, is refused (fails closed).
+    @Test func theComponentWalkRefusesEveryFolderLink() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(atPath: vault.appendingPathComponent("alias").path, withDestinationPath: "sub")
+        let pinned = try FolderRoot(vault)
+        _ = try pinned.createFile(["sub", "deeper", "A.md"], walk: true)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("sub/deeper/A.md").path))
+        #expect(throws: (any Error).self) { try pinned.createFile(["out", "B.md"], walk: true) }
+        #expect(throws: (any Error).self) { try pinned.createFile(["alias", "C.md"], walk: true) }
+        #expect(throws: (any Error).self) { try pinned.createFile(["sub", "deeper", "A.md"], walk: true) }
+        for bad in [[], ["..", "D.md"], ["sub/deeper", "E.md"], [""], ["."]] as [[String]] {
+            #expect(throws: (any Error).self, "\(bad)") { try pinned.createFile(bad, walk: true) }
+            #expect(throws: (any Error).self, "\(bad)") { try pinned.createFile(bad, walk: false) }
+        }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the outside folder is untouched")
+        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/C.md").path) && !fm.fileExists(atPath: base.appendingPathComponent("D.md").path))
+        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/deeper/E.md").path), "a slash inside a name isn't a path")
+    }
+
     @Test func explorerMovesOnlyTheRenamedPathAndDescendants() {
         let old = URL(fileURLWithPath: "/p/dir")
         let new = URL(fileURLWithPath: "/p/new")

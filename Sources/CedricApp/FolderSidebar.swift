@@ -240,6 +240,10 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     let root: FolderNode
     /// The root's real path (symbolic links resolved): FSEvents report those.
     let realRoot: String
+    /// The root, pinned by descriptor when the folder is opened: a note
+    /// made from a wiki link is created beneath it (nil: it couldn't be
+    /// opened, and no note is created).
+    let folderRoot: FolderRoot?
     let outline = FolderOutlineView()
     let scroll = NSScrollView()
     let title = NSTextField(labelWithString: "")
@@ -285,6 +289,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         rootURL = url
         root = FolderNode(root: url)
         realRoot = Self.realPath(url.path)
+        folderRoot = try? FolderRoot(url)
         ignore = FolderIgnore(root: url)
         width = state?.width.map { CGFloat($0) } ?? Self.defaultWidth
         showHidden = state?.showHidden ?? false
