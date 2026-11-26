@@ -874,14 +874,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func scheduleSessionSave() {
         sessionTimer?.invalidate()
         sessionTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionSaveDelay, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.saveSession(sync: false) }
+            MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
         }
         guard leadingSaveTimer?.isValid != true, !leadingSaveAfterFirstFrame, pendingRestore.isEmpty,
               !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) else { return }
         if AfterFirstFrame.passed {
             let wait = max(0.02, lastSessionSave + Self.sessionSaveDelay - ProcessInfo.processInfo.systemUptime)
             leadingSaveTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.saveSession(sync: false) }
+                MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
             }
         } else {
             leadingSaveAfterFirstFrame = true
@@ -1172,7 +1172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionRetryDelay) { [weak self] in
             guard let self, !self.terminating, self.sessionTimer?.isValid != true, self.leadingSaveTimer?.isValid != true else { return }
             self.sessionTimer = Timer.scheduledTimer(withTimeInterval: 0, repeats: false) { [weak self] _ in
-                MainActor.assumeIsolated { self?.saveSession(sync: false) }
+                MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
             }
         }
     }
