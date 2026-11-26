@@ -1180,12 +1180,15 @@ final class MarkdownRenderer {
     /// after it, the closer no space (or backslash) before it and no digit
     /// after it. `$$…$$`: any non-blank TeX between. Neither runs across
     /// a backtick, so a code span later on the line stays code
-    /// ("$5 and `$x$`").
+    /// ("$5 and `$x$`"). A `$…$` holding another unescaped `$` that could
+    /// open math (no space after it) doesn't open: the later one does, so
+    /// in "Costs $5 and $x$." the price stays text and `$x$` is the formula.
     struct MathDelimiters {
         let chars: [Character]
-        /// The next `$` that may close `$…$`, the next unescaped `$$`, and
-        /// the next backtick, from each index.
-        private var single: [Int?], double: [Int?], tick: [Int?]
+        /// The next `$` that may close `$…$`, the next unescaped `$$`, the
+        /// next backtick, and the next unescaped `$` with no space after
+        /// it (one that could open math), from each index.
+        private var single: [Int?], double: [Int?], tick: [Int?], opener: [Int?]
 
         init(_ chars: [Character]) {
             self.chars = chars
@@ -1193,6 +1196,7 @@ final class MarkdownRenderer {
             single = [Int?](repeating: nil, count: n + 1)
             double = [Int?](repeating: nil, count: n + 1)
             tick = [Int?](repeating: nil, count: n + 1)
+            opener = [Int?](repeating: nil, count: n + 1)
             var j = n - 1
             while j >= 0 {
                 let isDollar = chars[j] == "$"
@@ -1204,6 +1208,7 @@ final class MarkdownRenderer {
                 single[j] = closesSingle ? j : single[j + 1]
                 double[j] = isDollar && after == "$" && !escaped ? j : double[j + 1]
                 tick[j] = chars[j] == "`" ? j : tick[j + 1]
+                opener[j] = isDollar && !escaped && after.map { !$0.isWhitespace } == true ? j : opener[j + 1]
                 j -= 1
             }
         }
@@ -1217,7 +1222,8 @@ final class MarkdownRenderer {
                       chars[(i + 2)..<c].contains(where: { !$0.isWhitespace }) else { return nil }
                 return (c, 2)
             }
-            guard i + 1 < n, !chars[i + 1].isWhitespace, let c = single[i + 1], (tick[i + 1] ?? n) > c else { return nil }
+            guard i + 1 < n, !chars[i + 1].isWhitespace, let c = single[i + 1], (tick[i + 1] ?? n) > c,
+                  (opener[i + 1] ?? n) >= c else { return nil }
             return (c, 1)
         }
     }
