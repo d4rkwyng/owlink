@@ -10,6 +10,9 @@ import CedricCore
 /// - A word ignored straight through the spell checker (as the spelling
 ///   panel does) in the same interval: AppKit's pass runs and rebuilds the
 ///   marks.
+/// - A word learned straight through the spell checker (the spelling
+///   panel's Learn, or another app) in the same interval: the same. The
+///   word is made up and unlearned again at once.
 /// - An edit, and an input method's composition, before the queued
 ///   first-frame check runs: it doesn't run, and AppKit's pass marks.
 extension DevChecks {
@@ -20,6 +23,8 @@ extension DevChecks {
                                          drawn: @escaping (EditorTextView, String) -> (marked: Int, of: Int)) -> [Step] {
         var panelTab: EditorWindowController?
         var directTab: EditorWindowController?
+        var learnTab: EditorWindowController?
+        let learnedWord = "zqxlrnopen"
         var typedTab: EditorWindowController?
         var imeTab: EditorWindowController?
 
@@ -35,9 +40,9 @@ extension DevChecks {
             }
         }
         func pause(_ s: Double) -> Step { { next in DispatchQueue.main.asyncAfter(deadline: .now() + s) { next() } } }
-        func early(_ t: EditorWindowController?) -> Bool {
+        func early(_ t: EditorWindowController?, _ word: String = "tpyo") -> Bool {
             guard let v = t?.primaryTextView else { return true }
-            return marked(v, "tpyo") && marked(v, "wrnog")
+            return marked(v, word) && marked(v, "wrnog")
         }
         /// The early reply is in and AppKit's first pass hasn't come yet.
         func inTheInterval(_ t: EditorWindowController?, _ what: String) {
@@ -51,11 +56,11 @@ extension DevChecks {
             let d = drawn(v, word)
             return d.of > 0 && d.marked == 0
         }
-        func rebuilt(_ t: EditorWindowController?, _ what: String) {
+        func rebuilt(_ t: EditorWindowController?, _ what: String, _ word: String = "tpyo") {
             guard let v = t?.primaryTextView else { return }
             expect(v.skippedTextChecks == 0, "\(what): AppKit's pass is not skipped", "\(v.skippedTextChecks)")
-            let ignored = drawn(v, "tpyo"), other = drawn(v, "wrnog")
-            expect(ignored.of > 0 && ignored.marked == 0, "\(what): AppKit's underline on the ignored word goes",
+            let ignored = drawn(v, word), other = drawn(v, "wrnog")
+            expect(ignored.of > 0 && ignored.marked == 0, "\(what): AppKit's underline on the \(word == "tpyo" ? "ignored" : "learned") word goes",
                    "\(ignored.marked) of \(ignored.of) drawn")
             expect(other.of > 0 && other.marked == other.of, "\(what): AppKit still draws the other misspelling",
                    "\(other.marked) of \(other.of) drawn")
@@ -107,6 +112,29 @@ extension DevChecks {
             sync {
                 rebuilt(directTab, "ignored directly")
                 close(directTab)
+            },
+        ]
+        steps += [
+            sync {
+                // A word left learned by an interrupted run would never be marked.
+                NSSpellChecker.shared.unlearnWord(learnedWord)
+                learnTab = app.open(write("learn-direct.txt", "A \(learnedWord) and a wrnog there.\n"))
+                sized(learnTab)
+                if let learnTab { focus(learnTab) }
+            },
+            wait("the first-frame marks (learned directly)", 4) { early(learnTab, learnedWord) },
+            sync {
+                inTheInterval(learnTab, "learned directly")
+                // The spelling panel's Learn, or Learn in another app: nothing here is told.
+                NSSpellChecker.shared.learnWord(learnedWord)
+            },
+            wait("AppKit's pass after the word was learned", 4) { learnTab.map { undrawn($0.primaryTextView, learnedWord) } ?? true },
+            pause(1.5),
+            sync {
+                NSSpellChecker.shared.unlearnWord(learnedWord)
+                expect(!NSSpellChecker.shared.hasLearnedWord(learnedWord), "(and the check forgot it again)")
+                rebuilt(learnTab, "learned directly", learnedWord)
+                close(learnTab)
             },
         ]
         steps += [

@@ -20,6 +20,9 @@ final class EditorTextView: NSTextView {
     /// What the first-frame spell check covered, so AppKit's own first
     /// pass over the same text is skipped (EditorSpelling.checkVisibleNow).
     var spellCoverage = SpellCheckCoverage()
+    /// The orthography the early check's results came with: its marked
+    /// words are checked again with it at AppKit's pass (`stillMarked`).
+    var spellCoverageOrthography: NSOrthography?
     /// The first-frame check is calling `checkText` (not AppKit).
     var checkingVisibleNow = false
     /// AppKit passes skipped because the first-frame check had done them (checks).

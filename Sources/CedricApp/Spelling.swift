@@ -190,20 +190,36 @@ extension EditorTextView {
                             options: [NSSpellChecker.OptionKey: Any] = [:]) {
         if !checkingVisibleNow, !spellCoverage.isEmpty,
            spellCoverage.take(range, types: checkingTypes, hasOptions: !options.isEmpty,
-                              dictionary: spellDictionaryState(learnedAmong: spellCoverage.markedWords)) {
+                              dictionary: spellDictionaryState(), stillMarked: stillMarked) {
             skippedTextChecks += 1
             return
         }
+        spellCoverageOrthography = nil
         super.checkText(in: range, types: checkingTypes, options: options)
     }
 
-    /// The spell checker's state for this document (SpellDictionaryState):
-    /// `learnedAmong`, the early check's marked words now learned.
-    func spellDictionaryState(learnedAmong words: [String] = []) -> SpellDictionaryState {
+    /// The spell checker's language for this document (SpellDictionaryState),
+    /// read in-process: no round trip to the spell server.
+    func spellDictionaryState() -> SpellDictionaryState {
         let sc = NSSpellChecker.shared
-        return SpellDictionaryState(language: sc.language(), automaticByLanguage: sc.automaticallyIdentifiesLanguages,
-                                    ignored: Set(sc.ignoredWords(inSpellDocumentWithTag: spellCheckerDocumentTag) ?? []),
-                                    learned: Set(words.filter { sc.hasLearnedWord($0) }))
+        return SpellDictionaryState(language: sc.language(), automaticByLanguage: sc.automaticallyIdentifiesLanguages)
+    }
+
+    /// Which of the early check's marked words the spell checker still
+    /// flags, in this document's spell tag (its ignored words) and with the
+    /// early check's orthography: one check of them all, one round trip
+    /// (asking `hasLearnedWord` and `ignoredWords` was one per word, and
+    /// at AppKit's pass that alone kept a page of plain text busy).
+    func stillMarked(_ words: [String]) -> Set<String> {
+        let batch = MarkedWordsBatch(words)
+        let options: [NSSpellChecker.OptionKey: Any] = spellCoverageOrthography.map { [.orthography: $0] } ?? [:]
+        spellCoverageOrthography = nil
+        let results = NSSpellChecker.shared.check(batch.text, range: NSRange(location: 0, length: (batch.text as NSString).length),
+                                                  types: NSTextCheckingResult.CheckingType.spelling.rawValue, options: options,
+                                                  inSpellDocumentWithTag: spellCheckerDocumentTag,
+                                                  orthography: nil, wordCount: nil)
+        let flagged: [NSRange] = results.filter { $0.resultType == .spelling }.map(\.range)
+        return batch.stillMarked(flagged)
     }
 
     /// Turning continuous checking off and on is how Fix Typos' Ignore
@@ -255,6 +271,7 @@ extension EditorTextView {
         let length = ns.length
         if spellCoverage.awaitsResults(for: range) {
             spellCoverage.resultsArrived(for: range, marking: marked.map { ns.substring(with: $0) })
+            spellCoverageOrthography = orthography
         }
         markedMisspellings.removeAll { NSIntersectionRange($0, range).length > 0 || NSMaxRange($0) > length }
         markedMisspellings += marked
