@@ -13,7 +13,11 @@ import CedricCore
 /// - An edit, and an input method's composition, before the queued
 ///   first-frame check runs: it doesn't run, and AppKit's pass marks.
 extension DevChecks {
-    static func spellOpenDictionarySteps(_ app: AppDelegate, marked: @escaping (EditorTextView, String) -> Bool) -> [Step] {
+    /// `marked`: recorded by Owlink and drawn by AppKit. `drawn`: how many
+    /// of the word's occurrences carry AppKit's own `.spellingState`, of
+    /// how many (the underline itself, whatever Owlink recorded).
+    static func spellOpenDictionarySteps(_ app: AppDelegate, marked: @escaping (EditorTextView, String) -> Bool,
+                                         drawn: @escaping (EditorTextView, String) -> (marked: Int, of: Int)) -> [Step] {
         var panelTab: EditorWindowController?
         var directTab: EditorWindowController?
         var typedTab: EditorWindowController?
@@ -42,10 +46,19 @@ extension DevChecks {
                    "\(what): after the first-frame check's reply, before AppKit's pass",
                    "early=\(v.earlyTextChecks) passes=\(v.textCheckingPasses) skipped=\(v.skippedTextChecks)")
         }
+        /// No occurrence of `word` carries AppKit's underline any more.
+        func undrawn(_ v: EditorTextView, _ word: String) -> Bool {
+            let d = drawn(v, word)
+            return d.of > 0 && d.marked == 0
+        }
         func rebuilt(_ t: EditorWindowController?, _ what: String) {
             guard let v = t?.primaryTextView else { return }
             expect(v.skippedTextChecks == 0, "\(what): AppKit's pass is not skipped", "\(v.skippedTextChecks)")
-            expect(!marked(v, "tpyo"), "\(what): the ignored word's mark goes")
+            let ignored = drawn(v, "tpyo"), other = drawn(v, "wrnog")
+            expect(ignored.of > 0 && ignored.marked == 0, "\(what): AppKit's underline on the ignored word goes",
+                   "\(ignored.marked) of \(ignored.of) drawn")
+            expect(other.of > 0 && other.marked == other.of, "\(what): AppKit still draws the other misspelling",
+                   "\(other.marked) of \(other.of) drawn")
             expect(marked(v, "wrnog"), "\(what): the other misspelling stays marked")
         }
         func close(_ t: EditorWindowController?) {
@@ -68,7 +81,7 @@ extension DevChecks {
                 expect(t.spellStep?.current?.word == "tpyo", "Fix Typos is on the first misspelling", t.spellStep?.current?.word ?? "-")
                 if let b = t.spellStep?.ignoreButton { press(b) }
             },
-            wait("Ignore All's mark removed", 4) { panelTab.map { !marked($0.primaryTextView, "tpyo") } ?? true },
+            wait("Ignore All's mark removed", 4) { panelTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
             sync {
                 rebuilt(panelTab, "Ignore All")
@@ -89,7 +102,7 @@ extension DevChecks {
                 // The spelling panel's Ignore: the dictionary changes, nothing toggles.
                 NSSpellChecker.shared.ignoreWord("tpyo", inSpellDocumentWithTag: v.spellCheckerDocumentTag)
             },
-            wait("AppKit's pass after the word was ignored", 4) { directTab.map { !marked($0.primaryTextView, "tpyo") } ?? true },
+            wait("AppKit's pass after the word was ignored", 4) { directTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
             sync {
                 rebuilt(directTab, "ignored directly")

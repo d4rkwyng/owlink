@@ -191,11 +191,14 @@ extension DevChecks {
                 edited?.window?.close()
             },
         ]
-        steps += spellOpenDictionarySteps(app) { v, word in
+        steps += spellOpenDictionarySteps(app, marked: { v, word in
             // Recorded and drawn: every whole "word" in the text.
             let all = ranges(of: word, in: NSRange(location: 0, length: (v.string as NSString).length), of: v)
             return words(v).contains(word) && !all.isEmpty && all.allSatisfy { spellingMarked(v, $0) }
-        }
+        }, drawn: { v, word in
+            let all = ranges(of: word, in: NSRange(location: 0, length: (v.string as NSString).length), of: v)
+            return (all.filter { spellingMarked(v, $0) }.count, all.count)
+        })
         steps += [
             sync {
                 json = app.open(write("data.json", "{\"tpyo\": \"wrnog\"}\n"))
