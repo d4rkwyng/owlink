@@ -17,14 +17,21 @@ import CedricCore
 final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
     static let width: CGFloat = 220
 
-    /// A row of the tag tree (NSOutlineView wants objects).
+    /// A row of the tag tree (NSOutlineView wants objects). Its children
+    /// are made when first asked for (an expanded or searched tag), not
+    /// with the tree.
     final class Item: NSObject {
         let node: TagTree.Node
-        let children: [Item]
-        init(_ n: TagTree.Node) {
-            node = n
-            children = n.children.map(Item.init)
+        private var kids: [Item]?
+        init(_ n: TagTree.Node) { node = n }
+        var children: [Item] {
+            if let kids { return kids }
+            let k = node.children.map(Item.init)
+            kids = k
+            return k
         }
+        /// The children made so far.
+        var made: [Item] { kids ?? [] }
     }
 
     let title = NSTextField(labelWithString: String(localized: "Tags"))
@@ -176,6 +183,12 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
 
     var message: String { note.isHidden ? "" : note.stringValue }
 
+    /// Rows made for the current tree (the checks: collapsed tags make none).
+    var itemsMade: Int {
+        func count(_ l: [Item]) -> Int { l.reduce(l.count) { $0 + count($1.made) } }
+        return count(items)
+    }
+
     private func restoreExpansion() {
         restoring = true
         defer { restoring = false }
@@ -265,7 +278,7 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     // MARK: Outline (the tags)
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        (item as? Item)?.children.count ?? items.count
+        (item as? Item)?.node.children.count ?? items.count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
@@ -273,7 +286,7 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        !((item as? Item)?.children.isEmpty ?? true)
+        !((item as? Item)?.node.children.isEmpty ?? true)
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
@@ -387,24 +400,19 @@ extension EditorWindowController {
             notes.ensure()
             return
         }
-        // Shown only if it is still the latest asked for this pane, the
+        // The folder's one tree for these notes (WikiNotes.withTagTree),
+        // shown only if it is still the latest asked for this pane, the
         // folder is the same and its notes haven't changed since (a change
         // posts didChange, which asks again).
-        let scan = notes.scan, gen = notes.generation, partial = notes.isPartial
+        let gen = notes.generation, partial = notes.isPartial
         side.request += 1
         let token = side.request
         let me = WeakRef(self), pane = WeakRef(side), model = WeakRef(notes)
-        WikiNotes.queryQueue.async {
-            let tree = TagTree(files: scan.tagsByNote)
-            let out = MainBox(value: tree)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let tab = me.value, let side = pane.value, let notes = model.value,
-                          side.request == token, notes.generation == gen, FolderSidebar.shared?.wikiNotes === notes,
-                          tab.wiki.tags === side, tab.wiki.tagsVisible else { return }
-                    side.set(out.value, model: notes, message: nil, partial: partial)
-                }
-            }
+        notes.withTagTree { tree in
+            guard let tab = me.value, let side = pane.value, let notes = model.value,
+                  side.request == token, notes.generation == gen, FolderSidebar.shared?.wikiNotes === notes,
+                  tab.wiki.tags === side, tab.wiki.tagsVisible else { return }
+            side.set(tree, model: notes, message: nil, partial: partial)
         }
     }
 
