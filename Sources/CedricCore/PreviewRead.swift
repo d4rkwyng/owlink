@@ -130,7 +130,8 @@ public final class PinnedRoot: @unchecked Sendable {
 /// own reference until it finishes. At most `capacity` roots (`limit`,
 /// 64) are kept: at the cap a request for a file in a site root not yet
 /// pinned is refused (a pin that isn't kept would be found again on the
-/// next request), while the roots already pinned are still served.
+/// next request), while the roots already pinned are still served; a
+/// granted root past the cap is denied for that grant (batch 10c).
 /// A granted root that doesn't open when it is granted is denied for
 /// that grant's lifetime (Astra review, batch 8c): it is never opened by
 /// its path later, whatever is there by then, and a document whose own
@@ -165,7 +166,8 @@ public final class PreviewGrants: @unchecked Sendable {
 
     /// Grants `roots` (nil entries skipped): when they differ from the
     /// current grant, every pin is dropped and these are pinned now; one
-    /// that doesn't open is denied until the next fresh grant.
+    /// that doesn't open, or comes past `capacity` distinct roots, is
+    /// denied until the next fresh grant.
     public func grant(_ roots: [URL?]) {
         let paths = roots.compactMap { $0?.standardizedFileURL.path }
         lock.lock(); defer { lock.unlock() }
@@ -174,7 +176,9 @@ public final class PreviewGrants: @unchecked Sendable {
         pins = [:]
         denied = []
         for p in paths where pins[p] == nil && !denied.contains(p) {
-            if let r = PinnedRoot(URL(fileURLWithPath: p)) { pins[p] = r } else { denied.insert(p) }
+            // Past the cap a root is denied for this grant, never opened.
+            guard pins.count < capacity, let r = PinnedRoot(URL(fileURLWithPath: p)) else { denied.insert(p); continue }
+            pins[p] = r
         }
     }
 

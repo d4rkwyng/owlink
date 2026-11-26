@@ -434,6 +434,41 @@ import Testing
         }
     }
 
+    /// The cap holds for the granted roots too (Astra review, batch 10c,
+    /// should-fix): with room for one, the document's folder is pinned and
+    /// served, and the opened folder past it is denied for that grant,
+    /// never opened, and stays refused.
+    @Test func aGrantedRootPastTheCapIsRefused() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let opened = t.appendingPathComponent("site")
+        let doc = opened.appendingPathComponent("posts")
+        let mine = try put(doc, "a.png", "DOC")
+        let other = try put(opened, "img/b.png", "OPENED")
+        for scriptOn in [false, true] {
+            for walk in modes {
+                let what = "scriptOn \(scriptOn) walk \(walk)"
+                // With room for both, both are served (the requests are good).
+                let roomy = PreviewGrants(capacity: 2)
+                roomy.grant([doc, opened])
+                #expect(roomy.count == 2, "\(what)")
+                #expect(roomy.approve(page(other), in: doc, openedRoot: opened, scriptOn: scriptOn, walk: walk) != nil, "\(what)")
+                let grants = PreviewGrants(capacity: 1)
+                grants.grant([doc, opened])
+                #expect(grants.count == 1, "\(what)")
+                #expect(grants.pinned(doc) != nil, "\(what)")
+                #expect(grants.pinned(opened) == nil, "\(what)")
+                let hit = try #require(grants.approve(page(mine), in: doc, openedRoot: opened, scriptOn: scriptOn, walk: walk), "\(what)")
+                #expect(PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn, walk: walk) == Data("DOC".utf8), "\(what)")
+                #expect(grants.approve(page(other), in: doc, openedRoot: opened, scriptOn: scriptOn, walk: walk) == nil, "\(what)")
+                // Granted the same again: still one pin, the second still refused.
+                grants.grant([doc, opened])
+                #expect(grants.approve(page(other), in: doc, openedRoot: opened, scriptOn: scriptOn, walk: walk) == nil, "\(what)")
+                #expect(grants.count == 1, "\(what)")
+            }
+        }
+    }
+
     /// How many descriptors this process has open on something inside
     /// `t` (by the kernel's path for each, against `t`'s real path): other
     /// suites running alongside open files too, but never in this test's
