@@ -320,7 +320,9 @@ extension DevChecks {
     /// image, then two, copied byte for byte into notes/images/ (a file of
     /// the same name already there is left alone; the copy is renamed),
     /// linked at the caret as one undo step (the copies stay, as after a
-    /// paste); Cancel changes neither the text nor the folder; an untitled
+    /// paste); a picked relative symbolic link from outside the folder is
+    /// copied as the bytes it points at, not as a link; Cancel changes
+    /// neither the text nor the folder; an untitled
     /// tab is asked to save first, as on paste; a Swift tab has it off.
     static func imageSteps(_ app: AppDelegate, back: EditorWindowController, code: EditorWindowController) -> [Step] {
         let fm = FileManager.default
@@ -336,6 +338,10 @@ extension DevChecks {
         try? png(5).write(to: one)
         try? Data("not really a jpeg, copied as is\n".utf8).write(to: two)
         try? png(7).write(to: spaced)
+        // A relative symbolic link outside the folder: its bytes are copied, not the link
+        // (a copied link "one.png" would point at images/one.png, the older file).
+        let linked = pics.appendingPathComponent("linked.png")
+        try? fm.createSymbolicLink(atPath: linked.path, withDestinationPath: "one.png")
         let body = "Pictures:\n"
         let doc = app.open(write("notes/img.md", body))!
         sized(doc)
@@ -388,6 +394,20 @@ extension DevChecks {
                        doc.text.debugDescription)
                 undo()
                 expect(doc.text == body, "one ⌘Z takes both links out", doc.text.debugDescription)
+                caretAtEnd()
+                ImageFilePicker.injected = { [linked] }
+                clickImage(doc)
+            },
+            settle,
+            sync {
+                let copied = images.appendingPathComponent("linked.png")
+                let type = (try? fm.attributesOfItem(atPath: copied.path)[.type]) as? FileAttributeType
+                expect(type == .typeRegular, "a picked symbolic link is copied as a regular file", "\(type.map { $0.rawValue } ?? "none") \(listing())")
+                expect(same(one, copied), "with the bytes of the file it points at", "\(listing())")
+                expect(doc.text == body + "![](images/linked.png)", "and linked as images/linked.png", doc.text.debugDescription)
+                expect(!listing().contains { $0.hasPrefix(".cedric-image-") }, "no staging file is left in images/", "\(listing())")
+                undo()
+                expect(doc.text == body, "one ⌘Z takes that link out", doc.text.debugDescription)
                 // Cancel: nothing changes.
                 caretAtEnd()
                 let before = listing()

@@ -151,35 +151,44 @@ extension EditorWindowController {
         guard textView.isEditable else { NSSound.beep(); return }
         guard let docURL = doc.fileURL else { askToSaveForImages(files, bitmap: bitmap, at: range); return }
         let dir = docURL.deletingLastPathComponent()
-        let images = dir.appendingPathComponent("images", isDirectory: true)
-        let fm = FileManager.default
         var paths: [String] = []
-        func copyTarget(_ name: String) throws -> URL {
-            // An "images" that is a link out of the document's folder is refused.
-            guard SafePaths.isInside(images, dir) else {
+        // "images" is opened once per batch, relative to the pinned document
+        // folder, and every copy is staged and published through that
+        // descriptor (ImageStore): nothing is written outside the folder,
+        // nothing is overwritten, and no partial file gets a final name.
+        var opened: ImageStore?
+        func store() throws -> ImageStore {
+            if let opened { return opened }
+            do {
+                let s = try ImageStore.open(in: dir)
+                opened = s
+                return s
+            } catch ImageStore.Failure.outside {
+                // An "images" that is a link out of the document's folder is refused.
                 throw NSError(domain: "Cedric", code: 3, userInfo: [NSLocalizedDescriptionKey:
                     String(localized: "The “images” folder next to this document points outside its folder, so pasted images aren’t saved there.")])
             }
-            try fm.createDirectory(at: images, withIntermediateDirectories: true)
-            return images.appendingPathComponent(MarkdownPaste.uniqueName(name) { fm.fileExists(atPath: images.appendingPathComponent($0).path) })
         }
         do {
             for f in files {
                 if let rel = MarkdownPaste.relativePath(of: f, from: dir) { paths.append(rel); continue }
-                // Only a regular file is copied (not a folder named x.png).
-                guard SafePaths.isRegularFile(f) else { NSSound.beep(); continue }
-                let target = try copyTarget(f.lastPathComponent)
-                try fm.copyItem(at: f, to: target)
-                paths.append(MarkdownPaste.relativePath(of: target, from: dir) ?? "images/" + target.lastPathComponent)
+                // Only a regular file's bytes are copied (not a folder named x.png, not
+                // a pipe; a symbolic link's target is read, the link isn't copied).
+                let name: String
+                do {
+                    name = try store().copy(from: f, name: f.lastPathComponent)
+                } catch ImageStore.Failure.notRegularFile {
+                    NSSound.beep(); continue
+                }
+                paths.append(MarkdownPaste.imagesPath(name))
             }
             if let bitmap {
                 guard let png = NSBitmapImageRep(data: bitmap)?.representation(using: .png, properties: [:]) else { NSSound.beep(); return }
                 let f = DateFormatter()
                 f.locale = Locale(identifier: "en_US_POSIX")
                 f.dateFormat = "yyyyMMdd-HHmmss"
-                let target = try copyTarget("image-\(f.string(from: Date())).png")
-                try png.write(to: target, options: .atomic)
-                paths.append(MarkdownPaste.relativePath(of: target, from: dir) ?? "images/" + target.lastPathComponent)
+                let name = try store().write(png, name: "image-\(f.string(from: Date())).png")
+                paths.append(MarkdownPaste.imagesPath(name))
             }
         } catch {
             showError(error)
