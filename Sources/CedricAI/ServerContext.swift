@@ -198,11 +198,14 @@ public final class ServerContextCache: @unchecked Sendable {
     /// still running after that finishes in the background.
     public func refresh(client: LocalModelClient, model: String, kind: LocalAISettings.Backend,
                         wait: TimeInterval? = nil) async -> ServerContextReport? {
+        // The deadline counts from this call (taken before the lookup), not
+        // from when the lookup ends or the timer task first runs, so neither
+        // a busy pool nor a caller descheduled after the lookup can stretch
+        // the wait.
+        let start = ContinuousClock.now
         let found = lookup(Self.key(client, model, kind), client, model, kind)
         guard let task = found.probe else { return found.entry?.report }
-        // The deadline counts from this call, not from when the timer task
-        // first runs, so a busy pool can't stretch the wait.
-        let deadline = ContinuousClock.now + .seconds(max(0, wait ?? defaultWait))
+        let deadline = start + .seconds(max(0, wait ?? defaultWait))
         // Whichever ends first: the probe, or the wait (nil; the probe
         // goes on and stores its answer for the next read). Not a task
         // group: leaving one waits for every child, the probe included.

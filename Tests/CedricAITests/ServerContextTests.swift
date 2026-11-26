@@ -280,6 +280,31 @@ import Testing
         }
     }
 
+    /// The wait counts from the call, not from the end of the lookup: a
+    /// caller held up inside the lookup (here the clock read that checks
+    /// freshness stalls past the whole wait) has no budget left, so even
+    /// an instant answer is late. Counted from the lookup's end, it would
+    /// get a fresh full wait and take the answer.
+    @Test func aCallerHeldUpInTheLookupGetsNoFreshWait() async {
+        let fake = Fake()
+        let stall = Locked<TimeInterval>(0)
+        let contexts = ServerContextCache(now: {
+            let s = stall.mutate { v in defer { v = 0 }; return v }
+            if s > 0 { Thread.sleep(forTimeInterval: s); fake.advance(s) }
+            return fake.now
+        }, defaultWait: 3_600, probe: { _, _, _ in fake.called(); return fake.probe() })
+        #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio)?.tokens == 4_096)
+        fake.advance(301)
+        // The next clock read is the stale check in the lookup: it stalls
+        // 1 s against a 0.5 s wait, so the deadline has passed before the
+        // probe starts.
+        stall.mutate { $0 = 1 }
+        #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio, wait: 0.5) == nil, "the wait was spent in the lookup")
+        // The late answer is still stored for the next read.
+        #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio)?.tokens == 4_096)
+        #expect(fake.count == 2)
+    }
+
     @Test func anAnswerAfterTheDeadlineIsLateEvenWhenItArrivesFirst() async {
         let fake = Fake()
         let contexts = cache(fake)
