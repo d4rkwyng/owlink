@@ -34,10 +34,18 @@ final class WikiNotes {
     private var building = false, rebuild = false
     /// Some Backlinks pane shows: the notes' links are kept read.
     var wantsBacklinks = false { didSet { if wantsBacklinks && !oldValue { scheduleScan() } } }
+    /// Some Tags pane shows: the notes' tags are read too (TagsSidebar.swift).
+    var wantsTags = false { didSet { if wantsTags && !oldValue { scheduleScan() } } }
+    /// A pane wants the notes read.
+    var wantsScan: Bool { wantsBacklinks || wantsTags }
     /// Waiting for the names (a ⌘-click before the index landed).
     private var whenReady: [() -> Void] = []
     /// For the checks.
     private(set) var notesBuilt = 0, scansDone = 0
+    /// Scans that read the tags too (the Tags pane waits for one).
+    private(set) var tagScansDone = 0
+    /// The scan in `scan` read every note's tags (not only its links).
+    private(set) var tagsRead = false
     private static let queue = DispatchQueue(label: "cedric.wiki-notes", qos: .utility)
     /// Completion ranking and backlink lookups: run against a snapshot
     /// (`notes`, `scan` are values) off the main thread.
@@ -92,7 +100,7 @@ final class WikiNotes {
                     waiting.forEach { $0() }
                     NotificationCenter.default.post(name: Self.didChange, object: me)
                     if me.rebuild { me.rebuild = false; me.indexLanded(); return }
-                    if me.wantsBacklinks { me.scheduleScan() }
+                    if me.wantsScan { me.scheduleScan() }
                 }
             }
         }
@@ -113,7 +121,7 @@ final class WikiNotes {
             }
         }
         // A note edited in place changes no listing: rescan from here.
-        if wantsBacklinks { scheduleScan() }
+        if wantsScan { scheduleScan() }
     }
 
     /// The watcher stopped (sidebar hidden): look at every note next time.
@@ -123,12 +131,12 @@ final class WikiNotes {
         guard let notes else { ensure(); return }
         if scanning { rescan = true; return }
         scanning = true
-        let d = dirty
+        let d = dirty, tags = wantsTags
         dirty = []
         let box = MainBox(value: (scan, notes.paths)), ref = WeakRef(self)
         Self.queue.async {
             var s = box.value.0
-            s.update(notes: box.value.1, dirty: d)
+            s.update(notes: box.value.1, dirty: d, tags: tags)
             let out = MainBox(value: s)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -137,6 +145,8 @@ final class WikiNotes {
                     me.generation += 1
                     me.scanning = false
                     me.scansDone += 1
+                    me.tagsRead = tags
+                    if tags { me.tagScansDone += 1 }
                     NotificationCenter.default.post(name: Self.didChange, object: me)
                     if me.rescan { me.rescan = false; me.scheduleScan() }
                 }
@@ -173,6 +183,9 @@ final class WikiTabState {
     var backlinks: BacklinksSidebar?
     var observer: NSObjectProtocol?
     var backlinksVisible: Bool { backlinks?.superview != nil }
+    var tags: TagsSidebar?
+    var tagsObserver: NSObjectProtocol?
+    var tagsVisible: Bool { tags?.superview != nil }
     /// Asks the user before creating a missing note (a check answers instead).
     static var confirmCreate: ((String) -> Bool)?
     /// Gets a failed create instead of an alert (the checks).

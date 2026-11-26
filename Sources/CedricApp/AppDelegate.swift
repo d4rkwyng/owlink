@@ -1151,6 +1151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func togglePreview(_ sender: Any?) { currentTab?.togglePreview() }
     @objc func toggleOutlineMenu(_ sender: Any?) { currentTab?.toggleOutline() }
     @objc func toggleBacklinksMenu(_ sender: Any?) { currentTab?.toggleBacklinks() }
+    @objc func toggleTagsMenu(_ sender: Any?) { currentTab?.toggleTags() }
     @objc func goToHeadingMenu(_ sender: Any?) { currentTab?.goToHeading() }
     @objc func exportHTMLMenu(_ sender: Any?) { currentTab?.exportHTML() }
     @objc func exportPDFMenu(_ sender: Any?) { currentTab?.exportPDF() }
@@ -1250,6 +1251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleBacklinksMenu(_:)):
             setShowHide(item, shown: tab?.backlinksVisible == true, show: String(localized: "Show Backlinks"), hide: String(localized: "Hide Backlinks"))
             return tab?.backlinksApply == true
+        case #selector(toggleTagsMenu(_:)):
+            setShowHide(item, shown: tab?.tagsVisible == true, show: String(localized: "Show Tags"), hide: String(localized: "Hide Tags"))
+            return tab != nil
         case #selector(goToHeadingMenu(_:)):
             return tab?.doc.language.hasOutline == true
         case #selector(exportHTMLMenu(_:)), #selector(exportPDFMenu(_:)),

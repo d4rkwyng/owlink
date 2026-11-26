@@ -216,21 +216,7 @@ public enum WikiLinks {
         text.enumerateLines { l, _ in
             defer { line += 1 }
             let u = Array(l.utf16)
-            var k = 0
-            while k < u.count, k < 4, u[k] == 32 { k += 1 }
-            if k <= 3, k < u.count, u[k] == tick || u[k] == 126 {
-                var run = 0
-                while k + run < u.count, u[k + run] == u[k] { run += 1 }
-                if run >= 3 {
-                    if let f = fence {
-                        if f.0 == u[k], run >= f.1, u[(k + run)...].allSatisfy({ $0 == 32 || $0 == 9 }) { fence = nil }
-                    } else {
-                        fence = (u[k], run)
-                    }
-                    return
-                }
-            }
-            if fence != nil { return }
+            if fenceLine(u, fence: &fence) { return }
             guard u.count >= 5 else { return }
             let found = u.withUnsafeBufferPointer { links(inLine: $0) }
             guard !found.isEmpty else { return }
@@ -238,6 +224,27 @@ public enum WikiLinks {
             for f in found where !f.target.isEmpty { out.append(Ref(target: f.target, line: line, snippet: snippet)) }
         }
         return out
+    }
+
+    /// Fenced code (``` and ~~~, up to three spaces in), one line at a time:
+    /// true when `u` opens or closes a fence or is inside one. `fence` is
+    /// the open fence's character and length, carried from line to line.
+    static func fenceLine(_ u: [UInt16], fence: inout (UInt16, Int)?) -> Bool {
+        var k = 0
+        while k < u.count, k < 4, u[k] == 32 { k += 1 }
+        if k <= 3, k < u.count, u[k] == tick || u[k] == 126 {
+            var run = 0
+            while k + run < u.count, u[k + run] == u[k] { run += 1 }
+            if run >= 3 {
+                if let f = fence {
+                    if f.0 == u[k], run >= f.1, u[(k + run)...].allSatisfy({ $0 == 32 || $0 == 9 }) { fence = nil }
+                } else {
+                    fence = (u[k], run)
+                }
+                return true
+            }
+        }
+        return fence != nil
     }
 
     static func snippet(_ line: String) -> String {
@@ -369,6 +376,9 @@ public struct BacklinkScan: Sendable {
         var size: Int
         var modified: Date
         public var refs: [WikiLinks.Ref]
+        /// The note's tags (Tags.refs), or nil when they weren't read (the
+        /// last update didn't ask for tags).
+        public var tags: [Tags.Ref]?
     }
 
     public struct Backlink: Equatable, Sendable {
@@ -396,8 +406,10 @@ public struct BacklinkScan: Sendable {
 
     /// Brings the cache in line with `notes` (relative paths). `dirty`:
     /// the folders (relative, "" the root) that changed since the last
-    /// update; nil looks at every note's date and size.
-    public mutating func update(notes: [String], dirty: Set<String>?, cancelled: () -> Bool = { false }) {
+    /// update; nil looks at every note's date and size. `tags`: read each
+    /// note's tags too (a note cached without them is read again); the
+    /// links are always read, in the same pass.
+    public mutating func update(notes: [String], dirty: Set<String>?, tags: Bool = false, cancelled: () -> Bool = { false }) {
         let list = notes.sorted()
         skipped = max(0, list.count - Self.maxFiles)
         lastRead = 0
@@ -407,15 +419,16 @@ public struct BacklinkScan: Sendable {
         let fm = FileManager.default
         for rel in kept {
             if cancelled() { return }
-            if let dirty, files[rel] != nil, !dirty.contains((rel as NSString).deletingLastPathComponent) { continue }
+            let complete = files[rel].map { !tags || $0.tags != nil } ?? false
+            if let dirty, complete, !dirty.contains((rel as NSString).deletingLastPathComponent) { continue }
             let url = root.appendingPathComponent(rel)
             guard let a = try? fm.attributesOfItem(atPath: url.path), let size = (a[.size] as? NSNumber)?.intValue,
                   let date = a[.modificationDate] as? Date else { files[rel] = nil; continue }
-            if let e = files[rel], e.size == size, e.modified == date { continue }
+            if complete, let e = files[rel], e.size == size, e.modified == date { continue }
             guard size <= Self.maxFileBytes else { files[rel] = nil; skipped += 1; continue }
             guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { files[rel] = nil; skipped += 1; continue }
             lastRead += 1
-            files[rel] = Entry(size: size, modified: date, refs: Self.refs(in: data))
+            files[rel] = Entry(size: size, modified: date, refs: Self.refs(in: data), tags: tags ? Self.tags(in: data) : nil)
         }
     }
 
@@ -429,6 +442,25 @@ public struct BacklinkScan: Sendable {
         // A NUL early on: not text.
         if data.prefix(8192).contains(0) { return [] }
         return WikiLinks.refs(in: String(decoding: data, as: UTF8.self))
+    }
+
+    static func tags(in data: Data) -> [Tags.Ref] {
+        // A note with no `#` holds no tag (front matter `tags:` needs none,
+        // so a note starting with `---` is read too).
+        let has = data.withUnsafeBytes { raw -> Bool in
+            guard let p = raw.baseAddress, raw.count >= 2 else { return false }
+            return memchr(p, 35, raw.count) != nil || (raw.count >= 3 && memcmp(p, "---", 3) == 0)
+                || (raw.count >= 6 && memcmp(p, "\u{FEFF}---", 6) == 0)
+        }
+        guard has, !data.prefix(8192).contains(0) else { return [] }
+        return Tags.refs(in: String(decoding: data, as: UTF8.self))
+    }
+
+    /// Each note's tags (the notes whose tags were read).
+    public var tagsByNote: [String: [Tags.Ref]] {
+        var out: [String: [Tags.Ref]] = [:]
+        for (k, e) in files { if let t = e.tags, !t.isEmpty { out[k] = t } }
+        return out
     }
 
     /// The notes linking to `path` (not itself), by source then line.

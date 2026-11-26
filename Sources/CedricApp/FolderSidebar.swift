@@ -105,6 +105,8 @@ extension AppDelegate {
             self.findInFiles?.folderField.stringValue = dir.path
         }
         if state?.visible ?? true { s.show(in: tab) }
+        // Backlinks and Tags panes follow the new folder.
+        NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
         scheduleSessionSave()
     }
 
@@ -112,6 +114,7 @@ extension AppDelegate {
         FolderSidebar.shared?.close()
         FolderSidebar.shared = nil
         FolderSidebar.pendingFolder = nil
+        NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
         if let t = currentTab { t.window?.makeFirstResponder(t.textView) }
         scheduleSessionSave()
     }

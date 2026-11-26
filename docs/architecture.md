@@ -1250,6 +1250,48 @@ keys, code span and fence, ⌘-click to a tab and a heading, a missing
 note created, Backlinks and a click to the line, a rename on disk
 followed by names and backlinks, no list in large mode.
 
+## Tags (0.6)
+
+View › Show Tags: every `#tag` in the open folder's notes, with counts,
+as a tree, in a per-tab pane beside Outline and Backlinks
+(`TagsSidebar.swift`, in `EditorContainer`). The rules are
+`CedricCore/Tags.swift` (`TagsTests`).
+
+- **Parsing** (Obsidian's rules): inline `#tag` and `#nested/tag` start
+  at the line start or after white space, so URLs, `](#anchor)`, `a#b`
+  and `&#123;` are not tags, and `# Heading` is a heading. `\#` escapes;
+  code spans and fenced code are skipped (`WikiLinks.fenceLine`, shared
+  with the link scan). A name is letters, marks, digits, emoji, `_`, `-`
+  and `/`, with at least one non-digit (`#123` is not a tag); empty
+  parts are dropped. Front matter (a first line `---`, to `---` or
+  `...`) gives `tags:`/`tag:` as a YAML list, a `[flow, list]` or a
+  comma- or space-separated value; a `#` in it is a YAML comment, not a
+  tag. Each tag is kept once per note (its first line), ignoring case.
+- **One read for links and tags.** `BacklinkScan.update(…, tags:)` reads
+  each note once for both, on `WikiNotes`' utility queue, with the same
+  walk (Open Quickly's `FileIndex`), the same per-file cache by date and
+  size, the same dirty folders from the watcher and the same caps (over
+  5 MB or past 10,000 notes: skipped, "partial"). A note cached while no
+  Tags pane showed has no tags (`nil`) and is read again once when one
+  shows. Nothing is read while neither pane shows; nothing is written.
+- **The tree** (`TagTree`) is made on `WikiNotes.queryQueue` from a value
+  snapshot of the scan, and shown only if it is still the pane's latest
+  request, the scan generation is unchanged and the folder is the same
+  `WikiNotes`. A count is the notes that have the tag or one under it;
+  siblings go by count, then by name. Opening or closing a folder posts
+  `WikiNotes.didChange`, so Backlinks and Tags follow the new folder.
+- **Clicks**: a tag lists its notes (and those of tags under it) with
+  the line; a note opens at that line (`openWikiNote`).
+- **Speed**: opening a document does nothing for tags (no pane is made
+  for a new tab, no read, no index); `#` typing gets no completion.
+
+Checks: `CEDRIC_CHECK=tags` (in tools-check.sh): nothing read before the
+pane, the tree and counts (front matter, nested, not code, fences,
+headings, URLs or numbers), the tree made off the main thread, a tag
+click → its notes → the right tab at the line, a rename and a delete on
+disk, and a large document opened while the pane shows: no scan, no
+index build, no tree.
+
 ## Git and GitHub links
 
 `CedricCore/Git.swift` (tested in `GitTests.swift`) and

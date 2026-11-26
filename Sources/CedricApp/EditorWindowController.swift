@@ -34,6 +34,16 @@ final class EditorContainer: NSView {
         }
     }
 
+    /// Tags, beside Backlinks (nil while hidden; TagsSidebar.swift).
+    var tags: NSView? {
+        didSet {
+            guard oldValue !== tags else { return }
+            oldValue?.removeFromSuperview()
+            if let tags { addSubview(tags) }
+            needsLayout = true
+        }
+    }
+
     init(gutter: GutterView, scrollView: NSScrollView) {
         self.gutter = gutter
         self.scrollView = scrollView
@@ -48,9 +58,11 @@ final class EditorContainer: NSView {
         super.layout()
         let outlineW = sidebar == nil ? 0 : min(OutlineSidebar.width, max(0, bounds.width - 200))
         let backW = backlinks == nil ? 0 : min(BacklinksSidebar.width, max(0, bounds.width - 200 - outlineW))
-        let side = outlineW + backW
+        let tagsW = tags == nil ? 0 : min(TagsSidebar.width, max(0, bounds.width - 200 - outlineW - backW))
+        let side = outlineW + backW + tagsW
         sidebar?.frame = NSRect(x: 0, y: 0, width: outlineW, height: bounds.height)
         backlinks?.frame = NSRect(x: outlineW, y: 0, width: backW, height: bounds.height)
+        tags?.frame = NSRect(x: outlineW + backW, y: 0, width: tagsW, height: bounds.height)
         let g = showsGutter ? gutterWidth : 0
         // Beside the scroll view, at the window edge. Readable Width draws
         // it in the column's margin instead, just left of the text.
@@ -841,6 +853,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         if previewVisible { renderPreview() }
         outline.sidebar?.applyPalette(p)
         wiki.backlinks?.applyPalette(p)
+        wiki.tags?.applyPalette(p)
         owl?.layoutViews()
         spelling.apply()
         gitState?.settingChanged()
@@ -1508,6 +1521,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func windowWillClose(_ notification: Notification) {
         wikiHideCompletion()
         if let o = wiki.observer { NotificationCenter.default.removeObserver(o); wiki.observer = nil }
+        if tagsVisible { hideTags() }
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers = []
         unsplit(closing: true)
