@@ -59,6 +59,11 @@ if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-closedmemory" 
     | grep -E "^check:" | tee "$OUT/closedmemory.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/closedmemory.txt" || { echo "tools-check: closedmemory FAILED" >&2; fail=1; }
 
+echo "== quitsyncfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitsyncfail" CEDRIC_CHECK=quitsyncfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/quitsyncfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/quitsyncfail.txt" || { echo "tools-check: quitsyncfail FAILED" >&2; fail=1; }
+
 echo "== quitfail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitfail" CEDRIC_CHECK=quitfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/quitfail.txt"; then fail=1; fi

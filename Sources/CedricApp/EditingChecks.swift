@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitsyncfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -17,6 +17,7 @@ extension DevChecks {
         case "closedtab": closedTab(app)
         case "closefail": closeAfterFailedSave(app)
         case "quitfail": quitAfterFailedSave(app)
+        case "quitsyncfail": quitAfterFailedFlush(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedmemory": closedTextOnlyInMemory(app)
         case "closedraw": closedTabsStillDrawn(app)
@@ -620,6 +621,44 @@ extension DevChecks {
                 let reply = app.applicationShouldTerminate(NSApp)
                 expect(reply == .terminateNow && asked.isEmpty, "quit saves without a failure", "\(asked)")
                 expect(buffer(two) == "on disk two more\n", "and quit wrote the reopened text", buffer(two) ?? "-")
+                AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// Quit while the disk takes the session's writes but won't confirm
+    /// them (each flush fails: SessionStore.checkFailSync): the save fails,
+    /// so the app stays open and asks, as for a write that fails. Needs
+    /// session saving on (run like closefail).
+    static func quitAfterFailedFlush(_ app: AppDelegate) {
+        let file = app.open(write("quit-sync-fail.txt", "on disk\n"))!
+        sized(file)
+        func buffer() -> String? { app.store.readBuffer(file.doc.id) }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                app.saveSession(sync: true)
+                expect(buffer() == "on disk one\n", "a save writes the buffer", buffer() ?? "-")
+                type(" two")
+                app.store.checkFailSync = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "a quit whose flush fails is cancelled")
+                expect(asked.count == 1, "the user is asked", "\(asked)")
+                expect(app.tabs.contains { $0 === file } && file.doc.isDirty, "the tab is still open, unsaved")
+                expect(file.doc.sessionChangeCount != file.doc.changeCount, "its text isn't counted as written")
+                expect(buffer() == "on disk one\n", "the older buffer stays", buffer() ?? "-")
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { why in
+                    asked.append(why)
+                    app.store.checkFailSync = false
+                    return .retry
+                }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow, "flushes confirmed: the quit goes on")
+                expect(buffer() == "on disk one two\n", "with the latest text on disk", buffer() ?? "-")
                 AppDelegate.checkQuitSaveChoice = nil
             },
         ])

@@ -62,29 +62,68 @@ public enum PrivateDirectory {
     /// Writes `data` to `url` as a 0600 file, replacing it atomically: a
     /// temp file made 0600 by mkstemp in the same folder, then renamed over
     /// `url`, so the contents are never readable by others, even briefly.
-    public static func writePrivateFile(_ data: Data, to url: URL) throws {
+    ///
+    /// `durable`: also on the disk itself, not just in caches, before this
+    /// returns (power loss): the temp file is flushed (F_FULLFSYNC, or
+    /// fsync where the file system has no full flush) before the rename,
+    /// and the folder after it, so the new name and the bytes it points to
+    /// are both there. Writes made durable one after another reach the
+    /// disk in that order. A failed flush or close throws, and the old file
+    /// stays. `failSync` (check builds): the flush fails, as on a dying disk.
+    public static func writePrivateFile(_ data: Data, to url: URL, durable: Bool = false, failSync: Bool = false) throws {
         let dir = url.deletingLastPathComponent().path
         var template = Array((dir + "/." + url.lastPathComponent + ".XXXXXX").utf8CString)
         let fd = mkstemp(&template)
-        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        guard fd >= 0 else { throw failure(errno) }
         let tmp = String(cString: template)
-        var ok = fchmod(fd, 0o600) == 0
-        if ok {
-            ok = data.withUnsafeBytes { buf -> Bool in
+        var code: Int32 = fchmod(fd, 0o600) == 0 ? 0 : errno
+        if code == 0 {
+            code = data.withUnsafeBytes { buf -> Int32 in
                 var off = 0
                 while off < buf.count {
                     let n = Darwin.write(fd, buf.baseAddress! + off, buf.count - off)
-                    if n < 0 { if errno == EINTR { continue }; return false }
+                    if n < 0 { if errno == EINTR { continue }; return errno }
                     off += n
                 }
-                return true
+                return 0
             }
         }
-        close(fd)
-        guard ok, rename(tmp, url.path) == 0 else {
+        if code == 0, durable { code = (failSync && DevEnvironment.checksEnabled) ? EIO : flush(fd) }
+        if close(fd) != 0, code == 0 { code = errno }
+        if code == 0, rename(tmp, url.path) != 0 { code = errno }
+        guard code == 0 else {
             unlink(tmp)
-            throw CocoaError(.fileWriteUnknown)
+            throw failure(code)
         }
+        if durable { try syncFolder(dir) }
+    }
+
+    /// The folder's entries (a rename, an unlink) on the disk itself.
+    public static func syncFolder(_ path: String) throws {
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw failure(errno) }
+        var code = flush(fd)
+        if close(fd) != 0, code == 0 { code = errno }
+        if code != 0 { throw failure(code) }
+    }
+
+    /// F_FULLFSYNC (through the drive's own cache), else fsync on file
+    /// systems that don't support it; 0 or the error.
+    static func flush(_ fd: Int32) -> Int32 {
+        while true {
+            if fcntl(fd, F_FULLFSYNC) == 0 { return 0 }
+            let e = errno
+            if e == EINTR { continue }
+            guard e == ENOTSUP || e == EOPNOTSUPP || e == EINVAL || e == ENOTTY else { return e }
+            while true {
+                if fsync(fd) == 0 { return 0 }
+                if errno != EINTR { return errno }
+            }
+        }
+    }
+
+    private static func failure(_ code: Int32) -> Error {
+        CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
     }
 
     /// chmod 0700 if `path` is this user's own folder (not a link) that

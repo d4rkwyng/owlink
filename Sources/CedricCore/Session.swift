@@ -338,6 +338,18 @@ public final class SessionStore: @unchecked Sendable {
     /// Check builds only (inert otherwise): every write fails, as on a
     /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
     public var checkFailWrites = false
+    /// Check builds only: every write's flush to disk fails (the bytes
+    /// were written, the disk didn't confirm them; quitsyncfail).
+    public var checkFailSync = false
+
+    /// Every store file (buffers, the journals, session.json) is written
+    /// durably (PrivateDirectory.writePrivateFile), on the session queue:
+    /// a buffer and its journal entry are on the disk before the session
+    /// naming them is written, and the session before the journal is
+    /// removed or anything pruned.
+    private func writeDurably(_ data: Data, to url: URL) throws {
+        try PrivateDirectory.writePrivateFile(data, to: url, durable: true, failSync: checkFailSync)
+    }
     /// Check builds only: runs just before a session is committed while
     /// journaled buffers or reopened tabs wait for it (crash-check kills
     /// the app there).
@@ -368,6 +380,8 @@ public final class SessionStore: @unchecked Sendable {
         try PrivateDirectory.make(directory)
         // Unsaved tab text: recoverable state on this Mac, not backed up.
         PrivateDirectory.excludeFromBackup(directory)
+        // The folder's own entry on disk too (best effort: made once).
+        try? PrivateDirectory.syncFolder(directory.deletingLastPathComponent().path)
         directoryReady = true
     }
 
@@ -636,7 +650,7 @@ public final class SessionStore: @unchecked Sendable {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
         let generation = committedGeneration + 1
-        try PrivateDirectory.writePrivateFile(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
+        try writeDurably(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
         committedGeneration = generation
         committed = s.bufferIDs
         committedClosed = Set((s.closedTabs ?? []).map(\.id))
@@ -667,7 +681,7 @@ public final class SessionStore: @unchecked Sendable {
         // disk unnamed by both the session and the journal, nor written
         // for a reopened tab the session still lists as closed.
         try journal(id, reopened: open)
-        try PrivateDirectory.writePrivateFile(Data(text.utf8), to: bufferURL(id))
+        try writeDurably(Data(text.utf8), to: bufferURL(id))
         if let sequence { writtenSequence[id] = max(writtenSequence[id] ?? Int.min, sequence) }
     }
 
@@ -689,7 +703,7 @@ public final class SessionStore: @unchecked Sendable {
         let ids = fresh ? pending + [id] : pending, again = reopening ? pendingReopened + [id] : pendingReopened
         // Held: never over the journal launch found (it may be all that
         // says which buffers are pending), but beside it.
-        try PrivateDirectory.writePrivateFile(encodeJournal(ids, reopened: again), to: hold == nil ? journalFile : heldJournalFile)
+        try writeDurably(encodeJournal(ids, reopened: again), to: hold == nil ? journalFile : heldJournalFile)
         pending = ids
         pendingReopened = again
     }

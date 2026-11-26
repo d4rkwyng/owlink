@@ -285,6 +285,46 @@ import Testing
         try s.save(Session(windows: [SessionWindow(tabs: [a])]), requiring: [a.id: .onDisk])
     }
 
+    // MARK: Durable writes
+
+    /// A flush to disk that fails (check builds: checkFailSync) fails the
+    /// write: the old buffer and session.json stay as they were, and no
+    /// temp file is left.
+    @Test func aFailedFlushFailsTheWriteAndKeepsTheOldFile() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s.writeBuffer(a.id, text: "on disk")
+        try s.save(Session(windows: [SessionWindow(tabs: [a])]))
+        s.checkFailSync = true
+        #expect(throws: (any Error).self) { try s.writeBuffer(a.id, text: "not confirmed") }
+        #expect(throws: (any Error).self) { try s.writeBuffer(UUID(), text: "new, not confirmed") }
+        #expect(throws: (any Error).self) { try s.save(Session(windows: [])) }
+        #expect(s.readBuffer(a.id) == "on disk")
+        #expect(s.load()?.allTabs.map(\.id) == [a.id])
+        let names = try fm.contentsOfDirectory(atPath: dir.path)
+        #expect(!names.contains { $0.hasPrefix(".") }, "\(names)")
+        s.checkFailSync = false
+        try s.writeBuffer(a.id, text: "confirmed")
+        try s.save(Session(windows: [SessionWindow(tabs: [a])]))
+        #expect(s.readBuffer(a.id) == "confirmed")
+    }
+
+    @Test func durableWritesReplaceAtomically() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("f.json")
+        try PrivateDirectory.writePrivateFile(Data("one".utf8), to: f, durable: true)
+        #expect(throws: (any Error).self) { try PrivateDirectory.writePrivateFile(Data("two".utf8), to: f, durable: true, failSync: true) }
+        #expect(try Data(contentsOf: f) == Data("one".utf8))
+        #expect(try fm.attributesOfItem(atPath: f.path)[.posixPermissions] as? Int == 0o600)
+        #expect(try fm.contentsOfDirectory(atPath: dir.path) == ["f.json"])
+        try PrivateDirectory.syncFolder(dir.path)
+        #expect(throws: (any Error).self) { try PrivateDirectory.syncFolder(dir.appendingPathComponent("none").path) }
+    }
+
     // MARK: Holds
 
     @Test func anUnreadableSessionThatCantBeMovedIsCopiedAside() throws {
