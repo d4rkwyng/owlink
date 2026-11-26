@@ -44,11 +44,12 @@ case "$EDSIG" in *[!A-Za-z0-9+/=]*) fail "--signature is not base64" ;; esac
 case "$URL" in https://?*) ;; *) fail "--url must be an https:// URL" ;; esac
 case "$URL" in *[\<\>\&\"\'[:space:]]*) fail "--url may not hold spaces or < > & quotes" ;; esac
 [ -x "$SIGN_UPDATE" ] || fail "no sign_update at $SIGN_UPDATE"
+HERE=$(cd "$(dirname "$0")" && pwd)
 if [ -n "$FROM" ]; then
     [ -f "$FROM" ] || fail "$FROM is not a file"
-    grep -q '</channel>' "$FROM" || fail "$FROM has no </channel>"
-    grep -q "<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>" "$FROM" \
-        && fail "$FROM already has an item for $VERSION"
+    # By XML value: Sparkle's fields by namespace URI, the text as text.
+    have=$("$HERE/appcast-versions.sh" "$FROM" "$VERSION") || fail "can't read $FROM as an appcast"
+    [ "$have" = 0 ] || fail "$FROM already has an item for $VERSION"
 fi
 
 DIR=$(dirname "$OUT")

@@ -161,7 +161,24 @@ item() { # version [--from FEED] -> exit code; output in $W/item.out
         "$@" -- --account owlink-test-only > "$W/item.out" 2>&1
 }
 leftovers() { ls -A "$W/dist" | grep -v '^appcast\.xml$' | tr '\n' ' '; }
-items() { grep -c "<sparkle:shortVersionString>$1</sparkle:shortVersionString>" "$FEEDOUT"; }
+# How many direct /rss/channel/item elements carry version $1 in a Sparkle
+# field (found by namespace URI), in $2 or the feed. Python's ElementTree,
+# not the scripts' xmllint XPath, so the check doesn't share their logic.
+items() {
+    /usr/bin/python3 -I - "${2:-$FEEDOUT}" "$1" <<'PY'
+import sys, xml.etree.ElementTree as ET
+NS = "{http://www.andymatuschak.org/xml-namespaces/sparkle}"
+root = ET.parse(sys.argv[1]).getroot()
+n = 0
+if root.tag == "rss":
+    for item in root.findall("channel/item"):
+        vals = [(e.text or "").strip() for e in item if e.tag in (NS + "version", NS + "shortVersionString")]
+        for enc in item.findall("enclosure"):
+            vals += [enc.get(NS + "version", "").strip(), enc.get(NS + "shortVersionString", "").strip()]
+        n += sys.argv[2] in vals
+print(n)
+PY
+}
 if item 1.0.0 && xmllint --noout "$FEEDOUT" && [ "$(items 1.0.0)" = 1 ] && grep -q '^edSignature: STUB$' "$FEEDOUT" && [ -z "$(leftovers)" ]; then
     ok "appcast-item.sh starts a new feed, signed and verified"
 else
@@ -202,6 +219,56 @@ if [ $rc != 0 ] && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ ! -s "$W/stub.log
 else
     bad "appcast-item.sh with malformed XML (exit $rc): $(tail -2 "$W/item.out")"
 fi
+# Duplicates by XML value. A dashed 1-2-3 isn't 1.2.3 (a regex would say
+# it is), so 1.2.3 is added beside it.
+cat > "$W/dashes.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Owlink</title>
+        <item>
+            <sparkle:version>1-2-3</sparkle:version>
+            <sparkle:shortVersionString>1-2-3</sparkle:shortVersionString>
+        </item>
+    </channel>
+</rss>
+XML
+if item 1.2.3 --from "$W/dashes.xml" && [ "$(items 1.2.3)" = 1 ] && [ "$(items 1-2-3)" = 1 ] && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh: 1.2.3 isn't taken for a duplicate of 1-2-3"
+else
+    bad "appcast-item.sh 1.2.3 beside 1-2-3: $(tail -2 "$W/item.out")"
+fi
+# A real duplicate under another prefix for Sparkle's namespace, or with
+# the value on its own line, is refused before signing.
+cat > "$W/dup-prefix.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sp="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel><title>Owlink</title><item><sp:version>1.3.0</sp:version><sp:shortVersionString>1.3.0</sp:shortVersionString></item></channel>
+</rss>
+XML
+cat > "$W/dup-lines.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Owlink</title>
+        <item>
+            <sparkle:shortVersionString>
+                1.3.0
+            </sparkle:shortVersionString>
+        </item>
+    </channel>
+</rss>
+XML
+cp "$FEEDOUT" "$W/last-signed.xml"
+for d in dup-prefix dup-lines; do
+    rc=0; item 1.3.0 --from "$W/$d.xml" || rc=$?
+    if [ $rc != 0 ] && grep -q 'already has an item for 1.3.0' "$W/item.out" && cmp -s "$FEEDOUT" "$W/last-signed.xml" \
+        && [ ! -s "$W/stub.log" ] && [ -z "$(leftovers)" ]; then
+        ok "appcast-item.sh refuses a duplicate written as in $d.xml, before signing, feed unchanged"
+    else
+        bad "appcast-item.sh duplicate in $d.xml (exit $rc): $(tail -2 "$W/item.out")"
+    fi
+done
 
 if [ -n "$APP" ]; then
     P="$APP/Contents/Info.plist"
