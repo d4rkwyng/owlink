@@ -127,7 +127,10 @@ public final class PinnedRoot: @unchecked Sendable {
 /// opened folder and the vault's when they are granted (`grant`), and a
 /// site root the first time a file is approved under it. A grant that
 /// changes drops every pin (`grant` again); a read in flight keeps its
-/// own reference until it finishes. At most `limit` roots are kept.
+/// own reference until it finishes. At most `capacity` roots (`limit`,
+/// 64) are kept: at the cap a request for a file in a site root not yet
+/// pinned is refused (a pin that isn't kept would be found again on the
+/// next request), while the roots already pinned are still served.
 /// A granted root that doesn't open when it is granted is denied for
 /// that grant's lifetime (Astra review, batch 8c): it is never opened by
 /// its path later, whatever is there by then, and a document whose own
@@ -144,6 +147,8 @@ public final class PinnedRoot: @unchecked Sendable {
 /// descriptor, so a root swapped once it is found is never the one read.
 public final class PreviewGrants: @unchecked Sendable {
     public static let limit = 64
+    /// How many roots may be held open (`limit`; less in tests).
+    public let capacity: Int
     private let lock = NSLock()
     private var pins: [String: PinnedRoot] = [:]
     private var granted: [String] = []
@@ -153,7 +158,7 @@ public final class PreviewGrants: @unchecked Sendable {
     /// call back in).
     var siteRootFound: ((URL) -> Void)?
 
-    public init() {}
+    public init(capacity: Int = PreviewGrants.limit) { self.capacity = capacity }
 
     /// How many roots are held open.
     public var count: Int { lock.lock(); defer { lock.unlock() }; return pins.count }
@@ -212,7 +217,10 @@ public final class PreviewGrants: @unchecked Sendable {
         guard let page = PreviewFolder.pageURL(forFile: site.url.appendingPathComponent(rel.joined(separator: "/"))),
               let file = PreviewFolder.file(for: page, in: site.url, scriptOn: scriptOn),
               !scriptOn || PreviewRead.scriptSafe(rel) else { return nil }
-        if pins[site.url.path] == nil, pins.count < Self.limit { pins[site.url.path] = site }
+        if pins[site.url.path] == nil {
+            guard pins.count < capacity else { return nil }
+            pins[site.url.path] = site
+        }
         return (site, rel, file)
     }
 

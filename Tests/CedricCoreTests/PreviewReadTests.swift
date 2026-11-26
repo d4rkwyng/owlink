@@ -390,6 +390,50 @@ import Testing
         }
     }
 
+    /// At the cap a new site root is refused, not served from a pin that
+    /// isn't kept (the next request would find it again): the roots
+    /// already pinned are still served from the same pins (Astra review,
+    /// batch 8c, should-fix).
+    @Test func aNewRootAtTheCapIsRefused() throws {
+        #expect(PreviewGrants.limit == 64)
+        #expect(PreviewGrants().capacity == PreviewGrants.limit)
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let blog = t.appendingPathComponent("blog")
+        let doc = blog.appendingPathComponent("posts")
+        _ = try put(doc, "static/1.png", "ONE")
+        _ = try put(blog, "static/2.png", "TWO")
+        _ = try put(blog, "public/3.png", "THREE")
+        func req(_ n: Int) -> URL { URL(string: PreviewFolder.scheme + "://doc/\(n).png")! }
+        for walk in modes {
+            let grants = PreviewGrants(capacity: 3)
+            grants.grant([doc])
+            #expect(grants.count == 1)
+            let one = try #require(grants.approve(req(1), in: doc, openedRoot: nil, scriptOn: true, walk: walk))
+            #expect(grants.count == 2)
+            // The third root: exactly at the cap, kept.
+            let two = try #require(grants.approve(req(2), in: doc, openedRoot: nil, scriptOn: true, walk: walk))
+            #expect(grants.count == 3)
+            #expect(PreviewRead.data(two.parts, beneath: two.root, scriptOn: true, walk: walk) == Data("TWO".utf8))
+            // A fourth: refused, and nothing more held open.
+            #expect(grants.approve(req(3), in: doc, openedRoot: nil, scriptOn: true, walk: walk) == nil, "walk \(walk)")
+            #expect(grants.approve(req(3), in: doc, openedRoot: nil, scriptOn: false, walk: walk) == nil, "walk \(walk)")
+            #expect(grants.count == 3)
+            #expect(openDescriptors(inside: t) == 3)
+            // The pinned ones: the same pins.
+            let again = try #require(grants.approve(req(1), in: doc, openedRoot: nil, scriptOn: true, walk: walk))
+            #expect(again.root === one.root)
+            #expect(PreviewRead.data(again.parts, beneath: again.root, scriptOn: true, walk: walk) == Data("ONE".utf8))
+            #expect(grants.approve(req(2), in: doc, openedRoot: nil, scriptOn: true, walk: walk)?.root === two.root)
+            // A fresh grant starts over.
+            grants.revoke()
+            grants.grant([doc])
+            let three = try #require(grants.approve(req(3), in: doc, openedRoot: nil, scriptOn: true, walk: walk))
+            #expect(PreviewRead.data(three.parts, beneath: three.root, scriptOn: true, walk: walk) == Data("THREE".utf8))
+            #expect(grants.count == 2)
+        }
+    }
+
     /// How many descriptors this process has open on something inside
     /// `t` (by the kernel's path for each, against `t`'s real path): other
     /// suites running alongside open files too, but never in this test's
