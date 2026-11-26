@@ -306,7 +306,7 @@ public final class WikiVault: @unchecked Sendable {
         let to = file.standardizedFileURL.pathComponents
         let from = folder.standardizedFileURL.pathComponents
         var common = 0
-        while common < to.count - 1, common < from.count, to[common] == from[common] { common += 1 }
+        while common < to.count - 1, common < from.count, FolderTree.sameBytes(to[common], from[common]) { common += 1 }
         let parts = Array(repeating: "..", count: from.count - common) + to[common...]
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#;")

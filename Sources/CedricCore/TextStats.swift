@@ -202,13 +202,13 @@ public enum FileWordGoals {
     public static let limit = 500
 
     public static func goal(for path: String, in list: [FileWordGoal]) -> Int? {
-        list.last { $0.path == path }?.words
+        list.last { FolderTree.sameBytes($0.path, path) }?.words
     }
 
     /// `list` with `path`'s goal set (moved to the end) or, with nil or an
     /// out-of-range goal, removed.
     public static func setting(_ words: Int?, for path: String, in list: [FileWordGoal], limit: Int = limit) -> [FileWordGoal] {
-        var out = list.filter { $0.path != path }
+        var out = list.filter { !FolderTree.sameBytes($0.path, path) }
         if let w = words, WordGoal.range.contains(w) { out.append(FileWordGoal(path: path, words: w)) }
         if out.count > max(1, limit) { out.removeFirst(out.count - max(1, limit)) }
         return out

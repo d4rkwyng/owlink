@@ -122,10 +122,11 @@ public enum FolderTree {
     }
 
     /// True if expanding `url` would loop: its real path (symbolic links
-    /// resolved) is that of one of `ancestors` (the folders above it).
+    /// resolved) is that of one of `ancestors` (the folders above it), by
+    /// the bytes (`sameBytes`).
     public static func wouldLoop(_ url: URL, ancestors: [URL]) -> Bool {
         let real = url.resolvingSymlinksInPath().standardizedFileURL.path
-        return ancestors.contains { $0.resolvingSymlinksInPath().standardizedFileURL.path == real }
+        return ancestors.contains { sameBytes($0.resolvingSymlinksInPath().standardizedFileURL.path, real) }
     }
 
     /// `url`'s path relative to `root` ("" for the root itself), or nil if
@@ -283,8 +284,8 @@ public final class FolderNode {
     /// Forgets the listing (the folder reads as not loaded again).
     public func unload() { children = nil }
 
-    /// The child with this name, if loaded.
-    public func child(named name: String) -> FolderNode? { children?.first { $0.name == name } }
+    /// The child with this name (its bytes: `FolderTree.sameBytes`), if loaded.
+    public func child(named name: String) -> FolderNode? { children?.first { FolderTree.sameBytes($0.name, name) } }
 
     /// The node at `relativePath` below this one, walking only loaded folders.
     public func descendant(_ relativePath: String) -> FolderNode? {

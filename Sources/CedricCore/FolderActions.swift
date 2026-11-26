@@ -52,7 +52,9 @@ public enum FolderActions {
 
     public static func rename(_ source: URL, name: String) throws -> URL {
         let destination = try destination(in: source.deletingLastPathComponent(), name: name)
-        if source.lastPathComponent == name { return source }
+        // The same name only by its bytes: a rename between canonically
+        // equivalent spellings (the Ohm sign to Omega) is a real rename.
+        if FolderTree.sameBytes(source.lastPathComponent, name) { return source }
         guard renamex_np(source.path, destination.path, UInt32(RENAME_EXCL)) == 0 else { throw error(destination) }
         return destination
     }

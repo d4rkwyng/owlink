@@ -230,7 +230,7 @@ extension EditorWindowController {
                     guard let tab = me.value, let side = pane.value, let notes = model.value,
                           FolderSidebar.shared?.wikiNotes === notes,
                           side.request == token, notes.generation == gen, tab.wiki.backlinks === side, tab.wiki.backlinksVisible,
-                          notes.relativePath(of: tab.doc.fileURL) == rel else { return }
+                          notes.relativePath(of: tab.doc.fileURL).map({ FolderTree.sameBytes($0, rel) }) == true else { return }
                     side.set(found, message: nil, partial: partial)
                 }
             }

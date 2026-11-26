@@ -722,7 +722,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             add(String(localized: "Reveal in Finder"), #selector(revealInFinder(_:)))
             add(String(localized: "Open in Terminal Here"), #selector(openInTerminal(_:)))
             // A file below the root: its own folder as the sidebar's root.
-            if let n, !n.isDirectory, n.url.deletingLastPathComponent().standardizedFileURL.path != rootURL.standardizedFileURL.path {
+            if let n, !n.isDirectory, !FolderTree.sameBytes(n.url.deletingLastPathComponent().standardizedFileURL.path, rootURL.standardizedFileURL.path) {
                 add(String(localized: "Open Enclosing Folder"), #selector(openEnclosing(_:)))
             }
             add(String(localized: "Copy Path"), #selector(copyPath(_:)))
@@ -743,7 +743,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             if node.isDirectory {
                 selection = .folder
             } else {
-                selection = .file(parentIsRoot: node.url.deletingLastPathComponent().standardizedFileURL.path == rootURL.standardizedFileURL.path)
+                selection = .file(parentIsRoot: FolderTree.sameBytes(node.url.deletingLastPathComponent().standardizedFileURL.path, rootURL.standardizedFileURL.path))
             }
         } else {
             selection = .none
@@ -893,7 +893,9 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             try checkVisibleName(field.stringValue)
             onPrepareFileOperation?()
             let new = try FolderActions.rename(node.url, name: field.stringValue)
-            guard new.path != node.url.path else { return }
+            // By the bytes: a rename between canonically equivalent
+            // spellings moved the file, and its tabs follow it.
+            guard !FolderTree.sameBytes(new.path, node.url.path) else { return }
             revealedHiddenURLs.remove(node.url.standardizedFileURL)
             onRename?(node.url, new, node.isDirectory)
             revealAfterChange(new, in: parent)

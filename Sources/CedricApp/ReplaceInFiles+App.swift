@@ -104,7 +104,9 @@ extension AppDelegate {
     /// The open text tab showing `url` (symbolic links resolved on both sides).
     func tab(showing url: URL) -> EditorWindowController? {
         let want = url.standardizedFileURL.resolvingSymlinksInPath().path
-        return tabs.first { $0.doc.fileURL?.standardizedFileURL.resolvingSymlinksInPath().path == want }
+        // By the bytes (`FolderTree.sameBytes`): Swift text calls a
+        // canonically equivalent but byte-distinct file the same.
+        return tabs.first { $0.doc.fileURL.map { FolderTree.sameBytes($0.standardizedFileURL.resolvingSymlinksInPath().path, want) } ?? false }
     }
 
     /// The text of the files in `urls` that are open in a tab, by standardized path.

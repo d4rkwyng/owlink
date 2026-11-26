@@ -148,4 +148,41 @@ import Testing
         #expect(has(notOurs), "not six letters or digits after the marker")
         #expect(has(mark) && has(dot) && has(omega), "the files themselves are left")
     }
+
+    // MARK: Identity
+
+    /// Loop detection, the loaded child by name, a file's word goal and an
+    /// exported page's relative link tell the Ohm sign and Omega apart.
+    @Test func pathsAndNamesAreTheSameOnlyByTheirBytes() {
+        #expect(!FolderTree.wouldLoop(omega, ancestors: [ohm]))
+        #expect(FolderTree.wouldLoop(ohm, ancestors: [base, ohm]))
+        let root = FolderNode(root: base)
+        root.apply([FolderEntry(name: "\u{2126}", isDirectory: true)])
+        #expect(root.child(named: "\u{3A9}") == nil, "another spelling isn't the loaded child")
+        #expect(root.child(named: "\u{2126}") != nil)
+        let goals = [FileWordGoal(path: ohm.path, words: 300)]
+        #expect(FileWordGoals.goal(for: omega.path, in: goals) == nil)
+        #expect(FileWordGoals.goal(for: ohm.path, in: goals) == 300)
+        let set = FileWordGoals.setting(400, for: omega.path, in: goals)
+        #expect(set.count == 2, "setting the other spelling's goal leaves this one's")
+        #expect(WikiVault.relativeHref(omega.appendingPathComponent("a.png"), from: ohm) == "../%CE%A9/a.png")
+        #expect(WikiVault.relativeHref(ohm.appendingPathComponent("a.png"), from: ohm) == "a.png")
+    }
+
+    /// Renaming a file between canonically equivalent spellings renames
+    /// it (the volume here folds them into one file, and the name's bytes
+    /// change); before, Swift text called the names equal and the rename
+    /// did nothing.
+    @Test func aRenameBetweenEquivalentSpellingsRenames() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let src = t.appendingPathComponent("\u{2126}.txt")
+        try Data("x".utf8).write(to: src)
+        let moved = try FolderActions.rename(src, name: "\u{3A9}.txt")
+        #expect(Array(moved.lastPathComponent.utf8) == Array("\u{3A9}.txt".utf8))
+        let names = try fm.contentsOfDirectory(atPath: t.path).map { Array($0.utf8) }
+        #expect(names.contains(Array("\u{3A9}.txt".utf8)), "listed by the new bytes: \(names)")
+        #expect(try Data(contentsOf: moved) == Data("x".utf8))
+        #expect(try FolderActions.rename(moved, name: "\u{3A9}.txt") == moved, "the same bytes: nothing to do")
+    }
 }
