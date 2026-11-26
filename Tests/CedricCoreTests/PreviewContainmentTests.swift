@@ -61,4 +61,23 @@ import Testing
         #expect(PreviewLinkAction.previewDocument(at: s, root: doc, isText: isText) { _ in read = true; return nil } == nil)
         #expect(!read, "the sibling's file is not read")
     }
+
+    /// The enclosing-root gate: a document in a combining-mark folder
+    /// under the opened folder (or the opened folder itself) gets the
+    /// opened folder's files; a document in the opened folder's
+    /// name-plus-mark sibling does not.
+    @Test func theOpenedFolderEnclosesCombiningMarkFolders() throws {
+        let t = try makeTree(["root/img.png", "root/\u{301}d/doc.md", "root/c/\u{301}e/doc.md", "root\u{301}/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("root"), img = root.appendingPathComponent("img.png")
+        for rel in ["root/\u{301}d", "root/c/\u{301}e", "root"] {
+            let folder = t.appendingPathComponent(rel)
+            let hit = PreviewFolder.approved(for: try page(img), in: folder, openedRoot: root, scriptOn: true, siteRoots: false)
+            #expect(hit?.root == root, "\(rel)")
+            #expect(hit?.file == img.standardizedFileURL, "\(rel)")
+        }
+        let sibling = t.appendingPathComponent("root\u{301}")
+        #expect(PreviewFolder.approved(for: try page(img), in: sibling, openedRoot: root, scriptOn: true, siteRoots: false) == nil,
+                "the opened folder's name plus a mark doesn't enclose it")
+    }
 }

@@ -105,10 +105,10 @@ extension PreviewFolder {
     /// search (`PreviewGrants` does that one by descriptor).
     public static func approved(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                                 vault: WikiVault? = nil, siteRoots: Bool = true) -> (root: URL, file: URL)? {
+        // `root` is `folder` or holds it, by bytes (`FolderTree.relativePath`):
+        // a text prefix missed a combining-mark folder under it (Astra batch 9b).
         func containsFolder(_ root: URL) -> Bool {
-            let base = resolved(root).path
-            let path = resolved(folder).path
-            return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+            FolderTree.relativePath(of: resolved(folder), in: resolved(root)) != nil
         }
         if let f = file(for: url, in: folder, scriptOn: scriptOn), FileManager.default.fileExists(atPath: f.path) { return (folder, f) }
         if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
