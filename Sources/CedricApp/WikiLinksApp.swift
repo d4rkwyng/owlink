@@ -672,6 +672,16 @@ extension EditorWindowController {
         // in the folder and the link names no folder, else from the top.
         let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL)?.split(separator: "/").dropLast().map(String.init) ?? [])
         let components = besideDoc + parts.dropLast() + [file]
+        // Each one name by the bytes the kernel gets, before a path is built,
+        // shown or probed: a slash before a combining mark is one Swift
+        // character, so the text split above leaves it inside a component
+        // (Astra batch 6). Refused as a bad name, as createFile would.
+        guard components.allSatisfy(Beneath.isName) else {
+            let error = CocoaError(.fileWriteInvalidFileName, userInfo: [NSFilePathErrorKey: target])
+            if let report = WikiTabState.createFailed { report(error); return }
+            NSAlert(error: error).runModal()
+            return
+        }
         let folder = components.dropLast().reduce(notes.root) { $0.appendingPathComponent($1, isDirectory: true) }
         let shown = components.joined(separator: "/")
         let ok: Bool
