@@ -151,7 +151,9 @@ extension EditorWindowController {
         guard textView.isEditable else { NSSound.beep(); return }
         guard let docURL = doc.fileURL else { askToSaveForImages(files, bitmap: bitmap, at: range); return }
         let dir = docURL.deletingLastPathComponent()
-        var paths: [String] = []
+        // A link to a file already in the folder, or a name published in "images".
+        enum Piece { case inPlace(String), copied(String) }
+        var pieces: [Piece] = []
         // "images" is opened once per batch, relative to the pinned document
         // folder, and every copy is staged and published through that
         // descriptor (ImageStore): nothing is written outside the folder,
@@ -171,7 +173,11 @@ extension EditorWindowController {
         }
         do {
             for f in files {
-                if let rel = MarkdownPaste.relativePath(of: f, from: dir) { paths.append(rel); continue }
+                // Only a regular file is linked in place (not a folder named x.png).
+                if let rel = MarkdownPaste.relativePath(of: f, from: dir) {
+                    guard SafePaths.isRegularFile(f) else { NSSound.beep(); continue }
+                    pieces.append(.inPlace(rel)); continue
+                }
                 // Only a regular file's bytes are copied (not a folder named x.png, not
                 // a pipe; a symbolic link's target is read, the link isn't copied).
                 let name: String
@@ -180,7 +186,7 @@ extension EditorWindowController {
                 } catch ImageStore.Failure.notRegularFile {
                     NSSound.beep(); continue
                 }
-                paths.append(MarkdownPaste.imagesPath(name))
+                pieces.append(.copied(name))
             }
             if let bitmap {
                 guard let png = NSBitmapImageRep(data: bitmap)?.representation(using: .png, properties: [:]) else { NSSound.beep(); return }
@@ -188,13 +194,29 @@ extension EditorWindowController {
                 f.locale = Locale(identifier: "en_US_POSIX")
                 f.dateFormat = "yyyyMMdd-HHmmss"
                 let name = try store().write(png, name: "image-\(f.string(from: Date())).png")
-                paths.append(MarkdownPaste.imagesPath(name))
+                pieces.append(.copied(name))
             }
         } catch {
             showError(error)
-            if paths.isEmpty { return }
+            if pieces.isEmpty { return }
         }
-        guard !paths.isEmpty else { return }
+        guard !pieces.isEmpty else { return }
+        // Just before inserting: every copied image's link must still lead to
+        // the file written (ImageStore.link). If the folder or "images" was
+        // swapped, nothing is inserted and the user is told.
+        let paths: [String]
+        do {
+            paths = try pieces.map { piece in
+                switch piece {
+                case .inPlace(let rel): return rel
+                case .copied(let name): return try store().link(for: name)
+                }
+            }
+        } catch {
+            showError(NSError(domain: "Cedric", code: 4, userInfo: [NSLocalizedDescriptionKey:
+                String(localized: "The “images” folder next to this document changed while the images were copied, so no links were inserted.")]))
+            return
+        }
         let len = (textView.string as NSString).length
         let r = NSRange(location: min(range.location, len), length: min(range.length, len - min(range.location, len)))
         let s = MarkdownPaste.imageLinks(paths)

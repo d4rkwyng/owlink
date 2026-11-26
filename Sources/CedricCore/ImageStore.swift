@@ -18,30 +18,58 @@ import Darwin
 ///   rename (`renameatx_np` with `RENAME_EXCL`): a name already taken is
 ///   never overwritten and the next free suffix is tried; a failure
 ///   removes the staging file. A partial copy never has the final name.
+/// - The document's folder stays open until the links go in. `link(for:)`,
+///   called just before the Markdown is inserted, checks that the
+///   document's folder path is still that folder, that "images" looked up
+///   in it again (by the same rules) is still the pinned folder, and that
+///   `images/<name>` there is the very file published (device and inode).
+///   Otherwise it throws `Failure.destinationChanged` and nothing is
+///   inserted: a link that would show another file, or none, never goes in.
+/// - `name` is checked at this boundary: one name, not empty, not `.` or
+///   `..`, no `/` or NUL (`Failure.badName`), before anything is staged.
 public final class ImageStore {
     public enum Failure: Error, Equatable {
         /// "images" resolves outside the document's folder.
         case outside
         /// The source isn't a regular file (a folder named x.png, a pipe).
         case notRegularFile
+        /// The wanted name isn't a single file name.
+        case badName
+        /// The document's folder or its "images" changed after the copy:
+        /// `images/<name>` no longer leads to the file that was written.
+        case destinationChanged
     }
 
     /// The pinned "images" folder.
     public let fd: Int32
+    /// The pinned document folder, and the path the links are relative to.
+    private let root: Int32
+    private let folder: URL
+    /// Each published name and the file it was given.
+    private var published: [String: Beneath.FileID] = [:]
     /// Called after "images" is opened and checked (tests swap folders here).
     nonisolated(unsafe) public static var afterOpen: (() -> Void)?
 
-    private init(fd: Int32) { self.fd = fd }
-    deinit { close(fd) }
+    private init(fd: Int32, root: Int32, folder: URL) { self.fd = fd; self.root = root; self.folder = folder }
+    deinit { close(fd); close(root) }
 
     /// Opens (making it if needed) "images" in `folder`; throws
     /// `Failure.outside` when it leads out of `folder`.
     public static func open(in folder: URL) throws -> ImageStore {
         let dfd = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard dfd >= 0 else { throw posix(folder.path) }
-        defer { close(dfd) }
+        let ifd: Int32
+        do { ifd = try openImages(in: dfd, folder: folder, create: true) } catch { close(dfd); throw error }
+        let store = ImageStore(fd: ifd, root: dfd, folder: folder)
+        afterOpen?()
+        return store
+    }
+
+    /// "images" in the folder `dfd` has open, made if `create` and missing:
+    /// a folder, or a symbolic link to a folder inside `dfd`'s.
+    static func openImages(in dfd: Int32, folder: URL, create: Bool) throws -> Int32 {
         var ifd = openat(dfd, "images", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        if ifd < 0, errno == ENOENT {
+        if ifd < 0, errno == ENOENT, create {
             guard mkdirat(dfd, "images", 0o777) == 0 || errno == EEXIST else { throw posix(folder.appendingPathComponent("images").path) }
             ifd = openat(dfd, "images", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         }
@@ -60,9 +88,23 @@ public final class ImageStore {
             }
         }
         guard ifd >= 0 else { throw posix(folder.appendingPathComponent("images").path) }
-        let store = ImageStore(fd: ifd)
-        afterOpen?()
-        return store
+        return ifd
+    }
+
+    /// The link to insert for `name` (published by this store):
+    /// "images/<name>", encoded, once it is checked to lead to the file
+    /// written. Throws `Failure.destinationChanged` when it doesn't.
+    public func link(for name: String) throws -> String {
+        guard let want = published[name],
+              // The document's folder, looked up by its path again, is the pinned one.
+              Beneath.FileID(path: folder.path, followLast: true) == Beneath.FileID(fd: root),
+              // "images" in it, by the same rules as at open, is the pinned folder.
+              let again = try? Self.openImages(in: root, folder: folder, create: false)
+        else { throw Failure.destinationChanged }
+        defer { close(again) }
+        guard Beneath.FileID(fd: again) == Beneath.FileID(fd: fd),
+              Beneath.FileID(at: again, name) == want else { throw Failure.destinationChanged }
+        return MarkdownPaste.imagesPath(name)
     }
 
     /// The folder a descriptor has open (symbolic links resolved).
@@ -103,6 +145,7 @@ public final class ImageStore {
     }
 
     private func stage(_ name: String, fill: (Int32) -> Bool) throws -> String {
+        guard Beneath.isName(name) else { throw Failure.badName }
         let tmp = ".cedric-image-\(UUID().uuidString).tmp"
         let dst = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
         guard dst >= 0 else { throw Self.posix(tmp) }
@@ -111,9 +154,12 @@ public final class ImageStore {
         let filled = fill(dst)
         let err = errno
         guard filled, fsync(dst) == 0 else { close(dst); throw Self.posix(name, filled ? errno : err) }
-        guard close(dst) == 0 else { throw Self.posix(name) }
+        // The staged file's identity: a rename keeps it, so it names what was published.
+        let id = Beneath.FileID(fd: dst)
+        guard close(dst) == 0, let id else { throw Self.posix(name) }
         let out = try publish(tmp, as: name)
         published = true
+        self.published[out] = id
         return out
     }
 

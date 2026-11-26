@@ -343,6 +343,38 @@ extension DevChecks {
                 expect(shot != nil && tab.text.hasSuffix("![](images/\(shot ?? "?"))"), "a pasted bitmap is saved as images/image-….png and linked", "\(names) \(tab.text)")
             },
             sync {
+                // "images" swapped for a link out after it was opened: the copy lands in the
+                // folder that was checked, and no link goes in (it would lead elsewhere).
+                let fm = FileManager.default
+                let images = notes.appendingPathComponent("images"), was = notes.appendingPathComponent("was-images")
+                let away = dir.appendingPathComponent("mdpaste-away")
+                try? fm.createDirectory(at: away, withIntermediateDirectories: true)
+                ImageStore.afterOpen = {
+                    try? fm.moveItem(at: images, to: was)
+                    try? fm.createSymbolicLink(at: images, withDestinationURL: away)
+                }
+                let before = tab.text
+                general.clearContents()
+                general.writeObjects([pic as NSURL])
+                key("v", [.command])
+                ImageStore.afterOpen = nil
+                expect(tab.text == before, "a swapped images folder: no link is inserted", tab.text)
+                expect(((try? fm.contentsOfDirectory(atPath: away.path)) ?? ["?"]).isEmpty, "nothing is written where the swapped link leads")
+                expect(fm.fileExists(atPath: was.appendingPathComponent("my pic-2.png").path), "the copy is in the folder that was checked")
+                let sheet = tab.window?.attachedSheet
+                expect(sheet != nil, "and the user is told")
+                if let sheet { tab.window?.endSheet(sheet) }
+                try? fm.removeItem(at: images)
+                try? fm.moveItem(at: was, to: images)
+                // A folder named like an image, inside the document's folder: not linked.
+                let folderPNG = notes.appendingPathComponent("shots.png")
+                try? fm.createDirectory(at: folderPNG, withIntermediateDirectories: true)
+                general.clearContents()
+                general.writeObjects([folderPNG as NSURL])
+                key("v", [.command])
+                expect(!tab.text.contains("shots.png"), "a folder named x.png in the folder isn't inserted as an image", tab.text)
+            },
+            sync {
                 // Drops: an image inside the document's folder is linked in place; a text file still opens.
                 tv.setSelectedRange(NSRange(location: 0, length: 0))
                 let before = app.tabs.count
