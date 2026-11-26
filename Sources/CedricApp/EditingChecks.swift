@@ -741,8 +741,24 @@ extension DevChecks {
             expect(app.store.readBuffer(id)?.hasPrefix(String(repeating: "x", count: 9)) == true, "each close wrote the edit")
             report("close (⌘W, edited 200 KB file)", closes)
             report("reopen (⇧⌘T)", reopens)
-            // Quit with timed saves queued behind each other (typing).
+            // Timed saves queued behind each other: one commit, not four.
+            func generation() -> Int? {
+                let url = app.store.directory.appendingPathComponent("session.json")
+                return ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any])?["generation"] as? Int
+            }
             guard let t = app.tabs.first(where: { $0.doc.id == id }) else { return }
+            focus(t)
+            t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            let before = generation()
+            let gate = DispatchSemaphore(value: 0)
+            app.sessionQueue.async { gate.wait() }
+            for _ in 0..<4 { type("c"); app.saveSession(sync: false) }
+            gate.signal()
+            app.sessionQueue.sync {}
+            let after = generation()
+            expect(before != nil && after == before.map { $0 + 1 }, "four queued timed saves: one commit", "\(before ?? -1) → \(after ?? -1)")
+            expect(app.store.readBuffer(id)?.hasPrefix("cccc") == true, "with the latest text", String(app.store.readBuffer(id)?.prefix(12) ?? "-"))
+            // Quit with timed saves queued behind each other (typing).
             focus(t)
             t.textView.setSelectedRange(NSRange(location: 0, length: 0))
             for _ in 0..<4 { type("q"); app.saveSession(sync: false) }

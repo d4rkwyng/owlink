@@ -936,6 +936,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let sessionQueue = DispatchQueue(label: "cedric.session-save", qos: .utility)
     /// Numbers each buffer write a snapshot queues (EditorDocument.sessionWritingSequence).
     private var sessionWriteSequence = 0
+    /// Numbers each snapshot as it is queued, read on `sessionQueue`: a
+    /// timed snapshot with a newer one behind it skips its commit.
+    private let snapshotSerial = SnapshotSerial()
+
+    final class SnapshotSerial: @unchecked Sendable {
+        private let lock = NSLock()
+        private var latest = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; latest += 1; return latest }
+        func isLatest(_ n: Int) -> Bool { lock.lock(); defer { lock.unlock() }; return n == latest }
+    }
 
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
@@ -1047,7 +1057,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                               wordGoals: fileWordGoals.isEmpty ? nil : fileWordGoals)
         let store = self.store
         let toWrite = buffers, keeping = keep, needed = needs, lateClosed = memoryOnly
-        let write: @Sendable () -> (ok: Set<UUID>, failures: [String], missing: [UUID]) = {
+        // A timed snapshot superseded by the time it runs (a newer one is
+        // queued behind it, timed or not) writes its buffers, which the
+        // newer one may count on, but not its commit: the newer one
+        // commits a later state with the same checks, so the main thread
+        // (quit, a close) waits for one commit, not one per snapshot.
+        let serial = snapshotSerial, mine = snapshotSerial.next(), mayCoalesce = !sync
+        let write: @Sendable () -> (ok: Set<UUID>, failures: [String], missing: [UUID], coalesced: Bool) = {
             var ok = Set<UUID>()
             var failures: [String] = []
             var missing: [UUID] = []
@@ -1069,6 +1085,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     failures.append(error.localizedDescription)
                 }
             }
+            if mayCoalesce, !serial.isLatest(mine) { return (ok, [], [], true) }
             do {
                 // Commits (and clears the journal) only with every buffer it
                 // names on disk, this snapshot's writes and earlier ones it
@@ -1081,7 +1098,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 FileHandle.standardError.write(Data("session: save failed: \(error)\n".utf8))
                 failures.append(error.localizedDescription)
             }
-            return (ok, failures, missing)
+            return (ok, failures, missing, false)
         }
         // Each written tab's count, once its write is done: advanced if it
         // worked (never back: an older async write can finish after a
@@ -1143,6 +1160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         finished(r.ok, r.missing)
+                        // Coalesced: the newer snapshot's commit reports.
+                        guard !r.coalesced else { return }
                         self.noteSessionSave(failure: r.failures.first)
                         if !r.failures.isEmpty { self.retrySessionSaveLater() }
                     }
