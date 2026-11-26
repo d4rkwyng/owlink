@@ -34,22 +34,117 @@
 #      the app stays open.
 #  11. A buffer that can't be read at launch: kept, said, never pruned.
 #
-# Safety: before the first case the binary must report "dev hooks: on"
-# (a release build ignores CEDRIC_SESSION_DIR and would use the real
-# session), asked with restore and session saving off; every session
-# directory handed to the app must be inside this script's temp folder.
-# Only processes this script started are killed, and a reaped one is no
-# longer tracked. Relaunches pass -ApplePersistenceIgnoreState YES. Needs
-# a GUI session (works with the screen locked).
+# Safety: the temp root and every session directory are compared by
+# physical path (symbolic links resolved): the root must be this user's
+# own 0700 folder, neither in nor around the real
+# ~/Library/Application Support/Cedric/Session. Each session directory is
+# made by this script directly in that verified root (one plain name, no
+# link), and checked again before every launch and dump. Then, before the
+# first case, the binary must report "dev hooks: on" (a release build
+# ignores CEDRIC_SESSION_DIR and would use the real session), asked with
+# restore and session saving off. Only processes this script started are
+# killed, and a reaped one is no longer tracked. Relaunches pass
+# -ApplePersistenceIgnoreState YES. Needs a GUI session (works with the
+# screen locked).
 #
 #   Scripts/crash-check.sh [APP]     default "dist/Owlink.app"
+#   Scripts/crash-check.sh --self-test-paths
+#       checks the directory guards against symbolic-link aliases in a
+#       scratch folder (a decoy stands in for the real session); launches
+#       nothing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+physical() { python3 -I -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"; }
+# in_or_at A B: physical path A is B or inside it.
+in_or_at() { case "$1" in "$2"|"$2"/*) return 0 ;; esac; return 1; }
+REAL_SESSION=$(physical "$HOME/Library/Application Support/Cedric/Session")
+# verify_root DIR: prints DIR's physical path if it is a safe temp root.
+verify_root() {
+    local p; p=$(physical "$1")
+    [ -d "$p" ] && [ ! -L "$p" ] || { echo "crash-check: REFUSED: temp root $1 is not a folder" >&2; return 2; }
+    [ "$(stat -f %u "$p")" = "$(id -u)" ] && [ "$(stat -f %Lp "$p")" = 700 ] \
+        || { echo "crash-check: REFUSED: temp root $p is not this user's own 0700 folder" >&2; return 2; }
+    if in_or_at "$p" "$REAL_SESSION" || in_or_at "$REAL_SESSION" "$p" || [ "$p" = / ]; then
+        echo "crash-check: REFUSED: temp root $1 (physically $p) is in or around the real session $REAL_SESSION" >&2; return 2
+    fi
+    echo "$p"
+}
+# check_child DIR: DIR is an existing session folder this script made: one
+# plain name directly in $W, a real folder (not a link), physically in the
+# verified root $WP ($W as mktemp gave it, /var/... for /private/var/...,
+# is kept for the files: the app records the paths it was handed).
+check_child() {
+    local name=${1#"$W"/}
+    case "$1" in "$W"/?*) ;; *) echo "crash-check: REFUSED: session dir $1 is not inside $W" >&2; return 2 ;; esac
+    case "$name" in */*|.|..|*[!A-Za-z0-9._-]*) echo "crash-check: REFUSED: session dir $1 is not one plain name in $W" >&2; return 2 ;; esac
+    [ ! -L "$1" ] && [ -d "$1" ] || { echo "crash-check: REFUSED: session dir $1 is a link or not a folder" >&2; return 2; }
+    local p; p=$(physical "$1")
+    [ "$p" = "$WP/$name" ] || { echo "crash-check: REFUSED: session dir $1 is physically $p, not in $WP" >&2; return 2; }
+    ! in_or_at "$p" "$REAL_SESSION" || { echo "crash-check: REFUSED: session dir $1 is the real session" >&2; return 2; }
+}
+# child NAME: makes the session folder $W/NAME (it must not exist yet), checks it, prints it.
+child() {
+    local d="$W/$1"
+    [ ! -e "$d" ] && [ ! -L "$d" ] || { echo "crash-check: REFUSED: $d already exists" >&2; return 2; }
+    case "$1" in */*|.|..|*[!A-Za-z0-9._-]*) echo "crash-check: REFUSED: '$1' is not a plain name" >&2; return 2 ;; esac
+    mkdir -m 700 "$d" && check_child "$d" && echo "$d"
+}
+
+if [ "${1:-}" = "--self-test-paths" ]; then
+    # A scratch folder; a decoy plays the real session. Nothing is launched.
+    X=$(physical "$(mktemp -d)")
+    trap 'rm -rf "$X"' EXIT
+    REAL_SESSION="$X/decoy-session"; mkdir -m 700 "$REAL_SESSION" "$REAL_SESSION/inner"
+    echo "keep me" > "$REAL_SESSION/session.json"
+    pass=0; failed=0
+    t() { if [ "$1" = "$2" ]; then pass=$((pass + 1)); else echo "paths self-test: FAIL $3 (got $1, want $2)" >&2; failed=1; fi; }
+    rc() { "$@" >/dev/null 2>&1 && echo 0 || echo $?; }
+    mkdir -m 700 "$X/root"
+    ln -s "$REAL_SESSION" "$X/alias-to-session"; ln -s "$REAL_SESSION/inner" "$X/alias-inside-session"
+    ln -s "$X" "$REAL_SESSION/../alias-around"
+    t "$(rc verify_root "$X/root")" 0 "a plain 0700 root is accepted"
+    t "$(rc verify_root "$X/alias-to-session")" 2 "a root that is a link to the (decoy) real session"
+    t "$(rc verify_root "$X/alias-inside-session")" 2 "a root that is a link into the (decoy) real session"
+    t "$(rc verify_root "$X")" 2 "a root around the (decoy) real session"
+    t "$(rc verify_root "$X/alias-around")" 2 "a link to a root around the (decoy) real session"
+    W="$X/root"; WP=$(verify_root "$W")
+    t "$(rc child s1)" 0 "a new plain child"
+    t "$(rc check_child "$W/s1")" 0 "the child checks"
+    t "$(rc child s1)" 2 "a child that exists already"
+    ln -s "$REAL_SESSION" "$W/sl"
+    t "$(rc check_child "$W/sl")" 2 "a child that is a link to the (decoy) real session"
+    t "$(rc child sl)" 2 "making a child where a link is"
+    mkdir -m 700 "$W/real2"; ln -s "$W/real2" "$W/sl2"
+    t "$(rc check_child "$W/sl2")" 2 "a child that is a link within the root"
+    t "$(rc check_child "$W/../alias-to-session")" 2 "an escaping child (..)"
+    t "$(rc check_child "$W/a/b")" 2 "a nested child"
+    t "$(rc child "../escape")" 2 "making an escaping child"
+    t "$(rc check_child "$X/root-other")" 2 "a sibling of the root"
+    touch "$W/file"
+    t "$(rc check_child "$W/file")" 2 "a child that is a file"
+    # A root reached through an alias: its children are compared physically,
+    # with the root verified, not the alias.
+    ln -s "$W" "$X/root-alias"
+    W0=$W; W="$X/root-alias"
+    t "$(rc check_child "$X/root-alias/s1")" 0 "a child through an alias of the verified root"
+    rm "$X/root-alias"; ln -s "$REAL_SESSION" "$X/root-alias"; mkdir -m 700 "$REAL_SESSION/s1"
+    t "$(rc check_child "$X/root-alias/s1")" 2 "the alias turned to the (decoy) real session after the root was verified"
+    rmdir "$REAL_SESSION/s1"
+    W=$W0
+    t "$(ls -A "$REAL_SESSION" | tr '\n' ' ')" "inner session.json " "the decoy is untouched"
+    t "$(cat "$REAL_SESSION/session.json")" "keep me" "the decoy's file is untouched"
+    rm -f "$REAL_SESSION/../alias-around"
+    [ $failed = 0 ] && echo "paths self-test: all OK ($pass checks)" || echo "paths self-test: FAILED ($pass OK)" >&2
+    exit $failed
+fi
+
 APP="${1:-dist/Owlink.app}"
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
-W=$(mktemp -d)
 PIDS=()
+W=$(mktemp -d)
+# Verified before anything else: the preflight's own folder goes in it.
+WP=$(verify_root "$W") || { rmdir "$W" 2>/dev/null || true; exit 2; }
 # A tracked pid is killed only while it is still this script's child
 # running the app binary (a reaped pid can be reused by anything).
 kill_ours() { # PID
@@ -70,16 +165,11 @@ untrack() { # PID: reaped, no longer ours to kill
 }
 unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR \
     CEDRIC_TEST_TYPE_BURST CEDRIC_TEST_HOLD_SESSION_COMMIT CEDRIC_TEST_SESSION_WRITE_FAIL CEDRIC_TEST_QUIT_SAVE_CHOICE
-REAL_SESSION="$HOME/Library/Application Support/Cedric/Session"
-# A session directory this script may hand the app: inside $W, never the real one.
-safe_dir() {
-    case "$1" in "$W"/?*) ;; *) return 1 ;; esac
-    case "$1" in "$REAL_SESSION"|"$REAL_SESSION"/*) return 1 ;; esac
-}
 # Preflight, before anything destructive: a check build ("dev hooks: on"),
 # asked with restore and session saving off, so even a release build
 # touches no session here. CEDRIC_LLAMA_CHECK prints the hook status first.
-pre=$(env CEDRIC_SESSION_DIR="$W/preflight" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_LLAMA_CHECK=1 \
+P=$(child preflight)
+pre=$(env CEDRIC_SESSION_DIR="$P" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_LLAMA_CHECK=1 \
     perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
 if ! printf '%s\n' "$pre" | grep -qx 'dev hooks: on'; then
     echo "crash-check: REFUSED: $APP is not a check build (no 'dev hooks: on'; got '$(printf '%s' "$pre" | head -1)'). It would ignore CEDRIC_SESSION_DIR and use the real session. Build one with Scripts/bundle-app.sh." >&2
@@ -98,7 +188,7 @@ len16() { python3 -I -c 'import sys; print(len(sys.argv[1].encode("utf-16-le")) 
 # launch DIR OUT [VAR=value ...]: start the app on session DIR, stdout to OUT; sets $pid.
 launch() {
     local dir=$1 out=$2; shift 2
-    safe_dir "$dir" || { echo "crash-check: REFUSED: session dir $dir is not inside $W" >&2; exit 2; }
+    check_child "$dir" || exit 2
     env CEDRIC_SESSION_DIR="$dir" "$@" "$BIN" -ApplePersistenceIgnoreState YES > "$out" 2>/dev/null &
     pid=$!
     PIDS+=("$pid")
@@ -111,7 +201,7 @@ quit_app() {
 }
 # The restored state, printed by a relaunch that saves nothing.
 dump() { # DIR
-    safe_dir "$1" || { echo "crash-check: REFUSED: session dir $1 is not inside $W" >&2; exit 2; }
+    check_child "$1" || exit 2
     env CEDRIC_SESSION_DIR="$1" CEDRIC_SESSION_DUMP=1 CEDRIC_NO_SESSION_SAVE=1 \
         perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES > "$W/dump.txt" 2>/dev/null || true
     grep -E '^(exact|notice):' "$W/dump.txt" | sed 's/^/    /' || true
@@ -173,7 +263,7 @@ expect_disk() { # DESC FILE SHA
 # 1a. Untitled tab, kill -9 at once: as soon as the text is on disk, and
 #     within 1 s of the typing (the 1.5 s autosave interval hasn't passed).
 T1='typed into a new tab, then killed ✓'
-S=$W/s1a
+S=$(child s1a)
 launch "$S" "$W/out1a" CEDRIC_TEST_TYPE_UNTITLED="$T1"
 t0=$(typed_at "$W/out1a")
 end=$(python3 -I -c "print($t0 + 1.0)")
@@ -191,7 +281,7 @@ expect_tab "1a: untitled tab back unsaved, exact text, caret at the end" - "$T1"
 expect_count "1a" 1
 
 # 1b. The same, killed after the autosave interval.
-S=$W/s1b
+S=$(child s1b)
 launch "$S" "$W/out1b" CEDRIC_TEST_TYPE_UNTITLED="$T1"
 typed_at "$W/out1b" >/dev/null
 sleep 2.5
@@ -204,7 +294,7 @@ expect_count "1b" 1
 printf 'first line\nsecond line\n' > "$W/notes.txt"
 orig=$(sha_f "$W/notes.txt")
 T2=$(printf 'first line\nsecond line\n edited, not saved')
-S=$W/s2
+S=$(child s2)
 launch "$S" "$W/out2" CEDRIC_OPEN="$W/notes.txt" CEDRIC_TEST_TYPE=" edited, not saved"
 typed_at "$W/out2" >/dev/null
 wait_holds "$S" "$W/notes.txt" "$(sha_s "$T2")" 10 || bad "2: the edit never reached the session store"
@@ -222,7 +312,7 @@ open(sys.argv[1], "w").write("".join(row % i for i in range(16_000_000 // len(ro
 orig=$(sha_f "$W/big.txt")
 T3sha=$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read() + b" saved half way").hexdigest())' "$W/big.txt")
 T3len=$(python3 -I -c 'import sys; print(len(open(sys.argv[1]).read()) + len(" saved half way"))' "$W/big.txt")
-S=$W/s3
+S=$(child s3)
 launch "$S" "$W/out3" CEDRIC_OPEN="$W/big.txt" CEDRIC_TEST_TYPE=" saved half way" CEDRIC_TEST_SAVE_PAUSE="$W/paused" CEDRIC_TEST_SAVE_PAUSE_AFTER=4
 typed_at "$W/out3" >/dev/null
 wait_holds "$S" "$W/big.txt" "$T3sha" 15 || bad "3: the edit never reached the session store"
@@ -264,7 +354,7 @@ printf 'crash me\n' > "$W/crash.txt"
 orig=$(sha_f "$W/crash.txt")
 T4f=$(printf 'crash me\n edited before the crash')
 T4u='untitled before the crash'
-S=$W/s4
+S=$(child s4)
 launch "$S" "$W/out4" CEDRIC_OPEN="$W/crash.txt" CEDRIC_TEST_TYPE=" edited before the crash" CEDRIC_TEST_TYPE_UNTITLED="$T4u" CEDRIC_TEST_ABORT_AFTER=1
 code=0; { wait $pid; } 2>/dev/null || code=$?
 untrack $pid
@@ -283,11 +373,11 @@ line = ("0123456789abcdefghij" * 2000)
 open(sys.argv[1], "w").write("".join(line + "\n" for _ in range(750)))' "$W/huge.log"
 hsha=$(sha_f "$W/huge.log"); hlen=$(stat -f %z "$W/huge.log")
 printf 'small file\n' > "$W/small.txt"
-S=$W/s5
+S=$(child s5)
 python3 -I - "$W" "$S" <<'PY'
 import json, os, sys, uuid
 w, d = sys.argv[1], sys.argv[2]
-os.makedirs(d)
+os.makedirs(d, exist_ok=True)
 def tab(**k):
     t = {"id": str(uuid.uuid4()).upper(), "hasBuffer": False, "encoding": "utf8", "lineEnding": "lf",
          "selectionLocation": 0, "selectionLength": 0, "topLine": 0}
@@ -344,7 +434,7 @@ printf 'will be deleted\n' > "$W/gone.txt"
 printf 'will be renamed\n' > "$W/moved.txt"
 T6g=$(printf 'will be deleted\n edit to a deleted file')
 T6m=$(printf 'will be renamed\n edit to a renamed file')
-S=$W/s6
+S=$(child s6)
 launch "$S" "$W/out6a" CEDRIC_OPEN="$W/gone.txt" CEDRIC_TEST_TYPE=" edit to a deleted file"
 wait_holds "$S" "$W/gone.txt" "$(sha_s "$T6g")" 10 || bad "6: the first edit never reached the session store"
 kill9 $pid
@@ -371,7 +461,7 @@ printf 'seven\n' > "$W/seven.txt"
 orig=$(sha_f "$W/seven.txt")
 T7f=$(printf 'seven\n edited before the store broke')
 T7u='untitled before the store broke'
-S=$W/s7
+S=$(child s7)
 launch "$S" "$W/out7" CEDRIC_OPEN="$W/seven.txt" CEDRIC_TEST_TYPE=" edited before the store broke" CEDRIC_TEST_TYPE_UNTITLED="$T7u"
 wait_holds "$S" "$W/seven.txt" "$(sha_s "$T7f")" 10 && wait_holds "$S" - "$(sha_s "$T7u")" 10 || bad "7: the edits never reached the session store"
 kill9 $pid
@@ -403,7 +493,7 @@ expect_count "7 (after a save)" 2
 #    that names it, with an older, valid session in place.
 T8a='in the committed session'
 T8b='a new tab: its buffer written, the session naming it not yet'
-S=$W/s8
+S=$(child s8)
 launch "$S" "$W/out8a" CEDRIC_TEST_TYPE_UNTITLED="$T8a"
 wait_holds "$S" - "$(sha_s "$T8a")" 10 || bad "8: the first tab never reached the session store"
 kill9 $pid
@@ -441,7 +531,7 @@ expect_count "8 (after a save)" 2
 #    the typing). Typing after the last save may be lost, the first
 #    changes never.
 burst_case() { # NAME DELAY KILL_AFTER
-    S=$W/s$1
+    S=$(child s$1)
     launch "$S" "$W/out$1" CEDRIC_TEST_TYPE_BURST="two quick| changes" CEDRIC_TEST_TYPE_BURST_DELAY="$2"
     t0=$(typed_at "$W/out$1")
     sleep "$3"
@@ -468,7 +558,7 @@ burst_case 9b 0.3 2.5
 
 # 10. Quit while every session write fails: the app must stay open.
 T10='typed while the disk is full'
-S=$W/s10
+S=$(child s10)
 launch "$S" "$W/out10" CEDRIC_TEST_TYPE_UNTITLED="$T10" CEDRIC_TEST_SESSION_WRITE_FAIL=1 CEDRIC_TEST_QUIT_SAVE_CHOICE=keep
 typed_at "$W/out10" >/dev/null
 sleep 1
@@ -480,11 +570,11 @@ grep -q '^quit: session save failed, choice=keep' "$W/out10" && ok "10: the user
 kill9 $pid
 
 # 11. A buffer that can't be read at launch: kept, said, never pruned.
-S=$W/s11
+S=$(child s11)
 U11=$(python3 -I - "$S" <<'PY'
 import json, os, sys, uuid
 d = sys.argv[1]
-os.makedirs(d)
+os.makedirs(d, exist_ok=True)
 i = str(uuid.uuid4()).upper()
 open(os.path.join(d, i + ".txt"), "w").write("text that can't be read for now")
 json.dump({"version": 1, "untitledCounter": 0, "windows": [{"tabs": [{"id": i, "untitledName": "Untitled", "hasBuffer": True,
