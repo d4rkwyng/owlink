@@ -7,7 +7,8 @@ import CedricCore
 /// only the visible text is checked, and AppKit's first pass over that
 /// same text is skipped, once. Every later pass is AppKit's own: text
 /// scrolled to is checked when it is shown, typing is checked, and an edit
-/// after the first-frame check means AppKit's first pass runs. A data file
+/// after the first-frame check means AppKit's first pass runs. Ignore,
+/// edits and compositions: SpellOpenDictionaryCheck.swift. A data file
 /// (JSON) gets no check at all.
 extension DevChecks {
     static func spellOpenCheck(_ app: AppDelegate) {
@@ -140,6 +141,11 @@ extension DevChecks {
                 expect(words(e) == ["Thrid", "tpyo"], "both misspellings marked", "\(words(e))")
                 edited?.doc.markSaved()
                 edited?.window?.close()
+            },
+        ]
+        steps += spellOpenDictionarySteps(app) { v, word in words(v).contains(word) }
+        steps += [
+            sync {
                 json = app.open(write("data.json", "{\"tpyo\": \"wrnog\"}\n"))
                 sized(json)
             },

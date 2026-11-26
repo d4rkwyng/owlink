@@ -701,6 +701,9 @@ extension EditorPalette {
 extension EditorTextView {
     /// Right-click on a grammar underline: the suggestion first, then the usual menu.
     override func menu(for event: NSEvent) -> NSMenu? {
+        // Its Learn, Ignore and Unlearn Spelling change the dictionary:
+        // AppKit's next spelling pass is its own (SpellCheckCoverage).
+        spellCoverage.clear()
         let menu = super.menu(for: event)
         guard let g = grammar, !grammarRanges.isEmpty else { return menu }
         let p = convert(event.locationInWindow, from: nil)
