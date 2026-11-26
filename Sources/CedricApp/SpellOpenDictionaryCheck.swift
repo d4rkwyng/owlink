@@ -125,8 +125,13 @@ extension DevChecks {
             wait("the first-frame marks (learned directly)", 4) { early(learnTab, learnedWord) },
             sync {
                 inTheInterval(learnTab, "learned directly")
-                // The spelling panel's Learn, or Learn in another app: nothing here is told.
+                guard let v = learnTab?.primaryTextView else { return }
+                // The spelling panel's Learn: the spell checker's notice clears the
+                // record whether or not Owlink is the active app (inactive, AppKit's
+                // pass would ask about the marked words anyway).
                 NSSpellChecker.shared.learnWord(learnedWord)
+                expect(v.spellCoverage.isEmpty, "learned directly: the spell checker's notice clears the record",
+                       "app active=\(NSApp.isActive) asksLearned=\(v.spellCoverage.asksLearned)")
             },
             wait("AppKit's pass after the word was learned", 4) { learnTab.map { undrawn($0.primaryTextView, learnedWord) } ?? true },
             pause(1.5),

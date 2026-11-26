@@ -18,13 +18,19 @@ import Foundation
 /// language change, Check Document Now) is AppKit's own. Nor is a request
 /// skipped when it asks for anything the early check can't vouch for:
 /// options (AppKit's scheduled pass passes none), a checking type bit
-/// nobody has seen AppKit's pass use, a language change
-/// (`SpellDictionaryState`), or a marked word the spell checker no longer
-/// flags (learned or ignored since, here or in the spelling panel or in
-/// another app: `stillMarked`). The view also clears it before continuous
-/// checking is turned off or on (Fix Typos' Ignore All and Learn Word
-/// redraw the marks that way), when its context menu opens (Learn, Ignore,
-/// Unlearn) and on Ignore Spelling.
+/// nobody has seen AppKit's pass use, or a spelling dictionary that
+/// changed since the early check (`SpellDictionaryState`: Ignore, Learn,
+/// a language change). The view also clears it before continuous checking
+/// is turned off or on (Fix Typos' Ignore All and Learn Word redraw the
+/// marks that way), when its context menu opens (Learn, Ignore, Unlearn),
+/// on Ignore Spelling, and when the spell checker says a word was learned
+/// or unlearned in Owlink (the spelling panel's Learn).
+///
+/// Learned words are the spell server's, a round trip per word to ask
+/// about, so the marked words are asked about at AppKit's pass only when
+/// another app could have learned one: when Owlink wasn't the active app
+/// all along since the early check (`asksLearned`). While Owlink is the
+/// active app, a word is learned only in Owlink, and that clears the record.
 public struct SpellCheckCoverage: Equatable, Sendable {
     /// What the early check covered; nil when there is nothing to skip.
     public private(set) var range: NSRange?
@@ -34,9 +40,15 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     /// The spelling dictionary when the early check asked.
     public private(set) var dictionary: SpellDictionaryState?
     /// The words the early check's results marked (to see whether one
-    /// has been learned or ignored since), each once, in the order first
-    /// marked: a page of text marks the same few words many times over.
+    /// has been learned since), each once, in the order first marked:
+    /// asking the spell server about one is a round trip
+    /// (`hasLearnedWord`), and a page of text marks the same few words
+    /// many times over.
     public private(set) var markedWords: [String] = []
+    /// Owlink hasn't been the active app all along since the early check,
+    /// so a word may have been learned in another app (nothing tells
+    /// Owlink): AppKit's pass asks about the marked words.
+    public private(set) var asksLearned = true
 
     public init() {}
 
@@ -65,13 +77,25 @@ public struct SpellCheckCoverage: Equatable, Sendable {
 
     public var isEmpty: Bool { range == nil }
 
-    /// The early check is about to check `range` for `types`.
-    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState) {
+    /// The early check is about to check `range` for `types`; `appActive`:
+    /// Owlink is the active app.
+    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, appActive: Bool) {
         self.range = range
         self.types = types & Self.publicTypes
         self.dictionary = dictionary
         answered = false
         markedWords = []
+        asksLearned = !appActive
+    }
+
+    /// The marked words AppKit's pass must ask the spell server about
+    /// (`hasLearnedWord`): all of them when another app could have learned
+    /// one since the early check, none while Owlink was the active app all along.
+    public var wordsToAskLearned: [String] { asksLearned ? markedWords : [] }
+
+    /// Owlink stopped being the active app: another app may learn a word.
+    public mutating func appResignedActive() {
+        asksLearned = true
     }
 
     /// The early check's results for `checked` haven't come back yet.
@@ -97,75 +121,38 @@ public struct SpellCheckCoverage: Equatable, Sendable {
         answered = false
         dictionary = nil
         markedWords = []
+        asksLearned = true
     }
 
     /// AppKit asks to check `request` for `requestTypes`, with options
-    /// (`hasOptions`), the language now being `dictionary`. True when the
+    /// (`hasOptions`), the dictionary now being `dictionary`. True when the
     /// early check already did all of it (skip the request). Always clears.
-    ///
-    /// `stillMarked` is asked last, only when everything else allows the
-    /// skip and something was marked: given the marked words, the ones the
-    /// spell checker still flags now (one check of them all in the
-    /// document's spell tag, `MarkedWordsBatch`). A word learned or ignored
-    /// since the early check isn't flagged any more, so AppKit's pass runs
-    /// and takes its mark away.
     public mutating func take(_ request: NSRange, types requestTypes: UInt64, hasOptions: Bool = false,
-                              dictionary now: SpellDictionaryState,
-                              stillMarked: ([String]) -> Set<String> = { _ in [] }) -> Bool {
+                              dictionary now: SpellDictionaryState) -> Bool {
         defer { clear() }
         guard answered, !hasOptions, let range, request.location >= range.location, NSMaxRange(request) <= NSMaxRange(range),
-              requestTypes & ~Self.knownTypes == 0, dictionary == now,
-              requestTypes & Self.publicTypes & ~types == 0 else { return false }
-        guard !markedWords.isEmpty else { return true }
-        return stillMarked(markedWords).isSuperset(of: markedWords)
+              requestTypes & ~Self.knownTypes == 0, dictionary == now else { return false }
+        return requestTypes & Self.publicTypes & ~types == 0
     }
 }
 
-/// What the spell checker's answers depend on besides the text and its
-/// dictionaries: its language, or Automatic by Language. Both are read
-/// in-process. (Learned and ignored words are the spell server's: the
-/// marked words are checked again instead, `MarkedWordsBatch`.)
+/// What the spell checker's answers depend on besides the text: its
+/// language (or Automatic by Language), the words ignored in the
+/// document, and which of the early check's marked words have since been
+/// learned (asked only when `SpellCheckCoverage.asksLearned`). Learning
+/// another word can't change the early marks (it wasn't marked);
+/// unlearning one is offered by the context menu, which clears the record
+/// itself, and by the spelling panel, which the view hears about.
 public struct SpellDictionaryState: Equatable, Sendable {
     public var language: String
     public var automaticByLanguage: Bool
+    public var ignored: Set<String>
+    public var learned: Set<String>
 
-    public init(language: String, automaticByLanguage: Bool) {
+    public init(language: String, automaticByLanguage: Bool, ignored: Set<String>, learned: Set<String> = []) {
         self.language = language
         self.automaticByLanguage = automaticByLanguage
-    }
-}
-
-/// The early check's marked words as one text for one spelling check
-/// (one round trip to the spell server, however many words), and which
-/// of them that check flags again. A word counts as still marked only if
-/// a spelling result covers exactly it; anything else (not flagged, or
-/// flagged in part) counts as changed, which only means AppKit's pass runs.
-public struct MarkedWordsBatch: Equatable, Sendable {
-    public let text: String
-    /// Each word's range in `text`, in the order given.
-    public let ranges: [NSRange]
-    public let words: [String]
-
-    /// Words joined by newlines (a word never holds one: it's marked
-    /// inside a line).
-    public init(_ words: [String]) {
-        var text = ""
-        var ranges: [NSRange] = []
-        for w in words {
-            if !ranges.isEmpty { text += "\n" }
-            ranges.append(NSRange(location: (text as NSString).length, length: (w as NSString).length))
-            text += w
-        }
-        self.text = text
-        self.ranges = ranges
-        self.words = words
-    }
-
-    /// The words flagged by spelling results at `flagged` (ranges in `text`).
-    public func stillMarked(_ flagged: [NSRange]) -> Set<String> {
-        let hits = Set(flagged.map { "\($0.location):\($0.length)" })
-        var out = Set<String>()
-        for (w, r) in zip(words, ranges) where hits.contains("\(r.location):\(r.length)") { out.insert(w) }
-        return out
+        self.ignored = ignored
+        self.learned = learned
     }
 }
