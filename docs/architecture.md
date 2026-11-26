@@ -2314,8 +2314,14 @@ files; checking is off for those tabs, so no underlines and no typo
 hint). On TextKit 2 a pass that doesn't start at the top of the text
 hands its results over relative to the checked range (`{15, 4}` for a
 word 15 characters into `{14875, 1215}`); the scope test and the record
-use document offsets (`TextCheckingOffset`: relative when every result
-fits within the checked range's length). Until 0.6 the results were read
+use document offsets (TextKit 1 hands over document offsets). The
+convention (`TextCheckingOffset`) comes from the batch when only one
+reading fits (a result before the range's start can't be a document
+offset, one past its length can't be relative); when both fit (`{10,
+1000}` with one misspelling at `{20, 3}`), from the text: each spelling
+result must cover a whole word under the reading chosen; and if the text
+can't tell, from the callback path (relative on TextKit 2, the editor's
+layout, document offsets on TextKit 1). Until 0.6 the results were read
 as document offsets, so nothing scrolled to was ever marked.
 
 **The first check of an opened file.** AppKit's continuous checking
