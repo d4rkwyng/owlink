@@ -1104,10 +1104,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             for id in missing where needed[id] == .onDisk {
                 if let d = docs[id] { d.sessionChangeCount = -1; continue }
-                if self.closedTexts[id] == nil, case .missing = self.store.readBufferResult(id),
-                   let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) {
+                guard self.closedTexts[id] == nil, let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) else { continue }
+                switch self.store.readBufferResult(id) {
+                case .missing:
                     FileHandle.standardError.write(Data("session: closed tab \(id)'s buffer is gone\n".utf8))
                     self.closedTabs[i].hasBuffer = false
+                case .text, .unreadable:
+                    // There, but not a regular file (a folder, a link) or
+                    // not readable: kept where it is (held: never pruned,
+                    // named in every commit) and said, so it doesn't block
+                    // every later commit of the healthy tabs.
+                    self.noteUnusableClosedBuffer(self.closedTabs[i])
                 }
             }
         }
@@ -1352,6 +1359,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         host?.makeKeyAndOrderFront(nil)
         if let setAside { FileHandle.standardError.write(Data("session: unreadable, kept as \(setAside.path); \(built.count) unsaved text(s) recovered\n".utf8)) }
         if !unreadableSession, !built.isEmpty { FileHandle.standardError.write(Data("session: \(built.count) unsaved text(s) the session didn’t list recovered\n".utf8)) }
+    }
+
+    /// A closed tab's buffer that is there but isn't a regular file, or
+    /// can't be read: held (kept, never pruned, its entry stays on the
+    /// closed list) and said once.
+    func noteUnusableClosedBuffer(_ tab: SessionTab) {
+        guard !store.heldBuffers.contains(tab.id) else { return }
+        store.holdBuffer(tab.id)
+        let name = tab.untitledName ?? tab.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
+        noteRecoveryProblem(String(localized: "Owlink can’t use the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t a file it can read. It is left where it is, and the tab stays in File › Reopen Closed Tab."))
     }
 
     /// A buffer that is there but couldn't be read: kept (held) and said.

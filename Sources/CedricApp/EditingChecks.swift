@@ -571,6 +571,26 @@ extension DevChecks {
                        "and the tab says the reopen wasn't recorded", bar?.label.stringValue ?? "-")
                 expect(bar?.button("Save As…")?.isEnabled == true, "with Save As")
                 app.store.checkFailWrites = false
+                app.saveSession(sync: true)
+                // Closed once more; then its buffer's place holds a folder,
+                // not a file: the commit can't count it as on disk, but it
+                // must not block every later commit either.
+                if let back { focus(back) }
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "closed with its buffer")
+                try? fm.removeItem(atPath: path)
+                try? fm.createDirectory(atPath: path, withIntermediateDirectories: false)
+                let first = app.saveSession(sync: true)
+                expect(first != nil, "a commit that needs it on disk is refused once", first ?? "-")
+                let second = app.saveSession(sync: true)
+                expect(second == nil, "then it is held and the next commit goes through", second ?? "-")
+                expect(app.store.load()?.heldBuffers?.contains(id) == true, "the session names it as held")
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "it stays on the closed list")
+                var isDir: ObjCBool = false
+                expect(fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue, "and its place is left as it is")
+                try? fm.removeItem(atPath: path)
             },
         ])
     }
