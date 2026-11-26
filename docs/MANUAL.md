@@ -1667,7 +1667,11 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 [Dracula Theme](https://draculatheme.com), used under the MIT license.
 
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
-(MIT, © the ggml authors), bundled as `llama.framework`. Models are not
+(MIT, © the ggml authors), bundled as `llama.framework`. The Markdown
+preview draws diagrams with [Mermaid](https://github.com/mermaid-js/mermaid)
+(MIT) and math with [KaTeX](https://github.com/KaTeX/KaTeX) (MIT), both
+bundled in the app (versions, sources and checksums in
+[THIRD_PARTY.md](THIRD_PARTY.md)). Models are not
 bundled: the ones Owlink offers to download are Qwen models by Alibaba
 Cloud, each under its own licence. Download first opens a confirmation
 with the model name, licence name and full bundled licence text; no
