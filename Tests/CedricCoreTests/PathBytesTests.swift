@@ -274,4 +274,21 @@ import Testing
         #expect(tree.notes(for: "owl").map { Array($0.source.utf8) } .sorted { $0.lexicographicallyPrecedes($1) }
                 == [Array("\u{2126}.md".utf8), Array("\u{3A9}.md".utf8)].sorted { $0.lexicographicallyPrecedes($1) })
     }
+
+    // MARK: Splits
+
+    /// Obsidian's attachment folder setting is read as bytes: "/" then a
+    /// combining mark is absolute (refused), "../" then a mark climbs
+    /// (refused), a mark-leading folder below the vault is taken.
+    @Test func theAttachmentFolderSettingIsReadAsBytes() {
+        let root = base.appendingPathComponent("vault"), doc = root.appendingPathComponent("notes")
+        #expect(WikiVault.attachmentFolder("/\u{301}x", root: root, documentFolder: doc) == nil, "absolute")
+        #expect(WikiVault.attachmentFolder("../\u{301}x", root: root, documentFolder: doc) == nil, "climbs out")
+        #expect(WikiVault.attachmentFolder("a/../../x", root: root, documentFolder: doc) == nil)
+        #expect(WikiVault.attachmentFolder("a\\b", root: root, documentFolder: doc) == nil)
+        #expect(WikiVault.attachmentFolder("\u{301}img", root: root, documentFolder: doc) == root.appendingPathComponent("\u{301}img").standardizedFileURL)
+        #expect(WikiVault.attachmentFolder("Images", root: root, documentFolder: doc) == root.appendingPathComponent("Images").standardizedFileURL)
+        #expect(WikiVault.attachmentFolder("", root: root, documentFolder: doc) == doc)
+        #expect(WikiVault.attachmentFolder("current", root: root, documentFolder: doc) == doc)
+    }
 }

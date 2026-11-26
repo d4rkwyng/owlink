@@ -145,6 +145,22 @@ public final class WikiVault: @unchecked Sendable {
     /// a name just below `root` that starts with a combining mark makes
     /// "/" and the mark one Swift character, so a text prefix test missed
     /// the boundary and refused it.
+    /// The folder `.obsidian/app.json`'s `attachmentFolderPath` names: the
+    /// note's own folder for "" or "current", else a folder below `root`;
+    /// nil for an absolute path, one that climbs with "..", a backslash, or
+    /// one that leads out. Read as UTF-8 bytes (`FolderTree.components`, a
+    /// first "/" byte): as Swift text a slash followed by a combining mark
+    /// is one character, so "/" + mark wasn't absolute and "../" + mark
+    /// wasn't a climb.
+    static func attachmentFolder(_ path: String, root: URL, documentFolder: URL) -> URL? {
+        let b = Array(path.utf8)
+        if b.isEmpty || FolderTree.sameBytes(path, "current") { return documentFolder }
+        guard b.first != 0x2f, !b.contains(0x5c),
+              !FolderTree.components(path).contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
+        let folder = root.appendingPathComponent(path).standardizedFileURL
+        return Self.contains(folder, in: root) ? folder : nil
+    }
+
     private static func contains(_ url: URL, in root: URL) -> Bool {
         let base = Array(PreviewFolder.resolved(root).path.utf8)
         let path = Array(PreviewFolder.resolved(url).path.utf8)
@@ -185,13 +201,7 @@ public final class WikiVault: @unchecked Sendable {
            let data = fm.contents(atPath: config.path),
            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
            let path = json["attachmentFolderPath"] as? String {
-            let parts = path.split(separator: "/")
-            if path.isEmpty || path == "current" {
-                attachmentFolder = documentFolder
-            } else if !path.hasPrefix("/"), !parts.contains(".."), !path.contains("\\") {
-                let folder = root.appendingPathComponent(path).standardizedFileURL
-                if Self.contains(folder, in: root) { attachmentFolder = folder }
-            }
+            attachmentFolder = Self.attachmentFolder(path, root: root, documentFolder: documentFolder)
         }
         built = Date()
         return (index, attachmentFolder)
