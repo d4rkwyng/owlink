@@ -10,7 +10,8 @@
 #  - sign-sparkle.sh signs in Sparkle's order and refuses --deep;
 #  - ed-verify.swift refuses malformed input;
 #  - appcast-item.sh (the feed step) keeps the last signed feed when
-#    signing or verifying fails, with a stub sign_update;
+#    signing or verifying fails, with a stub sign_update; finds duplicates
+#    by XML value and adds the item inside the channel whatever the layout;
 #  - with an APP: its Info.plist has the empty placeholders, a required
 #    signed feed and automatic checks off, and bundle-app.sh's ad-hoc
 #    signing (sign-adhoc.sh) keeps Downloader.xpc's entitlements on a temp
@@ -267,6 +268,21 @@ for d in dup-prefix dup-lines; do
         ok "appcast-item.sh refuses a duplicate written as in $d.xml, before signing, feed unchanged"
     else
         bad "appcast-item.sh duplicate in $d.xml (exit $rc): $(tail -2 "$W/item.out")"
+    fi
+done
+# The item lands as a direct child of channel whatever the layout: with
+# <channel><item> on one line under <rss> (a line-based insert put it
+# under <rss>, still well-formed), and with the whole feed on one line.
+NSDECL='xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"'
+OLDITEM='<item><title>Version 0.9.0</title><sparkle:version>0.9.0</sparkle:version><sparkle:shortVersionString>0.9.0</sparkle:shortVersionString></item>'
+printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" %s>\n<channel><title>Owlink</title>%s</channel>\n</rss>\n' "$NSDECL" "$OLDITEM" > "$W/compact-channel.xml"
+printf '<?xml version="1.0" encoding="utf-8"?><rss version="2.0" %s><channel>%s</channel></rss>\n' "$NSDECL" "$OLDITEM" > "$W/one-line.xml"
+for d in compact-channel one-line; do
+    if item 1.4.0 --from "$W/$d.xml" && xmllint --noout "$FEEDOUT" && [ "$(items 1.4.0)" = 1 ] && [ "$(items 0.9.0)" = 1 ] \
+        && [ "$(xmllint --xpath 'count(//item)' "$FEEDOUT")" = 2 ] && [ "$(grep -c '^edSignature: STUB$' "$FEEDOUT")" = 1 ] && [ -z "$(leftovers)" ]; then
+        ok "appcast-item.sh adds the item inside the channel of $d.xml"
+    else
+        bad "appcast-item.sh with $d.xml: $(tail -2 "$W/item.out"); items: $(xmllint --xpath 'count(/rss/channel/item)' "$FEEDOUT" 2>&1) in channel, $(xmllint --xpath 'count(//item)' "$FEEDOUT" 2>&1) in all"
     fi
 done
 

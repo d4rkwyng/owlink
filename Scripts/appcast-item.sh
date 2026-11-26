@@ -4,8 +4,10 @@
 #
 # OUT, the last signed feed, is never edited in place. The new feed is
 # written to a temp file beside OUT whose name ends in .xml (sign_update
-# chooses feed signing by the extension), checked with xmllint, signed and
-# verified there, and only then renamed over OUT. Any failure leaves OUT
+# chooses feed signing by the extension), with the item added as a direct
+# child of /rss/channel by an XML parser (Scripts/appcast-insert.swift),
+# checked with xmllint and for exactly one channel item with VERSION
+# (Scripts/appcast-versions.sh), signed and verified there, and only then renamed over OUT. Any failure leaves OUT
 # byte for byte as it was, so the run can be retried (the version is not
 # yet in OUT, so it isn't refused as a duplicate).
 #
@@ -62,38 +64,19 @@ NEW="$STEM.xml"
 trap 'rm -f "$STEM" "$NEW"' EXIT
 (set -C; : > "$NEW") 2>/dev/null || fail "$NEW already exists"
 
-ITEM="        <item>
-            <title>Version $VERSION</title>
-            <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
-            <sparkle:version>$VERSION</sparkle:version>
-            <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url=\"$URL\" length=\"$LENGTH\" type=\"application/octet-stream\" sparkle:edSignature=\"$EDSIG\"/>
-        </item>"
-# The new item goes before the first existing one (else at the end of the
-# channel). Sparkle offers the highest version, whatever the order.
-{
-    if [ -n "$FROM" ]; then
-        cat "$FROM"
-    else
-        cat <<'FEED'
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <channel>
-        <title>Owlink</title>
-    </channel>
-</rss>
-FEED
-    fi
-} | ITEM=$ITEM awk '
-    !done && (/<item[ >]/ || /<\/channel>/) { print ENVIRON["ITEM"]; done = 1 }
-    { print }
-' > "$NEW"
+# The item goes in as a direct child of /rss/channel, through an XML
+# parser (Scripts/appcast-insert.swift), never by line.
+swift "$HERE/appcast-insert.swift" "${FROM:--}" "$NEW" "$VERSION" "$URL" "$LENGTH" "$EDSIG" \
+    "$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')" || fail "could not add the item; $OUT is unchanged"
 xmllint --noout "$NEW" || fail "the new feed is not well-formed XML; $OUT is unchanged"
+# Exactly one direct channel item has this version, or nothing is signed.
+one() { [ "$("$HERE/appcast-versions.sh" "$NEW" "$VERSION" 2>/dev/null)" = 1 ]; }
+one || fail "the new feed doesn't have exactly one channel item for $VERSION; $OUT is unchanged"
 echo "+ $(printf '%q ' "$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW")"
 "$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" || fail "sign_update could not sign the new feed; $OUT is unchanged"
 "$SIGN_UPDATE" --verify ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" || fail "the new feed's signature doesn't verify; $OUT is unchanged"
 xmllint --noout "$NEW" || fail "the signed feed is not well-formed XML; $OUT is unchanged"
+one || fail "the signed feed doesn't have exactly one channel item for $VERSION; $OUT is unchanged"
 # Same folder, so a rename: OUT is either the old feed or the new one.
 mv -f "$NEW" "$OUT"
 echo "Wrote $OUT (item $VERSION added, feed signed and verified)"
