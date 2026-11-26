@@ -78,13 +78,21 @@ public enum Tags {
     }
 
     /// `raw` as a tag name: empty parts dropped; nil when nothing is left
-    /// or it is only digits (and slashes).
+    /// or it is only digits (and slashes), in any script.
     public static func normalize<S: StringProtocol>(_ raw: S) -> String? {
         let parts = raw.split(separator: "/", omittingEmptySubsequences: true)
         guard !parts.isEmpty else { return nil }
         let name = parts.joined(separator: "/")
-        guard name.unicodeScalars.contains(where: { !($0.value >= 0x30 && $0.value <= 0x39) && $0 != "/" }) else { return nil }
+        guard name.unicodeScalars.contains(where: { $0 != "/" && !isDigit($0) }) else { return nil }
         return name
+    }
+
+    /// A digit by its Unicode numeric type (`٣`, `३`, `²`), not a letter
+    /// with a numeric value (`一`, `Ⅻ`).
+    static func isDigit(_ s: Unicode.Scalar) -> Bool {
+        if s.value < 0x80 { return s.value >= 0x30 && s.value <= 0x39 }
+        let t = s.properties.numericType
+        return t == .decimal || t == .digit
     }
 
     /// The inline tags in one line (no line break), outside code spans.
@@ -178,7 +186,7 @@ public enum Tags {
             if inList {
                 let t = l.trimmingCharacters(in: .whitespaces)
                 if t.hasPrefix("- ") || t == "-" {
-                    return Tags.item(t.dropFirst()).map { [$0] } ?? []
+                    return Tags.item(Tags.uncommented(t.dropFirst())).map { [$0] } ?? []
                 }
                 // Blank lines and comments keep the list; another key ends it.
                 if t.isEmpty || t.hasPrefix("#") { return [] }
@@ -196,12 +204,41 @@ public enum Tags {
                 return inner.split(separator: ",").compactMap { Tags.item($0) }
             }
             // A YAML comment after the value.
-            if let r = value.range(of: " #") { value = String(value[..<r.lowerBound]).trimmingCharacters(in: .whitespaces) }
+            value = Tags.uncommented(Substring(value)).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("#") { value = "" }
             if value.isEmpty { inList = true; return [] }
             // Inline: separated by commas or spaces.
             return value.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" }).compactMap { Tags.item($0) }
         }
+    }
+
+    /// `s` up to a YAML comment: a `#` after white space, past the start of
+    /// the value and outside a quoted value (`- a # note` is `a`; `"a # b"`
+    /// keeps its `#`). A leading `#` stays (`- #tag` is read as `tag`).
+    static func uncommented(_ s: Substring) -> Substring {
+        var i = s.startIndex
+        while i < s.endIndex, s[i] == " " || s[i] == "\t" { i = s.index(after: i) }
+        guard i < s.endIndex else { return s }
+        // A quoted value: comments start only after its closing quote.
+        if s[i] == "\"" || s[i] == "'" {
+            let q = s[i]
+            var j = s.index(after: i)
+            while j < s.endIndex, s[j] != q {
+                if q == "\"", s[j] == "\\" { j = s.index(after: j); if j == s.endIndex { break } }
+                j = s.index(after: j)
+            }
+            i = j < s.endIndex ? s.index(after: j) : j
+        } else {
+            i = s.index(after: i)
+        }
+        var prevSpace = false
+        while i < s.endIndex {
+            let c = s[i]
+            if c == "#", prevSpace { return s[..<i] }
+            prevSpace = c == " " || c == "\t"
+            i = s.index(after: i)
+        }
+        return s
     }
 
     /// One front-matter value as a tag: quotes and a leading `#` taken off.

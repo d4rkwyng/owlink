@@ -14,7 +14,8 @@ public enum FolderActions {
     }
 
     public static func destination(in parent: URL, name: String) throws -> URL {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+        // One name by its bytes (Beneath.isName): a slash before a combining mark is still a separator.
+        guard Beneath.isName(name) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
                           userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a single file or folder name.")])
         }
@@ -90,15 +91,24 @@ public final class FolderRoot: @unchecked Sendable {
 
     /// Makes the empty file `components` (each one name; the last is the
     /// file) beneath this folder: looked up beneath the descriptor
-    /// (`Beneath.open`: a folder that leads out is refused, and where the
-    /// kernel can't keep the lookup inside, any symbolic link to a folder
-    /// is), created with `O_CREAT | O_EXCL | O_NOFOLLOW` (an existing file
-    /// or link of that name is never replaced or followed). Returns the
-    /// file's URL under `url` once that path is checked to be the file
-    /// made (device and inode); throws if it isn't (the folder was moved
-    /// or replaced), so the caller opens nothing.
+    /// (`Beneath.open`: a folder that leads out is refused), created with
+    /// `O_CREAT | O_EXCL | O_NOFOLLOW` (an existing file or link of that
+    /// name is never replaced or followed). Where the kernel can't keep a
+    /// lookup inside (`walk`, the default there; tests force it), only a
+    /// single name directly in this folder is made: a parent opened on the
+    /// way could be moved before the file is created in it, so a note in a
+    /// subfolder is refused before anything is made (Astra batch 3,
+    /// must-fix 2). Returns the file's URL under `url` once that path is
+    /// checked to be the file made (device and inode); throws if it isn't
+    /// (the folder was moved or replaced), so the caller opens nothing.
     public func createFile(_ components: [String], walk: Bool = !Beneath.kernelEnforced) throws -> URL {
         let target = components.reduce(url) { $0.appendingPathComponent($1) }
+        if walk, components.count > 1, components.allSatisfy(Beneath.isName) {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError, userInfo: [
+                NSFilePathErrorKey: target.path,
+                NSLocalizedDescriptionKey: String(localized: "This version of macOS can’t make a note in a subfolder safely, so “\(components.joined(separator: "/"))” wasn’t created. A note can be made directly in the open folder “\(url.lastPathComponent)”."),
+            ])
+        }
         let made = Beneath.open(components, beneath: fd, flags: O_WRONLY | O_CREAT | O_EXCL, mode: 0o666, walk: walk)
         guard made >= 0 else {
             let err = errno

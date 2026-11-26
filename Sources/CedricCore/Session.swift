@@ -298,6 +298,59 @@ public final class SessionStore: @unchecked Sendable {
         return s
     }
 
+    /// What launch finds in the store (`loadForLaunch`).
+    public enum LaunchLoad: Equatable, Sendable {
+        /// No session and no unsaved text: a first launch.
+        case none
+        case session(Session)
+        /// No session to restore, but unsaved text in the store that no
+        /// session now refers to: the session file couldn't be read
+        /// (truncated, not JSON, from a newer version) and was moved aside
+        /// to `setAside` (nil: there was none, or the move failed), or the
+        /// app died between writing its first buffers and the session that
+        /// lists them. `buffers`: those buffers' tab ids, oldest first. The
+        /// caller opens them as tabs; else the next save's prune deletes them.
+        case recover(setAside: URL?, buffers: [UUID])
+    }
+
+    /// The saved session for launch. Unlike `load()`, a session file that
+    /// can't be read is never left for the next save to overwrite, and
+    /// its unsaved text is never left for the prune to delete: the file
+    /// is renamed `session.unreadable-<date>.json` (kept, beside the
+    /// buffers) and the buffers are returned for the caller to reopen.
+    public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
+        if let s = load() { return .session(s) }
+        lock.lock(); defer { lock.unlock() }
+        var aside: URL?
+        if fm.fileExists(atPath: sessionFile.path) {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone(identifier: "UTC")
+            f.dateFormat = "yyyyMMdd-HHmmss"
+            let stem = "session.unreadable-\(f.string(from: now))"
+            for n in 1...100 {
+                let url = directory.appendingPathComponent(n == 1 ? "\(stem).json" : "\(stem)-\(n).json")
+                if fm.fileExists(atPath: url.path) { continue }
+                if (try? fm.moveItem(at: sessionFile, to: url)) != nil { aside = url }
+                break
+            }
+        }
+        let buffers = bufferFiles()
+        guard aside != nil || !buffers.isEmpty else { return .none }
+        return .recover(setAside: aside, buffers: buffers)
+    }
+
+    /// The buffer files in the store, oldest first.
+    private func bufferFiles() -> [UUID] {
+        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        let found: [(UUID, Date)] = files.compactMap { f in
+            guard f.pathExtension == "txt", let id = UUID(uuidString: f.deletingPathExtension().lastPathComponent) else { return nil }
+            let date = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return (id, date)
+        }
+        return found.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.uuidString < $1.0.uuidString }.map(\.0)
+    }
+
     public func save(_ session: Session) throws {
         lock.lock(); defer { lock.unlock() }
         try ensureDirectory()

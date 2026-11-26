@@ -8,7 +8,9 @@ import CedricCore
 /// notes with their lines → a click opens the right tab at the line, a
 /// note renamed and one deleted on disk (the counts follow), and a
 /// large document opened while the pane shows: no scan, no index build
-/// and no tree made for it, and no pane in its tab.
+/// and no tree made for it, and no pane in its tab. Then the folder
+/// replaced while a tag is listed, both folders having a `daily.md` with
+/// it: the old tree and its notes go at once and an old hit opens nothing.
 extension DevChecks {
     static func tagsCheck(_ app: AppDelegate) {
         let root = dir.appendingPathComponent("tg", isDirectory: true)
@@ -30,6 +32,9 @@ extension DevChecks {
             { next in DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { next() } }
         }
         var before: (scans: Int, names: Int, index: Int, trees: Int) = (0, 0, 0, 0)
+        var trees = 0, skips = 0, scans = 0
+        var staleHit: TagTree.Hit?
+        var staleNotes: WikiNotes?
 
         run([
             sync { app.openFolder(root) },
@@ -60,13 +65,16 @@ extension DevChecks {
                 if let i = menuItem(action: #selector(AppDelegate.toggleTagsMenu(_:))) {
                     expect(app.validateMenuItem(i) && i.title == "Hide Tags", "the menu item says Hide Tags", i.title)
                 }
+                expect(side?.itemsMade == 6, "only the shown rows are made (a collapsed tag's children aren't)", "\(side?.itemsMade ?? -1)")
                 // A refresh makes the tree on the query queue: nothing is applied in the call.
                 builds = side?.builds ?? -1
+                trees = notes?.tagTreesBuilt ?? -1
                 draft.refreshTags()
                 expect(side?.builds == builds, "a tags refresh doesn't build the tree on the main thread", "\(side?.builds ?? -1) vs \(builds)")
             },
             wait("the refreshed tree lands") { (side?.builds ?? -1) > builds },
             sync {
+                expect(notes?.tagTreesBuilt == trees, "a refresh with the notes unchanged reuses their tree", "\(notes?.tagTreesBuilt ?? -1) vs \(trees)")
                 side?.selectTag("project/tankard")
                 let rows = side?.shownRows ?? []
                 expect(rows.contains("project/owlink 1") && rows.contains("project/tankard 1"), "nested tags show under their parent", "\(rows)")
@@ -114,6 +122,37 @@ extension DevChecks {
                        "\(side?.hits.map(\.source) ?? [])")
                 print("check: tags: \(side?.tree?.tagCount ?? -1) tags, \(notes?.tagScansDone ?? -1) tag scans, \(notes?.notesBuilt ?? -1) name builds")
                 focus(draft)
+                // A second pane (Alpha's tab): the two share one tree per change of the notes.
+                tab("Alpha.md")?.toggleTags()
+            },
+            wait("the second pane shows the tree") { tab("Alpha.md")?.wiki.tags?.shownRows.first == "todo 3" },
+            pause(2),
+            sync {
+                trees = notes?.tagTreesBuilt ?? -1
+                skips = notes?.latestGeneration.skipped ?? -1
+                scans = notes?.scansDone ?? -1
+                // Held on the query queue, so the next change supersedes the tree being made.
+                WikiNotes.queryDelay = 1
+                notes?.scheduleScan()
+            },
+            wait("a rescan lands") { (notes?.scansDone ?? -1) > scans },
+            sync {
+                scans = notes?.scansDone ?? -1
+                notes?.scheduleScan()
+            },
+            wait("another rescan lands and both panes get a tree") {
+                guard let n = notes, n.scansDone > scans, n.tagTreesBuilt > trees, let a = tab("Alpha.md")?.wiki.tags, let d = side else { return false }
+                return a.tree != nil && d.tree != nil && a.message.isEmpty && d.message.isEmpty
+            },
+            pause(1.5),
+            sync {
+                WikiNotes.queryDelay = 0
+                expect(notes?.tagTreesBuilt == trees + 1, "two panes and two changes: one tree made, for the latest", "\(trees) → \(notes?.tagTreesBuilt ?? -1)")
+                expect((notes?.latestGeneration.skipped ?? -1) > skips, "the superseded tree is skipped before it is made", "\(skips) → \(notes?.latestGeneration.skipped ?? -1)")
+                expect(tab("Alpha.md")?.wiki.tags?.tree?.roots == side?.tree?.roots && side?.shownRows.first == "todo 3", "both panes show it",
+                       "\(tab("Alpha.md")?.wiki.tags?.shownRows ?? []) / \(side?.shownRows ?? [])")
+                tab("Alpha.md")?.hideTags()
+                focus(draft)
             },
             // Settle: no scan or tree in flight before the large open.
             pause(3),
@@ -129,6 +168,42 @@ extension DevChecks {
                 expect(after == before, "opening a large document reads no notes, builds no index and makes no tree",
                        "\(before) → \(after)")
                 expect(!b.tagsVisible && b.wiki.tags == nil, "and its tab has no Tags pane")
+                // Folder replacement with a tag selected: both folders have a daily.md with it.
+                _ = write("tga/daily.md", "first folder #shared\n")
+                _ = write("tgb/daily.md", "second folder\n\n#shared\n")
+                app.openFolder(dir.appendingPathComponent("tga", isDirectory: true))
+                focus(draft)
+            },
+            wait("the first folder's tree lands") { side?.tree?.node("shared") != nil && notes?.root.lastPathComponent == "tga" },
+            sync {
+                side?.selectTag("shared")
+                expect(side?.hits.map(\.source) == ["daily.md"], "the first folder's daily.md is listed", "\(side?.hits ?? [])")
+                staleHit = side?.hits.first
+                staleNotes = notes
+                app.openFolder(dir.appendingPathComponent("tgb", isDirectory: true))
+                focus(draft)
+                expect(side?.tree == nil && side?.hits.isEmpty == true && side?.selectedTag == nil,
+                       "replacing the folder clears the old tree, its tag and its notes at once",
+                       "\(side?.tree?.tagCount ?? -1) tags, \(side?.hits ?? []), \(side?.selectedTag ?? "-")")
+                side?.activate(0)
+                if let h = staleHit { side?.onOpen?(h, staleNotes) }
+            },
+            pause(1),
+            sync {
+                expect(tab("daily.md") == nil, "an old folder's hit opens nothing in the new folder",
+                       app.tabs.compactMap { $0.doc.fileURL?.path }.joined(separator: ", "))
+                staleNotes = nil
+            },
+            wait("the second folder's tree lands") { side?.tree?.node("shared") != nil && notes?.root.lastPathComponent == "tgb" },
+            sync {
+                side?.selectTag("shared")
+                expect(side?.hits.first?.line == 2, "the new folder's own hit is listed", "\(side?.hits ?? [])")
+                side?.activate(0)
+            },
+            wait("its click opens the new folder's daily.md") {
+                tab("daily.md")?.doc.fileURL?.deletingLastPathComponent().lastPathComponent == "tgb"
+            },
+            sync {
                 draft.hideTags()
                 expect(!draft.tagsVisible && notes?.wantsTags == false, "hiding the last Tags pane stops reading tags")
                 finish()

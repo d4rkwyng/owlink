@@ -17,14 +17,21 @@ import CedricCore
 final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
     static let width: CGFloat = 220
 
-    /// A row of the tag tree (NSOutlineView wants objects).
+    /// A row of the tag tree (NSOutlineView wants objects). Its children
+    /// are made when first asked for (an expanded or searched tag), not
+    /// with the tree.
     final class Item: NSObject {
         let node: TagTree.Node
-        let children: [Item]
-        init(_ n: TagTree.Node) {
-            node = n
-            children = n.children.map(Item.init)
+        private var kids: [Item]?
+        init(_ n: TagTree.Node) { node = n }
+        var children: [Item] {
+            if let kids { return kids }
+            let k = node.children.map(Item.init)
+            kids = k
+            return k
         }
+        /// The children made so far.
+        var made: [Item] { kids ?? [] }
     }
 
     let title = NSTextField(labelWithString: String(localized: "Tags"))
@@ -35,6 +42,9 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     let notesScroll = NSScrollView()
     let note = NSTextField(wrappingLabelWithString: "")
     private(set) var tree: TagTree?
+    /// The folder's notes `tree` was made from: its hits are paths in that
+    /// folder, opened only while it is still the sidebar's.
+    private(set) weak var model: WikiNotes?
     private(set) var items: [Item] = []
     /// The tag whose notes are listed (its path as shown), if any.
     private(set) var selectedTag: String?
@@ -42,7 +52,8 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     /// Expanded tags (lowercased paths), kept across refreshes.
     private var expanded = Set<String>()
     private var restoring = false
-    var onOpen: ((TagTree.Hit) -> Void)?
+    /// A note row clicked: the hit and the notes it came from.
+    var onOpen: ((TagTree.Hit, WikiNotes?) -> Void)?
     private var textColor = NSColor.textColor
     private var dimColor = NSColor.secondaryLabelColor
     /// Trees applied (the checks wait for one).
@@ -145,9 +156,16 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
         needsDisplay = true
     }
 
-    /// The tree (nil: none yet), or a message instead of it, and whether it is partial.
-    func set(_ t: TagTree?, message: String?, partial: Bool) {
+    /// The tree (nil: none yet) made from `model`'s notes, or a message
+    /// instead of it, and whether it is partial. Another model (the folder
+    /// was closed or replaced) drops the listed tag and the expanded ones.
+    func set(_ t: TagTree?, model m: WikiNotes?, message: String?, partial: Bool) {
         if message != nil { request += 1 }
+        if m !== model {
+            model = m
+            expanded = []
+            selectedTag = nil
+        }
         tree = t
         self.partial = partial
         builds += 1
@@ -164,6 +182,12 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     }
 
     var message: String { note.isHidden ? "" : note.stringValue }
+
+    /// Rows made for the current tree (the checks: collapsed tags make none).
+    var itemsMade: Int {
+        func count(_ l: [Item]) -> Int { l.reduce(l.count) { $0 + count($1.made) } }
+        return count(items)
+    }
 
     private func restoreExpansion() {
         restoring = true
@@ -236,7 +260,7 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     func activate(_ r: Int) {
         guard r >= 0, r < hits.count else { return }
         table.selectRowIndexes([r], byExtendingSelection: false)
-        onOpen?(hits[r])
+        onOpen?(hits[r], model)
     }
 
     @objc private func tagClicked(_ sender: Any?) {
@@ -248,13 +272,13 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     @objc private func noteClicked(_ sender: Any?) {
         let r = table.clickedRow >= 0 ? table.clickedRow : table.selectedRow
         guard r >= 0, r < hits.count else { return }
-        onOpen?(hits[r])
+        onOpen?(hits[r], model)
     }
 
     // MARK: Outline (the tags)
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        (item as? Item)?.children.count ?? items.count
+        (item as? Item)?.node.children.count ?? items.count
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
@@ -262,7 +286,7 @@ final class TagsSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        !((item as? Item)?.children.isEmpty ?? true)
+        !((item as? Item)?.node.children.isEmpty ?? true)
     }
 
     func outlineViewItemDidExpand(_ notification: Notification) {
@@ -337,7 +361,7 @@ extension EditorWindowController {
         if wiki.tagsVisible { hideTags(); return }
         let s = wiki.tags ?? {
             let s = TagsSidebar(frame: .zero)
-            s.onOpen = { [weak self] h in self?.openTagHit(h) }
+            s.onOpen = { [weak self] h, model in self?.openTagHit(h, from: model) }
             wiki.tags = s
             return s
         }()
@@ -364,39 +388,38 @@ extension EditorWindowController {
     func refreshTags() {
         guard wiki.tagsVisible, let side = wiki.tags else { return }
         guard let folder = FolderSidebar.shared else {
-            side.set(nil, message: String(localized: "Open a folder to see the tags in its notes."), partial: false)
+            side.set(nil, model: nil, message: String(localized: "Open a folder to see the tags in its notes."), partial: false)
             return
         }
         let notes = folder.wikiNotesModel
         notes.wantsTags = true
         guard notes.notes != nil, notes.tagsRead else {
-            side.set(side.tree, message: String(localized: "Reading the folder’s notes…"), partial: false)
+            // The tree shown stays only while it is this folder's (a
+            // replaced folder's tree and notes go at once).
+            side.set(side.model === notes ? side.tree : nil, model: notes, message: String(localized: "Reading the folder’s notes…"), partial: false)
             notes.ensure()
             return
         }
-        // Shown only if it is still the latest asked for this pane, the
+        // The folder's one tree for these notes (WikiNotes.withTagTree),
+        // shown only if it is still the latest asked for this pane, the
         // folder is the same and its notes haven't changed since (a change
         // posts didChange, which asks again).
-        let scan = notes.scan, gen = notes.generation, partial = notes.isPartial
+        let gen = notes.generation, partial = notes.isPartial
         side.request += 1
         let token = side.request
         let me = WeakRef(self), pane = WeakRef(side), model = WeakRef(notes)
-        WikiNotes.queryQueue.async {
-            let tree = TagTree(files: scan.tagsByNote)
-            let out = MainBox(value: tree)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let tab = me.value, let side = pane.value, let notes = model.value,
-                          side.request == token, notes.generation == gen, FolderSidebar.shared?.wikiNotes === notes,
-                          tab.wiki.tags === side, tab.wiki.tagsVisible else { return }
-                    side.set(out.value, message: nil, partial: partial)
-                }
-            }
+        notes.withTagTree { tree in
+            guard let tab = me.value, let side = pane.value, let notes = model.value,
+                  side.request == token, notes.generation == gen, FolderSidebar.shared?.wikiNotes === notes,
+                  tab.wiki.tags === side, tab.wiki.tagsVisible else { return }
+            side.set(tree, model: notes, message: nil, partial: partial)
         }
     }
 
-    private func openTagHit(_ h: TagTree.Hit) {
-        guard let notes = FolderSidebar.shared?.wikiNotes else { return }
+    /// Opens a hit only in the folder it was found in (a path from a
+    /// replaced folder may name another note in the new one).
+    private func openTagHit(_ h: TagTree.Hit, from model: WikiNotes?) {
+        guard let notes = FolderSidebar.shared?.wikiNotes, let model, model === notes else { return }
         openWikiNote(notes.url(of: h.source), heading: nil, line: h.line)
     }
 }
