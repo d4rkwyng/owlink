@@ -17,10 +17,13 @@ final class SystemSpellDictionary: SpellDictionaryService {
 
     var learnedNotificationCenter: NotificationCenter { .default }
     /// What AppKit's spell checker posts in this process when a word is
-    /// learned or unlearned (the spelling panel's Learn, any learnWord
-    /// here). Not in the SDK headers; the SpellCheckCoverage tests and
-    /// spellopen show what depends on it (a word learned here while
-    /// Owlink stays in front would keep its underline until the next pass).
+    /// learned or unlearned (any learnWord here, and the spelling panel's
+    /// Learn when it posts one). Not in the SDK headers, and nothing relies
+    /// on it alone: it only clears the record early. A word learned in the
+    /// spelling panel or a menu without it is still caught, as the first
+    /// pass then asks about the marked words (SpellingPanel.inUse, the
+    /// menu-tracking observer: see watchSpellDictionary); spellopen
+    /// checks both.
     var learnedNotificationNames: [Notification.Name] {
         [Notification.Name("NSSpellCheckerDidLearnWordNotification"), Notification.Name("NSSpellCheckerDidUnlearnWordNotification")]
     }
