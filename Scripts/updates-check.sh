@@ -153,6 +153,24 @@ else
     awk '/^<!-- sparkle-signatures:/ { skip = 1 } !skip { print } skip && /^-->/ { skip = 0 }' "$f" > "$f.stub" && cat "$f.stub" > "$f" && rm "$f.stub"
     printf '<!-- sparkle-signatures:\nedSignature: STUB\n-->\n' >> "$f"
     [ "${STUB_FAIL:-}" = sign-partial ] && { printf '<garbage' >> "$f"; echo "stub: sign fails half way" >&2; exit 1; }
+    if [ "${STUB_FAIL:-}" = dup ]; then
+        # Signs "successfully" but leaves a second copy of each channel item
+        # with version $STUB_DUP (verify still passes); a copy of what it
+        # wrote goes to $STUB_DUP_COPY.
+        /usr/bin/python3 -I - "$f" "$STUB_DUP" <<'PY'
+import sys, copy, xml.etree.ElementTree as ET
+URI = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+ET.register_namespace("sparkle", URI)
+t = ET.parse(sys.argv[1]); ch = t.getroot().find("channel")
+for it in list(ch.findall("item")):
+    if any((e.text or "").strip() == sys.argv[2] for e in it if e.tag in ("{%s}version" % URI, "{%s}shortVersionString" % URI)):
+        ch.append(copy.deepcopy(it))
+t.write(sys.argv[1], encoding="utf-8", xml_declaration=True)
+PY
+        printf '<!-- sparkle-signatures:\nedSignature: STUB\n-->\n' >> "$f"
+        cp "$f" "$STUB_DUP_COPY"
+        exit 0
+    fi
     exit 0
 fi
 STUB
@@ -291,6 +309,38 @@ for d in compact-channel one-line; do
         bad "appcast-item.sh with $d.xml: $(tail -2 "$W/item.out"); items: $(xmllint --xpath 'count(/rss/channel/item)' "$FEEDOUT" 2>&1) in channel, $(xmllint --xpath 'count(//item)' "$FEEDOUT" 2>&1) in all"
     fi
 done
+# Exactly one channel item with the version, or nothing is signed or
+# replaced. A writer (stub `swift` on PATH, standing in for
+# appcast-insert.swift) that puts the item under <rss>, outside the
+# channel, in well-formed XML: refused before sign_update runs. A signer
+# that leaves a second copy of the item while verify passes: refused after
+# verify. Either way the feed is byte-identical and the temp folder gone.
+mkdir -p "$W/fakeswift"
+cat > "$W/fakeswift/swift" <<'STUB'
+#!/bin/bash
+# Test stub for `swift appcast-insert.swift FROM NEW VERSION …`: writes the
+# item under <rss>, not under <channel>.
+touch "$FAKESWIFT_RAN"
+printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><title>Owlink</title></channel><item><sparkle:version>%s</sparkle:version><sparkle:shortVersionString>%s</sparkle:shortVersionString></item></rss>\n' "$4" "$4" > "$3"
+STUB
+chmod +x "$W/fakeswift/swift"
+cp "$FEEDOUT" "$W/last-signed.xml"
+rm -f "$W/fakeswift.ran"
+rc=0; FAKESWIFT_RAN="$W/fakeswift.ran" PATH="$W/fakeswift:$PATH" item 1.6.0 --from "$FEEDOUT" || rc=$?
+if [ $rc != 0 ] && [ -e "$W/fakeswift.ran" ] && grep -q "the new feed doesn't have exactly one channel item for 1.6.0" "$W/item.out" \
+    && [ ! -s "$W/stub.log" ] && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh refuses a new feed with the item under <rss>, before signing; feed byte-identical, temp folder gone"
+else
+    bad "appcast-item.sh with the item under <rss> (exit $rc, writer $([ -e "$W/fakeswift.ran" ] && echo ran || echo "not run")): $(tail -2 "$W/item.out" | tr '\n' ' ') signer: $(tr '\n' ' ' < "$W/stub.log") leftovers: $(leftovers)"
+fi
+rm -f "$W/dup-seen.xml"
+rc=0; STUB_FAIL=dup STUB_DUP=1.6.0 STUB_DUP_COPY="$W/dup-seen.xml" item 1.6.0 --from "$FEEDOUT" || rc=$?
+if [ $rc != 0 ] && [ "$(items 1.6.0 "$W/dup-seen.xml" 2>/dev/null)" = 2 ] && grep -q "the signed feed doesn't have exactly one channel item for 1.6.0" "$W/item.out" \
+    && [ "$(cut -d' ' -f1 "$W/stub.log" | tr '\n' ' ')" = "0 1 " ] && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh refuses a signed feed with the item twice after verify passes; feed byte-identical, temp folder gone"
+else
+    bad "appcast-item.sh with a duplicating signer (exit $rc, copies seen: $(items 1.6.0 "$W/dup-seen.xml" 2>&1)): $(tail -2 "$W/item.out" | tr '\n' ' ') signer: $(tr '\n' ' ' < "$W/stub.log") leftovers: $(leftovers)"
+fi
 # release.sh --appcast refuses a version a feed already lists in its
 # preflight, before the build and before dist/Owlink-<version>.zip is
 # removed or rewritten. Run from a copy of the repository's scripts in a
