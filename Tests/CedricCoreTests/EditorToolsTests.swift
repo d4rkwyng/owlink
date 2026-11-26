@@ -247,6 +247,35 @@ import Testing
         #expect(throws: FindEngine.FindError.self) { try search(FileSearchOptions(root: root, query: "(", regex: true)) }
     }
 
+    /// Astra batch 9b: files under a folder whose name starts with a
+    /// combining mark, first-level or nested, keep their own relative
+    /// paths (a text prefix test fused "root/" and the mark and fell back
+    /// to the basename, so two files showed as "a.txt"), and path and name
+    /// filters and `**/` see them by the "/" bytes.
+    @Test func combiningMarkFoldersKeepTheirPathsAndFilters() throws {
+        let root = tempDir()
+        let fm = FileManager.default
+        defer { try? fm.removeItem(at: root) }
+        for rel in ["\u{301}m/a.txt", "\u{301}n/a.txt", "x/\u{301}n/b.txt", "plain/c.txt"] {
+            let u = root.appendingPathComponent(rel)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "needle\n".write(to: u, atomically: true, encoding: .utf8)
+        }
+        func rels(_ o: FileSearchOptions) throws -> Set<[UInt8]> { Set(try search(o).0.map { Array($0.relativePath.utf8) }) }
+        func bytes(_ a: [String]) -> Set<[UInt8]> { Set(a.map { Array($0.utf8) }) }
+        #expect(try rels(FileSearchOptions(root: root, query: "needle", exclude: []))
+                == bytes(["\u{301}m/a.txt", "\u{301}n/a.txt", "x/\u{301}n/b.txt", "plain/c.txt"]))
+        // A name exclude matches the nested mark-leading folder too.
+        #expect(try rels(FileSearchOptions(root: root, query: "needle", exclude: ["\u{301}n"])) == bytes(["\u{301}m/a.txt", "plain/c.txt"]))
+        // A path exclude matches the first-level one by its path, not its basename.
+        #expect(try rels(FileSearchOptions(root: root, query: "needle", exclude: ["\u{301}m/*"]))
+                == bytes(["\u{301}n/a.txt", "x/\u{301}n/b.txt", "plain/c.txt"]))
+        // `**/` before a mark-leading name, at the top and nested.
+        #expect(try rels(FileSearchOptions(root: root, query: "needle", include: ["**/\u{301}m/a.txt"], exclude: [])) == bytes(["\u{301}m/a.txt"]))
+        #expect(FileSearch.glob("**/\u{301}n/b.txt", "x/\u{301}n/b.txt"))
+        #expect(FileSearch.glob("**/\u{301}n/*.txt", "\u{301}n/a.txt"))
+    }
+
     @Test func capsResults() throws {
         let root = tempDir()
         defer { try? FileManager.default.removeItem(at: root) }
