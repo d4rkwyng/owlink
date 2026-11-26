@@ -14,7 +14,8 @@ public enum FolderActions {
     }
 
     public static func destination(in parent: URL, name: String) throws -> URL {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+        // One name by its bytes (Beneath.isName): a slash before a combining mark is still a separator.
+        guard Beneath.isName(name) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
                           userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a single file or folder name.")])
         }

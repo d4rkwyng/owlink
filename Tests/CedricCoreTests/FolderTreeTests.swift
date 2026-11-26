@@ -125,6 +125,68 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/deeper/E.md").path), "a slash inside a name isn't a path")
     }
 
+    /// Names are checked as the bytes the kernel sees (Astra batch 4 A,
+    /// batch 5 must-fix 1): a slash followed by a combining mark is one
+    /// Swift character, so a text search misses it, but Darwin still splits
+    /// the name there.
+    static let slashNames = ["a/\u{301}b", "sub/\u{301}N.md", "/\u{301}", "\u{301}/", "a/\u{301}", "/\u{301}a",
+                             "a/\u{301}\u{302}b", "./\u{301}", "../\u{301}", "a\u{301}/b"]
+    static let nulNames = ["a\0b", "a\0\u{301}b", "\0", "\0\u{301}", ".\0", "N.md\0"]
+    static let dotNames = ["", ".", "..", "./", "../", "/.", "/..", "/"]
+
+    @Test func aNameIsOneComponentByItsBytes() {
+        for bad in Self.slashNames + Self.nulNames + Self.dotNames {
+            #expect(!Beneath.isName(bad), "\(Array(bad.unicodeScalars))")
+            #expect(throws: (any Error).self, "\(Array(bad.unicodeScalars))") {
+                try FolderActions.destination(in: URL(fileURLWithPath: "/tmp"), name: bad)
+            }
+        }
+        // Not `.` or `..` by their bytes: ordinary names.
+        for good in ["N.md", ".\u{301}", "..\u{301}", "...", ".hidden", "\u{2024}", "\u{2025}", "a\u{301}b", "e\u{301}.md", "\u{FF0F}"] {
+            #expect(Beneath.isName(good), "\(Array(good.unicodeScalars))")
+            #expect(throws: Never.self, "\(Array(good.unicodeScalars))") {
+                _ = try FolderActions.destination(in: URL(fileURLWithPath: "/tmp"), name: good)
+            }
+        }
+    }
+
+    /// A wiki note whose name holds a slash (even one followed by a
+    /// combining mark), a NUL, or is `.` or `..` is refused as a bad name
+    /// before anything is opened, on both lookup paths, and nothing is made.
+    @Test func aWikiNoteNamedWithASeparatorIsRefusedBeforeAnyOpen() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault")
+        // `a` and `sub` exist, so a name the kernel split would land in them.
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: vault.appendingPathComponent("a"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let before = listing(vault)
+        let pinned = try FolderRoot(vault)
+        var cases: [[String]] = []
+        for name in Self.slashNames + Self.nulNames + Self.dotNames {
+            cases += [[name], ["sub", name], [name, "N.md"]]
+        }
+        for walk in [true, false] {
+            for components in cases {
+                do {
+                    _ = try pinned.createFile(components, walk: walk)
+                    Issue.record("walk \(walk): \(components.map { Array($0.unicodeScalars) }) was created")
+                } catch let error as NSError {
+                    #expect(error.domain == NSCocoaErrorDomain && error.code == NSFileWriteInvalidFileNameError,
+                            "walk \(walk): \(components.map { Array($0.unicodeScalars) }): \(error)")
+                }
+            }
+            for name in Self.slashNames + Self.nulNames + Self.dotNames {
+                #expect(throws: (any Error).self, "\(Array(name.unicodeScalars))") {
+                    try FolderActions.createFile(named: name, in: vault, within: vault, walk: walk)
+                }
+            }
+        }
+        #expect(listing(vault) == before, "nothing made on disk")
+        #expect(((try? fm.contentsOfDirectory(atPath: base.path)) ?? ["?"]) == ["vault"], "nothing made beside the folder")
+    }
+
     /// Everything beneath `dir`, as relative paths (links not followed).
     private func listing(_ dir: URL) -> [String] {
         (FileManager.default.subpaths(atPath: dir.path) ?? ["?"]).sorted()
