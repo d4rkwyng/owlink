@@ -10,7 +10,10 @@ import CedricCore
 /// The table is view-based and virtual (cells are made for the rows on
 /// screen only). Parsing (CSV in CedricCore) and sorting run on a
 /// background queue from a copy of the text taken on the main thread;
-/// a newer render drops an older result. At most `maxRows` records are
+/// a newer render drops an older result. Parses and sorts are counted
+/// apart: a sort picked while a parse is under way is applied to that
+/// parse's table when it lands, never to the one shown before it. At most
+/// `maxRows` records are
 /// shown (with a note), and in large mode only the first `largeMaxChars`
 /// characters are read.
 @MainActor
@@ -18,7 +21,8 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
     static let maxRows = 50_000
     static let maxChars = 16_000_000
     static let largeMaxChars = 2_000_000
-    private static let queue = DispatchQueue(label: "cedric.csv-preview", qos: .userInitiated)
+    /// Serial: the checks hold it to keep a parse under way.
+    static let queue = DispatchQueue(label: "cedric.csv-preview", qos: .userInitiated)
 
     let container = CSVContainer()
     let scroll = NSScrollView()
@@ -28,7 +32,13 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
     /// What is shown: the parsed records and the data rows' order (indexes into `rows`).
     private(set) var data = CSV.Table()
     private(set) var order: [Int] = []
-    private var generation = 0
+    /// The newest parse started (render), the parse whose table `data` is,
+    /// and the newest sort picked. A parse's result is applied only while
+    /// it is the newest; a sort's only while its table is still the
+    /// newest parse and no other sort was picked since.
+    private(set) var parseRevision = 0
+    private var appliedParse = 0
+    private var sortRevision = 0
     private var font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     private var textColor = NSColor.textColor
     /// Set by the tab: large mode, the text now, and where a click goes.
@@ -101,8 +111,8 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
 
     func render(text: String, language: Language, palette: EditorPalette, baseURL: URL?, fileName: String?) {
         applyPalette(palette)
-        generation += 1
-        let gen = generation
+        parseRevision += 1
+        let gen = parseRevision, sortGen = sortRevision
         // An immutable copy (the storage keeps changing), cut at a line end.
         let ns = text as NSString
         let limit = isLarge() ? Self.largeMaxChars : Self.maxChars
@@ -124,8 +134,24 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
             let order = Self.order(t.rows, sort)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard gen == self.generation else { return }
-                    self.apply(t, order: order)
+                    guard gen == self.parseRevision else { return }
+                    // A sort picked while this parsed: sort this table by it.
+                    if sortGen == self.sortRevision { self.apply(t, order: order, parse: gen) } else { self.sort(t, parse: gen) }
+                }
+            }
+        }
+    }
+
+    /// Sorts `t` (the table of parse `parse`) by the current sort off the
+    /// main thread, then shows it, unless a newer parse or sort came first.
+    private func sort(_ t: CSV.Table, parse: Int) {
+        let rows = t.rows, sort = table.sortDescriptors.first, sortGen = sortRevision
+        Self.queue.async {
+            let order = Self.order(rows, sort)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard parse == self.parseRevision, sortGen == self.sortRevision else { return }
+                    self.apply(t, order: order, parse: parse)
                 }
             }
         }
@@ -136,8 +162,9 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         return CSV.sortedOrder(rows, column: col, ascending: sort.ascending)
     }
 
-    private func apply(_ t: CSV.Table, order: [Int]) {
+    private func apply(_ t: CSV.Table, order: [Int], parse: Int) {
         data = t
+        appliedParse = parse
         self.order = order
         let header = t.rows.first ?? []
         // Columns: kept (and their widths) while the count is the same.
@@ -233,18 +260,10 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         ruler.header.isActive = isSorted
-        let rows = data.rows, sort = tableView.sortDescriptors.first
-        generation += 1
-        let gen = generation, t = data
-        Self.queue.async {
-            let order = Self.order(rows, sort)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard gen == self.generation else { return }
-                    self.apply(t, order: order)
-                }
-            }
-        }
+        sortRevision += 1
+        // The table shown, unless a newer parse is under way: then that
+        // parse sorts its own table by this sort when it lands.
+        sort(data, parse: appliedParse)
     }
 
     /// A click on a cell: the caret goes to that field in the text.
