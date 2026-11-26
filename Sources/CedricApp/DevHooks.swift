@@ -183,6 +183,22 @@ enum DevHooks {
             app.newTab(nil)
             if let tab = app.tabs.last { tab.textView.insertText(t, replacementRange: NSRange(location: 0, length: 0)) }
         }
+        // Crash check: two changes in one turn, then steady typing (the
+        // leading save must not be put off by it).
+        if let burst = env["CEDRIC_TEST_TYPE_BURST"]?.split(separator: "|", maxSplits: 1).map(String.init), burst.count == 2 {
+            let delay = env["CEDRIC_TEST_TYPE_BURST_DELAY"].flatMap(Double.init) ?? 2
+            AfterFirstFrame.run { DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                app.newTab(nil)
+                guard let tab = app.tabs.last else { return }
+                tab.textView.insertText(burst[0], replacementRange: NSRange(location: 0, length: 0))
+                tab.textView.insertText(burst[1], replacementRange: tab.textView.selectedRange())
+                print(String(format: "typed: t=%.3f", now()))
+                fflush(stdout)
+                Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    MainActor.assumeIsolated { tab.textView.insertText(".", replacementRange: tab.textView.selectedRange()) }
+                }
+            } }
+        }
         if env["CEDRIC_TEST_TYPE"] != nil || env["CEDRIC_TEST_TYPE_UNTITLED"] != nil {
             // When the typing happened, for crash-check's "killed at once".
             print(String(format: "typed: t=%.3f", now()))

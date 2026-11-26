@@ -855,35 +855,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     static let sessionSaveDelay: TimeInterval = 1.5
 
     /// Saves soon after a change. The first change after a quiet spell (no
-    /// save waiting, none for 1.5 s) is saved on the next turn, so a new
-    /// tab's first text or a file's first edit is on disk in a few
-    /// milliseconds, not only once typing pauses; the changes after it
-    /// are coalesced into one save 1.5 s after the last. A crash loses at
-    /// most the typing since the last save, never a whole new tab.
-    /// Not while restored tabs wait to be built (a save builds them all
-    /// at once: AppDelegate.finishRestore) nor before the first frame
-    /// (then right after it), and not with a large document unsaved,
-    /// whose whole text each save copies: those keep the 1.5 s.
+    /// save for 1.5 s) is saved on the next turn, so a new tab's first
+    /// text or a file's first edit is on disk in a few milliseconds, not
+    /// only once typing pauses; while typing goes on, the leading save
+    /// comes again at most every 1.5 s; and one more save comes 1.5 s
+    /// after the last change. A crash loses at most about 1.5 s of
+    /// typing, never a whole new tab.
+    /// The leading save has its own timer, which changes never cancel or
+    /// postpone (they did: a second change within its few ms turned it
+    /// into the trailing 1.5 s, and steady typing then put off every save
+    /// until the typing paused). Only the trailing save is debounced.
+    /// No leading save while restored tabs wait to be built (a save builds
+    /// them all at once: AppDelegate.finishRestore) nor before the first
+    /// frame (then right after it), and not with a large document unsaved,
+    /// whose whole text each save copies: those keep the trailing 1.5 s.
+    /// Per change: two timer checks; the large-document test (cached
+    /// flags) only when no leading save is armed.
     func scheduleSessionSave() {
-        let waiting = sessionTimer?.isValid == true
         sessionTimer?.invalidate()
-        var delay = Self.sessionSaveDelay
-        let quiet = !waiting && ProcessInfo.processInfo.systemUptime - lastSessionSave >= Self.sessionSaveDelay
-        if quiet, pendingRestore.isEmpty, !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) {
-            if AfterFirstFrame.passed {
-                delay = 0.02
-            } else if !leadingSaveAfterFirstFrame {
-                leadingSaveAfterFirstFrame = true
-                AfterFirstFrame.run { [weak self] in
-                    guard let self else { return }
-                    self.leadingSaveAfterFirstFrame = false
-                    // Still waiting (nothing saved since): save now.
-                    if self.sessionTimer?.isValid == true, self.pendingRestore.isEmpty { self.saveSession(sync: false) }
-                }
-            }
-        }
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionSaveDelay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveSession(sync: false) }
+        }
+        guard leadingSaveTimer?.isValid != true, !leadingSaveAfterFirstFrame, pendingRestore.isEmpty,
+              !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) else { return }
+        if AfterFirstFrame.passed {
+            let wait = max(0.02, lastSessionSave + Self.sessionSaveDelay - ProcessInfo.processInfo.systemUptime)
+            leadingSaveTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.saveSession(sync: false) }
+            }
+        } else {
+            leadingSaveAfterFirstFrame = true
+            AfterFirstFrame.run { [weak self] in
+                guard let self, self.leadingSaveAfterFirstFrame else { return }
+                self.leadingSaveAfterFirstFrame = false
+                // Still waiting (nothing saved since): save now.
+                if self.sessionTimer?.isValid == true, self.pendingRestore.isEmpty { self.saveSession(sync: false) }
+            }
         }
     }
 
