@@ -157,8 +157,9 @@ extension EditorWindowController {
         // "images" is opened once per batch beneath the pinned document
         // folder; every copy is staged in that folder and published as
         // images/<name> with the kernel keeping the rename beneath it
-        // (ImageStore): nothing is written outside the folder, nothing is
-        // overwritten, and no partial file gets a final name.
+        // (ImageStore): moving or replacing "images" can't redirect the
+        // staging or the published file through it, nothing is overwritten,
+        // and no partial file gets a final name.
         var opened: ImageStore?
         func store() throws -> ImageStore {
             if let opened { return opened }
@@ -229,8 +230,7 @@ extension EditorWindowController {
               actionName: String(localized: "Insert Image"))
     }
 
-    /// What the user is told when ImageStore refuses (in none of these
-    /// cases was anything written outside the document's folder).
+    /// What the user is told when ImageStore refuses.
     static func imageStoreError(_ failure: ImageStore.Failure) -> NSError {
         let text: String, code: Int
         switch failure {
