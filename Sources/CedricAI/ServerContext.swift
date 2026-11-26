@@ -190,10 +190,7 @@ public final class ServerContextCache: @unchecked Sendable {
     /// What is known now (nil: nothing yet, or the server doesn't say);
     /// refreshes in the background when stale.
     public func current(client: LocalModelClient, model: String, kind: LocalAISettings.Backend) -> ServerContextReport? {
-        let key = Self.key(client, model, kind)
-        let entry: Entry? = lock.withLock { entries[key] }
-        if entry.map(fresh) != true { _ = start(key, client, model, kind) }
-        return entry?.report
+        lookup(Self.key(client, model, kind), client, model, kind).entry?.report
     }
 
     /// Waits up to `wait` seconds (default `probeTimeout`) for a fresh
@@ -201,12 +198,14 @@ public final class ServerContextCache: @unchecked Sendable {
     /// still running after that finishes in the background.
     public func refresh(client: LocalModelClient, model: String, kind: LocalAISettings.Backend,
                         wait: TimeInterval? = nil) async -> ServerContextReport? {
-        let key = Self.key(client, model, kind)
-        if let e: Entry = lock.withLock({ entries[key] }), fresh(e) { return e.report }
-        // The deadline counts from this call, not from when the timer task
-        // first runs, so a busy pool can't stretch the wait.
-        let deadline = ContinuousClock.now + .seconds(max(0, wait ?? defaultWait))
-        let task = start(key, client, model, kind)
+        // The deadline counts from this call (taken before the lookup), not
+        // from when the lookup ends or the timer task first runs, so neither
+        // a busy pool nor a caller descheduled after the lookup can stretch
+        // the wait.
+        let start = ContinuousClock.now
+        let found = lookup(Self.key(client, model, kind), client, model, kind)
+        guard let task = found.probe else { return found.entry?.report }
+        let deadline = start + .seconds(max(0, wait ?? defaultWait))
         // Whichever ends first: the probe, or the wait (nil; the probe
         // goes on and stores its answer for the next read). Not a task
         // group: leaving one waits for every child, the probe included.
@@ -230,10 +229,15 @@ public final class ServerContextCache: @unchecked Sendable {
         }
     }
 
-    private func start(_ key: String, _ client: LocalModelClient, _ model: String,
-                       _ kind: LocalAISettings.Backend) -> Task<ServerContextReport?, Never> {
+    /// The entry, and the probe to wait for when it isn't fresh (the one
+    /// running, or a new one), in one hold of the lock: checked apart, a
+    /// probe ending between the check and the start would be asked again.
+    private func lookup(_ key: String, _ client: LocalModelClient, _ model: String,
+                        _ kind: LocalAISettings.Backend) -> (entry: Entry?, probe: Task<ServerContextReport?, Never>?) {
         lock.withLock {
-            if let t = running[key] { return t }
+            let entry = entries[key]
+            if let entry, fresh(entry) { return (entry, nil) }
+            if let t = running[key] { return (entry, t) }
             let probe = self.probe
             let t = Task.detached(priority: .utility) { [weak self] () -> ServerContextReport? in
                 let report = await probe(client, model, kind)
@@ -241,7 +245,7 @@ public final class ServerContextCache: @unchecked Sendable {
                 return report
             }
             running[key] = t
-            return t
+            return (entry, t)
         }
     }
 
