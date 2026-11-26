@@ -7,8 +7,14 @@ import Foundation
 ///
 /// The app uses the system's (NSSpellChecker.shared, in CedricApp); the
 /// dev checks (CEDRIC_CHECK) and the tests use `RecordingSpellDictionary`,
-/// so no check or test ever learns a word in, or ignores one through, the
-/// user's real spelling dictionary.
+/// so what goes through this seam (Fix Typos' Learn Word and Ignore All,
+/// the checks' own learns and ignores) never reaches the user's real
+/// spelling dictionary. AppKit's own spelling actions don't go through
+/// it: the native Ignore Spelling (`ignoreSpelling(_:)`, which the view
+/// overrides only to clear the record before calling super), the context
+/// menu's and the spelling panel's Learn and Ignore all write AppKit's
+/// spell checker directly, so a check that invoked one of them would
+/// reach the real one (none does).
 public protocol SpellDictionaryService: AnyObject {
     func language() -> String
     var automaticallyIdentifiesLanguages: Bool { get }

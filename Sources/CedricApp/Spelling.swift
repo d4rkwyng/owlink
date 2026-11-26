@@ -228,8 +228,12 @@ extension EditorTextView {
     }
 
     /// The spelling dictionary Owlink reads and writes: the system's, or,
-    /// in a dev check (CEDRIC_CHECK), one of its own, so no check learns a
-    /// word in the user's real dictionary (RecordingSpellDictionary).
+    /// in a dev check (CEDRIC_CHECK), one of its own, so what Owlink and
+    /// the checks learn or ignore through it never reaches the user's real
+    /// dictionary (RecordingSpellDictionary). AppKit's own spelling
+    /// actions bypass it (Ignore Spelling below calls super; the context
+    /// menu's and the spelling panel's Learn): a check that invoked one
+    /// would write the real dictionary.
     static let spellDictionary: SpellDictionaryService =
         DevEnvironment.values["CEDRIC_CHECK"] != nil
             ? RecordingSpellDictionary(language: { NSSpellChecker.shared.language() },
