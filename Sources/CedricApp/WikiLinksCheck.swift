@@ -5,9 +5,13 @@ import CedricCore
 /// `[[` typed with real key events (the list, filtering, ↑/↓, Return,
 /// Tab, ⎋, nothing in a code span or fence), ⌘-click on links (the right
 /// tab, a heading, a missing note created, none outside the folder
-/// through a symlinked parent), Backlinks (the list, its
+/// through a symlinked parent, none opened when the folder was replaced
+/// at its path before confirming), Backlinks (the list, its
 /// snippets, a click to the line; the list and the backlinks computed
 /// off the main thread), a note renamed on disk (names and
+/// backlinks follow), held queries (a click on an old row or a key while
+/// a list ranks, typing after a held Return, superseded queries skipped),
+/// the folder closed or replaced while a list ranks (the list goes, the
 /// backlinks follow), and no list in large mode.
 extension DevChecks {
     static func wikiLinksCheck(_ app: AppDelegate) {
@@ -61,7 +65,10 @@ extension DevChecks {
         var created: [String] = []
         var failures: [Error] = []
         var builds = 0
+        var skipped = 0
+        var oldNotes: WikiNotes?
         let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
+        let movedRoot = dir.appendingPathComponent("wl-moved", isDirectory: true)
 
         run([
             sync {
@@ -125,6 +132,47 @@ extension DevChecks {
             wait("Return while ranking is answered") { popup?.isActive != true },
             sync {
                 expect(draft.text == "[[Alpha]]", "Return before the list lands inserts the match for what was typed", draft.text)
+                // Held queries (a slow folder): input while a list ranks belongs to that list.
+                WikiNotes.queryDelay = 0.4
+                setText(draft, "")
+                type("[[")
+            },
+            wait("the full list lands") { popup?.ranking == false && popup?.isShown == true && (popup?.shownNames.count ?? 0) > 2 },
+            sync {
+                type("b")
+                expect(popup?.ranking == true, "a held query is ranking")
+                popup?.activate(0)
+                expect(draft.text == "[[b", "a click on a row of the old list while ranking inserts nothing", draft.text)
+                expect(popup?.isActive == true, "and the list stays for what was typed")
+                press(String(UnicodeScalar(UInt16(NSDownArrowFunctionKey))!), 125)
+                expect(draft.text == "[[b" && draft.textView.selectedRange().location == 3, "↓ while ranking doesn't move the caret", draft.text)
+            },
+            wait("the list for b lands") { popup?.ranking == false && popup?.isShown == true },
+            sync {
+                let names = popup?.shownNames ?? []
+                expect(names.count >= 2 && names.prefix(2).allSatisfy { $0.lowercased().hasPrefix("b") }, "the list is for b", "\(names)")
+                expect(popup?.selectedRow == 1, "↓ held while ranking moves on the new list", "\(popup?.selectedRow ?? -1)")
+                press("\u{1b}", 53)
+                setText(draft, "")
+                type("[[alp\n")
+                type("x")
+                expect(draft.text == "[[alpx", "typing after a held Return", draft.text)
+            },
+            wait("the list for alpx lands") { popup?.ranking == false },
+            sync {
+                expect(draft.text == "[[alpx", "a Return held for older text isn't replayed after more typing", draft.text.debugDescription)
+                press("\u{1b}", 53)
+                skipped = popup?.skippedRankings ?? 0
+                setText(draft, "")
+                type("[[bet")
+            },
+            wait("the list for bet lands") { popup?.ranking == false && popup?.isShown == true },
+            sync {
+                let n = (popup?.skippedRankings ?? 0) - skipped
+                expect(n >= 2, "queries superseded while queued are skipped before ranking", "\(n) skipped")
+                expect(popup?.shownNames.first == "Beta", "and the latest one is ranked", "\(popup?.shownNames ?? [])")
+                press("\u{1b}", 53)
+                WikiNotes.queryDelay = 0
                 setText(draft, "See [[Beta]] [[Gamma]] [[zz")
                 type(" `[[")
                 expect(popup?.isShown != true, "no list inside a code span")
@@ -170,6 +218,29 @@ extension DevChecks {
                 expect(((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty,
                        "confirming leaves the outside folder untouched", "\((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])")
                 expect(!failures.isEmpty && tab("Escape.md") == nil, "the create is refused and nothing opens", "\(failures)")
+                // The open folder replaced at its path between opening it and confirming:
+                // the note goes in the folder that was opened, and nothing opens.
+                failures = []
+                WikiTabState.confirmCreate = { shown in
+                    created.append(shown)
+                    try? FileManager.default.moveItem(at: root, to: movedRoot)
+                    try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                    return true
+                }
+                setText(draft, "Draft [[Swapped]]\n")
+                commandClick(draft, "[[Swapped]]")
+            },
+            wait("⌘-click on a missing note after the folder was replaced is answered") { !failures.isEmpty || tab("Swapped.md") != nil },
+            sync {
+                let fm = FileManager.default
+                expect(!failures.isEmpty && tab("Swapped.md") == nil, "a replaced open folder: the create is reported and nothing opens", "\(failures)")
+                expect(!fm.fileExists(atPath: root.appendingPathComponent("Swapped.md").path), "nothing is made in the folder now at its path")
+                expect(fm.fileExists(atPath: movedRoot.appendingPathComponent("Swapped.md").path), "the note is in the folder that was opened")
+                // Put the folder back (the replacement is moved aside, never deleted).
+                try? fm.moveItem(at: root, to: dir.appendingPathComponent("wl-replaced", isDirectory: true))
+                try? fm.moveItem(at: movedRoot, to: root)
+                expect(fm.fileExists(atPath: root.appendingPathComponent("Alpha.md").path), "the folder is back")
+                WikiTabState.confirmCreate = { created.append($0); return true }
                 WikiTabState.createFailed = nil
                 guard let a = alphaTab else { expect(false, "Alpha tab"); return }
                 focus(a)
@@ -224,6 +295,42 @@ extension DevChecks {
                 expect(names.contains("Bravo") && !names.contains("Beta"), "and the suggestions", "\(names)")
                 press("\u{1b}", 53)
                 print("check: wiki notes: \(notes?.notes?.count ?? -1) names, \(notes?.notesBuilt ?? -1) name builds, \(notes?.scansDone ?? -1) backlink scans")
+                // The folder closed while a list ranks and a backlinks walk is out.
+                WikiNotes.queryDelay = 0.4
+                focus(draft)
+                setText(draft, "")
+                type("[[b")
+                alphaTab?.refreshBacklinks()
+                expect(popup?.ranking == true, "a list is ranking when the folder closes")
+                app.closeFolder()
+                expect(popup?.isActive != true && draft.textView.commandInterceptor == nil, "closing the folder drops the list and its key handling")
+                expect(side?.links.isEmpty == true && side?.message.hasPrefix("Open a folder") == true,
+                       "and the backlinks pane says no folder is open", side?.message ?? "-")
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { next() } },
+            sync {
+                expect(popup?.isShown != true && side?.links.isEmpty == true, "results asked before the close aren't applied after it")
+                app.openFolder(root)
+            },
+            wait("the folder opens again and the backlinks follow it") { FolderSidebar.shared?.isShown == true && (side?.links.count ?? 0) >= 3 },
+            sync {
+                // Replaced while a list ranks: the old folder's names never show.
+                focus(draft)
+                setText(draft, "")
+                type("[[b")
+                expect(popup?.ranking == true, "a list is ranking when the folder is replaced")
+                oldNotes = FolderSidebar.shared?.wikiNotes
+                app.openFolder(root)
+                expect(popup?.isActive != true && draft.textView.commandInterceptor == nil, "replacing the folder drops the list too")
+                expect(FolderSidebar.shared?.wikiNotes !== oldNotes, "the backlinks pane asks the new folder")
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { next() } },
+            wait("the backlinks follow the new folder") { (side?.links.count ?? 0) >= 3 && FolderSidebar.shared?.wikiNotes === notes && (notes?.scansDone ?? 0) > 0 },
+            sync {
+                expect(popup?.isShown != true, "the old folder's list never shows")
+                expect(side?.links.map(\.source) == ["Bravo.md", "notes.txt", "sub/Gamma.md"], "the new folder's backlinks", "\(side?.links.map(\.source) ?? [])")
+                WikiNotes.queryDelay = 0
+                oldNotes = nil
                 _ = app.open(big)
             },
             wait("the long-line note opens in large mode") { tab("big.md")?.largeReason != nil },

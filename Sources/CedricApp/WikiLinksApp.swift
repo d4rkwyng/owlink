@@ -26,6 +26,8 @@ final class WikiNotes {
     weak var sidebar: FolderSidebar?
     let root: URL
     let realRoot: String
+    /// The sidebar's pinned root (new notes are made beneath it).
+    let folderRoot: FolderRoot?
     private(set) var notes: NoteIndex?
     private(set) var scan: BacklinkScan
     /// Folders changed since the last scan (relative); nil: all of them.
@@ -50,6 +52,8 @@ final class WikiNotes {
     /// Completion ranking and backlink lookups: run against a snapshot
     /// (`notes`, `scan` are values) off the main thread.
     static let queryQueue = DispatchQueue(label: "cedric.wiki-query", qos: .userInitiated)
+    /// The checks hold each query this long on the queue (a slow folder).
+    static var queryDelay: TimeInterval = 0
     /// Bumped whenever `notes` or `scan` changes: a query result made from
     /// an older snapshot is dropped.
     private(set) var generation = 0
@@ -58,6 +62,7 @@ final class WikiNotes {
         self.sidebar = sidebar
         root = sidebar.rootURL
         realRoot = sidebar.realRoot
+        folderRoot = sidebar.folderRoot
         scan = BacklinkScan(root: sidebar.rootURL)
     }
 
@@ -215,9 +220,23 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var isActive: Bool { panel.isVisible || ranking }
     /// A ranking is out on the query queue; `request` names the latest.
     private(set) var ranking = false
-    private var request = 0
-    /// Return or Tab came while ranking: taken when the list lands.
-    private var pendingKey: Selector?
+    private let latest = LatestRequest()
+    private var request: Int {
+        get { latest.value }
+        set { latest.value = newValue }
+    }
+    /// Rankings skipped on the queue because a newer one came (the checks).
+    var skippedRankings: Int { latest.skipped }
+    /// ↑/↓, Return or Tab that came while ranking, bound to that request
+    /// and the selection then: used when that list lands, dropped if a
+    /// newer request came or the caret moved (`apply`).
+    private struct Deferred {
+        var request: Int
+        var selection: NSRange
+        var moves = 0
+        var key: Selector?
+    }
+    private var pending: Deferred?
     /// Lists shown (the checks).
     private(set) var updates = 0
 
@@ -275,23 +294,39 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
         textView = tv
         tv.commandInterceptor = { [weak self] sel in self?.handle(sel) ?? false }
         request += 1
+        // Keys held for an older request don't carry over to this one.
+        pending = nil
         guard let idx = notes.notes else {
             ranking = false
             apply([], ready: false, in: tv)
             return
         }
         ranking = true
-        let token = request, gen = notes.generation
-        let ref = WeakRef(self), source = WeakRef(notes), view = WeakRef(tv)
+        // Captured here: a main-actor static can't be read in the Sendable
+        // closure (Swift 6.1 rejects it).
+        let token = request, gen = notes.generation, limit = Self.maxRows, delay = WikiNotes.queryDelay
+        let ref = WeakRef(self), source = WeakRef(notes), view = WeakRef(tv), gate = latest
         WikiNotes.queryQueue.async {
-            let found = idx.suggestions(query, limit: Self.maxRows)
+            if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+            // A newer keystroke (or a hide) came while this waited: skip the ranking.
+            guard gate.isLatest(token) else { return }
+            let found = idx.suggestions(query, limit: limit)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let me = ref.value, let tv = view.value, me.request == token, me.ranking,
-                          me.query == query, me.start == start, me.textView === tv, tv.window != nil,
-                          let notes = source.value else { return }
+                    // Superseded: the newer request owns the list.
+                    guard let me = ref.value, me.request == token, me.ranking else { return }
+                    // The tab, or the folder's notes, went or changed (a folder closed
+                    // or replaced): the list goes, with its key handling.
+                    guard let tv = view.value, me.query == query, me.start == start, me.textView === tv, tv.window != nil,
+                          let notes = source.value, FolderSidebar.shared?.wikiNotes === notes else {
+                        me.hide()
+                        return
+                    }
                     guard notes.generation == gen else {
+                        // Same request ranked again on the newer names: held keys stay with it.
+                        let keep = me.pending
                         me.show(in: tv, start: start, query: query, notes: notes)
+                        if var keep, keep.selection == tv.selectedRange() { keep.request = me.request; me.pending = keep }
                         return
                     }
                     me.ranking = false
@@ -305,22 +340,29 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
         let old = rows.first?.path
         rows = found
         updates += 1
-        if let key = pendingKey {
-            pendingKey = nil
-            if rows.isEmpty {
-                hide()
-                tv.doCommand(by: key)
-            } else {
-                accept(0)
+        var row = 0
+        if let p = pending {
+            pending = nil
+            // Held keys count only for this request, with the caret where it was.
+            if p.request == request, tv.selectedRange() == p.selection {
+                row = rows.isEmpty ? 0 : max(0, min(rows.count - 1, p.moves))
+                if let key = p.key {
+                    if rows.isEmpty {
+                        hide()
+                        tv.doCommand(by: key)
+                    } else {
+                        accept(row)
+                    }
+                    return
+                }
             }
-            return
         }
         note.stringValue = ready ? String(localized: "No matching notes") : String(localized: "Indexing notes…")
         note.isHidden = !rows.isEmpty
         table.reloadData()
         if !rows.isEmpty {
-            table.selectRowIndexes([0], byExtendingSelection: false)
-            if old != rows.first?.path { table.scrollRowToVisible(0) }
+            table.selectRowIndexes([row], byExtendingSelection: false)
+            if old != rows.first?.path || row > 0 { table.scrollRowToVisible(row) }
         }
         let height = CGFloat(rows.isEmpty ? 1 : min(rows.count, 8)) * Self.rowHeight + 8
         let caret = tv.firstRect(forCharacterRange: NSRange(location: start, length: 0), actualRange: nil)
@@ -341,7 +383,7 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
         textView?.commandInterceptor = nil
         request += 1
         ranking = false
-        pendingKey = nil
+        pending = nil
         rows = []
         table.reloadData()
     }
@@ -353,6 +395,8 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func handle(_ sel: Selector) -> Bool {
         switch sel {
         case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.moveUp(_:)):
+            // The rows shown are for older text: the move waits for the new list.
+            if ranking { hold { $0.moves += sel == #selector(NSResponder.moveDown(_:)) ? 1 : -1 }; return true }
             guard !rows.isEmpty else { return false }
             let r = table.selectedRow
             let next = sel == #selector(NSResponder.moveDown(_:)) ? min(rows.count - 1, r + 1) : max(0, r - 1)
@@ -361,7 +405,7 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
             // The list for what was just typed isn't in yet: answer when it is.
-            if ranking { pendingKey = sel; return true }
+            if ranking { hold { $0.key = sel }; return true }
             guard !rows.isEmpty else { hide(); return false }
             accept(max(0, table.selectedRow))
             return true
@@ -373,6 +417,15 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
         }
     }
 
+    /// Keeps a key for the list being ranked, bound to this request and selection.
+    private func hold(_ change: (inout Deferred) -> Void) {
+        guard let tv = textView else { return }
+        var p = pending.flatMap { $0.request == request ? $0 : nil }
+            ?? Deferred(request: request, selection: tv.selectedRange())
+        change(&p)
+        pending = p
+    }
+
     private func accept(_ row: Int) {
         guard row < rows.count else { return }
         let s = rows[row]
@@ -380,10 +433,17 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
         onAccept?(s)
     }
 
-    @objc private func clicked(_ sender: Any?) {
-        let r = table.clickedRow
-        if r >= 0 { accept(r) }
+    @objc private func clicked(_ sender: Any?) { activate(table.clickedRow) }
+
+    /// A click on row `r` (the checks call it too): taken only when the
+    /// rows shown are for the text as it is, not while a newer list ranks.
+    func activate(_ r: Int) {
+        guard !ranking, r >= 0 else { return }
+        accept(r)
     }
+
+    /// No row is picked with the mouse while the rows are for older text.
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !ranking }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
@@ -546,10 +606,12 @@ extension EditorWindowController {
         let parts = name.split(separator: "/").map(String.init)
         guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
         let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
-        let base = parts.count > 1 ? notes.root
-            : (notes.relativePath(of: doc.fileURL) != nil ? doc.fileURL!.deletingLastPathComponent() : notes.root)
-        let folder = parts.dropLast().reduce(base) { $0.appendingPathComponent($1, isDirectory: true) }
-        let shown = FolderTree.relativePath(of: folder.appendingPathComponent(file), in: notes.root) ?? file
+        // The note's path in the folder, as names: beside this note when it is
+        // in the folder and the link names no folder, else from the top.
+        let besideDoc = parts.count > 1 ? [] : (notes.relativePath(of: doc.fileURL)?.split(separator: "/").dropLast().map(String.init) ?? [])
+        let components = besideDoc + parts.dropLast() + [file]
+        let folder = components.dropLast().reduce(notes.root) { $0.appendingPathComponent($1, isDirectory: true) }
+        let shown = components.joined(separator: "/")
         let ok: Bool
         if let confirm = WikiTabState.confirmCreate {
             ok = confirm(shown)
@@ -568,10 +630,15 @@ extension EditorWindowController {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
                               userInfo: [NSLocalizedDescriptionKey: String(localized: "The folder “\(folder.lastPathComponent)” doesn’t exist.")])
             }
-            // The parent is judged against the open folder's real root, and the
-            // note made relative to that checked folder (a symlinked parent that
-            // leads out is refused; O_EXCL keeps an existing file).
-            let url = try FolderActions.createFile(named: file, in: folder, within: URL(fileURLWithPath: notes.realRoot))
+            // Made beneath the folder pinned when the sidebar opened it, never
+            // its path looked up again (a parent that leads out is refused,
+            // O_EXCL keeps an existing file), and opened only if its URL is
+            // still the file made.
+            guard let pinned = notes.folderRoot else {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
+                              userInfo: [NSLocalizedDescriptionKey: String(localized: "The open folder couldn’t be read, so the note wasn’t created.")])
+            }
+            let url = try pinned.createFile(components)
             if let s = FolderSidebar.shared, let rel = FolderTree.relativePath(of: folder, in: s.rootURL) {
                 let node = rel.isEmpty ? s.root : s.root.descendant(rel)
                 if let node, node.isLoaded { s.load(node) }

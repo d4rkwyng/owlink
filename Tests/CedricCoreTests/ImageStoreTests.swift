@@ -83,6 +83,59 @@ import Testing
         #expect(try store.copy(from: pic, name: "p.png") == "p.png")
         #expect(listing(outside).isEmpty, "the outside folder is untouched")
         #expect(fm.contents(atPath: doc.appendingPathComponent("was-images/p.png").path) == Data([9]), "the copy is in the folder that was checked")
+        // Through insertion: images/p.png no longer leads to that copy, so no link is given.
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "p.png") }
+    }
+
+    /// The link handed to the editor is checked against the published file.
+    @Test func aLinkIsGivenOnlyWhileItLeadsToThePublishedFile() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = d.appendingPathComponent("p q.png")
+        try Data([4]).write(to: pic)
+        let store = try ImageStore.open(in: doc)
+        let name = try store.copy(from: pic, name: "p q.png")
+        #expect(try store.link(for: name) == "images/p%20q.png", "an unchanged folder gives the link")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "never-published.png") }
+        // The published file replaced by another of the same name.
+        let published = doc.appendingPathComponent("images/p q.png")
+        try fm.removeItem(at: published)
+        try Data([5]).write(to: published)
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: name) }
+        // The pinned "images" moved out of the document's folder (no link left behind).
+        let second = try store.write(Data([6]), name: "r.png")
+        try fm.moveItem(at: doc.appendingPathComponent("images"), to: outside.appendingPathComponent("moved"))
+        #expect(fm.contents(atPath: outside.appendingPathComponent("moved/r.png").path) == Data([6]))
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: second) }
+    }
+
+    /// The document's folder replaced at its path after "images" was pinned.
+    @Test func aReplacedDocumentFolderGivesNoLink() throws {
+        let (d, doc, _) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let store = try ImageStore.open(in: doc)
+        let name = try store.write(Data([1]), name: "x.png")
+        try fm.moveItem(at: doc, to: d.appendingPathComponent("doc-old"))
+        try fm.createDirectory(at: doc.appendingPathComponent("images"), withIntermediateDirectories: true)
+        try Data([2]).write(to: doc.appendingPathComponent("images/x.png"))
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: name) }
+        #expect(fm.contents(atPath: d.appendingPathComponent("doc-old/images/x.png").path) == Data([1]), "the copy stayed where it was written")
+        #expect(fm.contents(atPath: doc.appendingPathComponent("images/x.png").path) == Data([2]), "the new folder's file is untouched")
+    }
+
+    /// `name` is one file name, checked before anything is staged.
+    @Test func aNameThatIsNotOneFileNameIsRefused() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([3]).write(to: pic)
+        let store = try ImageStore.open(in: doc)
+        for bad in ["", ".", "..", "../p.png", "a/b.png", "/tmp/p.png", "p\0.png"] {
+            #expect(throws: ImageStore.Failure.badName, "\(bad.debugDescription)") { _ = try store.copy(from: pic, name: bad) }
+            #expect(throws: ImageStore.Failure.badName, "\(bad.debugDescription)") { _ = try store.write(Data([3]), name: bad) }
+        }
+        #expect(listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
+        #expect(listing(d) == ["doc", "outside"] && listing(outside) == ["p.png"], "nothing written beside the folders")
     }
 
     @Test func aSourceSymlinkIsCopiedAsItsBytes() throws {
