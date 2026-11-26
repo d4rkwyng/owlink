@@ -295,7 +295,7 @@ typing is as fast with it shown as hidden.
 Markdown's set, left to right: a heading pull-down (Body, Heading 1,
 Heading 2, Heading 3), Bold, Italic, Strikethrough, Inline Code, Link,
 Bulleted List, Numbered List, Checkbox, Quote, Code Block, Insert Table
-and Image Link (see [Markdown editing](#markdown-editing)), and at the far
+and Insert Image… (see [Markdown editing](#markdown-editing)), and at the far
 end a preview toggle (an eye) that lights up while the preview shows. The
 icons take their colour from the theme and stand out from the bar at
 least 3:1 in every theme.
@@ -926,6 +926,13 @@ way. A session saved before that leaves the preview closed.
   between the parentheses (or uses a URL on the clipboard), a selected
   URL into `![](url)`, and with the caret in an image it takes the image
   markup off and leaves its alt text.
+  Insert Image… (the Context Bar's Image button) asks for one or more
+  image files and treats them exactly as a paste or drop: each is copied
+  into the `images` folder next to the document (a file of the same name
+  there is never replaced; the copy becomes `name-2.png`), a file already
+  inside the document's folder is linked where it is, and the links go
+  in at the caret as one undo step. Undo takes the links out and leaves
+  the copied files. An untitled document is asked to save first.
 - **Checkboxes:** Format › Markdown › Checkbox (⌘↩) checks
   or unchecks `- [ ]` / `- [x]` on the caret's line or every selected
   line, adds a box to a list item without one, and turns a plain line

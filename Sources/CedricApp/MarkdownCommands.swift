@@ -1,5 +1,6 @@
 import AppKit
 import CedricCore
+import UniformTypeIdentifiers
 
 // Format › Markdown: bold, italic, strikethrough, inline code and link
 // (MarkdownFormat in CedricCore). Each is one undo step, and only for
@@ -91,6 +92,8 @@ extension AppDelegate {
         currentTab?.markdownBlock(String(localized: "Insert Table")) { MarkdownBlocks.insertTable(in: $0, selection: $1) }
     }
     @objc func markdownImageMenu(_ sender: Any?) { currentTab?.markdownImage() }
+    /// Format › Markdown › Insert Image… (the Context Bar's Image button).
+    @objc func markdownInsertImageFileMenu(_ sender: Any?) { currentTab?.insertImageFiles() }
 
     static let markdownActions: Set<Selector> = [
         #selector(markdownBoldMenu(_:)), #selector(markdownItalicMenu(_:)), #selector(markdownStrikethroughMenu(_:)),
@@ -98,7 +101,7 @@ extension AppDelegate {
         #selector(formatTableMenu(_:)), #selector(markdownBodyMenu(_:)), #selector(markdownHeading1Menu(_:)),
         #selector(markdownHeading2Menu(_:)), #selector(markdownHeading3Menu(_:)), #selector(markdownBulletListMenu(_:)),
         #selector(markdownNumberedListMenu(_:)), #selector(markdownQuoteMenu(_:)), #selector(markdownCodeBlockMenu(_:)),
-        #selector(markdownTableMenu(_:)), #selector(markdownImageMenu(_:)),
+        #selector(markdownTableMenu(_:)), #selector(markdownImageMenu(_:)), #selector(markdownInsertImageFileMenu(_:)),
     ]
 
     func validateMarkdownItem(_ item: NSMenuItem) -> Bool? {
@@ -118,6 +121,8 @@ func markdownMenu() -> NSMenuItem {
         item(String(localized: "Inline Code"), #selector(AppDelegate.markdownCodeMenu(_:)), "`", [.control]),
         item(String(localized: "Link"), #selector(AppDelegate.markdownLinkMenu(_:)), "k"),
         item(String(localized: "Image Link"), #selector(AppDelegate.markdownImageMenu(_:))),
+        // Image files from an open panel, copied in as paste and drop do (the Context Bar's Image button).
+        item(String(localized: "Insert Image…"), #selector(AppDelegate.markdownInsertImageFileMenu(_:))),
         .separator(),
         // ⌘1–⌘3 as in Bear (plain ⌘1–3 were free; ⌃⌘1 is the folder sidebar, ⌥⌘1… Open Recent).
         item(String(localized: "Body"), #selector(AppDelegate.markdownBodyMenu(_:))),
@@ -188,6 +193,23 @@ extension EditorWindowController {
               actionName: String(localized: "Insert Image"))
     }
 
+    /// Format › Markdown › Insert Image… (the Context Bar's Image button):
+    /// image files picked in an open panel go through `insertImages`, the
+    /// paste and drop path (same images/ folder, naming, no overwrite,
+    /// links, one undo step; an untitled tab is asked to save first).
+    /// Cancel changes nothing.
+    func insertImageFiles() {
+        guard markdownEditable, textView.multiCarets == nil, let window else { NSSound.beep(); return }
+        ImageFilePicker.pick(for: window) { [weak self] urls in
+            guard let self, let urls else { return }
+            // What a paste takes: existing files with an image extension.
+            let images = urls.filter { MarkdownPaste.isImageFile($0) && FileManager.default.fileExists(atPath: $0.path) }
+            guard !images.isEmpty else { NSSound.beep(); return }
+            guard self.markdownEditable else { NSSound.beep(); return }
+            self.insertImages(images, bitmap: nil, at: self.textView.selectedRange())
+        }
+    }
+
     /// An untitled tab has no folder for the image: say so, and offer Save As.
     private func askToSaveForImages(_ files: [URL], bitmap: Data?, at range: NSRange) {
         guard let window else { NSSound.beep(); return }
@@ -202,6 +224,44 @@ extension EditorWindowController {
                 guard let self, self.saveAs(), self.doc.fileURL != nil else { return }
                 self.insertImages(files, bitmap: bitmap, at: range)
             }
+        }
+    }
+}
+
+/// The open panel behind Insert Image…: image files only (the extensions
+/// paste and drop take), one or several. Checks never show it: they set
+/// `injected` (the URLs a user would pick, nil for Cancel).
+@MainActor
+enum ImageFilePicker {
+    static let dryRun = DevEnvironment.values["CEDRIC_CHECK"] != nil
+    static var injected: (() -> [URL]?)?
+    /// Panels asked for (shown or, in checks, answered by `injected`).
+    static var asks = 0
+
+    static var contentTypes: [UTType] {
+        MarkdownPaste.imageExtensions.sorted().compactMap { UTType(filenameExtension: $0) }
+    }
+
+    /// `done` gets the picked files, or nil on Cancel; on the next turn of
+    /// the run loop, after the panel's sheet has gone (a save-first sheet
+    /// may follow).
+    static func pick(for window: NSWindow, done: @escaping ([URL]?) -> Void) {
+        asks += 1
+        if dryRun {
+            let r = injected?()
+            DispatchQueue.main.async { done(r) }
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = contentTypes
+        panel.prompt = String(localized: "Insert")
+        panel.message = String(localized: "Images are copied into the “images” folder next to the document.")
+        panel.beginSheetModal(for: window) { response in
+            let urls = response == .OK ? panel.urls : nil
+            DispatchQueue.main.async { done(urls) }
         }
     }
 }

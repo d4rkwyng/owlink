@@ -132,7 +132,15 @@ extension DevChecks {
             sync { roundTrip("quote", select: "Title line", "hello world\n> Title line\na\nb\nc\n") },
             sync { roundTrip("codeBlock", select: "a\nb", "hello world\nTitle line\n```\na\nb\n```\nc\n") },
             sync { roundTrip("table", select: "Title line", "hello world\nTitle line\n\n|     |     |     |\n| --- | --- | --- |\n|     |     |     |\n|     |     |     |\n\na\nb\nc\n", caret: true) },
-            sync { roundTrip("image", select: "world", "hello ![world]()\nTitle line\na\nb\nc\n") },
+            // The Image button picks files (imageSteps below); Image Link stays a menu command.
+            sync {
+                expect(bar?.items.first { $0.id == "image" }?.command == "markdownInsertImageFileMenu:", "the Image button runs Insert Image…")
+                selectText("world", in: tab)
+                NSApp.sendAction(#selector(AppDelegate.markdownImageMenu(_:)), to: nil, from: nil)
+                expect(tab.text == "hello ![world]()\nTitle line\na\nb\nc\n", "Format › Markdown › Image Link still wraps the selection", tab.text.debugDescription)
+                undo()
+                expect(tab.text == start, "one ⌘Z undoes Image Link", tab.text.debugDescription)
+            },
             sync {
                 // The heading pull-down's items run the same menu commands.
                 guard let p = button("heading") as? NSPopUpButton, let menu = p.menu else { expect(false, "the heading pull-down"); return }
@@ -227,7 +235,7 @@ extension DevChecks {
                 let h2 = rows.first { $0.candidate.title == "Heading 2" }
                 expect(h2?.shortcut == "⌘2" && h2?.candidate.path == "Format › Markdown" && h2?.candidate.enabled == true,
                        "the palette has Format › Markdown › Heading 2 (⌘2)", "\(h2?.shortcut ?? "-") \(h2?.candidate.path ?? "-")")
-                for t in ["Bulleted List", "Numbered List", "Quote", "Code Block", "Insert Table", "Image Link", "Strikethrough", "Hide Context Bar"] {
+                for t in ["Bulleted List", "Numbered List", "Quote", "Code Block", "Insert Table", "Image Link", "Insert Image…", "Strikethrough", "Hide Context Bar"] {
                     expect(rows.contains { $0.candidate.title == t }, "the palette has \(t)")
                 }
                 // In a Swift tab the Markdown commands are disabled (⌘2 does nothing there).
@@ -279,6 +287,10 @@ extension DevChecks {
                        "a tab switched to CSV / TSV gets no Context Bar")
                 code.setLanguage(.swift)
             },
+        ]
+        steps += steps4
+        steps += imageSteps(app, back: tab, code: code)
+        let steps5: [Step] = [
             sync { typingRounds(tab, toggle: toggleBar) },
             sync {
                 if Settings.shared.showContextBar { toggleBar() }
@@ -299,8 +311,124 @@ extension DevChecks {
                 expect(fresh.text.contains("**world**"), "a click on Bold works on that tab", fresh.text.debugDescription)
             },
         ]
-        steps += steps4
+        steps += steps5
         run(steps)
+    }
+
+    /// The Image button (Format › Markdown › Insert Image…) with the open
+    /// panel's answer injected (no panel is shown in checks): one picked
+    /// image, then two, copied byte for byte into notes/images/ (a file of
+    /// the same name already there is left alone; the copy is renamed),
+    /// linked at the caret as one undo step (the copies stay, as after a
+    /// paste); Cancel changes neither the text nor the folder; an untitled
+    /// tab is asked to save first, as on paste; a Swift tab has it off.
+    static func imageSteps(_ app: AppDelegate, back: EditorWindowController, code: EditorWindowController) -> [Step] {
+        let fm = FileManager.default
+        func png(_ w: Int) -> Data {
+            let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: 3, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                       isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+            return rep.representation(using: .png, properties: [:])!
+        }
+        // Outside the document's folder (a file inside it is linked where it is, not copied).
+        let pics = dir.appendingPathComponent("pics", isDirectory: true)
+        let one = pics.appendingPathComponent("one.png"), two = pics.appendingPathComponent("two.jpg"), spaced = pics.appendingPathComponent("my pic.png")
+        try? fm.createDirectory(at: pics, withIntermediateDirectories: true)
+        try? png(5).write(to: one)
+        try? Data("not really a jpeg, copied as is\n".utf8).write(to: two)
+        try? png(7).write(to: spaced)
+        let body = "Pictures:\n"
+        let doc = app.open(write("notes/img.md", body))!
+        sized(doc)
+        let images = dir.appendingPathComponent("notes/images", isDirectory: true)
+        try? fm.createDirectory(at: images, withIntermediateDirectories: true)
+        let old = Data("an older one.png, not to be overwritten\n".utf8)
+        try? old.write(to: images.appendingPathComponent("one.png"))
+        func listing() -> [String] { ((try? fm.contentsOfDirectory(atPath: images.path)) ?? []).sorted() }
+        func same(_ a: URL, _ b: URL) -> Bool { fm.contentsEqual(atPath: a.path, andPath: b.path) }
+        func caretAtEnd() { doc.textView.setSelectedRange(NSRange(location: (doc.text as NSString).length, length: 0)) }
+        func clickImage(_ t: EditorWindowController) {
+            guard let b = t.contextBar?.buttons["image"] else { expect(false, "the tab's bar has an Image button"); return }
+            t.window?.layoutIfNeeded()
+            click(b, at: NSPoint(x: b.bounds.midX, y: b.bounds.midY))
+        }
+        func undo() { key("z", [.command]) }
+        let settle: Step = { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } }
+        var asks = 0
+        var untitled: EditorWindowController?
+        return [
+            sync {
+                focus(doc)
+                caretAtEnd()
+                asks = ImageFilePicker.asks
+                ImageFilePicker.injected = { [one] }
+                expect(doc.contextBar?.buttons["image"]?.isEnabled == true, "the Image button is enabled in a saved Markdown tab")
+                clickImage(doc)
+            },
+            settle,
+            sync {
+                expect(ImageFilePicker.asks == asks + 1, "a click on Image asks for files once", "\(ImageFilePicker.asks - asks)")
+                let types = Set(ImageFilePicker.contentTypes.compactMap(\.preferredFilenameExtension))
+                expect(types.isSuperset(of: ["png", "jpeg", "gif", "svg"]) && ImageFilePicker.contentTypes.allSatisfy { $0.conforms(to: .image) },
+                       "the panel takes the image types paste and drop take", "\(types.sorted())")
+                expect(fm.contents(atPath: images.appendingPathComponent("one.png").path) == old, "the same-named file in images/ is untouched")
+                expect(same(one, images.appendingPathComponent("one-2.png")), "the picked image is copied byte for byte as images/one-2.png", "\(listing())")
+                expect(doc.text == body + "![](images/one-2.png)", "its relative link goes in at the caret", doc.text.debugDescription)
+                undo()
+                expect(doc.text == body, "one ⌘Z takes the link out", doc.text.debugDescription)
+                expect(fm.fileExists(atPath: images.appendingPathComponent("one-2.png").path), "the copy stays, as after a paste")
+                caretAtEnd()
+                ImageFilePicker.injected = { [two, spaced] }
+                clickImage(doc)
+            },
+            settle,
+            sync {
+                expect(same(two, images.appendingPathComponent("two.jpg")) && same(spaced, images.appendingPathComponent("my pic.png")),
+                       "two picked images are both copied byte for byte", "\(listing())")
+                expect(doc.text == body + "![](images/two.jpg)\n![](images/my%20pic.png)", "two links, one per line, spaces encoded",
+                       doc.text.debugDescription)
+                undo()
+                expect(doc.text == body, "one ⌘Z takes both links out", doc.text.debugDescription)
+                // Cancel: nothing changes.
+                caretAtEnd()
+                let before = listing()
+                ImageFilePicker.injected = { nil }
+                asks = ImageFilePicker.asks
+                clickImage(doc)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    expect(ImageFilePicker.asks == asks + 1, "Cancel: the panel was asked")
+                    expect(doc.text == body, "Cancel leaves the text as it was", doc.text.debugDescription)
+                    expect(listing() == before, "Cancel leaves images/ as it was", "\(listing())")
+                }
+            },
+            settle,
+            sync {
+                // In a Swift tab the command is off; an untitled Markdown tab asks to save first, as a paste does.
+                focus(code)
+                let item = ContextBarView.menuItem("markdownInsertImageFileMenu:")
+                expect(item != nil && item?.title == "Insert Image…", "Format › Markdown › Insert Image… exists", item?.title ?? "-")
+                expect(item.map { CommandPalette.validate($0, in: code.window) } == false, "Insert Image… is off in a Swift tab")
+                app.newTab(nil)
+                untitled = app.tabs.last
+                guard let u = untitled, u.doc.fileURL == nil else { expect(false, "an untitled tab opens"); return }
+                u.setLanguage(.markdown)
+                focus(u)
+                ImageFilePicker.injected = { [one] }
+                clickImage(u)
+            },
+            settle,
+            sync {
+                guard let u = untitled else { return }
+                expect(u.text.isEmpty, "an untitled tab inserts nothing", u.text.debugDescription)
+                let sheet = u.window?.attachedSheet
+                expect(sheet != nil, "it asks to save first, as a paste does")
+                if let sheet { u.window?.endSheet(sheet, returnCode: .alertSecondButtonReturn) }
+                ImageFilePicker.injected = nil
+                // Closed again: the typing rounds that follow time one window's tabs as before.
+                u.window?.performClose(nil)
+                doc.window?.performClose(nil)
+                focus(back)
+            },
+        ]
     }
 
     /// Keystrokes into the Markdown tab, bar hidden and shown in

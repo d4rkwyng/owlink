@@ -978,7 +978,10 @@ set; every other language returns none.
   mirrors in right-to-left layouts.
 - **The commands.** `MarkdownBlocks` (CedricCore, `MarkdownBlocksTests`):
   heading, bulleted and numbered list, quote, code block, table and image
-  link, each a pure toggle from text and selection to one `TextEdit`,
+  link (Format › Markdown › Image Link; the bar's Image button instead runs
+  Insert Image…, an open panel whose files go through `insertImages`, the
+  paste and drop path, see `ImageFilePicker` in `MarkdownCommands.swift`;
+  checks inject the panel's answer), each a pure toggle from text and selection to one `TextEdit`,
   CRLF-safe (lines via `getLineStart`; inserted lines use the text's own
   ending). Bold, italic and inline code are the existing `MarkdownFormat`
   (wrapping now merges inner pairs of the same marker), the checkbox is
@@ -988,6 +991,8 @@ set; every other language returns none.
 Checks: `CEDRIC_CHECK=contextbar` (`ContextBarCheck.swift`,
 `Scripts/contextbar-check.sh`, also in tools-check.sh) clicks the buttons
 with mouse events, uses ⌘1–3 and ⌘Z, the pull-down, the preview toggle,
+the Image button with injected picks (one and two files, a name clash,
+Cancel, untitled),
 VoiceOver press and labels, both themes and RTL, and times keystrokes in
 a Markdown tab with the bar hidden and shown in alternating rounds.
 
