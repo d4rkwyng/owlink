@@ -280,6 +280,25 @@ let needsContainment: Comment = "needs a kernel that keeps open and rename benea
         #expect(listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
     }
 
+    /// An "images" on another volume than the document's folder (forced
+    /// here; a separate mount in use) is reported before anything is
+    /// staged: no staging file is made or filled.
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func anImagesFolderOnAnotherVolumeIsReportedBeforeStaging() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([3]).write(to: pic)
+        let store = try ImageStore.open(in: doc)
+        defer { ImageStore.forceOtherVolume = false }
+        ImageStore.forceOtherVolume = true
+        #expect(throws: ImageStore.Failure.otherVolume) { _ = try store.copy(from: pic, name: "p.png") }
+        #expect(throws: ImageStore.Failure.otherVolume) { _ = try store.write(Data([3]), name: "w.png") }
+        #expect(listing(doc) == ["images"] && listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
+        // The same store works once they are on one volume.
+        ImageStore.forceOtherVolume = false
+        #expect(try store.write(Data([3]), name: "w.png") == "w.png")
+    }
+
     @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aFailedPublishLeavesNoStagingFile() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }

@@ -25,7 +25,9 @@ import Darwin
 ///   swapped for a link out) receives neither the staged bytes nor the
 ///   published file. A name already taken is never overwritten and the
 ///   next free suffix is tried; a failure removes the staging file. A
-///   partial copy never has the final name.
+///   partial copy never has the final name. An "images" on another volume
+///   than the document's folder is reported (`Failure.otherVolume`) before
+///   the staging file is made, not after a large copy.
 /// - Where the kernel doesn't enforce beneath lookups for both the open
 ///   and the rename (`containmentEnforced`), nothing is opened, made or
 ///   written: `Failure.noContainment`.
@@ -54,6 +56,10 @@ public final class ImageStore {
         /// folder (no kernel-enforced `O_RESOLVE_BENEATH` and
         /// `RENAME_RESOLVE_BENEATH`): nothing is written.
         case noContainment
+        /// "images" is on another volume than the document's folder (a
+        /// separate mount): the staged file couldn't be renamed into it.
+        /// Found before the staging file is filled.
+        case otherVolume
     }
 
     /// The pinned "images" folder.
@@ -70,6 +76,8 @@ public final class ImageStore {
     nonisolated(unsafe) public static var beforePublish: (() -> Void)?
     /// Tests: behave as on a kernel without beneath lookups.
     nonisolated(unsafe) static var forceNoContainment = false
+    /// Tests: behave as if "images" were on another volume.
+    nonisolated(unsafe) static var forceOtherVolume = false
 
     /// `RENAME_RESOLVE_BENEATH` from sys/stdio.h, written as its value:
     /// older SDKs may not name it.
@@ -77,7 +85,8 @@ public final class ImageStore {
 
     /// Whether this kernel keeps both an `openat` (`Beneath.kernelEnforced`)
     /// and an exclusive rename beneath a folder: a rename to `../x` with
-    /// `RENAME_RESOLVE_BENEATH` must be refused while one to `x` works,
+    /// `RENAME_RESOLVE_BENEATH` must be refused with `ENOTCAPABLE` (the
+    /// containment error, not just any failure) while one to `x` works,
     /// tried on a file in a fresh temporary folder (removed after). A
     /// kernel that ignored or didn't know the flag fails the probe.
     public static let containmentEnforced: Bool = Beneath.kernelEnforced && renameBeneathProbe()
@@ -103,6 +112,7 @@ public final class ImageStore {
         defer { unlinkat(d, "f", 0); unlinkat(d, "g", 0); unlinkat(top, "out", 0) }
         let flags = UInt32(RENAME_EXCL) | renameResolveBeneath
         if renameatx_np(d, "f", d, "../out", flags) == 0 { return false }
+        guard errno == Beneath.notCapable else { return false }
         return renameatx_np(d, "f", d, "g", flags) == 0
     }
 
@@ -211,6 +221,10 @@ public final class ImageStore {
         // Checked before any byte is written.
         let images = try currentImages()
         defer { close(images) }
+        // The staged file is renamed into "images": both must be on one volume.
+        // (A mount that changes after this still fails at the rename, below.)
+        guard let imagesID = Beneath.FileID(fd: images), let rootID = Beneath.FileID(fd: root) else { throw Self.posix(name) }
+        guard imagesID.dev == rootID.dev, !Self.forceOtherVolume else { throw Failure.otherVolume }
         // Staged directly in the pinned document folder: never in an "images" that moved.
         let tmp = ".cedric-image-\(UUID().uuidString).tmp"
         let dst = openat(root, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)

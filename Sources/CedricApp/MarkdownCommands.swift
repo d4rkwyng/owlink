@@ -244,6 +244,9 @@ extension EditorWindowController {
         case .noContainment:
             text = String(localized: "This version of macOS can’t keep copied images inside the document’s folder, so they aren’t copied. Images already in the folder can still be linked.")
             code = 5
+        case .otherVolume:
+            text = String(localized: "The “images” folder next to this document is on a different volume from the document, so pasted images can’t be saved there. Use an “images” folder on the same volume.")
+            code = 7
         case .notRegularFile, .badName:
             text = String(localized: "The image couldn’t be copied.")
             code = 6
