@@ -484,13 +484,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.urls.forEach { open($0, background: true) }
     }
 
-    /// Set while the command palette validates the whole menu in one go
-    /// (nothing changes windows in between): the current tab and viewer
-    /// tab are worked out once, not once per menu item. Without a key
+    /// Set while the command palette validates the whole menu, or the
+    /// Context Bar its buttons, in one go (nothing changes windows in
+    /// between): the current tab and viewer tab are worked out once, not
+    /// once per menu item. Without a key
     /// window that is a window-server round trip (orderedWindows) each.
     var validationPass: (tab: EditorWindowController?, viewer: (any ViewerTab)?)?
 
+    /// Inside a pass already: that one stands (its end clears it).
     func withValidationPass<T>(_ body: () -> T) -> T {
+        guard validationPass == nil else { return body() }
         let viewer = currentViewerTab
         let tab = currentTab
         validationPass = (tab, viewer)
