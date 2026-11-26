@@ -249,4 +249,29 @@ import Testing
         #expect(!fresh.isIgnored(relative: "\u{3A9}/a.txt", isDirectory: false))
         #expect(fresh.isIgnored(relative: "\u{2126}/a.txt", isDirectory: false), "either order")
     }
+
+    /// The backlinks scan keeps each note by its path's bytes: two
+    /// canonically equivalent note names are two notes, each a backlink
+    /// under its own name (this volume folds them into one file, so both
+    /// read the same bytes; a volume that keeps names as bytes has two).
+    @Test func backlinkNotesAreKeptByBytes() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        try Data("see [[c]]\n".utf8).write(to: t.appendingPathComponent("\u{2126}.md"))
+        try Data("c\n".utf8).write(to: t.appendingPathComponent("c.md"))
+        let notes = ["\u{2126}.md", "\u{3A9}.md", "c.md"]
+        var scan = BacklinkScan(root: t)
+        scan.update(notes: notes, dirty: nil, tags: true)
+        #expect(scan.files.count == 3)
+        let sources = Set(scan.backlinks(to: "c.md", in: NoteIndex(paths: notes)).map { Array($0.source.utf8) })
+        #expect(sources == [Array("\u{2126}.md".utf8), Array("\u{3A9}.md".utf8)])
+    }
+
+    /// The tag tree tells notes apart by their paths' bytes.
+    @Test func tagNotesAreKeptByBytes() {
+        let ref = Tags.Ref(name: "owl", line: 1, snippet: "#owl")
+        let tree = TagTree(files: [(note: "\u{2126}.md", tags: [ref]), (note: "\u{3A9}.md", tags: [ref])])
+        #expect(tree.notes(for: "owl").map { Array($0.source.utf8) } .sorted { $0.lexicographicallyPrecedes($1) }
+                == [Array("\u{2126}.md".utf8), Array("\u{3A9}.md".utf8)].sorted { $0.lexicographicallyPrecedes($1) })
+    }
 }

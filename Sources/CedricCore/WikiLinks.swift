@@ -394,7 +394,10 @@ public struct BacklinkScan: Sendable {
     public static let maxFiles = 10_000
 
     public let root: URL
-    public private(set) var files: [String: Entry] = [:]
+    /// Each note by its relative path's bytes (`FolderTree.PathKey`): a
+    /// `String` key let canonically equivalent notes (the Ohm sign and
+    /// Omega) share one entry, read from one and named by the other.
+    public private(set) var files: [FolderTree.PathKey: Entry] = [:]
     /// Notes left out (too big, unreadable, past `maxFiles`) in the last update.
     public private(set) var skipped = 0
     /// Notes read (not taken from the cache) in the last update.
@@ -409,26 +412,27 @@ public struct BacklinkScan: Sendable {
     /// update; nil looks at every note's date and size. `tags`: read each
     /// note's tags too (a note cached without them is read again); the
     /// links are always read, in the same pass.
-    public mutating func update(notes: [String], dirty: Set<String>?, tags: Bool = false, cancelled: () -> Bool = { false }) {
+    public mutating func update(notes: [String], dirty: Set<FolderTree.PathKey>?, tags: Bool = false, cancelled: () -> Bool = { false }) {
         let list = notes.sorted()
         skipped = max(0, list.count - Self.maxFiles)
         lastRead = 0
         let kept = Array(list.prefix(Self.maxFiles))
-        let keep = Set(kept)
+        let keep = Set(kept.map { FolderTree.PathKey($0) })
         for k in files.keys where !keep.contains(k) { files[k] = nil }
         let fm = FileManager.default
         for rel in kept {
             if cancelled() { return }
-            let complete = files[rel].map { !tags || $0.tags != nil } ?? false
-            if let dirty, complete, !dirty.contains((rel as NSString).deletingLastPathComponent) { continue }
+            let key = FolderTree.PathKey(rel)
+            let complete = files[key].map { !tags || $0.tags != nil } ?? false
+            if let dirty, complete, !dirty.contains(FolderTree.PathKey((rel as NSString).deletingLastPathComponent)) { continue }
             let url = root.appendingPathComponent(rel)
             guard let a = try? fm.attributesOfItem(atPath: url.path), let size = (a[.size] as? NSNumber)?.intValue,
-                  let date = a[.modificationDate] as? Date else { files[rel] = nil; continue }
-            if complete, let e = files[rel], e.size == size, e.modified == date { continue }
-            guard size <= Self.maxFileBytes else { files[rel] = nil; skipped += 1; continue }
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { files[rel] = nil; skipped += 1; continue }
+                  let date = a[.modificationDate] as? Date else { files[key] = nil; continue }
+            if complete, let e = files[key], e.size == size, e.modified == date { continue }
+            guard size <= Self.maxFileBytes else { files[key] = nil; skipped += 1; continue }
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { files[key] = nil; skipped += 1; continue }
             lastRead += 1
-            files[rel] = Entry(size: size, modified: date, refs: Self.refs(in: data), tags: tags ? Self.tags(in: data) : nil)
+            files[key] = Entry(size: size, modified: date, refs: Self.refs(in: data), tags: tags ? Self.tags(in: data) : nil)
         }
     }
 
@@ -456,10 +460,11 @@ public struct BacklinkScan: Sendable {
         return Tags.refs(in: String(decoding: data, as: UTF8.self))
     }
 
-    /// Each note's tags (the notes whose tags were read).
-    public var tagsByNote: [String: [Tags.Ref]] {
-        var out: [String: [Tags.Ref]] = [:]
-        for (k, e) in files { if let t = e.tags, !t.isEmpty { out[k] = t } }
+    /// Each note's tags (the notes whose tags were read), one pair per
+    /// note by its path's bytes.
+    public var tagsByNote: [(note: String, tags: [Tags.Ref])] {
+        var out: [(note: String, tags: [Tags.Ref])] = []
+        for (k, e) in files { if let t = e.tags, !t.isEmpty { out.append((k.string, t)) } }
         return out
     }
 
@@ -467,11 +472,12 @@ public struct BacklinkScan: Sendable {
     public func backlinks(to path: String, in index: NoteIndex) -> [Backlink] {
         var out: [Backlink] = []
         var resolved: [String: String?] = [:]
-        for (src, e) in files where src != path {
+        for (key, e) in files where !FolderTree.sameBytes(key.string, path) {
+            let src = key.string
             for r in e.refs {
                 let to: String?
                 if let c = resolved[r.target] { to = c } else { to = index.resolve(r.target); resolved[r.target] = to }
-                if to == path { out.append(Backlink(source: src, line: r.line, snippet: r.snippet)) }
+                if let to, FolderTree.sameBytes(to, path) { out.append(Backlink(source: src, line: r.line, snippet: r.snippet)) }
             }
         }
         return out.sorted { $0.source != $1.source ? $0.source < $1.source : $0.line < $1.line }

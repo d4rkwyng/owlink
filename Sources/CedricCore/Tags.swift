@@ -286,11 +286,18 @@ public struct TagTree: Sendable {
     let hits: [String: [Hit]]
 
     public init(files: [String: [Tags.Ref]]) {
+        self.init(files: files.map { ($0.key, $0.value) })
+    }
+
+    /// Each note's tags, one pair per note (`BacklinkScan.tagsByNote`).
+    /// Notes are told apart by their paths' bytes (`FolderTree.PathKey`).
+    public init(files notes: [(note: String, tags: [Tags.Ref])]) {
         // Lowercased path → (shown path, note → its first hit).
         var shown: [String: String] = [:]
-        var byKey: [String: [String: Hit]] = [:]
-        for src in files.keys.sorted() {
-            for r in files[src] ?? [] {
+        var byKey: [String: [FolderTree.PathKey: Hit]] = [:]
+        for (src, refs) in notes.sorted(by: { $0.note < $1.note }) {
+            let note = FolderTree.PathKey(src)
+            for r in refs {
                 let parts = r.name.split(separator: "/").map(String.init)
                 var lower = ""
                 var display = ""
@@ -299,8 +306,8 @@ public struct TagTree: Sendable {
                     display += (k == 0 ? "" : "/") + p
                     if shown[lower] == nil { shown[lower] = display }
                     let hit = Hit(source: src, tag: r.name, line: r.line, snippet: r.snippet)
-                    if let old = byKey[lower]?[src], old.line <= r.line { continue }
-                    byKey[lower, default: [:]][src] = hit
+                    if let old = byKey[lower]?[note], old.line <= r.line { continue }
+                    byKey[lower, default: [:]][note] = hit
                 }
             }
         }

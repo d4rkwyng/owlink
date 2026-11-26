@@ -31,7 +31,8 @@ final class WikiNotes {
     private(set) var notes: NoteIndex?
     private(set) var scan: BacklinkScan
     /// Folders changed since the last scan (relative); nil: all of them.
-    private var dirty: Set<String>?
+    /// Folders changed since the last scan, by their relative paths' bytes.
+    private var dirty: Set<FolderTree.PathKey>?
     private var scanning = false, rescan = false
     private var building = false, rebuild = false
     /// Some Backlinks pane shows: the notes' links are kept read.
@@ -141,7 +142,7 @@ final class WikiNotes {
         for c in changes {
             switch c {
             case .folder(let p):
-                if let r = rel(p) { dirty?.insert(r) }
+                if let r = rel(p) { dirty?.insert(FolderTree.PathKey(r)) }
             case .subtree, .rootChanged:
                 dirty = nil
             }
