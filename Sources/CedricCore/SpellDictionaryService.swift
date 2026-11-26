@@ -80,18 +80,21 @@ public final class SpellLearnedWatch {
 public extension SpellCheckCoverage {
     /// The first-frame check is about to check `range` of the document
     /// `tag` for `types`.
-    mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryService, tag: Int, onlyOwlinkInFront: Bool) {
-        checked(range, types: types, dictionary: dictionary.state(forDocument: tag), onlyOwlinkInFront: onlyOwlinkInFront)
+    mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryService, tag: Int, onlyOwlinkInFront: Bool,
+                          spellingUIShown: Bool = false) {
+        checked(range, types: types, dictionary: dictionary.state(forDocument: tag), onlyOwlinkInFront: onlyOwlinkInFront,
+                spellingUIShown: spellingUIShown)
     }
 
     /// AppKit's pass asks to check `request` (NSTextView.checkText): true
     /// when the early check already did it (skip it). If some other app is
-    /// in front now, the marked words are asked about. Nothing is asked
-    /// when there is no record.
+    /// in front now, or AppKit's spelling UI is up (`spellingUIShown`), the
+    /// marked words are asked about. Nothing is asked when there is no record.
     mutating func takeAppKitPass(_ request: NSRange, types requestTypes: UInt64, hasOptions: Bool,
-                                 onlyOwlinkInFront: Bool, dictionary: SpellDictionaryService, tag: Int) -> Bool {
+                                 onlyOwlinkInFront: Bool, spellingUIShown: Bool = false, dictionary: SpellDictionaryService, tag: Int) -> Bool {
         guard !isEmpty else { return false }
         if !onlyOwlinkInFront { anotherAppInFront() }
+        if spellingUIShown { self.spellingUIShown() }
         return take(request, types: requestTypes, hasOptions: hasOptions,
                     dictionary: dictionary.state(forDocument: tag, learnedAmong: wordsToAskLearned))
     }
@@ -100,8 +103,9 @@ public extension SpellCheckCoverage {
 /// A spelling dictionary of its own, for the dev checks and the tests:
 /// learning or ignoring a word here never reaches the user's real one.
 /// Learning posts its own notice, as the system's spell checker does in
-/// process; `learnElsewhere` stands for another app learning one (no
-/// notice). Records what it was told and asked.
+/// process; `learnElsewhere` stands for another app learning one, and
+/// `learnSilently` for AppKit learning one in Owlink without its notice
+/// (neither posts). Records what it was told and asked.
 public final class RecordingSpellDictionary: SpellDictionaryService, @unchecked Sendable {
     public static let learnedName = Notification.Name("RecordingSpellDictionaryDidLearnWord")
 
@@ -144,6 +148,12 @@ public final class RecordingSpellDictionary: SpellDictionaryService, @unchecked 
 
     /// Another app learned `word`: nothing in this process hears of it.
     public func learnElsewhere(_ word: String) {
+        learned.insert(word)
+    }
+
+    /// AppKit learned `word` in this process (the spelling panel's Learn)
+    /// without posting the notice: nothing hears of it either.
+    public func learnSilently(_ word: String) {
         learned.insert(word)
     }
 

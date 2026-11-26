@@ -152,6 +152,21 @@ import Testing
         #expect(server.asked.isEmpty)
     }
 
+    /// AppKit's spelling UI shown in Owlink after the early check (its
+    /// Learn may post no notice): the marked words are asked about, and an
+    /// edit's clear starts over.
+    @Test func spellingUIShownAsksLearnedWords() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        #expect(!c.asksLearned)
+        c.spellingUIShown()
+        #expect(c.asksLearned && c.wordsToAskLearned == ["tpyo", "wrnog"])
+        let server = Server()
+        server.learned = ["wrnog"]
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(!took)
+        #expect(server.asked == ["tpyo", "wrnog"])
+    }
+
     /// Another app came to the front after the early check (it may learn a
     /// word): the marked words are asked about, and a learned one means
     /// AppKit's pass runs.

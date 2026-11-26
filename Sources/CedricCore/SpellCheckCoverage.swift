@@ -28,11 +28,16 @@ import Foundation
 ///
 /// Learned words are the spell server's, a round trip per word to ask
 /// about, so the marked words are asked about at AppKit's pass only when
-/// another app could have learned one: when something other than Owlink
-/// or the lock screen has been the frontmost app since the early check
-/// (`asksLearned`). Words are learned where the user types; while Owlink
-/// is in front a word is learned only in Owlink, which clears the record,
-/// and while the screen is locked nobody types into any app.
+/// a word could have been learned without Owlink hearing of it
+/// (`asksLearned`): when something other than Owlink or the lock screen
+/// has been the frontmost app since the early check, or when AppKit's
+/// spelling UI (the spelling panel, any menu: Learn Spelling) has been
+/// shown since. Words are learned where the user types; while Owlink is
+/// in front with none of its spelling UI up, a word is learned only by
+/// Owlink's own commands, which clear the record, and while the screen is
+/// locked nobody types into any app. The spell checker's in-process
+/// learn notice still clears the record early, but nothing rests on it:
+/// it isn't in the SDK, and a learn may not post it.
 public struct SpellCheckCoverage: Equatable, Sendable {
     /// What the early check covered; nil when there is nothing to skip.
     public private(set) var range: NSRange?
@@ -47,9 +52,9 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     /// (`hasLearnedWord`), and a page of text marks the same few words
     /// many times over.
     public private(set) var markedWords: [String] = []
-    /// Another app may have been in front since the early check, so a word
-    /// may have been learned there (nothing tells Owlink): AppKit's pass
-    /// asks about the marked words.
+    /// Another app may have been in front since the early check, or
+    /// AppKit's spelling UI shown, so a word may have been learned with
+    /// nothing telling Owlink: AppKit's pass asks about the marked words.
     public private(set) var asksLearned = true
 
     public init() {}
@@ -80,23 +85,34 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     public var isEmpty: Bool { range == nil }
 
     /// The early check is about to check `range` for `types`;
-    /// `onlyOwlinkInFront`: the frontmost app is Owlink or the lock screen.
-    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, onlyOwlinkInFront: Bool) {
+    /// `onlyOwlinkInFront`: the frontmost app is Owlink or the lock screen;
+    /// `spellingUIShown`: AppKit's spelling panel is up (a word may be
+    /// learned there with no notice).
+    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, onlyOwlinkInFront: Bool,
+                                 spellingUIShown: Bool = false) {
         self.range = range
         self.types = types & Self.publicTypes
         self.dictionary = dictionary
         answered = false
         markedWords = []
-        asksLearned = !onlyOwlinkInFront
+        asksLearned = !onlyOwlinkInFront || spellingUIShown
     }
 
     /// The marked words AppKit's pass must ask the spell server about
-    /// (`hasLearnedWord`): all of them when another app could have learned
-    /// one since the early check, none while only Owlink or the lock screen was in front.
+    /// (`hasLearnedWord`): all of them when a word could have been learned
+    /// unheard since the early check, none while only Owlink or the lock
+    /// screen was in front with no spelling UI shown.
     public var wordsToAskLearned: [String] { asksLearned ? markedWords : [] }
 
     /// Another app came (or may have come) to the front: a word may be learned there.
     public mutating func anotherAppInFront() {
+        asksLearned = true
+    }
+
+    /// AppKit's spelling UI was shown in Owlink (the spelling panel, a
+    /// menu with Learn Spelling): a word may be learned there without the
+    /// spell checker's notice.
+    public mutating func spellingUIShown() {
         asksLearned = true
     }
 

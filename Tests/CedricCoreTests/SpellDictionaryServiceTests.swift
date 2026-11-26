@@ -98,6 +98,57 @@ import Testing
         #expect(quiet.asked == ["tpyo", "wrnog"])
     }
 
+    /// AppKit's spelling UI shown in Owlink while it stays in front (the
+    /// spelling panel, a menu with Learn Spelling): a word learned there
+    /// with no notice is asked about, and AppKit's pass runs. Whether the
+    /// UI came up between the early check and the pass, was up at the
+    /// early check, or is up at the pass.
+    @Test func learnedSilentlyWithSpellingUIShownIsCaught() {
+        let between = RecordingSpellDictionary()
+        let view = View()
+        view.coverage = early(between)
+        let watch = SpellLearnedWatch(between) { view.coverage.clear() }
+        #expect(!view.coverage.asksLearned)
+        view.coverage.spellingUIShown()
+        between.learnSilently("tpyo")
+        // Nothing posted: the record stays, only the lookup can tell.
+        #expect(!view.coverage.isEmpty)
+        #expect(between.learnCalls.isEmpty)
+        let took = view.coverage.takeAppKitPass(page, types: scheduled, hasOptions: false, onlyOwlinkInFront: true,
+                                                spellingUIShown: false, dictionary: between, tag: tag)
+        #expect(!took)
+        #expect(between.asked == ["tpyo", "wrnog"])
+        withExtendedLifetime(watch) {}
+
+        let atEarly = RecordingSpellDictionary()
+        var e = SpellCheckCoverage()
+        e.checked(page, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: atEarly, tag: tag,
+                  onlyOwlinkInFront: true, spellingUIShown: true)
+        e.resultsArrived(for: page, marking: ["tpyo", "wrnog"])
+        #expect(e.asksLearned)
+        atEarly.learnSilently("wrnog")
+        let tookEarly = e.takeAppKitPass(page, types: scheduled, hasOptions: false, onlyOwlinkInFront: true,
+                                         spellingUIShown: false, dictionary: atEarly, tag: tag)
+        #expect(!tookEarly)
+        #expect(atEarly.asked == ["tpyo", "wrnog"])
+
+        let atPass = RecordingSpellDictionary()
+        var p = early(atPass)
+        atPass.learnSilently("tpyo")
+        let tookPass = p.takeAppKitPass(page, types: scheduled, hasOptions: false, onlyOwlinkInFront: true,
+                                        spellingUIShown: true, dictionary: atPass, tag: tag)
+        #expect(!tookPass)
+        #expect(atPass.asked == ["tpyo", "wrnog"])
+
+        // The panel up, nothing learned: asked, and still skipped.
+        let quiet = RecordingSpellDictionary()
+        var q = early(quiet)
+        let tookQuiet = q.takeAppKitPass(page, types: scheduled, hasOptions: false, onlyOwlinkInFront: true,
+                                         spellingUIShown: true, dictionary: quiet, tag: tag)
+        #expect(tookQuiet)
+        #expect(quiet.asked == ["tpyo", "wrnog"])
+    }
+
     /// The accepted gap: a word learned with no notice while Owlink stays
     /// in front (a background script) isn't asked about.
     @Test func learnedWithoutNoticeWhileInFrontIsNotAsked() {
