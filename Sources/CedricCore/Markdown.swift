@@ -1173,17 +1173,21 @@ final class MarkdownRenderer {
     /// Where inline math closes, found in one pass (a line of `$a $b $c`
     /// that never closes stays linear). `$…$`: the opener has no space
     /// after it, the closer no space (or backslash) before it and no digit
-    /// after it. `$$…$$`: any non-blank TeX between.
+    /// after it. `$$…$$`: any non-blank TeX between. Neither runs across
+    /// a backtick, so a code span later on the line stays code
+    /// ("$5 and `$x$`").
     struct MathDelimiters {
         let chars: [Character]
-        /// The next `$` that may close `$…$`, and the next unescaped `$$`, from each index.
-        private var single: [Int?], double: [Int?]
+        /// The next `$` that may close `$…$`, the next unescaped `$$`, and
+        /// the next backtick, from each index.
+        private var single: [Int?], double: [Int?], tick: [Int?]
 
         init(_ chars: [Character]) {
             self.chars = chars
             let n = chars.count
             single = [Int?](repeating: nil, count: n + 1)
             double = [Int?](repeating: nil, count: n + 1)
+            tick = [Int?](repeating: nil, count: n + 1)
             var j = n - 1
             while j >= 0 {
                 let isDollar = chars[j] == "$"
@@ -1194,6 +1198,7 @@ final class MarkdownRenderer {
                     && after != "$" && before != "$"
                 single[j] = closesSingle ? j : single[j + 1]
                 double[j] = isDollar && after == "$" && !escaped ? j : double[j + 1]
+                tick[j] = chars[j] == "`" ? j : tick[j + 1]
                 j -= 1
             }
         }
@@ -1203,11 +1208,11 @@ final class MarkdownRenderer {
         func closing(from i: Int) -> (Int, Int)? {
             let n = chars.count
             if i + 1 < n, chars[i + 1] == "$" {
-                guard i + 2 < n, let c = double[i + 2],
+                guard i + 2 < n, let c = double[i + 2], (tick[i + 2] ?? n) > c,
                       chars[(i + 2)..<c].contains(where: { !$0.isWhitespace }) else { return nil }
                 return (c, 2)
             }
-            guard i + 1 < n, !chars[i + 1].isWhitespace, let c = single[i + 1] else { return nil }
+            guard i + 1 < n, !chars[i + 1].isWhitespace, let c = single[i + 1], (tick[i + 1] ?? n) > c else { return nil }
             return (c, 1)
         }
     }

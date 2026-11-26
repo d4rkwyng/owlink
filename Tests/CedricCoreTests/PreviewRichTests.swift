@@ -126,6 +126,10 @@ $not math$
         #expect(m("```\n$x$\n```") == "<pre><code>$x$\n</code></pre>\n")
         #expect(m("```tex\n$$\nx\n$$\n```").contains("math") == false)
         #expect(m("    $$x$$") == "<pre><code>$$x$$\n</code></pre>\n")
+        // A price before a code span: the span stays code, no math across it.
+        #expect(m("$5 and `$x$`") == "<p>$5 and <code>$x$</code></p>\n")
+        #expect(m("Prices: $5 and $10. Code: `$x$`.") == "<p>Prices: $5 and $10. Code: <code>$x$</code>.</p>\n")
+        #expect(m("x $$a `b` c$$") == "<p>x $$a <code>b</code> c$$</p>\n")
     }
 
     @Test func displayMath() {
