@@ -243,6 +243,7 @@ enum DevChecks {
         case "splittyping": splitTypingCheck(app)
         case "perfsafe": perfSafeCheck(app)
         case "spell": spellTypesCheck(app)
+        case "spellopen": spellOpenCheck(app)
         default:
             if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
         }

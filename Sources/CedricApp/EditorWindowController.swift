@@ -322,6 +322,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         PerfTrace.mark("owl")
         recheckWriteAccess()
         AfterFirstFrame.run { [weak self] in self?.gitTabShown() }
+        // The visible text's misspellings as soon as the first frame is up
+        // (AppKit's own first pass comes about 1 s after layout).
+        AfterFirstFrame.run { [weak self] in self?.spelling.checkVisibleNow() }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -634,6 +637,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     private func storageEdited() {
         guard let storage = textView.textStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        // The text the first-frame spell check saw has changed.
+        primaryTextView.spellCoverage.clear()
         let edited = storage.editedRange
         let delta = storage.changeInLength
         // Every change, loading or not: a long saved text is chunk hashes,

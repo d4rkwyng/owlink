@@ -17,6 +17,13 @@ final class EditorTextView: NSTextView {
     var textCheckingPasses = 0
     /// Misspellings the checker has marked (in scope), for the checks.
     var markedMisspellings: [NSRange] = []
+    /// What the first-frame spell check covered, so AppKit's own first
+    /// pass over the same text is skipped (EditorSpelling.checkVisibleNow).
+    var spellCoverage = SpellCheckCoverage()
+    /// The first-frame check is calling `checkText` (not AppKit).
+    var checkingVisibleNow = false
+    /// AppKit passes skipped because the first-frame check had done them (checks).
+    var skippedTextChecks = 0
     /// Grammar in prose (Grammar.swift): the issues' ranges, drawn as
     /// green dotted underlines; their suggestions in the right-click menu.
     weak var grammar: EditorGrammar?

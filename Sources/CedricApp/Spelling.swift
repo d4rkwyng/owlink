@@ -44,6 +44,8 @@ final class EditorSpelling {
         let on = Settings.shared.checkSpellingWhileTyping && !tab.extrasPaused && checksThisDocument
         let tv = tab.primaryTextView
         tv.spelling = self
+        // Whatever changed, AppKit's next pass is its own.
+        tv.spellCoverage.clear()
         Self.setChecking(tv, on: on, spells: true)
         // A split's second pane never marks misspellings (they're the
         // primary pane's) but has AppKit's checking types of its own:
@@ -69,6 +71,25 @@ final class EditorSpelling {
             tv.savedCheckingTypes = tv.enabledTextCheckingTypes
             tv.enabledTextCheckingTypes = 0
         }
+    }
+
+    /// Checks the visible text as soon as the first frame is up, through
+    /// the view's own continuous checking (the same request, results and
+    /// marks as AppKit's pass). AppKit schedules its first pass about 1 s
+    /// after the first layout; that pass is then skipped if it asks for
+    /// nothing more (`SpellCheckCoverage`), so the marks show about a
+    /// second sooner and the text is checked once, not twice. Visible text
+    /// only, as AppKit's pass: the rest is checked when it is scrolled to.
+    func checkVisibleNow() {
+        guard let tab else { return }
+        let tv = tab.primaryTextView
+        guard tv.isContinuousSpellCheckingEnabled, tv.window?.isVisible == true,
+              let r = tv.visibleCharacterRange, r.length > 0 else { return }
+        let types = SpellCheckCoverage.earlyTypes(enabled: tv.enabledTextCheckingTypes)
+        tv.spellCoverage.checked(r, types: types)
+        tv.checkingVisibleNow = true
+        tv.checkText(in: r, types: types, options: [:])
+        tv.checkingVisibleNow = false
     }
 
     /// Not data (JSON, YAML, TOML/INI/.env, XML, CSV/TSV): no underlines, no typo hints there.
@@ -157,6 +178,18 @@ final class EditorSpelling {
 }
 
 extension EditorTextView {
+    /// AppKit's scheduled checking (NSTextCheckingController) and Check
+    /// Document Now come through here. The first request after the
+    /// first-frame check is skipped when that check already did it.
+    override func checkText(in range: NSRange, types checkingTypes: NSTextCheckingTypes,
+                            options: [NSSpellChecker.OptionKey: Any] = [:]) {
+        if !checkingVisibleNow, !spellCoverage.isEmpty, spellCoverage.take(range, types: checkingTypes) {
+            skippedTextChecks += 1
+            return
+        }
+        super.checkText(in: range, types: checkingTypes, options: options)
+    }
+
     /// Every batch of continuous-checking results: only misspellings in
     /// scope are kept (see EditorSpelling). Recorded for the checks.
     /// The results' ranges can be relative to `range` (TextKit 2 hands
@@ -168,6 +201,7 @@ extension EditorTextView {
                                             options: [NSSpellChecker.OptionKey: Any] = [:],
                                             orthography: NSOrthography, wordCount: Int) {
         textCheckingPasses += 1
+        spellCoverage.resultsArrived(for: range)
         guard let spelling else {
             super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options,
                                             orthography: orthography, wordCount: wordCount)

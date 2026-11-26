@@ -2310,7 +2310,31 @@ hands its results over relative to the checked range (`{15, 4}` for a
 word 15 characters into `{14875, 1215}`); the scope test and the record
 use document offsets (`TextCheckingOffset`: relative when every result
 fits within the checked range's length). Until 0.6 the results were read
-as document offsets, so nothing scrolled to was ever marked. The marks are
+as document offsets, so nothing scrolled to was ever marked.
+
+**The first check of an opened file.** AppKit's continuous checking
+checks only the visible text, but its checking controller schedules the
+first pass about 1 s after the first layout (measured on a 1 MB file: the
+pass at ~1.2 s, the window at ~0.3 s; ~30 ms of the app's CPU and ~80 ms
+of AppleSpell's for 181 misspellings on screen). Owlink checks the visible
+range itself once the first frame is up (`EditorSpelling.checkVisibleNow`,
+an `AfterFirstFrame` block: the view's own `checkText(in:types:options:)`,
+so the same request, results and marks), and the marks show ~50 ms later.
+`SpellCheckCoverage` (CedricCore) records the range and the public
+checking types asked for (the view's enabled ones plus correction, which
+AppKit's pass asks for even with autocorrection off; AppKit's private bits
+differ and aren't compared). `EditorTextView.checkText` skips AppKit's
+request when it asks for nothing more, once the early results are back
+and with no edit since; the first request, skipped or not, clears the
+record, as do an edit, a language or settings change, so scrolling, typing,
+Learn/Ignore and Check Document Now are always AppKit's own passes. The
+rest of the text is checked when it is scrolled to, as before.
+`CEDRIC_CHECK=spellopen` (tools-check): marks before AppKit's pass, only
+visible text, AppKit's first pass skipped once and the text checked once,
+scrolled-to and typed misspellings marked, an edit after the early check
+lets AppKit's pass run, JSON checked not at all.
+
+The marks are
 the text view's spelling state, a drawing attribute, so text colours are
 never touched; suggestions, Learn and Ignore are the standard context menu.
 Check Document Now walks our scope (the system's would stop on
