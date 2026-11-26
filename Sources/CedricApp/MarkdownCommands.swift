@@ -155,9 +155,10 @@ extension EditorWindowController {
         enum Piece { case inPlace(String), copied(String) }
         var pieces: [Piece] = []
         // "images" is opened once per batch beneath the pinned document
-        // folder; every copy is staged in that folder and published as
-        // images/<name> with the kernel keeping the rename beneath it
-        // (ImageStore): moving or replacing "images" can't redirect the
+        // folder; every copy is staged and published as images/<name>
+        // through descriptors (ImageStore; the kernel keeps the rename
+        // beneath the folder, or on macOS 15 it is made relative to the
+        // held "images", which must be a real folder): moving or replacing "images" can't redirect the
         // staging or the published file through it, nothing is overwritten,
         // and no partial file gets a final name.
         var opened: ImageStore?
@@ -241,9 +242,10 @@ extension EditorWindowController {
         case .destinationChanged:
             text = String(localized: "The “images” folder next to this document changed while the images were copied, so no links were inserted.")
             code = 4
-        case .noContainment:
-            text = String(localized: "This version of macOS can’t keep copied images inside the document’s folder, so they aren’t copied. Images already in the folder can still be linked.")
-            code = 5
+        case .imagesIsLink:
+            // On macOS 15 (no kernel-kept beneath lookups) only a real "images" folder is used.
+            text = String(localized: "The “images” folder next to this document is a symbolic link, and on this version of macOS pasted images are only saved in a real folder. Replace the link with a folder.")
+            code = 8
         case .otherVolume:
             text = String(localized: "The “images” folder next to this document is on a different volume from the document, so pasted images can’t be saved there. Use an “images” folder on the same volume.")
             code = 7
