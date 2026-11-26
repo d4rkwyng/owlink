@@ -72,4 +72,40 @@ import Testing
         #expect(d.text.hasPrefix("a line ending in CRLF, long enough\na line"))
         #expect(!d.text.contains("\r"))
     }
+
+    /// A big all-ASCII file after a UTF-8 BOM: the text reads the bytes
+    /// after the BOM (a slice of the file's data) in place, and keeps them
+    /// readable after the data it came from has gone out of scope.
+    @Test func aBigBOMFilesSharedTextOutlivesItsData() throws {
+        final class Freed: @unchecked Sendable { var done = false }
+        let line = Array("2026-11-25 INFO a shared line, read in place\n".utf8)
+        let count = (TextCodec.sharedBytesMinimum / line.count + 1) * line.count
+        let body = (0..<count).map { line[$0 % line.count] }
+        let bytes: [UInt8] = [0xEF, 0xBB, 0xBF] + body
+        let freed = Freed()
+        /// Decodes `bytes` from a mapped buffer of their own; the Data is
+        /// gone when this returns.
+        func decode() -> DecodedText? {
+            autoreleasepool {
+                guard let raw = BigBuffer.allocate(bytes.count) else { return nil }
+                let room = bytes.count
+                raw.copyMemory(from: bytes, byteCount: room)
+                let data = Data(bytesNoCopy: raw, count: room, deallocator: .custom { p, _ in
+                    freed.done = true
+                    BigBuffer.free(p, count: room)
+                })
+                return TextCodec.decode(data, shareBytes: true)
+            }
+        }
+        var d: DecodedText? = try #require(decode())
+        #expect(!freed.done, "the text holds the file's bytes")
+        #expect(d?.encoding == .utf8BOM && d?.lineEnding == .lf)
+        let ns = try #require(d?.text as NSString?)
+        #expect(ns.length == count)
+        #expect(d?.text == String(decoding: body, as: UTF8.self), "every byte after the BOM, read after the data went")
+        let saved = try #require(TextCodec.encodeDocument(d!.text, encoding: d!.encoding, lineEnding: d!.lineEnding, lineBreaks: nil))
+        #expect(saved == Data(bytes), "encoded back with its BOM")
+        d = nil
+        #expect(ns.length == count && ns.character(at: count - 1) == 10, "still readable through the string alone")
+    }
 }

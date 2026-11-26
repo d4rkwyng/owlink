@@ -531,14 +531,18 @@ public enum TextCodec {
 
     /// All-ASCII `data` as a string that reads its bytes in place (kept
     /// alive by the string; mapped file pages cost no memory of their own).
+    ///
+    /// The pointer comes from an immutable NSData, whose `bytes` stay put
+    /// for as long as that NSData lives, and the string's deallocator holds
+    /// that same NSData. (A pointer from `Data.withUnsafeBytes` is only
+    /// promised inside its closure.) Bridging a Data, a slice included,
+    /// wraps its storage rather than copying it.
     static func sharedASCII(_ data: Data) -> String? {
-        data.withUnsafeBytes { raw -> String? in
-            guard let base = raw.baseAddress else { return nil }
-            let keep = data
-            let s = NSString(bytesNoCopy: UnsafeMutableRawPointer(mutating: base), length: raw.count,
-                             encoding: String.Encoding.ascii.rawValue, deallocator: { _, _ in withExtendedLifetime(keep) {} })
-            return s.map { $0 as String }
-        }
+        let owner = data as NSData
+        guard owner.length > 0 else { return nil }
+        let s = NSString(bytesNoCopy: UnsafeMutableRawPointer(mutating: owner.bytes), length: owner.length,
+                         encoding: String.Encoding.ascii.rawValue, deallocator: { _, _ in withExtendedLifetime(owner) {} })
+        return s.map { $0 as String }
     }
 
     /// Copies `raw` into `out` with CRLF and lone CR as LF (as replacing
