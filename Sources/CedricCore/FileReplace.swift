@@ -414,17 +414,29 @@ public enum FileReplace {
     /// Removes temp files a crashed or killed write left next to `urls`
     /// (`.<name>.owlink-XXXXXX` for one of those names, a regular file
     /// owned by this user, over a minute old). One listing per folder.
+    /// Folders and names are matched by their bytes (`FolderTree.PathKey`,
+    /// `FolderTree.isDotName`): as Swift text a dot followed by a combining
+    /// mark isn't a "." prefix, and a canonically equivalent but
+    /// byte-distinct name (the Ohm sign for Omega) is another file's.
     static func sweepTempFiles(for urls: [URL], now: Date = Date()) {
-        var byDir: [String: Set<String>] = [:]
-        for u in urls { byDir[u.deletingLastPathComponent().path, default: []].insert(u.lastPathComponent) }
+        var byDir: [FolderTree.PathKey: Set<FolderTree.PathKey>] = [:]
+        for u in urls { byDir[FolderTree.PathKey(u.deletingLastPathComponent().path), default: []].insert(FolderTree.PathKey(u.lastPathComponent)) }
         let fm = FileManager.default
-        for (dir, names) in byDir {
+        let marker = Array(tempMarker.utf8)
+        for (key, names) in byDir {
+            let dir = key.string
             guard let items = try? fm.contentsOfDirectory(atPath: dir) else { continue }
-            for item in items where item.hasPrefix(".") {
-                guard let r = item.range(of: tempMarker, options: .backwards) else { continue }
-                let suffix = item[r.upperBound...]
-                let name = String(item[item.index(after: item.startIndex)..<r.lowerBound])
-                guard suffix.count == 6, suffix.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }), names.contains(name) else { continue }
+            for item in items where FolderTree.isDotName(item) {
+                // `.<name>.owlink-XXXXXX`: the last marker, six ASCII letters
+                // or digits after it, `<name>` between the dot and it.
+                let b = Array(item.utf8)
+                guard b.count >= 1 + marker.count + 6,
+                      let cut = (1...(b.count - marker.count)).reversed().first(where: { b[$0..<($0 + marker.count)].elementsEqual(marker) })
+                else { continue }
+                let suffix = b[(cut + marker.count)...]
+                let name = FolderTree.PathKey(String(decoding: b[1..<cut], as: UTF8.self))
+                guard suffix.count == 6, suffix.allSatisfy({ (0x30...0x39).contains($0) || (0x41...0x5a).contains($0) || (0x61...0x7a).contains($0) }),
+                      names.contains(name) else { continue }
                 let path = dir + "/" + item
                 var st = stat()
                 guard lstat(path, &st) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_uid == getuid(),

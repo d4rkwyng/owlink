@@ -857,7 +857,8 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func newFolder(_ sender: Any?) { createItem(sender, directory: true) }
 
     private func revealAfterChange(_ url: URL, in parent: FolderNode) {
-        if url.lastPathComponent.hasPrefix("."), !showHidden,
+        // A dot name by its first byte (a dot then a combining mark too).
+        if FolderTree.isDotName(url.lastPathComponent), !showHidden,
            !FolderTree.alwaysHidden.contains(url.lastPathComponent) {
             revealedHiddenURLs.insert(url.standardizedFileURL)
         }

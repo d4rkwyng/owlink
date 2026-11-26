@@ -45,7 +45,7 @@ public enum FolderTree {
             let name = u.lastPathComponent
             if alwaysHidden.contains(name) { continue }
             let v = try? u.resourceValues(forKeys: Set(keys))
-            let hidden = v?.isHidden ?? name.hasPrefix(".")
+            let hidden = isHidden(name, resourceValue: v?.isHidden)
             if hidden && !showHidden && !revealed.contains(name) { continue }
             let link = v?.isSymbolicLink ?? false
             var dir = (v?.isDirectory ?? false) && !(v?.isPackage ?? false)
@@ -64,6 +64,13 @@ public enum FolderTree {
 
     private static func isPackage(_ u: URL) -> Bool {
         (try? u.resourceValues(forKeys: [.isPackageKey]))?.isPackage ?? false
+    }
+
+    /// Whether a listed entry is hidden: Finder's flag when it is known,
+    /// else a name starting with a `.` byte (`isDotName`; as Swift text a
+    /// dot followed by a combining mark isn't a "." prefix).
+    static func isHidden(_ name: String, resourceValue: Bool?) -> Bool {
+        resourceValue ?? isDotName(name)
     }
 
     /// `entries` without the always-hidden names, and without hidden ones

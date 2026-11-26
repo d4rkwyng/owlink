@@ -110,4 +110,42 @@ import Testing
         #expect(!WikiVault.mayBeVaultRoot(base.appendingPathComponent("x"), home: base.appendingPathComponent("x/\u{301}h")))
         #expect(WikiVault.mayBeVaultRoot(base.appendingPathComponent("x/\u{301}h/n"), home: base.appendingPathComponent("x/\u{301}h")))
     }
+
+    // MARK: Dot names
+
+    /// A listed name starting with a dot byte is hidden when Finder's flag
+    /// is unknown, a dot followed by a combining mark too; the flag wins
+    /// when it is known.
+    @Test func aDotThenAMarkIsAHiddenName() {
+        #expect(FolderTree.isHidden(".\u{301}x", resourceValue: nil))
+        #expect(FolderTree.isHidden(".env", resourceValue: nil))
+        #expect(!FolderTree.isHidden("\u{301}x", resourceValue: nil))
+        #expect(!FolderTree.isHidden(".\u{301}x", resourceValue: false) && FolderTree.isHidden("x", resourceValue: true))
+    }
+
+    /// Replace in Files' leftover temp files (`.<name>.owlink-XXXXXX`):
+    /// one for a name starting with a combining mark, or a dot name, is
+    /// swept; one for another spelling of a canonically equivalent name
+    /// is another file's and is left.
+    @Test func leftoverTempFilesAreMatchedByBytes() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        func put(_ name: String) throws -> URL {
+            let u = t.appendingPathComponent(name)
+            try Data("x".utf8).write(to: u)
+            try fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -600)], ofItemAtPath: u.path)
+            return u
+        }
+        let mark = try put("\u{301}x.txt"), dot = try put(".\u{301}y.txt"), omega = try put("\u{3A9}.txt")
+        let markTemp = try put(".\u{301}x.txt.owlink-Ab12Cd"), dotTemp = try put("..\u{301}y.txt.owlink-Zz9Y8x")
+        let ohmTemp = try put(".\u{2126}.txt.owlink-Qq1Ww2"), notOurs = try put(".\u{301}x.txt.owlink-Ab12C")
+        FileReplace.sweepTempFiles(for: [mark, dot, omega])
+        let left = Set(try fm.contentsOfDirectory(atPath: t.path).map { Array($0.utf8) })
+        func has(_ u: URL) -> Bool { left.contains(Array(u.lastPathComponent.utf8)) }
+        #expect(!has(markTemp), "a mark-leading name's temp file is swept")
+        #expect(!has(dotTemp), "a dot name's temp file is swept")
+        #expect(has(ohmTemp), "another spelling's temp file is left")
+        #expect(has(notOurs), "not six letters or digits after the marker")
+        #expect(has(mark) && has(dot) && has(omega), "the files themselves are left")
+    }
 }
