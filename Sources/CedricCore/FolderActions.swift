@@ -14,7 +14,8 @@ public enum FolderActions {
     }
 
     public static func destination(in parent: URL, name: String) throws -> URL {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+        // One name by its bytes (Beneath.isName): a slash before a combining mark is still a separator.
+        guard Beneath.isName(name) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
                           userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a single file or folder name.")])
         }
@@ -111,8 +112,8 @@ public final class FolderRoot: @unchecked Sendable {
         let made = Beneath.open(components, beneath: fd, flags: O_WRONLY | O_CREAT | O_EXCL, mode: 0o666, walk: walk)
         guard made >= 0 else {
             let err = errno
-            // ENOTCAPABLE (107, as a value: older SDKs may not name it): the lookup left the folder.
-            if err == 107 || err == ELOOP {
+            // ENOTCAPABLE (Beneath.notCapable): the lookup left the folder.
+            if err == Beneath.notCapable || err == ELOOP {
                 throw Self.outsideError(target, folder: target.deletingLastPathComponent().lastPathComponent)
             }
             if err == EINVAL {

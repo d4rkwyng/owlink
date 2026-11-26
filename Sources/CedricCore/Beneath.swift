@@ -14,6 +14,12 @@ public enum Beneath {
     /// SDKs (Swift 6.1's) may not name it.
     static let resolveBeneath: Int32 = 0x0000_1000
 
+    /// `ENOTCAPABLE` from sys/errno.h (Darwin 107), written as its value:
+    /// the macOS 15 SDK (Swift 6.1's) doesn't name it. What a lookup or
+    /// rename the kernel keeps beneath a folder fails with when it would
+    /// leave it.
+    public static let notCapable: Int32 = 107
+
     /// Whether this kernel enforces `O_RESOLVE_BENEATH`: `..` beneath
     /// /usr must be refused while `bin` opens. A kernel that ignored the
     /// flag would open `..`, and the component walk is used instead.
@@ -58,8 +64,14 @@ public enum Beneath {
     }
 
     /// One file or folder name: not empty, not `.` or `..`, no `/` or NUL.
+    /// Checked as the UTF-8 bytes the kernel gets, not as Swift text: a
+    /// slash followed by a combining mark is one Swift character, so a text
+    /// search misses it, but Darwin still splits the name at that byte
+    /// (Astra batch 4 A, batch 5 must-fix 1).
     public static func isName(_ s: String) -> Bool {
-        !s.isEmpty && s != "." && s != ".." && !s.contains("/") && !s.contains("\0")
+        let b = s.utf8
+        return !b.isEmpty && !b.elementsEqual(".".utf8) && !b.elementsEqual("..".utf8)
+            && !b.contains(0x2f) && !b.contains(0)
     }
 
     /// Opens `components` beneath the folder `root` has open, with `flags`
