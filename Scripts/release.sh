@@ -4,7 +4,7 @@
 # Application" certificate. The GitHub release workflow runs this too.
 # After Tankard's Scripts/release.sh.
 #
-#   Scripts/release.sh [--dry-run] [--host-arch] [--skip-notarize] [--skip-launch-check]
+#   Scripts/release.sh [--dry-run] [--host-arch] [--skip-notarize] [--skip-launch-check] [--appcast]
 #
 #   --dry-run        print every command instead of running it (the identity
 #                    lookup still runs: it only reads the keychain)
@@ -13,6 +13,9 @@
 #   --skip-launch-check
 #                    don't real-launch the signed app (Scripts/launch-check.sh);
 #                    only for a Mac with no logged-in GUI session
+#   --appcast        also sign the zip for Sparkle (EdDSA) and add its item
+#                    to a local appcast, dist/appcast.xml (see below and
+#                    docs/updates.md). Off by default. Uploads nothing.
 #
 # Settings (environment):
 #   CEDRIC_SIGN_ID          signing identity; default: the first
@@ -29,6 +32,26 @@
 #                           Sources/CedricCore/Version.swift); must equal it
 #   TAG                     the release tag (CI); the built version must be
 #                           the tag's without "v" and any "-suffix"
+#
+# Updates (--appcast only; every one is checked before anything is built,
+# and the script refuses to start if one is missing or wrong):
+#   CEDRIC_SPARKLE_FEED_URL     the appcast's https:// URL (baked into the
+#                               app's Info.plist as SUFeedURL)
+#   CEDRIC_SPARKLE_PUBLIC_KEY   the EdDSA public key, base64 (SUPublicEDKey)
+#   CEDRIC_SPARKLE_DOWNLOAD_URL the zip's https:// URL once published, with
+#                               {version} for the version, e.g.
+#                               https://host/v{version}/Owlink-{version}.zip
+#   and exactly one source for the EdDSA PRIVATE key, read by Sparkle's
+#   sign_update at release time and never copied or stored by this script:
+#   CEDRIC_SPARKLE_KEY_FILE     a file outside this repository, readable
+#                               by its owner only, or
+#   CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT
+#                               the login Keychain item's account (Sparkle's
+#                               default is "ed25519")
+#   CEDRIC_SPARKLE_BIN          folder with Sparkle's sign_update (default:
+#                               the pinned package's bin, .build/artifacts)
+#   CEDRIC_SPARKLE_APPCAST      a local copy of the published appcast to add
+#                               the item to (default: start a new one)
 #
 # Output: "dist/Owlink.app" (stapled) and dist/Owlink-<version>.zip
 # (no spaces in the download's name); when notarizing,
@@ -57,13 +80,15 @@ DRY=0
 UNIVERSAL=1
 NOTARIZE=1
 LAUNCH_CHECK=1
+APPCAST=0
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY=1 ;;
         --host-arch) UNIVERSAL=0 ;;
         --skip-notarize) NOTARIZE=0 ;;
         --skip-launch-check) LAUNCH_CHECK=0 ;;
-        -h|--help) sed -n '2,53p' "$0"; exit 0 ;;
+        --appcast) APPCAST=1 ;;
+        -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
         *) echo "release.sh: unknown option $a" >&2; exit 2 ;;
     esac
 done
@@ -82,9 +107,63 @@ run() {
 
 fail() { echo "release.sh: $*" >&2; exit 1; }
 
+# Updates: --appcast refuses to start (even as a dry run) unless the feed,
+# the public key, the download URL and one private-key source are all
+# given and sane. Nothing here reads or prints the private key.
+SPARKLE_SIGN_ARGS=()
+SPARKLE_SIGN_UPDATE=""
+if [ $APPCAST = 1 ]; then
+    feed=${CEDRIC_SPARKLE_FEED_URL:-}
+    pub=${CEDRIC_SPARKLE_PUBLIC_KEY:-}
+    dl=${CEDRIC_SPARKLE_DOWNLOAD_URL:-}
+    keyfile=${CEDRIC_SPARKLE_KEY_FILE:-}
+    account=${CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT:-}
+    [ -n "$feed" ] || fail "--appcast: CEDRIC_SPARKLE_FEED_URL is not set (the appcast's https:// URL; docs/updates.md)"
+    case "$feed" in https://?*) ;; *) fail "--appcast: CEDRIC_SPARKLE_FEED_URL must be an https:// URL" ;; esac
+    [ -n "$pub" ] || fail "--appcast: CEDRIC_SPARKLE_PUBLIC_KEY is not set (the EdDSA public key, base64; docs/updates.md)"
+    publen=$(printf '%s' "$pub" | base64 -D 2>/dev/null | wc -c | tr -d ' ')
+    [ "$publen" = 32 ] || fail "--appcast: CEDRIC_SPARKLE_PUBLIC_KEY is not a base64 EdDSA public key (32 bytes)"
+    [ -n "$dl" ] || fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL is not set (where the zip will be published, with {version})"
+    case "$dl" in https://?*) ;; *) fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL must be an https:// URL" ;; esac
+    case "$dl" in *'{version}'*) ;; *) fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL needs {version} in it" ;; esac
+    case "$feed$dl" in *[\<\>\&\"\'[:space:]]*) fail "--appcast: the feed and download URLs may not hold spaces or < > & quotes" ;; esac
+    if [ -n "$keyfile" ] && [ -n "$account" ]; then
+        fail "--appcast: set CEDRIC_SPARKLE_KEY_FILE or CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT, not both"
+    elif [ -n "$keyfile" ]; then
+        [ -f "$keyfile" ] || fail "--appcast: CEDRIC_SPARKLE_KEY_FILE is not a file"
+        keydir=$(cd "$(dirname "$keyfile")" && pwd -P)
+        case "$keydir/" in "$(pwd -P)/"*) fail "--appcast: CEDRIC_SPARKLE_KEY_FILE is inside this repository; keep the private key outside it" ;; esac
+        perms=$(stat -f '%Lp' "$keyfile")
+        case "$perms" in 400|600) ;; *) fail "--appcast: CEDRIC_SPARKLE_KEY_FILE is mode $perms; make it readable by its owner only (chmod 600)" ;; esac
+        SPARKLE_SIGN_ARGS=(--ed-key-file "$keyfile")
+    elif [ -n "$account" ]; then
+        SPARKLE_SIGN_ARGS=(--account "$account")
+    else
+        fail "--appcast: no EdDSA private key: set CEDRIC_SPARKLE_KEY_FILE (a file outside the repo) or CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT (docs/updates.md)"
+    fi
+    [ $NOTARIZE = 1 ] || fail "--appcast: an update must be notarized; drop --skip-notarize"
+    if [ -n "${CEDRIC_SPARKLE_BIN:-}" ]; then
+        SPARKLE_SIGN_UPDATE="$CEDRIC_SPARKLE_BIN/sign_update"
+    else
+        SPARKLE_SIGN_UPDATE=$(find .build/artifacts -maxdepth 5 -type f -path '*Sparkle*/bin/sign_update' 2>/dev/null | head -1)
+    fi
+    [ -n "$SPARKLE_SIGN_UPDATE" ] && [ -x "$SPARKLE_SIGN_UPDATE" ] \
+        || fail "--appcast: no Sparkle sign_update (set CEDRIC_SPARKLE_BIN to the bin folder of Sparkle 2.10.1)"
+    if [ -n "${CEDRIC_SPARKLE_APPCAST:-}" ]; then
+        [ -f "$CEDRIC_SPARKLE_APPCAST" ] || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not a file"
+        grep -q '</channel>' "$CEDRIC_SPARKLE_APPCAST" || fail "--appcast: CEDRIC_SPARKLE_APPCAST has no </channel>"
+    fi
+    # bundle-app.sh bakes these two into Info.plist.
+    export CEDRIC_SPARKLE_FEED_URL CEDRIC_SPARKLE_PUBLIC_KEY
+    echo "Updates: feed $feed, key from $([ -n "$keyfile" ] && echo "file (outside the repo)" || echo "Keychain account $account"), sign_update $SPARKLE_SIGN_UPDATE"
+elif [ -n "${CEDRIC_SPARKLE_FEED_URL:-}" ] || [ -n "${CEDRIC_SPARKLE_PUBLIC_KEY:-}" ]; then
+    echo "NOTE: CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY are set but --appcast isn't: the app gets them, no appcast item is made." >&2
+fi
+
 APP="dist/Owlink.app"
 BIN="$APP/Contents/MacOS/Cedric"
 FW="$APP/Contents/Frameworks/llama.framework"
+SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
 SUBMIT_ZIP=dist/Owlink-notarize.zip
 
 # 0. The version. A release's Info.plist (CEDRIC_VERSION, the tag's in CI)
@@ -140,6 +219,7 @@ fi
 run Scripts/bundle-app.sh "${BUNDLE_ARGS[@]}"
 if [ $DRY = 0 ]; then
     [ -d "$FW" ] || fail "missing $FW (bundle-app.sh copies it)"
+    [ -d "$SPARKLE_FW" ] || fail "missing $SPARKLE_FW (bundle-app.sh --release copies it)"
     if [ $UNIVERSAL = 1 ]; then
         for b in "$BIN" "$FW/Versions/Current/llama"; do
             archs=$(lipo -archs "$b")
@@ -172,7 +252,10 @@ fi
 # 4. Sign inside out: nested code first (llama.framework, and any other
 #    framework/dylib/XPC a later version adds), then the app. No --deep:
 #    each piece gets its own signature with the hardened runtime and a
-#    secure timestamp (notarization requires both).
+#    secure timestamp (notarization requires both). Sparkle.framework is
+#    signed in its own documented order by Scripts/sign-sparkle.sh (XPC
+#    services, Autoupdate, Updater.app, the framework; Downloader.xpc
+#    keeps its entitlements), so the generic pass leaves it alone.
 APP_SIGN_EXTRA=()
 if [ "$ID" = "-" ]; then
     SIGN=(codesign --force --options runtime --timestamp=none -s -)
@@ -205,14 +288,19 @@ if [ $DRY = 0 ]; then
     while IFS= read -r -d '' f; do
         run "${SIGN[@]}" "$f"
         nested=$((nested + 1))
-    done < <(find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) -print0)
+    done < <(find "$APP/Contents" -depth \( -name '*.dylib' -o -name '*.framework' -o -name '*.xpc' -o -name '*.appex' \) \
+                 -not -path "$SPARKLE_FW" -not -path "$SPARKLE_FW/*" -print0)
     [ $nested -ge 1 ] || fail "found no nested code to sign; llama.framework should be there"
+    echo "+ Scripts/sign-sparkle.sh $SPARKLE_FW $(printf '%q ' "${SIGN[@]}")"
+    Scripts/sign-sparkle.sh "$SPARKLE_FW" "${SIGN[@]}"
 else
     run "${SIGN[@]}" "$FW"
+    Scripts/sign-sparkle.sh --dry-run "$SPARKLE_FW" "${SIGN[@]}"
 fi
 run "${SIGN[@]}" ${APP_SIGN_EXTRA[@]+"${APP_SIGN_EXTRA[@]}"} "$APP"
 run codesign --verify --strict --deep --verbose=2 "$APP"
 run codesign --verify --strict --verbose=2 "$FW"
+run codesign --verify --strict --deep --verbose=2 "$SPARKLE_FW"
 
 # 4a. What library validation will see at launch: the app and the
 #     framework signed by the same team (both "not set" when ad hoc), both
@@ -223,6 +311,13 @@ if [ $DRY = 0 ]; then
     APP_TEAM=$(sig_field "$APP" TeamIdentifier)
     FW_TEAM=$(sig_field "$FW" TeamIdentifier)
     [ "$APP_TEAM" = "$FW_TEAM" ] || fail "Team IDs differ: app $APP_TEAM, llama.framework $FW_TEAM (library validation would refuse to load it)"
+    for p in "$SPARKLE_FW" "$SPARKLE_FW/Versions/B/Autoupdate" "$SPARKLE_FW/Versions/B/Updater.app" \
+             "$SPARKLE_FW/Versions/B/XPCServices/Installer.xpc" "$SPARKLE_FW/Versions/B/XPCServices/Downloader.xpc"; do
+        t=$(sig_field "$p" TeamIdentifier)
+        [ "$t" = "$APP_TEAM" ] || fail "Team IDs differ: app $APP_TEAM, $p $t"
+        info=$(codesign -dv "$p" 2>&1 || true)
+        grep -q '^CodeDirectory .*flags=.*runtime' <<<"$info" || fail "$p is not signed with the hardened runtime"
+    done
     for p in "$APP" "$FW"; do
         # Captured first: `grep -q` on a pipe would SIGPIPE codesign under pipefail.
         info=$(codesign -dv "$p" 2>&1 || true)
@@ -233,7 +328,7 @@ if [ $DRY = 0 ]; then
         [ "$ID" = "-" ] && [ "$p" = "$APP" ] && allowed="com.apple.security.cs.disable-library-validation "
         [ "$keys" = "$allowed" ] || fail "$p has entitlements [${keys% }], expected [${allowed% }]"
     done
-    echo "Signatures: app and llama.framework, Team ID $APP_TEAM, hardened runtime, entitlements: $([ "$ID" = "-" ] && echo "ad-hoc test only: disable-library-validation" || echo none)"
+    echo "Signatures: app, llama.framework and Sparkle.framework (with its helpers), Team ID $APP_TEAM, hardened runtime, entitlements: $([ "$ID" = "-" ] && echo "ad-hoc test only: disable-library-validation" || echo none)"
 fi
 
 # 4b. Launch the signed app for real (no dev switches) and fail the release
@@ -310,3 +405,73 @@ run spctl -a -vv -t exec "$APP"
 run rm -f "$ZIP" "$SUBMIT_ZIP"
 run ditto -c -k --keepParent "$APP" "$ZIP"
 echo "Release ready: $ZIP"
+[ $APPCAST = 1 ] || exit 0
+
+# 7. The update (--appcast): Sparkle's EdDSA signature for the zip, checked
+#    against the public key the app ships, an appcast item for it in a
+#    local dist/appcast.xml (a copy of CEDRIC_SPARKLE_APPCAST, or a new
+#    feed), the feed signed too (SURequireSignedFeed), and a list of what
+#    to upload. This script uploads nothing.
+VERSION=${CEDRIC_VERSION:-$SOURCE_VERSION}
+APPCAST_OUT=dist/appcast.xml
+ENCLOSURE=${CEDRIC_SPARKLE_DOWNLOAD_URL//\{version\}/$VERSION}
+if [ $DRY = 1 ]; then
+    echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$ZIP")"
+    echo "+ swift Scripts/ed-verify.swift <CEDRIC_SPARKLE_PUBLIC_KEY> <signature> $ZIP"
+    echo "+ (add the $VERSION item, enclosure $ENCLOSURE, to $APPCAST_OUT)"
+    echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
+    echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" --verify "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
+    exit 0
+fi
+# The app as built must carry this feed and key.
+[ "$(plutil -extract SUFeedURL raw "$APP/Contents/Info.plist")" = "$CEDRIC_SPARKLE_FEED_URL" ] || fail "$APP's SUFeedURL isn't CEDRIC_SPARKLE_FEED_URL"
+[ "$(plutil -extract SUPublicEDKey raw "$APP/Contents/Info.plist")" = "$CEDRIC_SPARKLE_PUBLIC_KEY" ] || fail "$APP's SUPublicEDKey isn't CEDRIC_SPARKLE_PUBLIC_KEY"
+echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$ZIP")"
+ATTRS=$("$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$ZIP") || fail "sign_update could not sign $ZIP"
+ED_SIG=$(sed -n 's/.*sparkle:edSignature="\([A-Za-z0-9+/=]*\)".*/\1/p' <<<"$ATTRS")
+ED_LEN=$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<<"$ATTRS")
+[ -n "$ED_SIG" ] && [ "$ED_LEN" = "$(stat -f '%z' "$ZIP")" ] || fail "sign_update's output isn't a signature and length for $ZIP: $ATTRS"
+swift Scripts/ed-verify.swift "$CEDRIC_SPARKLE_PUBLIC_KEY" "$ED_SIG" "$ZIP" \
+    || fail "the private key doesn't match CEDRIC_SPARKLE_PUBLIC_KEY: installed copies would refuse this update"
+if [ -n "${CEDRIC_SPARKLE_APPCAST:-}" ]; then
+    [ "$(cd "$(dirname "$CEDRIC_SPARKLE_APPCAST")" && pwd -P)/$(basename "$CEDRIC_SPARKLE_APPCAST")" = "$(pwd -P)/$APPCAST_OUT" ] \
+        || cp "$CEDRIC_SPARKLE_APPCAST" "$APPCAST_OUT"
+else
+    cat > "$APPCAST_OUT" <<'FEED'
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Owlink</title>
+    </channel>
+</rss>
+FEED
+fi
+grep -q "<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>" "$APPCAST_OUT" \
+    && fail "$APPCAST_OUT already has an item for $VERSION"
+ITEM=$(mktemp)
+trap 'rm -f "$ITEM"' EXIT
+cat > "$ITEM" <<ITEMXML
+        <item>
+            <title>Version $VERSION</title>
+            <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
+            <sparkle:version>$VERSION</sparkle:version>
+            <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="$ENCLOSURE" length="$ED_LEN" type="application/octet-stream" sparkle:edSignature="$ED_SIG"/>
+        </item>
+ITEMXML
+# The new item goes before the first existing one (else at the end of the
+# channel). Sparkle offers the highest version, whatever the order.
+awk -v item="$ITEM" '
+    !done && (/<item[ >]/ || /<\/channel>/) { while ((getline l < item) > 0) print l; done = 1 }
+    { print }
+' "$APPCAST_OUT" > "$APPCAST_OUT.new" && mv "$APPCAST_OUT.new" "$APPCAST_OUT"
+xmllint --noout "$APPCAST_OUT" || fail "$APPCAST_OUT is not well-formed XML"
+echo "+ $(printf '%q ' "$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT")"
+"$SPARKLE_SIGN_UPDATE" "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT" || fail "sign_update could not sign $APPCAST_OUT"
+"$SPARKLE_SIGN_UPDATE" --verify "${SPARKLE_SIGN_ARGS[@]}" "$APPCAST_OUT" || fail "$APPCAST_OUT's signature doesn't verify"
+echo
+echo "Nothing was uploaded. To publish this update, by hand:"
+echo "  1. $ZIP  ->  $ENCLOSURE"
+echo "  2. $APPCAST_OUT  ->  $CEDRIC_SPARKLE_FEED_URL   (after 1; replaces the published feed)"
+echo "  sha256 $(shasum -a 256 "$ZIP" | cut -d' ' -f1)  $ZIP"
