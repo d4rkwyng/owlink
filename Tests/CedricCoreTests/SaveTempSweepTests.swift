@@ -3,8 +3,9 @@ import Testing
 @testable import CedricCore
 
 /// The new files an atomic save leaves when it is killed before its
-/// rename (`.owlink-save-<UUID>`): the next save into that folder removes
-/// them, and nothing else.
+/// rename (`.owlink-save-<UUID>`): nothing removes them on its own. A file
+/// with that exact name in a user's folder may be the user's own or
+/// another process's save under way, so a save never deletes one.
 @Suite(.serialized) struct SaveTempSweepTests {
     private let fm = FileManager.default
 
@@ -22,21 +23,25 @@ import Testing
     }
 
     private func save(_ dir: URL) throws {
-        DocumentWrite.sweptFolders.forget()
         try DocumentWrite.write(Data("saved\n".utf8), to: dir.appendingPathComponent("doc.txt"))
     }
 
-    @Test func aSaveRemovesItsFoldersStaleTemps() throws {
+    /// Reversed on purpose (0.6 review): an old, unlocked, single-link
+    /// regular file of this user's with the exact name used to be swept.
+    @Test func aMatchingUserFileIsNeverDeleted() throws {
         let dir = try folder()
         defer { try? fm.removeItem(at: dir) }
         try Data("old\n".utf8).write(to: dir.appendingPathComponent("doc.txt"))
-        let stale = try temp(dir), other = try temp(dir)
+        let mine = try temp(dir), other = try temp(dir, age: 86_400 * 365)
         try save(dir)
-        #expect(!fm.fileExists(atPath: stale.path))
-        #expect(!fm.fileExists(atPath: other.path))
+        try save(dir)
+        #expect(fm.fileExists(atPath: mine.path))
+        #expect(fm.fileExists(atPath: other.path))
+        #expect(try Data(contentsOf: mine) == Data("half a save".utf8))
+        #expect(try Data(contentsOf: other) == Data("half a save".utf8))
         #expect(try String(contentsOf: dir.appendingPathComponent("doc.txt"), encoding: .utf8) == "saved\n")
-        // Nothing else of the save's own is left either.
-        #expect(try fm.contentsOfDirectory(atPath: dir.path) == ["doc.txt"])
+        // Nothing of the save's own is left beside them.
+        #expect(try Set(fm.contentsOfDirectory(atPath: dir.path)) == ["doc.txt", mine.lastPathComponent, other.lastPathComponent])
     }
 
     @Test func aRecentTempIsKept() throws {
@@ -58,7 +63,7 @@ import Testing
         #expect(fm.fileExists(atPath: busy.path))
     }
 
-    @Test func onlyTheExactNameOfARegularFileWithOneLinkGoes() throws {
+    @Test func linksFoldersAndLookAlikesAreLeftAlone() throws {
         let dir = try folder()
         defer { try? fm.removeItem(at: dir) }
         let id = UUID().uuidString
@@ -84,21 +89,16 @@ import Testing
         #expect(fm.fileExists(atPath: sub.path))
     }
 
-    @Test func aFolderIsSweptOncePerRun() throws {
+    @Test func aTempLeftBeforeAnEarlierSaveIsKeptByLaterOnes() throws {
         let dir = try folder()
         defer { try? fm.removeItem(at: dir) }
         try save(dir)
         let later = try temp(dir)
-        // Not forgotten: the second save doesn't list the folder again.
         try DocumentWrite.write(Data("again\n".utf8), to: dir.appendingPathComponent("doc.txt"))
         #expect(fm.fileExists(atPath: later.path))
     }
 
-    @Test func tempNames() {
-        let id = UUID().uuidString
-        #expect(DocumentWrite.isTempName(".owlink-save-" + id))
-        #expect(!DocumentWrite.isTempName(".owlink-save-" + id.lowercased()))
-        #expect(!DocumentWrite.isTempName(".owlink-save-" + id + "x"))
-        #expect(!DocumentWrite.isTempName("owlink-save-" + id))
+    @Test func tempPrefix() {
+        #expect(DocumentWrite.tempPrefix == ".owlink-save-")
     }
 }

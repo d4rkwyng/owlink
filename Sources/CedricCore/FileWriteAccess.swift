@@ -247,8 +247,6 @@ public enum DocumentWrite {
     /// refuses a new file (`overwrite` then writes the checked file in place).
     private static func replace(_ name: String, in dir: Int32, with data: Data, url: URL, checked: stat,
                                 faults: Faults?) throws -> DiskStamp? {
-        var started = timespec()
-        clock_gettime(CLOCK_REALTIME, &started)
         let temp = tempPrefix + UUID().uuidString
         let fd = openat(dir, temp, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o666)
         guard fd >= 0 else {
@@ -256,16 +254,8 @@ public enum DocumentWrite {
             if code == EACCES || code == EPERM { return nil }
             throw writeError(code, url)
         }
-        // Locked until it is renamed or removed, through a description of
-        // its own (opened before its mode can change): a later save's
-        // sweep never takes a file some save is still writing for stale.
-        let lock = openat(dir, temp, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        if lock >= 0 { _ = flock(lock, LOCK_EX | LOCK_NB) }
         var renamed = false
-        defer {
-            if !renamed { _ = unlinkat(dir, temp, 0) }
-            if lock >= 0 { close(lock) }
-        }
+        defer { if !renamed { _ = unlinkat(dir, temp, 0) } }
         var written = stat()
         do {
             // What an atomic save keeps of the file it replaces.
@@ -299,77 +289,17 @@ public enum DocumentWrite {
         else { throw writeError(EBUSY, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
-        if sweptFolders.firstVisit(dir) { sweepStaleTemps(in: dir, olderThan: started) }
         return DiskStamp(written)
     }
 
     /// The new file an atomic save writes beside the file, then renames
     /// over it: this, then a UUID (upper case, as `uuidString` makes it).
+    /// A save killed before its rename leaves one behind. Nothing removes
+    /// those automatically: a file with such a name in a user's folder
+    /// may be the user's own, or another process's save still under way,
+    /// and neither its name, age nor a lock proves it is an abandoned
+    /// Owlink temp. (0.6 before review had a sweep that could unlink both.)
     static let tempPrefix = ".owlink-save-"
-
-    /// Folders swept this run (device and inode), so a save sweeps its
-    /// folder at most once per run, not on every ⌘S.
-    final class SweptFolders: @unchecked Sendable {
-        private let lock = NSLock()
-        private var seen = Set<String>()
-        func firstVisit(_ dir: Int32) -> Bool {
-            var st = stat()
-            guard fstat(dir, &st) == 0 else { return false }
-            lock.lock(); defer { lock.unlock() }
-            return seen.insert("\(st.st_dev):\(st.st_ino)").inserted
-        }
-        /// Tests: a folder can reuse a deleted one's inode.
-        func forget() { lock.lock(); seen = []; lock.unlock() }
-    }
-    static let sweptFolders = SweptFolders()
-
-    /// Removes new files left in `dir` by atomic saves that never got to
-    /// their rename (the app was killed or crashed mid-save). Only what is
-    /// certainly such a file: named exactly `tempPrefix` + an upper-case
-    /// UUID, a regular file (not a link, not a folder) with one link,
-    /// this user's, last written before `start` (this save's start, less
-    /// 2 s for coarse file times), and not locked: a save under way (in
-    /// this app or another copy of it) holds a lock on its file until
-    /// the rename. It is locked here, then checked to be the same file
-    /// still at that name, and only then removed. A file this user can't
-    /// open for reading, or a folder that can't be listed or locked in
-    /// (some network volumes), is left alone.
-    static func sweepStaleTemps(in dir: Int32, olderThan start: timespec) {
-        let listing = openat(dir, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        guard listing >= 0 else { return }
-        guard let dp = fdopendir(listing) else { close(listing); return }
-        defer { closedir(dp) }
-        var names: [String] = []
-        while let e = readdir(dp) {
-            let name = withUnsafeBytes(of: e.pointee.d_name) { raw in
-                String(decoding: raw.prefix(Int(e.pointee.d_namlen)), as: UTF8.self)
-            }
-            if isTempName(name) { names.append(name) }
-        }
-        let cutoff = start.tv_sec - 2
-        for name in names { removeIfStale(name, in: dir, writtenBefore: cutoff) }
-    }
-
-    static func isTempName(_ name: String) -> Bool {
-        guard name.hasPrefix(tempPrefix) else { return false }
-        let id = String(name.dropFirst(tempPrefix.count))
-        return UUID(uuidString: id)?.uuidString == id
-    }
-
-    private static func removeIfStale(_ name: String, in dir: Int32, writtenBefore cutoff: Int) {
-        var st = stat()
-        guard fstatat(dir, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFREG,
-              st.st_uid == geteuid(), st.st_nlink == 1, st.st_mtimespec.tv_sec < cutoff else { return }
-        let fd = openat(dir, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard fd >= 0 else { return }
-        defer { close(fd) }
-        var held = stat()
-        guard fstat(fd, &held) == 0, held.st_ino == st.st_ino, held.st_dev == st.st_dev, held.st_nlink == 1,
-              held.st_mtimespec.tv_sec < cutoff, flock(fd, LOCK_EX | LOCK_NB) == 0 else { return }
-        var now = stat()
-        guard fstatat(dir, name, &now, AT_SYMLINK_NOFOLLOW) == 0, now.st_ino == held.st_ino, now.st_dev == held.st_dev else { return }
-        _ = unlinkat(dir, name, 0)
-    }
 
     /// Whether what is at `name` now may be replaced by a save that
     /// checked `checked` (`st_ino` 0: nothing was there): the same file
