@@ -47,7 +47,7 @@ public enum FolderActions {
                 ?? FolderTree.relativePath(of: folder.resolvingSymlinksInPath(), in: root.resolvingSymlinksInPath()) else {
             throw FolderRoot.outsideError(folder.appendingPathComponent(name), folder: folder.lastPathComponent)
         }
-        return try pinned.createFile(rel.split(separator: "/").map(String.init) + [name], walk: walk)
+        return try pinned.createFile(FolderTree.components(rel) + [name], walk: walk)
     }
 
     public static func rename(_ source: URL, name: String) throws -> URL {
