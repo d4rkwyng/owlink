@@ -59,18 +59,25 @@ import Testing
         }
     }
 
-    /// A big CRLF file's LF text (written into a mapped buffer) is the
-    /// file's text with each CRLF as LF, its line ending CRLF.
+    /// A big CRLF file's LF text (written into a mapped buffer: the text
+    /// with CRLF as LF is itself past `sharedBytesMinimum`) is the file's
+    /// text with each CRLF as LF, its line ending CRLF, and encodes back
+    /// to exactly the file's bytes.
     @Test func aBigCRLFFileDecodesThroughAMappedBuffer() throws {
         let line = "a line ending in CRLF, long enough\r\n"
-        let count = BigBuffer.minimum / line.utf8.count + 2
+        let lfLine = line.utf8.count - 1
+        // Sized from the LF length, which is what the mapped buffer holds.
+        let count = TextCodec.sharedBytesMinimum / lfLine + 2
         let data = Data(String(repeating: line, count: count).utf8)
         let d = try #require(TextCodec.decode(data, shareBytes: true))
         #expect(d.lineEnding == .crlf && !d.mixedLineEndings)
         let ns = d.text as NSString
         #expect(ns.length == data.count - count)
+        #expect(ns.length >= TextCodec.sharedBytesMinimum, "the LF text is big enough for the mapped buffer")
         #expect(d.text.hasPrefix("a line ending in CRLF, long enough\na line"))
         #expect(!d.text.contains("\r"))
+        let saved = try #require(TextCodec.encodeDocument(d.text, encoding: d.encoding, lineEnding: d.lineEnding, lineBreaks: nil))
+        #expect(saved == data, "encoded back to the file's CRLF bytes")
     }
 
     /// A big all-ASCII file after a UTF-8 BOM: the text reads the bytes
