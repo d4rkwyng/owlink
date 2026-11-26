@@ -11,6 +11,27 @@ final class WeakRef<T: AnyObject>: @unchecked Sendable {
     init(_ v: T) { value = v }
 }
 
+/// The number of the latest request, also readable on a worker queue: a
+/// queued query that is no longer the latest skips its work (`isLatest`),
+/// so obsolete keystrokes don't hold up the newest one.
+final class LatestRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n = 0, skips = 0
+    var value: Int {
+        get { lock.lock(); defer { lock.unlock() }; return n }
+        set { lock.lock(); n = newValue; lock.unlock() }
+    }
+    /// Requests skipped because a newer one came (the checks).
+    var skipped: Int { lock.lock(); defer { lock.unlock() }; return skips }
+    /// Whether `token` is still the latest; counts a skip when not.
+    func isLatest(_ token: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if n == token { return true }
+        skips += 1
+        return false
+    }
+}
+
 // MARK: - App: Open Recent, text tools, Find in Files, Compare, Follow
 
 extension AppDelegate: NSMenuDelegate {
