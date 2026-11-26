@@ -1205,6 +1205,51 @@ while hidden, the session state, and snapshots light and dark.
 `render-check.sh` renders the sidebar beside typed text in a light and a
 dark theme; `session-check.sh` restores a saved folder after a kill -9.
 
+## Wiki links (0.6)
+
+`[[Name]]`, `[[Name|alias]]`, `[[Name#Heading]]` in Markdown and plain-text
+notes. The rules are `CedricCore/WikiLinks.swift` (`WikiLinksTests`); the
+app side is `WikiLinksApp.swift` and `BacklinksSidebar.swift`.
+
+- **Parsing**, one line at a time: `\` escapes, code spans are skipped,
+  a body holds no `[`, `]` or line break and is at most 999 units
+  (`[[[x]]]` is the link `[[x]]`), `\|` is the alias bar in a table.
+  Fenced code is skipped by the callers (`FenceIndex` in the editor, a
+  fence scan in `WikiLinks.refs`). The Markdown tokenizer colours a link
+  with the same `WikiLinks.end`, so colouring stays viewport-only.
+- **Names** (`NoteIndex`): the notes (.md, .markdown, .mdown, .mkd, .txt,
+  .text) in Open Quickly's `FileIndex` of the sidebar's folder (so
+  hidden and git-ignored files are left out, and the 20,000-file cap
+  applies). Built off the main thread the first time `[[`, a ⌘-click on a
+  link or Backlinks asks (`WikiNotes`, one per folder, on
+  `FolderSidebar.wikiNotes`), rebuilt whenever the watcher-driven index
+  lands (`QuickOpenFiles.onIndexLanded`); never per keystroke. Resolution:
+  the exact name (or `folder/name`), then ignoring case; among several,
+  fewest folders, then fewest characters, then by path.
+- **`[[` list** (`WikiCompletion`): a borderless child panel that never
+  becomes key; the text view hands it ↑/↓, Return, Tab and ⎋
+  (`EditorTextView.commandInterceptor`). Until it shows, a keystroke costs
+  a look at the two characters before the caret; while it shows, the
+  line up to the caret (at most 4,000 units). Off with no folder open, in
+  large mode (even after Turn On Anyway), with several carets, in code
+  spans and fences.
+- **⌘-click** on a link opens its note (at the heading for `#Heading`).
+  Owlink opens nothing on a plain click in the text, and ⌘-click elsewhere
+  still adds a caret. A link to no note offers to create it (beside the
+  note when it is in the folder), with `FolderActions.create`, as the
+  sidebar's New File does.
+- **Backlinks** (View › Show Backlinks): a per-tab pane beside the
+  Outline in `EditorContainer`. `BacklinkScan` reads the notes off the
+  main thread and keeps each one's links by date and size; an FSEvents
+  batch marks its folders dirty, so only notes there are looked at again.
+  Notes over 5 MB, or past 10,000, are skipped and the pane says
+  "partial". Nothing is written; nothing runs while no pane shows.
+
+Checks: `CEDRIC_CHECK=wikilinks` (in tools-check.sh): the list and its
+keys, code span and fence, ⌘-click to a tab and a heading, a missing
+note created, Backlinks and a click to the line, a rename on disk
+followed by names and backlinks, no list in large mode.
+
 ## Git and GitHub links
 
 `CedricCore/Git.swift` (tested in `GitTests.swift`) and
