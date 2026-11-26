@@ -564,7 +564,11 @@ public final class SessionStore: @unchecked Sendable {
             // back the same buffers and reopens the same closed tabs.
             pending = candidates
             pendingReopened = reopened.filter(committedClosed.contains).sorted { $0.uuidString < $1.uuidString }
-            let r = Self.applyJournal(s, journal: candidates, reopened: reopened) { fm.fileExists(atPath: bufferURL($0).path) }
+            let r = Self.applyJournal(s, journal: candidates, reopened: reopened,
+                                      bufferReadable: { [self] in if case .text = readBufferResult($0) { true } else { false } }) {
+                fm.fileExists(atPath: bufferURL($0).path)
+            }
+            held = Set(r.session.heldBuffers ?? [])
             return .session(r.session, recovered: r.recovered)
         }
         pending = journal.ids
@@ -612,15 +616,27 @@ public final class SessionStore: @unchecked Sendable {
     /// reopened and edited) opens again, in a window of its own, with no
     /// closing date left to expire; any other id is returned in
     /// `recovered`. Ids only in `reopened` count as journaled.
-    public static func applyJournal(_ session: Session, journal: [UUID], reopened: Set<UUID> = [], bufferExists: (UUID) -> Bool)
+    ///
+    /// A held buffer (one an earlier launch couldn't read) is left alone,
+    /// unless it was reopened since (⇧⌘T read it, and journaled that) and
+    /// `bufferReadable` says it can be read now: then the reopen counts as
+    /// for any other tab, and it is no longer held. Else its closed entry,
+    /// under its old closing date, could expire it with that text.
+    public static func applyJournal(_ session: Session, journal: [UUID], reopened: Set<UUID> = [],
+                                    bufferReadable: (UUID) -> Bool = { _ in false }, bufferExists: (UUID) -> Bool)
         -> (session: Session, recovered: [UUID]) {
         var s = session
         var recovered: [UUID] = []
         var reopenedTabs: [SessionTab] = []
-        let held = Set(s.heldBuffers ?? [])
+        var held = Set(s.heldBuffers ?? [])
         var seen = Set<UUID>()
         let order = journal + reopened.sorted { $0.uuidString < $1.uuidString }.filter { !journal.contains($0) }
-        for id in order where seen.insert(id).inserted && bufferExists(id) && !held.contains(id) {
+        for id in order where seen.insert(id).inserted && bufferExists(id) {
+            if held.contains(id) {
+                guard reopened.contains(id), bufferReadable(id) else { continue }
+                held.remove(id)
+                s.heldBuffers = held.isEmpty ? nil : s.heldBuffers?.filter { $0 != id }
+            }
             if let w = s.windows.firstIndex(where: { $0.tabs.contains { $0.id == id } }),
                let t = s.windows[w].tabs.firstIndex(where: { $0.id == id }) {
                 s.windows[w].tabs[t].hasBuffer = true

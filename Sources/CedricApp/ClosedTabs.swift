@@ -162,12 +162,18 @@ extension AppDelegate {
         // Open again: journaled before anything else is written for it, so
         // a crash before the next commit can't leave it on the closed list
         // under its old closing date (SessionStore.noteReopened).
+        // If that write fails, the last commit still lists it closed under
+        // its old date until a commit works: the tab says so, with Save As.
         if sessionSaving {
             let store = self.store, id = st.id
+            var failure: Error?
             sessionQueue.sync {
-                do { try store.noteReopened(id) } catch {
-                    FileHandle.standardError.write(Data("session: reopened tab not journaled: \(error)\n".utf8))
-                }
+                do { try store.noteReopened(id) } catch { failure = error }
+            }
+            if let failure {
+                FileHandle.standardError.write(Data("session: reopened tab not journaled: \(failure)\n".utf8))
+                tab.showNotice(String(localized: "Owlink couldn’t record that “\(name)” was reopened (\(failure.localizedDescription)). Until its session is saved again, a crash could put it back in File › Reopen Closed Tab. Save it with File › Save As… to keep it."),
+                               buttons: [(String(localized: "Save As…"), { [weak tab] in _ = tab?.saveAs() })])
             }
         }
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }

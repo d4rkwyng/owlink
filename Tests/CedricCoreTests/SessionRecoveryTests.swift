@@ -266,6 +266,46 @@ import Testing
         #expect(store(dir).readBuffer(closed.id) == "edited after reopening")
     }
 
+    /// A closed tab whose buffer an earlier launch couldn't read (held in
+    /// the commit), readable now: ⇧⌘T reads it, releases the hold and
+    /// journals the reopen; the app dies before the next commit. The
+    /// next launch, past the old closing date's retention, must open it,
+    /// not skip the reopen because the old commit still holds it (then
+    /// release it, leave it closed and expire its text).
+    @Test func aReopenedTabWhoseBufferWasHeldSurvivesACrash() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "held, readable again", open: false)
+        s0.holdBuffer(closed.id)
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        #expect(s0.load()?.heldBuffers == [closed.id])
+
+        let s1 = store(dir)
+        guard case .session(let first, _) = s1.loadForLaunch(now: t1) else { Issue.record("readable"); return }
+        #expect(first.closedTabs?.map(\.id) == [closed.id], "still closed at the first launch")
+        // ⇧⌘T: read, released, journaled.
+        #expect(s1.readBuffer(closed.id) == "held, readable again")
+        s1.releaseBuffer(closed.id)
+        try s1.noteReopened(closed.id)
+
+        let t2 = t1.addingTimeInterval(86_400)
+        let s2 = store(dir)
+        guard case .session(let second, let recovered) = s2.loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(ClosedTabs.expire(second.closedTabs ?? [], now: t2).dropped.isEmpty, "not expired under its old closing date")
+        #expect(second.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil }, "open again, with its text")
+        #expect(second.heldBuffers == nil && !s2.heldBuffers.contains(closed.id), "no longer held")
+        #expect(recovered.isEmpty)
+        // Unreadable again at that launch: left held and closed.
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: s2.bufferURL(closed.id).path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: s2.bufferURL(closed.id).path) }
+        guard case .session(let third, _) = store(dir).loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(third.closedTabs?.map(\.id) == [closed.id] && third.heldBuffers == [closed.id], "unreadable: still held, still closed")
+    }
+
     /// Reopened and not edited: journaled anyway, so it isn't expired
     /// either; once a commit lists it open, the journal is spent.
     @Test func aReopenedClosedTabIsJournaledBeforeAnyEdit() throws {

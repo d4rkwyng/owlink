@@ -553,6 +553,24 @@ extension DevChecks {
                        back?.text ?? "-")
                 expect(!app.closedTabs.contains { $0.id == id }, "and it leaves the closed list")
                 expect(!app.store.heldBuffers.contains(id), "no longer held")
+                // Closed again; then ⇧⌘T while the store can't be written:
+                // the reopen isn't journaled, and the tab says so.
+                if let back { focus(back) }
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id, "closed again")
+                app.store.checkFailWrites = true
+                key("t", [.command, .shift])
+            },
+            sync {
+                let back = app.tabs.first { $0.doc.id == id }
+                let bar = back?.noticeBar
+                expect(back?.text == "on disk edited\n", "the store can't be written: ⇧⌘T still reopens the text", back?.text ?? "-")
+                expect(bar?.isHidden == false && bar?.label.stringValue.contains("couldn’t record that") == true,
+                       "and the tab says the reopen wasn't recorded", bar?.label.stringValue ?? "-")
+                expect(bar?.button("Save As…")?.isEnabled == true, "with Save As")
+                app.store.checkFailWrites = false
             },
         ])
     }
