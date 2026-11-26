@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|reopenfail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -17,6 +17,7 @@ extension DevChecks {
         case "closedtab": closedTab(app)
         case "closefail": closeAfterFailedSave(app)
         case "quitfail": quitAfterFailedSave(app)
+        case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedraw": closedTabsStillDrawn(app)
         case "jsonwhole": formatWholeJSONCheck(app)
         case "colours": colourConsistency(app)
@@ -503,6 +504,52 @@ extension DevChecks {
                 expect(buffer() == "on disk one two\n", "the latest text is in its buffer", buffer() ?? "-")
                 expect(app.store.load()?.allTabs.contains { $0.id == file.doc.id && $0.hasBuffer } == true, "and the session names it")
                 AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// ⇧⌘T on a closed tab whose buffer is there but can't be read: the
+    /// tab isn't reopened (not from its file without the text either),
+    /// the entry stays on the closed list and the buffer is held (kept,
+    /// never pruned). Readable again, ⇧⌘T brings the text back. Needs
+    /// session saving on (run like closefail).
+    static func reopenUnreadableClosedTab(_ app: AppDelegate) {
+        let file = app.open(write("reopen-fail.txt", "on disk\n"))!
+        sized(file)
+        let id = file.doc.id
+        let path = app.store.bufferURL(id).path
+        let fm = FileManager.default
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" edited")
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "⌘W keeps the edit for ⇧⌘T")
+                expect(app.store.readBuffer(id) == "on disk edited\n", "in its buffer", app.store.readBuffer(id) ?? "-")
+                try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+                key("t", [.command, .shift])
+            },
+            sync {
+                expect(!app.tabs.contains { $0.doc.id == id || $0.doc.fileURL?.lastPathComponent == "reopen-fail.txt" },
+                       "an unreadable buffer: the tab isn't reopened", app.tabs.map(\.doc.displayName).joined(separator: ","))
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "the entry stays on the closed list")
+                expect(app.store.heldBuffers.contains(id), "its buffer is held")
+                app.saveSession(sync: true)
+                expect(fm.fileExists(atPath: path), "and survives a save and its prune")
+                expect(app.store.load()?.heldBuffers?.contains(id) == true, "the session names it as held")
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+                key("t", [.command, .shift])
+            },
+            sync {
+                let back = app.tabs.first { $0.doc.id == id }
+                expect(back?.text == "on disk edited\n" && back?.doc.isDirty == true, "readable again: ⇧⌘T brings the edit back, unsaved",
+                       back?.text ?? "-")
+                expect(!app.closedTabs.contains { $0.id == id }, "and it leaves the closed list")
+                expect(!app.store.heldBuffers.contains(id), "no longer held")
             },
         ])
     }

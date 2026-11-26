@@ -1133,10 +1133,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             recoverBuffers(buffers, setAside: aside, unreadableSession: true)
             return
         }
-        // Buffers an earlier launch couldn't read: again.
+        // Buffers an earlier launch couldn't read: again. A closed tab's
+        // (Reopen Closed Tab couldn't read it) stays on the closed list.
+        let closedIDs = Set((session.closedTabs ?? []).map(\.id))
         for id in session.heldBuffers ?? [] {
             switch store.readBufferResult(id) {
-            case .text: store.releaseBuffer(id); recovered.append(id)
+            case .text: store.releaseBuffer(id); if !closedIDs.contains(id) { recovered.append(id) }
             case .missing: store.releaseBuffer(id)
             case .unreadable(let why): noteUnreadableBuffer(id, why)
             }
@@ -1248,7 +1250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Something launch couldn't recover: on stderr, and on the front tab
     /// once launch is done (after the notices restored tabs show).
-    private func noteRecoveryProblem(_ text: String) {
+    func noteRecoveryProblem(_ text: String) {
         FileHandle.standardError.write(Data("session: recovery problem: \(text)\n".utf8))
         recoveryProblems.append(text)
         guard recoveryProblems.count == 1 else { return }

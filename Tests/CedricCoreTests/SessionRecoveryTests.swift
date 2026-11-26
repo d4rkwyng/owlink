@@ -300,6 +300,78 @@ import Testing
         #expect(buffers == [a])
     }
 
+    /// A held store deletes nothing, not even a buffer the app lets go
+    /// directly (a closed tab past its retention, a tab saved).
+    @Test func aHeldStoreRemovesNoBuffer() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = UUID()
+        try s1.writeBuffer(a, text: "unsaved")
+        try Data("{truncated".utf8).write(to: dir.appendingPathComponent("session.json"))
+        try fm.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+        let s = store(dir)
+        _ = s.loadForLaunch()
+        #expect(s.hold != nil)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        s.removeBuffer(a)
+        #expect(s.readBuffer(a) == "unsaved")
+    }
+
+    /// Launch can't read the journal nor list the folder: held. New text
+    /// written this run is journaled beside the damaged journal, never
+    /// over it, so the next launch still knows to scan, and finds both
+    /// the older unnamed buffer and the new one. Its commit then removes
+    /// the held run's journal.
+    @Test func aHeldStoreNeverReplacesTheJournal() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let older = UUID()
+        try s1.writeBuffer(older, text: "only copy, journal lost")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        try Data("{".utf8).write(to: journal)
+        // Search and write, no read: the session opens, the folder doesn't list.
+        try fm.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+        let s2 = store(dir)
+        guard case .session = s2.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s2.hold != nil)
+        let new = UUID()
+        try s2.writeBuffer(new, text: "typed while held")
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        #expect(try Data(contentsOf: journal) == Data("{".utf8), "the damaged journal is left as it was")
+        let s3 = store(dir)
+        guard case .session(_, let recovered) = s3.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s3.hold == nil)
+        #expect(Set(recovered) == [older, new])
+        try s3.save(Session(windows: [SessionWindow(tabs: [a] + recovered.map { SessionTab(id: $0, untitledName: "Recovered", hasBuffer: true) })]))
+        let left = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-buffers") }
+        #expect(left.isEmpty, "\(left)")
+    }
+
+    /// The held run's journal alone (the main one readable): applied too.
+    @Test func aHeldRunsJournalIsApplied() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        try Data("{".utf8).write(to: dir.appendingPathComponent("pending-buffers.json"))
+        try fm.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+        let s2 = store(dir)
+        _ = s2.loadForLaunch()
+        let new = UUID()
+        try s2.writeBuffer(new, text: "typed while held")
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        try fm.removeItem(at: dir.appendingPathComponent("pending-buffers.json"))
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [new])
+    }
+
     @Test func aMissingFolderIsAFirstLaunchNotAHold() {
         let s = store(tempDir())
         #expect(s.loadForLaunch() == .none)

@@ -309,9 +309,18 @@ public final class SessionStore: @unchecked Sendable {
     private var held = Set<UUID>()
     /// Set when launch couldn't make the store safe to write (an unreadable
     /// session it couldn't keep a copy of, a folder it couldn't list):
-    /// `save` refuses to replace `session.json` and nothing is pruned,
-    /// for the rest of the run. Buffers are still written (journaled).
+    /// for the rest of the run `save` refuses to replace `session.json`,
+    /// nothing is pruned or removed (`removeBuffer`), and the journal on
+    /// disk is never replaced: it may be the only record of buffers launch
+    /// couldn't account for. Buffers are still written, journaled in a
+    /// file of this run's own (`heldJournalFile`), which the next launch
+    /// reads beside the journal and the next commit removes.
     public private(set) var hold: String?
+    /// This run's journal while `hold` is set.
+    private lazy var heldJournalFile = directory.appendingPathComponent("\(Self.heldJournalPrefix)\(UUID().uuidString).json")
+    static let heldJournalPrefix = "pending-buffers.held-"
+    /// Held runs' journals launch read: removed by the next commit.
+    private var heldJournalsSeen: [URL] = []
 
     /// Check builds only (inert otherwise): every write fails, as on a
     /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
@@ -423,8 +432,17 @@ public final class SessionStore: @unchecked Sendable {
     /// replaces the session file nor prunes until the next launch.
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
         lock.lock(); defer { lock.unlock() }
-        var journal = readJournal()
+        var journal = readJournal(journalFile)
         committedGeneration = max(0, (journal.generation ?? 0) - 1)
+        // Journals of runs that were held (heldJournalFile): listed, so a
+        // folder that can't be listed holds this run too.
+        do {
+            heldJournalsSeen = try heldJournalFiles()
+        } catch {
+            hold = "the session folder couldn’t be listed: \(error.localizedDescription)"
+        }
+        let heldJournals = heldJournalsSeen.map(readJournal)
+        for j in heldJournals { committedGeneration = max(committedGeneration, (j.generation ?? 0) - 1) }
         if let (s, generation) = loadManifest() {
             committedGeneration = max(committedGeneration, generation)
             // Spent: the commit it waited for is in session.json already.
@@ -436,11 +454,17 @@ public final class SessionStore: @unchecked Sendable {
             held = Set(s.heldBuffers ?? [])
             var candidates = journal.ids
             var reopened = Set(journal.reopened)
+            var damaged = journal.damaged
+            for j in heldJournals where !(j.generation.map { $0 <= generation } ?? false) || j.damaged {
+                damaged = damaged || j.damaged
+                candidates += j.ids.filter { !candidates.contains($0) }
+                reopened.formUnion(j.reopened)
+            }
             // A journal that can't be read: every buffer the session
             // doesn't name could be one it listed, and every closed tab
             // with a buffer could have been reopened. Bringing back one
             // that was let go beats deleting one that wasn't.
-            if journal.damaged {
+            if damaged {
                 do { candidates = try bufferFiles() } catch { hold = "the session folder couldn’t be listed: \(error.localizedDescription)" }
                 reopened = Set(candidates)
             }
@@ -524,9 +548,9 @@ public final class SessionStore: @unchecked Sendable {
     /// `damaged` if the file is there but can't be read, or names
     /// something that isn't an id (then which buffers it listed is
     /// unknown: the caller scans).
-    private func readJournal() -> (ids: [UUID], reopened: [UUID], generation: Int?, damaged: Bool) {
-        guard fm.fileExists(atPath: journalFile.path) else { return ([], [], nil, false) }
-        guard let data = try? Data(contentsOf: journalFile) else { return ([], [], nil, true) }
+    private func readJournal(_ url: URL) -> (ids: [UUID], reopened: [UUID], generation: Int?, damaged: Bool) {
+        guard fm.fileExists(atPath: url.path) else { return ([], [], nil, false) }
+        guard let data = try? Data(contentsOf: url) else { return ([], [], nil, true) }
         let j: Journal
         if let object = try? JSONDecoder().decode(Journal.self, from: data) {
             j = object
@@ -544,6 +568,18 @@ public final class SessionStore: @unchecked Sendable {
     private func encodeJournal(_ ids: [UUID], reopened: [UUID]) throws -> Data {
         try JSONEncoder().encode(Journal(generation: committedGeneration + 1, ids: ids.map(\.uuidString),
                                          reopened: reopened.isEmpty ? nil : reopened.map(\.uuidString)))
+    }
+
+    /// Held runs' journals in the store, by name. Throws if the folder is
+    /// there but can't be listed (none at all: none).
+    private func heldJournalFiles() throws -> [URL] {
+        do {
+            return try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix(Self.heldJournalPrefix) && $0.pathExtension == "json" }
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        } catch let e as CocoaError where e.code == .fileReadNoSuchFile {
+            return []
+        }
     }
 
     /// The buffer files in the store, oldest first. Throws if the folder
@@ -589,6 +625,10 @@ public final class SessionStore: @unchecked Sendable {
             pendingReopened = []
             try? fm.removeItem(at: journalFile)
         }
+        // Held runs' journals: launch applied them, so this commit names
+        // what they listed or let it go.
+        for url in heldJournalsSeen { try? fm.removeItem(at: url) }
+        heldJournalsSeen = []
     }
 
     /// Writes tab `id`'s unsaved text. `open`: the tab is open (false: a
@@ -620,7 +660,9 @@ public final class SessionStore: @unchecked Sendable {
         let reopening = reopened && committedClosed.contains(id) && !pendingReopened.contains(id)
         guard fresh || reopening else { return }
         let ids = fresh ? pending + [id] : pending, again = reopening ? pendingReopened + [id] : pendingReopened
-        try PrivateDirectory.writePrivateFile(encodeJournal(ids, reopened: again), to: journalFile)
+        // Held: never over the journal launch found (it may be all that
+        // says which buffers are pending), but beside it.
+        try PrivateDirectory.writePrivateFile(encodeJournal(ids, reopened: again), to: hold == nil ? journalFile : heldJournalFile)
         pending = ids
         pendingReopened = again
     }
@@ -667,9 +709,12 @@ public final class SessionStore: @unchecked Sendable {
         return held
     }
 
+    /// Deletes a buffer the app let go (its tab saved, discarded, or a
+    /// closed tab expired). Never a held one, and nothing while `hold` is
+    /// set: launch couldn't tell which buffers are pending then.
     public func removeBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
-        guard !held.contains(id) else { return }
+        guard hold == nil, !held.contains(id) else { return }
         try? fm.removeItem(at: bufferURL(id))
     }
 

@@ -49,6 +49,11 @@ if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-closefail" CED
     | grep -E "^check:" | tee "$OUT/closefail.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/closefail.txt" || { echo "tools-check: closefail FAILED" >&2; fail=1; }
 # Quit while the session can't be written: likewise.
+echo "== reopenfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-reopenfail" CEDRIC_CHECK=reopenfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/reopenfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/reopenfail.txt" || { echo "tools-check: reopenfail FAILED" >&2; fail=1; }
+
 echo "== quitfail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitfail" CEDRIC_CHECK=quitfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/quitfail.txt"; then fail=1; fi

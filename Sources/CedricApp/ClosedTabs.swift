@@ -86,13 +86,33 @@ extension AppDelegate {
     }
 
     @objc func reopenClosedTab(_ sender: Any?) {
-        guard let st = closedTabs.popLast() else { NSSound.beep(); return }
-        if st.pdf != nil { reopenClosedPDF(st); return }
-        if st.image != nil || st.office != nil || st.certificate != nil { reopenClosedViewer(st); return }
+        guard let st = closedTabs.last else { NSSound.beep(); return }
+        if st.pdf != nil { closedTabs.removeLast(); reopenClosedPDF(st); return }
+        if st.image != nil || st.office != nil || st.certificate != nil { closedTabs.removeLast(); reopenClosedViewer(st); return }
         // A restored tab for the same file may not be built yet: build them
         // all first, so the check below sees it and it isn't opened twice.
         finishRestore()
-        var text: String? = closedTexts.removeValue(forKey: st.id) ?? (st.hasBuffer ? store.readBuffer(st.id) : nil)
+        // Its unsaved text: kept in memory (its close couldn't write it),
+        // else its buffer. A buffer that is there but can't be read stays
+        // where it is, held (never pruned), and so does the entry: the
+        // tab isn't reopened without its text, nor its buffer let go.
+        var text: String?
+        if let kept = closedTexts[st.id] {
+            text = kept
+        } else if st.hasBuffer {
+            switch store.readBufferResult(st.id) {
+            case .text(let t): text = t; store.releaseBuffer(st.id)
+            case .missing: store.releaseBuffer(st.id)
+            case .unreadable(let why):
+                store.holdBuffer(st.id)
+                let name = st.untitledName ?? st.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
+                noteRecoveryProblem(String(localized: "Owlink couldn’t read the unsaved text of “\(name)” (\(why)), so it didn’t reopen it. It is kept as \(store.bufferURL(st.id).path) and stays in File › Reopen Closed Tab."))
+                NSSound.beep()
+                return
+            }
+        }
+        closedTabs.removeAll { $0.id == st.id }
+        closedTexts[st.id] = nil
         var url = st.path.map { URL(fileURLWithPath: $0) }
         if let u = url, let open = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == u.standardizedFileURL }) {
             guard text != nil else {
