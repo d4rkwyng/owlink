@@ -434,6 +434,38 @@ import Testing
         }
     }
 
+    /// A first-level asset whose name starts with a combining mark is
+    /// served through the grant (Astra batch 13d, must 1): `approve`
+    /// recomputed its parts with a text prefix, which "/" and the mark
+    /// (one Swift character) missed, so it refused what
+    /// `PreviewFolder.file` had accepted. Nested and plain names too; the
+    /// folder's name plus a mark is still a sibling, outside.
+    @Test func aFirstLevelMarkLeadingAssetIsServedThroughTheGrant() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let doc = t.appendingPathComponent("doc")
+        let first = try put(doc, "\u{301}a.png", "MARK")
+        let nested = try put(doc, "\u{301}d/b.png", "NESTED")
+        let plain = try put(doc, "c.png", "PLAIN")
+        let sibling = try put(t, "doc\u{301}/s.png", "SIBLING")
+        for scriptOn in [false, true] {
+            for walk in modes {
+                let what = "scriptOn \(scriptOn) walk \(walk)"
+                let grants = PreviewGrants()
+                grants.grant([doc])
+                for (file, bytes) in [(first, "MARK"), (nested, "NESTED"), (plain, "PLAIN")] {
+                    let hit = try #require(grants.approve(page(file), in: doc, openedRoot: nil, scriptOn: scriptOn, walk: walk),
+                                           "\(file.lastPathComponent) \(what)")
+                    #expect(hit.parts.last.map { Array($0.utf8) } == Array(file.lastPathComponent.utf8), "\(what)")
+                    #expect(PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn, walk: walk) == Data(bytes.utf8), "\(what)")
+                }
+                #expect(PreviewRead.components(of: first, below: doc) == ["\u{301}a.png"], "\(what)")
+                #expect(grants.approve(page(sibling), in: doc, openedRoot: nil, scriptOn: scriptOn, walk: walk) == nil, "\(what)")
+                #expect(PreviewRead.components(of: sibling, below: doc) == nil, "\(what)")
+            }
+        }
+    }
+
     /// With script on, the check of what was opened judges the opened
     /// file's real name by its bytes (Astra batch 13d, must 2). Asked for
     /// by a plain name (which passes the preflight on the parts asked for)

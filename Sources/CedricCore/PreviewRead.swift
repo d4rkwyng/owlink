@@ -16,16 +16,18 @@ public enum PreviewRead {
     public static let maxBytes = 512 << 20
 
     /// `file`'s parts below `root`, by the paths as given or else as
-    /// resolved; nil when it isn't below `root` either way.
+    /// resolved; nil when it isn't below `root` either way. Compared and
+    /// split as bytes (`FolderTree.relativePath`, `FolderTree.components`):
+    /// a slash followed by a combining mark is one Swift character, so a
+    /// text prefix refused a first-level mark-leading name (Astra batch 13d).
     static func components(of file: URL, below root: URL) -> [String]? {
-        func rel(_ f: String, _ r: String) -> [String]? {
-            let base = r.hasSuffix("/") ? r : r + "/"
-            guard f.hasPrefix(base) else { return nil }
-            let parts = f.dropFirst(base.count).split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        func rel(_ f: URL, _ r: URL) -> [String]? {
+            guard let rel = FolderTree.relativePath(of: f, in: r), !rel.isEmpty else { return nil }
+            let parts = FolderTree.components(rel)
             return parts.isEmpty || !parts.allSatisfy(Beneath.isName) ? nil : parts
         }
-        return rel(file.standardizedFileURL.path, root.standardizedFileURL.path)
-            ?? rel(PreviewFolder.resolved(file.standardizedFileURL).path, PreviewFolder.resolved(root.standardizedFileURL).path)
+        let f = file.standardizedFileURL, r = root.standardizedFileURL
+        return rel(f, r) ?? rel(PreviewFolder.resolved(f), PreviewFolder.resolved(r))
     }
 
     /// The path the kernel has for what `fd` has open.
