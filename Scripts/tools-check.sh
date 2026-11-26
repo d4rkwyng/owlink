@@ -48,6 +48,11 @@ echo "== closefail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-closefail" CEDRIC_CHECK=closefail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/closefail.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/closefail.txt" || { echo "tools-check: closefail FAILED" >&2; fail=1; }
+# Quit while the session can't be written: likewise.
+echo "== quitfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitfail" CEDRIC_CHECK=quitfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/quitfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/quitfail.txt" || { echo "tools-check: quitfail FAILED" >&2; fail=1; }
 chmod -R u+w "$W" 2>/dev/null || true
 echo "== cedric script (dry run: the URLs it would send)"
 cli=$(cd "$W" && CEDRIC_DRY_RUN=1 "$OLDPWD/Scripts/cedric" -w a.txt src/x.c:12:5 +3 b.md 'c.py:9:' 2>&1) || fail=1

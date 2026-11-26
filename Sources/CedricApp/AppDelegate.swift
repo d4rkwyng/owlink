@@ -157,10 +157,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// No "save changes?" on quit: unsaved text is kept in the session and
     /// comes back as open tabs next launch, reopen on or off (with it off,
     /// only clean files go to Reopen Closed Tab: SessionReopenPolicy.plan).
+    /// Unless that save fails: then the app stays open (`prepareToQuit`).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Closing the last window already saved (quitAfterLastClose / a
         // last-window terminate started from windowShouldClose).
-        if !terminating { prepareToQuit() }
+        if !terminating, !prepareToQuit() { return .terminateCancel }
         return .terminateNow
     }
 
@@ -174,7 +175,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    private func prepareToQuit() {
+    /// False, with the app left open, when the session (unsaved text
+    /// included) couldn't be written and the user didn't choose to quit
+    /// anyway (`askAfterFailedQuitSave`).
+    private func prepareToQuit() -> Bool {
         // Replace in Files' disk writes under way finish first.
         ReplaceInFiles.waitForWrites()
         // The last words of the day, if typing hadn't paused yet.
@@ -182,11 +186,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // The whole session, whatever Reopen files from last session says:
         // launch decides what comes back (SessionReopenPolicy.plan; with it
         // off, files go to Reopen Closed Tab there and unsaved text reopens).
-        saveSession()
+        // Waits for the queued writes, then writes every unsaved text not
+        // yet on disk again (one whose earlier write failed included).
+        while let failure = saveSession(sync: true, quitting: true) {
+            FileHandle.standardError.write(Data("session: quit save failed: \(failure)\n".utf8))
+            switch askAfterFailedQuitSave(failure) {
+            case .retry: continue
+            case .quitAnyway: break
+            case .keepOpen: return false
+            case .saveAs:
+                if let t = firstUnsavedTab() {
+                    t.window?.makeKeyAndOrderFront(nil)
+                    DispatchQueue.main.async { _ = t.saveAs() }
+                }
+                return false
+            }
+            break
+        }
         releaseAllWaiters()
         failPendingBackgroundOpens()
         terminating = true
         sessionTimer?.invalidate()
+        leadingSaveTimer?.invalidate()
+        return true
+    }
+
+    enum QuitSaveChoice: String { case keepOpen = "keep", saveAs = "saveas", retry = "retry", quitAnyway = "quit" }
+    /// Check builds: answers the alert instead of the user.
+    static var checkQuitSaveChoice: ((String) -> QuitSaveChoice)?
+
+    /// The tab whose unsaved text is in most danger: the first with any.
+    private func firstUnsavedTab() -> EditorWindowController? {
+        tabs.first { $0.doc.isDirty || $0.doc.fileURL == nil && ($0.textView.textStorage?.length ?? 0) > 0 }
+    }
+
+    /// Quitting, the session couldn't be written: say so and let the user
+    /// keep Owlink open (the default), Save As, try again, or quit anyway.
+    private func askAfterFailedQuitSave(_ failure: String) -> QuitSaveChoice {
+        if DevEnvironment.checksEnabled {
+            let choice = Self.checkQuitSaveChoice?(failure)
+                ?? env["CEDRIC_TEST_QUIT_SAVE_CHOICE"].flatMap(QuitSaveChoice.init(rawValue:))
+            if let choice {
+                print("quit: session save failed, choice=\(choice.rawValue)")
+                fflush(stdout)
+                return choice
+            }
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = String(localized: "Owlink couldn’t save your unsaved work")
+        alert.informativeText = String(localized: "Its session couldn’t be written: \(failure)\n\nIf you quit now, unsaved text may be lost. Keep Owlink open and save your tabs with File › Save As…, or try again.")
+        alert.addButton(withTitle: String(localized: "Keep Owlink Open"))
+        alert.addButton(withTitle: String(localized: "Save As…"))
+        alert.addButton(withTitle: String(localized: "Try Again"))
+        let quit = alert.addButton(withTitle: String(localized: "Quit Anyway"))
+        quit.hasDestructiveAction = true
+        switch alert.runModal() {
+        case .alertSecondButtonReturn: return .saveAs
+        case .alertThirdButtonReturn: return .retry
+        case NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1): return .quitAnyway
+        default: return .keepOpen
+        }
     }
 
     /// Settings › "Quit when the last window closes", once launch is done
@@ -222,7 +282,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The last document tab has closed: only a fallback (windowShouldClose
     /// / Close Window usually quit first, while the tabs were still open).
     func quitAfterLastClose() {
-        prepareToQuit()
+        guard prepareToQuit() else { return }
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
@@ -240,7 +300,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let onlyGroup = windowGroups().count == 1
         let lastTab = otherDocumentWindows(than: window) == 0
         if onlyGroup, lastTab || isClosingWholeWindow(window) {
-            prepareToQuit()
+            // The session couldn't be saved: nothing closes.
+            guard prepareToQuit() else { return false }
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return false
         }
@@ -251,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// quit-causing last window, terminate with the session already saved.
     func closeDocumentWindows(in window: NSWindow) {
         if quitsOnLastClose, windowGroups().count == 1 {
-            prepareToQuit()
+            guard prepareToQuit() else { return }
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return
         }
@@ -852,10 +913,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
-    /// `sync`: wait for it (quit).
-    func saveSession(sync: Bool = true) {
+    /// `sync`: wait for it (quit). Nothing is pruned after a failed write.
+    /// `quitting`: also write again every unsaved text whose write is
+    /// queued (it is waited for anyway) and closed tabs' text kept only
+    /// in memory (`closedTexts`). Returns what failed, nil when every
+    /// unsaved text and the session are on disk (sync only; an async
+    /// save that fails is tried again `sessionRetryDelay` later).
+    @discardableResult
+    func saveSession(sync: Bool = true, quitting: Bool = false) -> String? {
         sessionTimer?.invalidate()
-        guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
+        leadingSaveTimer?.invalidate()
+        guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return nil }
         lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()
@@ -878,7 +946,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let needsBuffer = d.isDirty || d.fileURL == nil && !isEmpty
                 if needsBuffer {
                     keep.insert(d.id)
-                    if d.sessionChangeCount != d.changeCount, d.sessionWritingCount != d.changeCount {
+                    if d.sessionChangeCount != d.changeCount, quitting || d.sessionWritingCount != d.changeCount {
                         // One copy of the text (the storage keeps changing).
                         // A mixed file's breaks go into the buffer with it (restoreFormat).
                         buffers.append((d.id, t.text, d.lineBreaks))
@@ -924,42 +992,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         for c in closedTabs where c.hasBuffer { keep.insert(c.id) }
+        // Closed tabs whose text couldn't be written when they closed.
+        let memoryOnly: [(UUID, String)] = quitting ? closedTabs.filter(\.hasBuffer).compactMap { c in closedTexts[c.id].map { (c.id, $0) } } : []
         let session = Session(windows: windows, closedTabs: closedTabs.isEmpty ? nil : closedTabs, folder: folderSessionState,
                               wordGoals: fileWordGoals.isEmpty ? nil : fileWordGoals)
         let store = self.store
         let toWrite = buffers, keeping = keep
-        let write: @Sendable () -> Set<UUID> = {
+        let write: @Sendable () -> (ok: Set<UUID>, failures: [String]) = {
             var ok = Set<UUID>()
+            var failures: [String] = []
             for (id, text, breaks) in toWrite {
                 do {
                     try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks))
                     ok.insert(id)
                 } catch {
                     FileHandle.standardError.write(Data("session: buffer write failed: \(error)\n".utf8))
+                    failures.append(error.localizedDescription)
+                }
+            }
+            for (id, text) in memoryOnly {
+                do {
+                    try store.writeBuffer(id, text: text)
+                    ok.insert(id)
+                } catch {
+                    failures.append(error.localizedDescription)
                 }
             }
             do {
                 try store.save(session)
-                store.pruneBuffers(keeping: keeping)
+                // Only after a save that wrote everything: a buffer whose
+                // write failed may still have an older copy worth keeping.
+                if failures.isEmpty { store.pruneBuffers(keeping: keeping) }
             } catch {
                 FileHandle.standardError.write(Data("session: save failed: \(error)\n".utf8))
+                failures.append(error.localizedDescription)
             }
-            return ok
+            return (ok, failures)
         }
         // Each written tab's count, once its write is done: advanced if it
-        // worked, else left as it was so the next save (or a close) tries again.
-        let finished: @MainActor (Set<UUID>) -> Void = { ok in
+        // worked (never back: an older async write can finish after a
+        // newer sync one), else left as it was so the next save (or a
+        // close) tries again.
+        let finished: @MainActor (Set<UUID>) -> Void = { [weak self] ok in
             for (id, (d, count)) in written {
                 if d.sessionWritingCount == count { d.sessionWritingCount = -1 }
-                if ok.contains(id) { d.sessionChangeCount = count }
+                if ok.contains(id), count > d.sessionChangeCount { d.sessionChangeCount = count }
             }
+            for (id, _) in memoryOnly where ok.contains(id) { self?.closedTexts[id] = nil }
         }
         if sync {
-            finished(sessionQueue.sync(execute: write))
+            let r = sessionQueue.sync(execute: write)
+            finished(r.ok)
+            if let first = r.failures.first { return first }
+            guard quitting else { return nil }
+            // Everything that needs its text kept has it on disk now.
+            let unwritten = tabs.filter { t in
+                let d = t.doc
+                return (d.isDirty || d.fileURL == nil && (t.textView.textStorage?.length ?? 0) > 0) && d.sessionChangeCount != d.changeCount
+            }
+            if !unwritten.isEmpty { return String(localized: "\(unwritten.count) tab(s) with unsaved text weren’t written") }
+            if closedTabs.contains(where: { $0.hasBuffer && closedTexts[$0.id] != nil }) {
+                return String(localized: "a closed tab’s unsaved text wasn’t written")
+            }
+            return nil
         } else {
             sessionQueue.async {
-                let ok = write()
-                DispatchQueue.main.async { MainActor.assumeIsolated { finished(ok) } }
+                let r = write()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        finished(r.ok)
+                        if !r.failures.isEmpty { self.retrySessionSaveLater() }
+                    }
+                }
+            }
+            return nil
+        }
+    }
+
+    /// After a failed timed save: try again a little later if nothing
+    /// else saves meanwhile (a full disk may have room again).
+    static let sessionRetryDelay: TimeInterval = 10
+
+    private func retrySessionSaveLater() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionRetryDelay) { [weak self] in
+            guard let self, !self.terminating, self.sessionTimer?.isValid != true, self.leadingSaveTimer?.isValid != true else { return }
+            self.sessionTimer = Timer.scheduledTimer(withTimeInterval: 0, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.saveSession(sync: false) }
             }
         }
     }

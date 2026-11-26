@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -16,6 +16,7 @@ extension DevChecks {
         case "bookmarks": bookmarks(app)
         case "closedtab": closedTab(app)
         case "closefail": closeAfterFailedSave(app)
+        case "quitfail": quitAfterFailedSave(app)
         case "closedraw": closedTabsStillDrawn(app)
         case "jsonwhole": formatWholeJSONCheck(app)
         case "colours": colourConsistency(app)
@@ -459,6 +460,50 @@ extension DevChecks {
                 expect(key("t", [.command, .shift]) == false || app.tabs.count == 2, "⇧⌘T with nothing closed does nothing")
             },
             snapshot("reopened-tab.png"),
+        ])
+    }
+
+    /// Quit while every session write fails (SessionStore.checkFailWrites,
+    /// as on a full disk): the app stays open, the user is asked (here
+    /// answered by `checkQuitSaveChoice`), and Try Again once the disk
+    /// works writes the latest text and lets the quit go on. Needs
+    /// session saving on (run like closefail).
+    static func quitAfterFailedSave(_ app: AppDelegate) {
+        let file = app.open(write("quit-fail.txt", "on disk\n"))!
+        sized(file)
+        func buffer() -> String? { app.store.readBuffer(file.doc.id) }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                app.saveSession(sync: true)
+                expect(buffer() == "on disk one\n", "a save writes the buffer", buffer() ?? "-")
+                type(" two")
+                app.store.checkFailWrites = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                let reply = app.applicationShouldTerminate(NSApp)
+                expect(reply == .terminateCancel, "a quit whose session save fails is cancelled")
+                expect(asked.count == 1, "the user is asked once", "\(asked)")
+                expect(!app.terminating, "the app isn't quitting")
+                expect(app.tabs.contains { $0 === file } && file.doc.isDirty, "the tab is still open, unsaved")
+                expect(buffer() == "on disk one\n", "nothing newer reached the disk", buffer() ?? "-")
+                // Try Again, with the disk working again: the quit goes on.
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { why in
+                    asked.append(why)
+                    app.store.checkFailWrites = false
+                    return .retry
+                }
+                let again = app.applicationShouldTerminate(NSApp)
+                expect(asked.count == 1, "asked once more", "\(asked)")
+                expect(again == .terminateNow, "after a save that worked, the quit goes on")
+                expect(buffer() == "on disk one two\n", "the latest text is in its buffer", buffer() ?? "-")
+                expect(app.store.load()?.allTabs.contains { $0.id == file.doc.id && $0.hasBuffer } == true, "and the session names it")
+                AppDelegate.checkQuitSaveChoice = nil
+            },
         ])
     }
 
