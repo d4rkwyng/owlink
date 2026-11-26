@@ -1059,6 +1059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if binary { tab.holdBinary(body) }
         if st.hasBuffer { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
         tab.updateTitle()
+        // Unsaved text for a file deleted or moved while the app was not
+        // running: the "deleted or moved" bar, as when it goes while open.
+        if fromBuffer, let url = doc.fileURL, case .missing = DiskStamp.status(known: doc.diskStamp, at: url) { tab.showFileMissing() }
         let len = (body as NSString).length
         tab.textView.setSelectedRange(NSRange(location: min(st.selectionLocation, len), length: min(st.selectionLength, max(0, len - st.selectionLocation))))
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }
