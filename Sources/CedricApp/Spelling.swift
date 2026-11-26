@@ -257,7 +257,8 @@ extension EditorTextView {
     /// Removed with the view.
     func watchSpellDictionary() {
         guard spellLearnedWatch == nil else { return }
-        nonisolated(unsafe) weak let view = self
+        // var, not let: Swift 6.1 (CI's test-swift61) rejects a weak let.
+        nonisolated(unsafe) weak var view = self
         spellLearnedWatch = SpellLearnedWatch(Self.spellDictionary) {
             // Posted on the thread that learned the word: on the main
             // thread at once, else as soon as it gets there.
