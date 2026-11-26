@@ -40,6 +40,8 @@ public enum Beneath {
         public let dev: dev_t
         public let ino: ino_t
         init(_ st: stat) { dev = st.st_dev; ino = st.st_ino }
+        /// A given device and inode (tests).
+        init(dev: dev_t, ino: ino_t) { self.dev = dev; self.ino = ino }
 
         /// What `fd` has open.
         public init?(fd: Int32) {
