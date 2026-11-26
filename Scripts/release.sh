@@ -8,7 +8,8 @@
 #
 #   --dry-run        print every command instead of running it (the identity
 #                    lookup still runs: it only reads the keychain)
-#   --host-arch      build only this Mac's architecture (default: universal)
+#   --host-arch      build only this Mac's architecture (default: universal);
+#                    not with --appcast
 #   --skip-notarize  sign and verify only
 #   --skip-launch-check
 #                    don't real-launch the signed app (Scripts/launch-check.sh);
@@ -142,6 +143,9 @@ if [ $APPCAST = 1 ]; then
         fail "--appcast: no EdDSA private key: set CEDRIC_SPARKLE_KEY_FILE (a file outside the repo) or CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT (docs/updates.md)"
     fi
     [ $NOTARIZE = 1 ] || fail "--appcast: an update must be notarized; drop --skip-notarize"
+    # The appcast item names no architecture, so every installed copy, Intel
+    # or Apple silicon, would be offered this zip: it must run on both.
+    [ $UNIVERSAL = 1 ] || fail "--appcast: an update must be universal (arm64 and x86_64): its appcast item is offered to every Mac; drop --host-arch"
     if [ -n "${CEDRIC_SPARKLE_BIN:-}" ]; then
         SPARKLE_SIGN_UPDATE="$CEDRIC_SPARKLE_BIN/sign_update"
     else

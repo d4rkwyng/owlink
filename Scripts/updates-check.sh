@@ -75,6 +75,10 @@ refuses "a key file others can read" "readable by its owner only" "${SET[@]}" CE
 chmod 600 "$W/empty-not-a-key"
 refuses "an update that isn't notarized" "must be notarized" "${SET[@]}" CEDRIC_SPARKLE_KEY_FILE="$W/empty-not-a-key" -- --skip-notarize
 refuses "an update that isn't notarized (Keychain key)" "must be notarized" "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 -- --skip-notarize
+# A host-arch build is one architecture, but an appcast item has none, so
+# every Mac would be offered it. CEDRIC_SIGN_ID=- keeps a broken guard from
+# even looking up an identity.
+refuses "an update that isn't universal (--host-arch)" "must be universal" "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 CEDRIC_SIGN_ID=- -- --host-arch
 refuses "no sign_update" "no Sparkle sign_update" "${SET[@]}" CEDRIC_SPARKLE_KEY_FILE="$W/empty-not-a-key" CEDRIC_SPARKLE_BIN="$W/no-bin"
 # Past the sign_update lookup only when the pinned package's tools are in
 # .build (after `swift build`); sign_update is found, not run.

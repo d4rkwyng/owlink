@@ -44,7 +44,8 @@ never loaded, and nothing goes to the network.
   to upload and where. **It uploads nothing.** It refuses to start without a
   feed URL, public key, download URL and exactly one private-key source.
   It also refuses a key file inside the repository or one others can read, and
-  a release that skips notarization. `Scripts/updates-check.sh` tests those
+  a release that skips notarization or is built for one architecture only
+  (`--host-arch`: the appcast item is offered to every Mac). `Scripts/updates-check.sh` tests those
   refusals.
 
 ## Decisions and OKs needed
