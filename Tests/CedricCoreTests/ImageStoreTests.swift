@@ -65,7 +65,8 @@ import Testing
     }
 
     /// The race the review describes: "images" is swapped for a link out
-    /// after it was checked. The copy goes to the folder that was opened.
+    /// after it was checked. Nothing is written: not through the link, not
+    /// in the folder that was checked (images/<name> no longer leads there).
     @Test func aSwappedImagesFolderDoesNotRedirectTheCopy() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
@@ -80,11 +81,100 @@ import Testing
         defer { ImageStore.afterOpen = nil }
         let store = try ImageStore.open(in: doc)
         #expect(isSymlink(images), "the swap happened")
-        #expect(try store.copy(from: pic, name: "p.png") == "p.png")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "p.png") }
         #expect(listing(outside).isEmpty, "the outside folder is untouched")
-        #expect(fm.contents(atPath: doc.appendingPathComponent("was-images/p.png").path) == Data([9]), "the copy is in the folder that was checked")
+        #expect(listing(doc.appendingPathComponent("was-images")).isEmpty, "the folder that was checked gets neither staged bytes nor a file")
+        #expect(listing(doc) == ["images", "was-images"], "no staging file is left in the document's folder")
         // Through insertion: images/p.png no longer leads to that copy, so no link is given.
         #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "p.png") }
+    }
+
+    /// Must-fix 1 (Astra, batch 3): the pinned "images" moved outside the
+    /// document's folder after it was opened. The moved-out folder gets
+    /// neither staged bytes nor a published file.
+    @Test func anImagesFolderMovedOutAfterOpenReceivesNothing() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = d.appendingPathComponent("p.png")
+        try Data([9]).write(to: pic)
+        let images = doc.appendingPathComponent("images"), moved = outside.appendingPathComponent("moved")
+        ImageStore.afterOpen = { try? FileManager.default.moveItem(at: images, to: moved) }
+        defer { ImageStore.afterOpen = nil }
+        let store = try ImageStore.open(in: doc)
+        #expect(fm.fileExists(atPath: moved.path) && !fm.fileExists(atPath: images.path), "the move happened")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "p.png") }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.write(Data([8]), name: "w.png") }
+        #expect(listing(moved).isEmpty, "the moved-out folder gets neither staged bytes nor a published file")
+        #expect(listing(doc).isEmpty, "nothing staged or made in the document's folder")
+        #expect(listing(outside) == ["moved"], "nothing else written outside")
+    }
+
+    /// The same, after the bytes are staged and before they are published:
+    /// the rename is resolved beneath the document's folder, so a moved-out
+    /// "images" (gone, or swapped for a link out) gets nothing, and the
+    /// staging file is removed.
+    @Test func anImagesFolderMovedOutBeforePublishReceivesNothing() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = d.appendingPathComponent("p.png")
+        try Data([9]).write(to: pic)
+        let images = doc.appendingPathComponent("images"), moved = outside.appendingPathComponent("moved")
+        defer { ImageStore.beforePublish = nil }
+        // Moved out, nothing in its place.
+        var store = try ImageStore.open(in: doc)
+        ImageStore.beforePublish = { try? FileManager.default.moveItem(at: images, to: moved) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "p.png") }
+        #expect(fm.fileExists(atPath: moved.path), "the move happened")
+        #expect(listing(moved).isEmpty, "the moved-out folder gets neither staged bytes nor a published file")
+        #expect(listing(doc).isEmpty, "the staging file is removed")
+        // Moved out and swapped for a link to it.
+        try fm.removeItem(at: moved)
+        ImageStore.beforePublish = nil
+        store = try ImageStore.open(in: doc)
+        ImageStore.beforePublish = {
+            try? FileManager.default.moveItem(at: images, to: moved)
+            try? FileManager.default.createSymbolicLink(at: images, withDestinationURL: moved)
+        }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.write(Data([8]), name: "w.png") }
+        #expect(isSymlink(images), "the swap happened")
+        #expect(listing(moved).isEmpty, "the folder behind the link out gets nothing")
+        #expect(listing(doc) == ["images"], "the staging file is removed")
+        // Moved out and a new "images" made in its place: the file stays inside, and no link is given.
+        try fm.removeItem(at: images)
+        try fm.removeItem(at: moved)
+        ImageStore.beforePublish = nil
+        store = try ImageStore.open(in: doc)
+        ImageStore.beforePublish = {
+            try? FileManager.default.moveItem(at: images, to: moved)
+            try? FileManager.default.createDirectory(at: images, withIntermediateDirectories: false)
+        }
+        let name = try store.write(Data([7]), name: "n.png")
+        #expect(listing(moved).isEmpty, "the moved-out folder gets nothing")
+        #expect(fm.contents(atPath: images.appendingPathComponent(name).path) == Data([7]), "published inside the document's folder")
+        #expect(listing(doc) == ["images"], "no staging file is left")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: name) }
+    }
+
+    /// Where the kernel can't keep the open and the rename beneath the
+    /// document's folder, nothing is made, staged or published.
+    @Test func withoutKernelContainmentNothingIsWritten() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([3]).write(to: pic)
+        #expect(ImageStore.containmentEnforced, "this macOS enforces O_RESOLVE_BENEATH and RENAME_RESOLVE_BENEATH")
+        defer { ImageStore.forceNoContainment = false }
+        ImageStore.forceNoContainment = true
+        #expect(throws: ImageStore.Failure.noContainment) { _ = try ImageStore.open(in: doc) }
+        #expect(listing(doc).isEmpty, "no images folder is made")
+        // A store opened before: copies and writes are refused before a byte is written.
+        ImageStore.forceNoContainment = false
+        let store = try ImageStore.open(in: doc)
+        ImageStore.forceNoContainment = true
+        #expect(throws: ImageStore.Failure.noContainment) { _ = try store.copy(from: pic, name: "p.png") }
+        #expect(throws: ImageStore.Failure.noContainment) { _ = try store.write(Data([3]), name: "w.png") }
+        #expect(listing(doc) == ["images"] && listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
+        #expect(listing(outside) == ["p.png"], "nothing written outside")
     }
 
     /// The link handed to the editor is checked against the published file.
@@ -135,6 +225,7 @@ import Testing
             #expect(throws: ImageStore.Failure.badName, "\(bad.debugDescription)") { _ = try store.write(Data([3]), name: bad) }
         }
         #expect(listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
+        #expect(listing(doc) == ["images"], "nothing staged in the document's folder")
         #expect(listing(d) == ["doc", "outside"] && listing(outside) == ["p.png"], "nothing written beside the folders")
     }
 
@@ -176,5 +267,6 @@ import Testing
         let tooLong = String(repeating: "n", count: 300) + ".png"
         #expect(throws: (any Error).self) { _ = try store.copy(from: pic, name: tooLong) }
         #expect(listing(doc.appendingPathComponent("images")).isEmpty, "the staging file is removed")
+        #expect(listing(doc) == ["images"], "and none is left in the document's folder")
     }
 }

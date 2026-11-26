@@ -154,10 +154,11 @@ extension EditorWindowController {
         // A link to a file already in the folder, or a name published in "images".
         enum Piece { case inPlace(String), copied(String) }
         var pieces: [Piece] = []
-        // "images" is opened once per batch, relative to the pinned document
-        // folder, and every copy is staged and published through that
-        // descriptor (ImageStore): nothing is written outside the folder,
-        // nothing is overwritten, and no partial file gets a final name.
+        // "images" is opened once per batch beneath the pinned document
+        // folder; every copy is staged in that folder and published as
+        // images/<name> with the kernel keeping the rename beneath it
+        // (ImageStore): nothing is written outside the folder, nothing is
+        // overwritten, and no partial file gets a final name.
         var opened: ImageStore?
         func store() throws -> ImageStore {
             if let opened { return opened }
@@ -165,10 +166,8 @@ extension EditorWindowController {
                 let s = try ImageStore.open(in: dir)
                 opened = s
                 return s
-            } catch ImageStore.Failure.outside {
-                // An "images" that is a link out of the document's folder is refused.
-                throw NSError(domain: "Cedric", code: 3, userInfo: [NSLocalizedDescriptionKey:
-                    String(localized: "The “images” folder next to this document points outside its folder, so pasted images aren’t saved there.")])
+            } catch let failure as ImageStore.Failure {
+                throw Self.imageStoreError(failure)
             }
         }
         do {
@@ -185,6 +184,8 @@ extension EditorWindowController {
                     name = try store().copy(from: f, name: f.lastPathComponent)
                 } catch ImageStore.Failure.notRegularFile {
                     NSSound.beep(); continue
+                } catch let failure as ImageStore.Failure {
+                    throw Self.imageStoreError(failure)
                 }
                 pieces.append(.copied(name))
             }
@@ -193,7 +194,12 @@ extension EditorWindowController {
                 let f = DateFormatter()
                 f.locale = Locale(identifier: "en_US_POSIX")
                 f.dateFormat = "yyyyMMdd-HHmmss"
-                let name = try store().write(png, name: "image-\(f.string(from: Date())).png")
+                let name: String
+                do {
+                    name = try store().write(png, name: "image-\(f.string(from: Date())).png")
+                } catch let failure as ImageStore.Failure {
+                    throw Self.imageStoreError(failure)
+                }
                 pieces.append(.copied(name))
             }
         } catch {
@@ -213,8 +219,7 @@ extension EditorWindowController {
                 }
             }
         } catch {
-            showError(NSError(domain: "Cedric", code: 4, userInfo: [NSLocalizedDescriptionKey:
-                String(localized: "The “images” folder next to this document changed while the images were copied, so no links were inserted.")]))
+            showError(Self.imageStoreError(.destinationChanged))
             return
         }
         let len = (textView.string as NSString).length
@@ -222,6 +227,28 @@ extension EditorWindowController {
         let s = MarkdownPaste.imageLinks(paths)
         apply(TextEdit(range: r, replacement: s, selection: NSRange(location: r.location + (s as NSString).length, length: 0)),
               actionName: String(localized: "Insert Image"))
+    }
+
+    /// What the user is told when ImageStore refuses (in none of these
+    /// cases was anything written outside the document's folder).
+    static func imageStoreError(_ failure: ImageStore.Failure) -> NSError {
+        let text: String, code: Int
+        switch failure {
+        case .outside:
+            // An "images" that is a link out of the document's folder is refused.
+            text = String(localized: "The “images” folder next to this document points outside its folder, so pasted images aren’t saved there.")
+            code = 3
+        case .destinationChanged:
+            text = String(localized: "The “images” folder next to this document changed while the images were copied, so no links were inserted.")
+            code = 4
+        case .noContainment:
+            text = String(localized: "This version of macOS can’t keep copied images inside the document’s folder, so they aren’t copied. Images already in the folder can still be linked.")
+            code = 5
+        case .notRegularFile, .badName:
+            text = String(localized: "The image couldn’t be copied.")
+            code = 6
+        }
+        return NSError(domain: "Cedric", code: code, userInfo: [NSLocalizedDescriptionKey: text])
     }
 
     /// Format › Markdown › Insert Image… (the Context Bar's Image button):
