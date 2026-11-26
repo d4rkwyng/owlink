@@ -215,4 +215,21 @@ import Testing
         let m = FileMatchIndex(paths: [p])
         #expect(m.nameStart == [p.count - "\u{301}n.txt".count], "the name starts after the last slash byte")
     }
+
+    /// Replace in Files plans a file open in a tab against that tab's text
+    /// only when the tab shows those exact bytes: the tab of a canonically
+    /// equivalent name isn't this file's.
+    @Test func replaceBuffersAreKeyedByBytes() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let f = t.appendingPathComponent("\u{2126}.txt")
+        try Data("owl on disk\n".utf8).write(to: f)
+        let other = t.appendingPathComponent("\u{3A9}.txt")
+        let q = ReplaceQuery(query: "owl", template: "cat")
+        let cands = [FileReplace.Candidate(url: f, relativePath: f.lastPathComponent, searchStamp: DiskStamp.of(f))]
+        let mine = try FileReplace.plan(q, root: t, candidates: cands, buffers: [FolderTree.PathKey(f): "owl owl unsaved"])
+        #expect(mine.files.first?.disk == nil && mine.files.first?.edits.count == 2, "its own tab's text")
+        let notMine = try FileReplace.plan(q, root: t, candidates: cands, buffers: [FolderTree.PathKey(other): "owl owl unsaved"])
+        #expect(notMine.files.first?.disk != nil && notMine.files.first?.edits.count == 1, "planned from disk, not the other spelling's tab")
+    }
 }

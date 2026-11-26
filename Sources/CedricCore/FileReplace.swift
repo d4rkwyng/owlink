@@ -237,17 +237,18 @@ public enum FileReplace {
     }
 
     /// Plans the replace. `buffers`: the text of files open in a tab, by
-    /// standardized path; those are planned against that text, not disk.
-    /// Reads files; call it off the main thread.
-    public static func plan(_ query: ReplaceQuery, root: URL, candidates: [Candidate], buffers: [String: String] = [:],
+    /// standardized path's bytes (`FolderTree.PathKey`: a `String` key took
+    /// a canonically equivalent file's tab for this one); those are
+    /// planned against that text, not disk. Reads files; call it off the
+    /// main thread.
+    public static func plan(_ query: ReplaceQuery, root: URL, candidates: [Candidate], buffers: [FolderTree.PathKey: String] = [:],
                             maxFileSize: Int = 20 * 1024 * 1024, isCancelled: () -> Bool = { false }) throws -> ReplacePlan {
         let re = try FindEngine.regex(query.query, query.findOptions)
         var plan = ReplacePlan(query: query, root: root, files: [], skipped: [])
         for c in candidates {
             if isCancelled() { plan.cancelled = true; break }
             func skip(_ r: ReplaceSkip) { plan.skipped.append(SkippedFile(url: c.url, relativePath: c.relativePath, reason: r)) }
-            let key = c.url.standardizedFileURL.path
-            if let text = buffers[key] {
+            if let text = buffers[FolderTree.PathKey(c.url)] {
                 let edits = edits(in: text, regex: re, query: query)
                 if !edits.isEmpty { plan.files.append(ReplaceFile(url: c.url, relativePath: c.relativePath, sourceText: text, edits: edits, disk: nil)) }
                 continue

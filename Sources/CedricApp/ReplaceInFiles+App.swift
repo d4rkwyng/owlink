@@ -109,13 +109,14 @@ extension AppDelegate {
         return tabs.first { $0.doc.fileURL.map { FolderTree.sameBytes($0.standardizedFileURL.resolvingSymlinksInPath().path, want) } ?? false }
     }
 
-    /// The text of the files in `urls` that are open in a tab, by standardized path.
-    func openBuffers(for urls: [URL]) -> [String: String] {
+    /// The text of the files in `urls` that are open in a tab, by
+    /// standardized path's bytes (`FolderTree.PathKey`).
+    func openBuffers(for urls: [URL]) -> [FolderTree.PathKey: String] {
         // Tabs restored lazily from the session are built first, so none is missed.
         finishRestore()
-        var out: [String: String] = [:]
+        var out: [FolderTree.PathKey: String] = [:]
         for u in urls {
-            if let t = tab(showing: u) { out[u.standardizedFileURL.path] = t.text }
+            if let t = tab(showing: u) { out[FolderTree.PathKey(u)] = t.text }
         }
         return out
     }

@@ -208,7 +208,7 @@ import Testing
         let f = try put(root, "open.txt", Data("owl on disk\n".utf8))
         let q = ReplaceQuery(query: "owl", template: "cat")
         let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
-                                        buffers: [f.standardizedFileURL.path: "owl owl unsaved"])
+                                        buffers: [FolderTree.PathKey(f): "owl owl unsaved"])
         #expect(plan.files.count == 1 && plan.files[0].disk == nil && plan.files[0].edits.count == 2)
         // apply never writes a buffer-planned file.
         let r = FileReplace.apply(plan.files, query: q, root: root, store: store)
