@@ -21,6 +21,7 @@ extension DevChecks {
         case "backupfail": backupFailureNotice(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedmemory": closedTextOnlyInMemory(app)
+        case "sessionlatency": sessionLatency(app)
         case "closedraw": closedTabsStillDrawn(app)
         case "jsonwhole": formatWholeJSONCheck(app)
         case "colours": colourConsistency(app)
@@ -701,6 +702,57 @@ extension DevChecks {
                 AppDelegate.checkQuitSaveChoice = nil
             },
         ])
+    }
+
+    /// How long the main thread waits on the session store for ⌘W (the
+    /// buffer write and the commit), ⇧⌘T (the reopen's journal and the
+    /// commit) and quit (queued timed saves drained, then the final
+    /// commit), with a 200 KB file edited. Prints "session-timing:" lines
+    /// (median and max over the runs, ms). Measures only; needs session
+    /// saving on (run like closefail). Not part of tools-check.
+    static func sessionLatency(_ app: AppDelegate) {
+        let line = "a line of a document of some size, to make each buffer write real work\n"
+        let body = String(repeating: line, count: 200_000 / line.utf8.count)
+        let file = app.open(write("latency.txt", body))!
+        sized(file)
+        let id = file.doc.id
+        var closes: [Double] = [], reopens: [Double] = []
+        func ms(_ f: () -> Void) -> Double { let t = DispatchTime.now().uptimeNanoseconds; f(); return Double(DispatchTime.now().uptimeNanoseconds - t) / 1e6 }
+        func report(_ name: String, _ v: [Double]) {
+            let s = v.sorted()
+            print(String(format: "session-timing: %@ median=%.1f ms max=%.1f ms n=%d", name, s[s.count / 2], s.last ?? 0, s.count))
+        }
+        var steps: [(@escaping () -> Void) -> Void] = [sync {
+            expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+        }]
+        for _ in 0..<9 {
+            steps.append(sync {
+                guard let t = app.tabs.first(where: { $0.doc.id == id }) else { expect(false, "the tab is open"); return }
+                focus(t)
+                t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                type("x")
+                app.sessionQueue.sync {}
+                closes.append(ms { key("w", [.command]) })
+            })
+            steps.append(sync { reopens.append(ms { key("t", [.command, .shift]) }) })
+        }
+        steps.append(sync {
+            expect(closes.count == 9 && reopens.count == 9, "nine closes and reopens")
+            expect(app.store.readBuffer(id)?.hasPrefix(String(repeating: "x", count: 9)) == true, "each close wrote the edit")
+            report("close (⌘W, edited 200 KB file)", closes)
+            report("reopen (⇧⌘T)", reopens)
+            // Quit with timed saves queued behind each other (typing).
+            guard let t = app.tabs.first(where: { $0.doc.id == id }) else { return }
+            focus(t)
+            t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            for _ in 0..<4 { type("q"); app.saveSession(sync: false) }
+            var reply: NSApplication.TerminateReply?
+            let quit = ms { reply = app.applicationShouldTerminate(NSApp) }
+            expect(reply == .terminateNow, "quit saves")
+            expect(app.store.readBuffer(id)?.hasPrefix("qqqq") == true, "with the last text")
+            print(String(format: "session-timing: quit (4 timed saves queued) %.1f ms", quit))
+        })
+        run(steps)
     }
 
     /// Quit while the disk takes the session's writes but won't confirm
