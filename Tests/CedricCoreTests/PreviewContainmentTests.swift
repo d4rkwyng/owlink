@@ -80,4 +80,29 @@ import Testing
         #expect(PreviewFolder.approved(for: try page(img), in: sibling, openedRoot: root, scriptOn: true, siteRoots: false) == nil,
                 "the opened folder's name plus a mark doesn't enclose it")
     }
+
+    /// With JavaScript on, a name starting with a dot byte is hidden even
+    /// when a combining mark follows the dot (`hasPrefix(".")` missed it),
+    /// on the path asked for and on the path its links lead to; a
+    /// combining-mark name that isn't hidden is still served.
+    @Test func aDotFollowedByAMarkIsHiddenWithScriptOn() throws {
+        let t = try makeTree(["doc/.\u{301}x.png", "doc/.\u{301}d/y.png", "doc/c/.\u{301}e/z.png", "doc/\u{301}ok/w.png", "doc/ok.png"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let fm = FileManager.default
+        let doc = t.appendingPathComponent("doc")
+        func served(_ rel: String) throws -> URL? {
+            PreviewFolder.file(for: try page(doc.appendingPathComponent(rel)), in: doc, scriptOn: true)
+        }
+        for rel in [".\u{301}x.png", ".\u{301}d/y.png", "c/.\u{301}e/z.png"] {
+            #expect(try served(rel) == nil, "\(rel) is hidden")
+            #expect(PreviewFolder.file(for: try page(doc.appendingPathComponent(rel)), in: doc, scriptOn: false) != nil, "\(rel) with script off")
+        }
+        #expect(try served("\u{301}ok/w.png") != nil, "a mark-leading folder isn't hidden")
+        #expect(try served("ok.png") != nil)
+        // Asked for by a plain name, leading to a hidden one: refused.
+        try fm.createSymbolicLink(at: doc.appendingPathComponent("pics"), withDestinationURL: doc.appendingPathComponent(".\u{301}d"))
+        try fm.createSymbolicLink(at: doc.appendingPathComponent("v.png"), withDestinationURL: doc.appendingPathComponent(".\u{301}x.png"))
+        #expect(try served("pics/y.png") == nil, "the resolved folder is hidden")
+        #expect(try served("v.png") == nil, "the resolved file is hidden")
+    }
 }
