@@ -281,10 +281,12 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
             return
         }
         ranking = true
-        let token = request, gen = notes.generation
+        // Captured here: a main-actor static can't be read in the Sendable
+        // closure (Swift 6.1 rejects it).
+        let token = request, gen = notes.generation, limit = Self.maxRows
         let ref = WeakRef(self), source = WeakRef(notes), view = WeakRef(tv)
         WikiNotes.queryQueue.async {
-            let found = idx.suggestions(query, limit: Self.maxRows)
+            let found = idx.suggestions(query, limit: limit)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let me = ref.value, let tv = view.value, me.request == token, me.ranking,
