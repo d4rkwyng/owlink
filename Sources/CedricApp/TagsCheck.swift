@@ -8,7 +8,9 @@ import CedricCore
 /// notes with their lines → a click opens the right tab at the line, a
 /// note renamed and one deleted on disk (the counts follow), and a
 /// large document opened while the pane shows: no scan, no index build
-/// and no tree made for it, and no pane in its tab.
+/// and no tree made for it, and no pane in its tab. Then the folder
+/// replaced while a tag is listed, both folders having a `daily.md` with
+/// it: the old tree and its notes go at once and an old hit opens nothing.
 extension DevChecks {
     static func tagsCheck(_ app: AppDelegate) {
         let root = dir.appendingPathComponent("tg", isDirectory: true)
@@ -30,6 +32,8 @@ extension DevChecks {
             { next in DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { next() } }
         }
         var before: (scans: Int, names: Int, index: Int, trees: Int) = (0, 0, 0, 0)
+        var staleHit: TagTree.Hit?
+        var staleNotes: WikiNotes?
 
         run([
             sync { app.openFolder(root) },
@@ -129,6 +133,42 @@ extension DevChecks {
                 expect(after == before, "opening a large document reads no notes, builds no index and makes no tree",
                        "\(before) → \(after)")
                 expect(!b.tagsVisible && b.wiki.tags == nil, "and its tab has no Tags pane")
+                // Folder replacement with a tag selected: both folders have a daily.md with it.
+                _ = write("tga/daily.md", "first folder #shared\n")
+                _ = write("tgb/daily.md", "second folder\n\n#shared\n")
+                app.openFolder(dir.appendingPathComponent("tga", isDirectory: true))
+                focus(draft)
+            },
+            wait("the first folder's tree lands") { side?.tree?.node("shared") != nil && notes?.root.lastPathComponent == "tga" },
+            sync {
+                side?.selectTag("shared")
+                expect(side?.hits.map(\.source) == ["daily.md"], "the first folder's daily.md is listed", "\(side?.hits ?? [])")
+                staleHit = side?.hits.first
+                staleNotes = notes
+                app.openFolder(dir.appendingPathComponent("tgb", isDirectory: true))
+                focus(draft)
+                expect(side?.tree == nil && side?.hits.isEmpty == true && side?.selectedTag == nil,
+                       "replacing the folder clears the old tree, its tag and its notes at once",
+                       "\(side?.tree?.tagCount ?? -1) tags, \(side?.hits ?? []), \(side?.selectedTag ?? "-")")
+                side?.activate(0)
+                if let h = staleHit { side?.onOpen?(h, staleNotes) }
+            },
+            pause(1),
+            sync {
+                expect(tab("daily.md") == nil, "an old folder's hit opens nothing in the new folder",
+                       app.tabs.compactMap { $0.doc.fileURL?.path }.joined(separator: ", "))
+                staleNotes = nil
+            },
+            wait("the second folder's tree lands") { side?.tree?.node("shared") != nil && notes?.root.lastPathComponent == "tgb" },
+            sync {
+                side?.selectTag("shared")
+                expect(side?.hits.first?.line == 2, "the new folder's own hit is listed", "\(side?.hits ?? [])")
+                side?.activate(0)
+            },
+            wait("its click opens the new folder's daily.md") {
+                tab("daily.md")?.doc.fileURL?.deletingLastPathComponent().lastPathComponent == "tgb"
+            },
+            sync {
                 draft.hideTags()
                 expect(!draft.tagsVisible && notes?.wantsTags == false, "hiding the last Tags pane stops reading tags")
                 finish()
