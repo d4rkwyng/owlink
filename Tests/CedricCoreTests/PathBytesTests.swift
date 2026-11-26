@@ -291,4 +291,13 @@ import Testing
         #expect(WikiVault.attachmentFolder("", root: root, documentFolder: doc) == doc)
         #expect(WikiVault.attachmentFolder("current", root: root, documentFolder: doc) == doc)
     }
+
+    /// A worktree's `.git` file names its git folder absolutely when the
+    /// path's first byte is "/", a "/" followed by a combining mark too.
+    @Test func aGitdirPathIsAbsoluteByItsFirstByte() {
+        let dir = base.appendingPathComponent("repo")
+        #expect(GitLocation.gitDirFromFile("gitdir: /\u{301}x/.git/worktrees/a\n", relativeTo: dir).map { Array($0.path.utf8) }
+                == Array("/\u{301}x/.git/worktrees/a".utf8))
+        #expect(GitLocation.gitDirFromFile("gitdir: ../main/.git\n", relativeTo: dir) == base.appendingPathComponent("main/.git").standardizedFileURL)
+    }
 }

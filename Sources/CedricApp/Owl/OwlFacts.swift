@@ -12,8 +12,10 @@ import CedricCore
 final class FileProbe: @unchecked Sendable {
     let folder: URL
     private let lock = NSLock()
-    private var known: [String: (exists: Bool, at: Date)] = [:]
-    private var pending: Set<String> = []
+    // By the path's bytes (`FolderTree.PathKey`): a `String` key gave a
+    // canonically equivalent name the other's answer.
+    private var known: [FolderTree.PathKey: (exists: Bool, at: Date)] = [:]
+    private var pending: Set<FolderTree.PathKey> = []
     private static let queue = DispatchQueue(label: "owlink.owl.file-probe", qos: .utility)
     static let lifetime: TimeInterval = 120
 
@@ -53,17 +55,18 @@ final class FileProbe: @unchecked Sendable {
 
     func exists(_ rel: String) -> Bool? {
         let path = folder.appendingPathComponent(rel).standardizedFileURL.path
+        let key = FolderTree.PathKey(path)
         lock.lock()
         defer { lock.unlock() }
-        if let k = known[path], Date().timeIntervalSince(k.at) < Self.lifetime { return k.exists }
+        if let k = known[key], Date().timeIntervalSince(k.at) < Self.lifetime { return k.exists }
         if known.count > 2000 { known.removeAll() }
-        guard pending.insert(path).inserted else { return nil }
+        guard pending.insert(key).inserted else { return nil }
         Self.queue.async { [weak self] in
             let e = FileManager.default.fileExists(atPath: path)
             guard let self else { return }
             self.lock.lock()
-            self.known[path] = (e, Date())
-            self.pending.remove(path)
+            self.known[key] = (e, Date())
+            self.pending.remove(key)
             self.lock.unlock()
         }
         return nil

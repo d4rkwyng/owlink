@@ -45,7 +45,8 @@ public struct GitLocation: Equatable, Sendable {
         guard let line = contents.split(whereSeparator: \.isNewline).first, line.hasPrefix("gitdir:") else { return nil }
         let path = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
         guard !path.isEmpty else { return nil }
-        return path.hasPrefix("/") ? URL(fileURLWithPath: path).standardizedFileURL
+        // Absolute by the first byte, as git and the kernel read it.
+        return path.utf8.first == 0x2f ? URL(fileURLWithPath: path).standardizedFileURL
             : dir.appendingPathComponent(path).standardizedFileURL
     }
 }
