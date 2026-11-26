@@ -1019,7 +1019,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
             for (id, text) in memoryOnly {
                 do {
-                    try store.writeBuffer(id, text: text)
+                    try store.writeBuffer(id, text: text, open: false)
                     ok.insert(id)
                 } catch {
                     failures.append(error.localizedDescription)

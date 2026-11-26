@@ -33,6 +33,10 @@
 #  10. Quit while every session write fails (CEDRIC_TEST_SESSION_WRITE_FAIL):
 #      the app stays open.
 #  11. A buffer that can't be read at launch: kept, said, never pruned.
+#  12. A closed tab with unsaved text, reopened (⇧⌘T), killed before the
+#      session that lists it open is committed; its closing date passes
+#      ClosedTabs.keepDays before the next launch: it comes back open
+#      with its text, not expired with it.
 #
 # Safety: the temp root and every session directory are compared by
 # physical path (symbolic links resolved): the root must be this user's
@@ -595,6 +599,34 @@ grep -q "^notice: .*info=.*Owlink couldn’t read unsaved text from its last ses
 chmod 600 "$S/$U11.txt"
 dump "$S"
 expect_tab "11: readable again: the text is back, exact" - "text that can't be read for now" "name=Recovered"
+
+# 12. Reopened, killed before the commit, past its retention next launch.
+T12='closed with unsaved text, reopened, then killed'
+S=$(child s12)
+python3 -I - "$S" "$T12" <<'PY'
+import json, os, sys, time, uuid
+d, text = sys.argv[1], sys.argv[2]
+i = str(uuid.uuid4()).upper()
+open(os.path.join(d, i + ".txt"), "w").write(text)
+# Closed 30 days less 25 s ago (seconds since 2001, as JSONEncoder writes dates).
+closed = time.time() - 978307200 - 30 * 86400 + 25
+n = len(text.encode("utf-16-le")) // 2
+json.dump({"version": 1, "untitledCounter": 0, "windows": [], "closedTabs": [{"id": i, "untitledName": "Untitled", "hasBuffer": True,
+    "encoding": "utf8", "lineEnding": "lf", "selectionLocation": n, "selectionLength": 0, "topLine": 0, "closed": closed}]},
+    open(os.path.join(d, "session.json"), "w"))
+PY
+t12=$(date +%s)
+launch "$S" "$W/out12" CEDRIC_TEST_REOPEN_CLOSED=1 CEDRIC_TEST_HOLD_SESSION_COMMIT="$W/held12"
+for _ in $(seq 1 150); do [ -s "$W/held12" ] && break; sleep 0.1; done
+[ -s "$W/held12" ] && ok "12: reopened, and the save that lists it open stopped before its commit" || bad "12: the save never reached the hold"
+python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if len(s.get("closedTabs") or []) == 1 and not s["windows"] else 1)' "$S/session.json" \
+    && ok "12: at the kill, the committed session still lists it as closed" || bad "12: the committed session already lists it open"
+kill9 $pid
+while [ $(( $(date +%s) - t12 )) -lt 27 ]; do sleep 0.5; done
+dump "$S"
+expect_tab "12: past its closing date's retention: back open, exact text, caret" - "$T12"
+expect_count "12" 1
+grep -q '^closed:' "$W/dump.txt" && bad "12: still on the closed list" || ok "12: no longer on the closed list"
 
 [ $fail = 0 ] && echo "crash-check: all OK ($oks checks)" || echo "crash-check: FAILED ($oks OK)" >&2
 exit $fail

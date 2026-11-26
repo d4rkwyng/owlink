@@ -278,6 +278,12 @@ public struct SessionFolder: Codable, Equatable, Sendable {
 /// closed empty) is not in the journal once a session without it has
 /// been committed, so it never comes back.
 ///
+/// A closed tab reopened since the commit (File › Reopen Closed Tab) is
+/// journaled too, as `reopened`, before its buffer is written again:
+/// launch then opens it, whether or not its closed entry kept a buffer,
+/// before closed tabs past `ClosedTabs.keepDays` are let go, so newer
+/// text written under an old closing date isn't deleted with it.
+///
 /// Each commit is numbered (`generation` in `session.json`), and the
 /// journal says which commit it waits for. A journal whose commit is
 /// already in `session.json` (the app died after the commit, before the
@@ -292,6 +298,10 @@ public final class SessionStore: @unchecked Sendable {
     private var committed = Set<UUID>()
     /// Buffer ids written (or being written) since: the journal, in order.
     private var pending: [UUID] = []
+    /// Closed tabs the last commit lists, and those of them reopened
+    /// since (journaled as `reopened`).
+    private var committedClosed = Set<UUID>()
+    private var pendingReopened: [UUID] = []
     /// The number of the last commit (`session.json`'s `generation`, or
     /// above any journal launch found); the next commit is this + 1.
     private var committedGeneration = 0
@@ -307,7 +317,8 @@ public final class SessionStore: @unchecked Sendable {
     /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
     public var checkFailWrites = false
     /// Check builds only: runs just before a session is committed while
-    /// journaled buffers wait for it (crash-check kills the app there).
+    /// journaled buffers or reopened tabs wait for it (crash-check kills
+    /// the app there).
     public var checkBeforeCommit: (@Sendable () -> Void)?
 
     public init(directory: URL) {
@@ -377,6 +388,8 @@ public final class SessionStore: @unchecked Sendable {
     struct Journal: Codable, Equatable {
         var generation: Int?
         var ids: [String]
+        /// Closed tabs the commit lists that were reopened since.
+        var reopened: [String]?
     }
 
     /// What launch finds in the store (`loadForLaunch`).
@@ -415,18 +428,23 @@ public final class SessionStore: @unchecked Sendable {
         if let (s, generation) = loadManifest() {
             committedGeneration = max(committedGeneration, generation)
             // Spent: the commit it waited for is in session.json already.
-            if let g = journal.generation, g <= generation, !journal.damaged { journal = ([], g, false) }
+            if let g = journal.generation, g <= generation, !journal.damaged { journal = ([], [], g, false) }
             pending = journal.ids
+            pendingReopened = journal.reopened
             committed = s.bufferIDs
+            committedClosed = Set((s.closedTabs ?? []).map(\.id))
             held = Set(s.heldBuffers ?? [])
             var candidates = journal.ids
+            var reopened = Set(journal.reopened)
             // A journal that can't be read: every buffer the session
-            // doesn't name could be one it listed. Bringing back one
+            // doesn't name could be one it listed, and every closed tab
+            // with a buffer could have been reopened. Bringing back one
             // that was let go beats deleting one that wasn't.
             if journal.damaged {
                 do { candidates = try bufferFiles() } catch { hold = "the session folder couldn’t be listed: \(error.localizedDescription)" }
+                reopened = Set(candidates)
             }
-            let r = Self.applyJournal(s, journal: candidates) { fm.fileExists(atPath: bufferURL($0).path) }
+            let r = Self.applyJournal(s, journal: candidates, reopened: reopened) { fm.fileExists(atPath: bufferURL($0).path) }
             return .session(r.session, recovered: r.recovered)
         }
         pending = journal.ids
@@ -470,56 +488,62 @@ public final class SessionStore: @unchecked Sendable {
 
     /// `session` with the journaled ids in `journal` (whose buffer files
     /// exist) put back: an open tab gets `hasBuffer`; a closed tab
-    /// without it (reopened and edited since) opens again, in a window
-    /// of its own; any other id is returned in `recovered`.
-    public static func applyJournal(_ session: Session, journal: [UUID], bufferExists: (UUID) -> Bool)
+    /// reopened since (in `reopened`, or without a buffer of its own:
+    /// reopened and edited) opens again, in a window of its own, with no
+    /// closing date left to expire; any other id is returned in
+    /// `recovered`. Ids only in `reopened` count as journaled.
+    public static func applyJournal(_ session: Session, journal: [UUID], reopened: Set<UUID> = [], bufferExists: (UUID) -> Bool)
         -> (session: Session, recovered: [UUID]) {
         var s = session
         var recovered: [UUID] = []
-        var reopened: [SessionTab] = []
+        var reopenedTabs: [SessionTab] = []
         let held = Set(s.heldBuffers ?? [])
         var seen = Set<UUID>()
-        for id in journal where seen.insert(id).inserted && bufferExists(id) && !held.contains(id) {
+        let order = journal + reopened.sorted { $0.uuidString < $1.uuidString }.filter { !journal.contains($0) }
+        for id in order where seen.insert(id).inserted && bufferExists(id) && !held.contains(id) {
             if let w = s.windows.firstIndex(where: { $0.tabs.contains { $0.id == id } }),
                let t = s.windows[w].tabs.firstIndex(where: { $0.id == id }) {
                 s.windows[w].tabs[t].hasBuffer = true
                 continue
             }
             if let c = s.closedTabs?.firstIndex(where: { $0.id == id }) {
-                guard s.closedTabs?[c].hasBuffer == false, var tab = s.closedTabs?.remove(at: c) else { continue }
+                guard s.closedTabs?[c].hasBuffer == false || reopened.contains(id), var tab = s.closedTabs?.remove(at: c) else { continue }
                 tab.hasBuffer = true
                 tab.closed = nil
-                reopened.append(tab)
+                reopenedTabs.append(tab)
                 continue
             }
             recovered.append(id)
         }
         if s.closedTabs?.isEmpty == true { s.closedTabs = nil }
-        if !reopened.isEmpty { s.windows.append(SessionWindow(tabs: reopened)) }
+        if !reopenedTabs.isEmpty { s.windows.append(SessionWindow(tabs: reopenedTabs)) }
         return (s, recovered)
     }
 
-    /// The journal's ids and commit number; `damaged` if the file is
-    /// there but can't be read, or names something that isn't an id
-    /// (then which buffers it listed is unknown: the caller scans).
-    private func readJournal() -> (ids: [UUID], generation: Int?, damaged: Bool) {
-        guard fm.fileExists(atPath: journalFile.path) else { return ([], nil, false) }
-        guard let data = try? Data(contentsOf: journalFile) else { return ([], nil, true) }
+    /// The journal's ids, reopened closed tabs and commit number;
+    /// `damaged` if the file is there but can't be read, or names
+    /// something that isn't an id (then which buffers it listed is
+    /// unknown: the caller scans).
+    private func readJournal() -> (ids: [UUID], reopened: [UUID], generation: Int?, damaged: Bool) {
+        guard fm.fileExists(atPath: journalFile.path) else { return ([], [], nil, false) }
+        guard let data = try? Data(contentsOf: journalFile) else { return ([], [], nil, true) }
         let j: Journal
         if let object = try? JSONDecoder().decode(Journal.self, from: data) {
             j = object
         } else if let legacy = try? JSONDecoder().decode([String].self, from: data) {
             j = Journal(generation: nil, ids: legacy)
         } else {
-            return ([], nil, true)
+            return ([], [], nil, true)
         }
         let ids = j.ids.compactMap(UUID.init(uuidString:))
-        guard ids.count == j.ids.count else { return ([], j.generation, true) }
-        return (ids, j.generation, false)
+        let reopened = (j.reopened ?? []).compactMap(UUID.init(uuidString:))
+        guard ids.count == j.ids.count, reopened.count == (j.reopened ?? []).count else { return ([], [], j.generation, true) }
+        return (ids, reopened, j.generation, false)
     }
 
-    private func encodeJournal(_ ids: [UUID]) throws -> Data {
-        try JSONEncoder().encode(Journal(generation: committedGeneration + 1, ids: ids.map(\.uuidString)))
+    private func encodeJournal(_ ids: [UUID], reopened: [UUID]) throws -> Data {
+        try JSONEncoder().encode(Journal(generation: committedGeneration + 1, ids: ids.map(\.uuidString),
+                                         reopened: reopened.isEmpty ? nil : reopened.map(\.uuidString)))
     }
 
     /// The buffer files in the store, oldest first. Throws if the folder
@@ -550,32 +574,55 @@ public final class SessionStore: @unchecked Sendable {
         s.heldBuffers = held.isEmpty ? nil : held.sorted { $0.uuidString < $1.uuidString }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        if DevEnvironment.checksEnabled, !pending.isEmpty, let hook = checkBeforeCommit { hook() }
+        if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
         let generation = committedGeneration + 1
         try PrivateDirectory.writePrivateFile(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
         committedGeneration = generation
         committed = s.bufferIDs
+        committedClosed = Set((s.closedTabs ?? []).map(\.id))
         // Every buffer written before this session's snapshot is named in
         // it or was let go (writes are serialized with saves). If the app
         // dies before this, or it fails, the journal is spent anyway: it
         // waited for this commit.
-        if !pending.isEmpty || fm.fileExists(atPath: journalFile.path) {
+        if !pending.isEmpty || !pendingReopened.isEmpty || fm.fileExists(atPath: journalFile.path) {
             pending = []
+            pendingReopened = []
             try? fm.removeItem(at: journalFile)
         }
     }
 
-    public func writeBuffer(_ id: UUID, text: String) throws {
+    /// Writes tab `id`'s unsaved text. `open`: the tab is open (false: a
+    /// closed tab's text kept in memory since its close couldn't write it).
+    public func writeBuffer(_ id: UUID, text: String, open: Bool = true) throws {
         lock.lock(); defer { lock.unlock() }
         try ensureDirectory()
         try injectedFailure()
-        if !committed.contains(id), !pending.contains(id) {
-            // Journaled before the buffer exists, so a buffer is never on
-            // disk unnamed by both the session and the journal.
-            try PrivateDirectory.writePrivateFile(encodeJournal(pending + [id]), to: journalFile)
-            pending.append(id)
-        }
+        // Journaled before the buffer exists, so a buffer is never on
+        // disk unnamed by both the session and the journal, nor written
+        // for a reopened tab the session still lists as closed.
+        try journal(id, reopened: open)
         try PrivateDirectory.writePrivateFile(Data(text.utf8), to: bufferURL(id))
+    }
+
+    /// File › Reopen Closed Tab brought `id` back: journaled at once, so
+    /// it reopens after a crash even if nothing is written for it before
+    /// the next commit (its closing date could expire it meanwhile).
+    public func noteReopened(_ id: UUID) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard committedClosed.contains(id), !pendingReopened.contains(id) else { return }
+        try ensureDirectory()
+        try injectedFailure()
+        try journal(id, reopened: true)
+    }
+
+    private func journal(_ id: UUID, reopened: Bool) throws {
+        let fresh = !committed.contains(id) && !pending.contains(id)
+        let reopening = reopened && committedClosed.contains(id) && !pendingReopened.contains(id)
+        guard fresh || reopening else { return }
+        let ids = fresh ? pending + [id] : pending, again = reopening ? pendingReopened + [id] : pendingReopened
+        try PrivateDirectory.writePrivateFile(encodeJournal(ids, reopened: again), to: journalFile)
+        pending = ids
+        pendingReopened = again
     }
 
     /// What reading a buffer found.

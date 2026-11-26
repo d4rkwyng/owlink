@@ -165,6 +165,79 @@ import Testing
         }
     }
 
+    // MARK: Reopened closed tabs
+
+    /// A closed tab whose entry kept a buffer, closed just inside
+    /// `ClosedTabs.keepDays` when one launch reads it. ⇧⌘T reopens it,
+    /// it is edited, and the app dies before the next commit. The next
+    /// launch, a day later, is past its closing date's retention: the
+    /// tab must come back open with the new text, not be expired with it.
+    @Test func aReopenedClosedTabWithABufferSurvivesACrashAcrossItsRetention() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let t2 = t1.addingTimeInterval(86_400)
+        let s0 = store(dir)
+        var closed = SessionTab(path: "/tmp/closed-with-text.txt", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "text when it closed")
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+
+        let s1 = store(dir)
+        guard case .session(let first, _) = s1.loadForLaunch(now: t1) else { Issue.record("readable"); return }
+        #expect(ClosedTabs.expire(first.closedTabs ?? [], now: t1).dropped.isEmpty, "inside retention at the first launch")
+        try s1.noteReopened(closed.id)
+        try s1.writeBuffer(closed.id, text: "edited after reopening")
+        #expect(s1.load()?.closedTabs?.map(\.id) == [closed.id], "the commit still lists it as closed")
+
+        guard case .session(let second, let recovered) = store(dir).loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        let expiry = ClosedTabs.expire(second.closedTabs ?? [], now: t2)
+        #expect(!expiry.dropped.contains { $0.id == closed.id }, "not expired with its old closing date")
+        let back = second.allTabs.first { $0.id == closed.id }
+        #expect(back?.hasBuffer == true && back?.closed == nil, "open again, with its buffer")
+        #expect(recovered.isEmpty)
+        #expect(store(dir).readBuffer(closed.id) == "edited after reopening")
+    }
+
+    /// Reopened and not edited: journaled anyway, so it isn't expired
+    /// either; once a commit lists it open, the journal is spent.
+    @Test func aReopenedClosedTabIsJournaledBeforeAnyEdit() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 60)
+        try s0.writeBuffer(closed.id, text: "kept")
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        try s1.noteReopened(closed.id)
+        guard case .session(let s, _) = store(dir).loadForLaunch(now: t1.addingTimeInterval(86_400)) else { Issue.record("readable"); return }
+        #expect(s.closedTabs == nil)
+        #expect(s.windows.first?.tabs.map(\.id) == [closed.id])
+        var open = closed
+        open.closed = nil
+        try s1.save(Session(windows: [SessionWindow(tabs: [open])]))
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("pending-buffers.json").path))
+    }
+
+    /// A closed tab's text kept in memory and written later (its close
+    /// couldn't write it) is not a reopen: it stays on the closed list.
+    @Test func aClosedTabsLateWriteDoesntReopenIt() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = Date()
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let s1 = store(dir)
+        _ = s1.loadForLaunch()
+        try s1.writeBuffer(closed.id, text: "written after the close", open: false)
+        guard case .session(let s, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s.closedTabs?.map(\.id) == [closed.id] && s.windows.isEmpty && recovered.isEmpty)
+    }
+
     // MARK: Holds
 
     @Test func anUnreadableSessionThatCantBeMovedIsCopiedAside() throws {

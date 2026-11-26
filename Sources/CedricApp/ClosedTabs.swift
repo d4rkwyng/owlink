@@ -135,6 +135,17 @@ extension AppDelegate {
             doc.languageChoice = .untitled(content: body)
         }
         let tab = makeTab(doc, text: body)
+        // Open again: journaled before anything else is written for it, so
+        // a crash before the next commit can't leave it on the closed list
+        // under its old closing date (SessionStore.noteReopened).
+        if sessionSaving {
+            let store = self.store, id = st.id
+            sessionQueue.sync {
+                do { try store.noteReopened(id) } catch {
+                    FileHandle.standardError.write(Data("session: reopened tab not journaled: \(error)\n".utf8))
+                }
+            }
+        }
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }
         if let w = st.writing, !w.isOff { tab.setWriting(w) }
         if st.hasBuffer || url == nil && st.path != nil {
