@@ -41,7 +41,10 @@ never loaded, and nothing goes to the network.
   signature against `CEDRIC_SPARKLE_PUBLIC_KEY` (`Scripts/ed-verify.swift`, so
   a key mismatch stops the release), adds an `<item>` to a local
   `dist/appcast.xml`, signs that feed, verifies it, and prints the two files
-  to upload and where. **It uploads nothing.** It refuses to start without a
+  to upload and where. The new feed is built, signed and verified in a temp
+  `.xml` beside `dist/appcast.xml` (`Scripts/appcast-item.sh`) and replaces
+  it only once it verifies, so a failed run keeps the last signed feed and
+  can simply be run again. **It uploads nothing.** It refuses to start without a
   feed URL, public key, download URL and exactly one private-key source.
   It also refuses a key file inside the repository or one others can read, and
   a release that skips notarization or is built for one architecture only

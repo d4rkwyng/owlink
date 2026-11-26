@@ -9,6 +9,8 @@
 #  - bundle-app.sh refuses a non-HTTPS feed;
 #  - sign-sparkle.sh signs in Sparkle's order and refuses --deep;
 #  - ed-verify.swift refuses malformed input;
+#  - appcast-item.sh (the feed step) keeps the last signed feed when
+#    signing or verifying fails, with a stub sign_update;
 #  - with an APP: its Info.plist has the empty placeholders, a required
 #    signed feed and automatic checks off.
 # No key of any kind is generated or read: the "key file" below is an
@@ -122,6 +124,82 @@ rc=0; swift Scripts/ed-verify.swift PUBLIC_KEY_HERE AAAA README.md >/dev/null 2>
 [ $rc = 2 ] && ok "ed-verify.swift refuses a key that isn't 32 bytes" || bad "ed-verify.swift with a bad key: exit $rc"
 rc=0; swift Scripts/ed-verify.swift "$PUB" AAAA README.md >/dev/null 2>&1 || rc=$?
 [ $rc = 2 ] && ok "ed-verify.swift refuses a signature that isn't 64 bytes" || bad "ed-verify.swift with a bad signature: exit $rc"
+
+# appcast-item.sh (release.sh --appcast's feed step) with a stub
+# sign_update, not Sparkle's and no key: the stub appends a fake signature
+# comment, or fails when told to. The last signed feed must stay byte for
+# byte as it was whenever signing or verifying fails, and a retry must work.
+mkdir -p "$W/stub" "$W/dist"
+cat > "$W/stub/sign_update" <<'STUB'
+#!/bin/bash
+# Test stub for Sparkle's sign_update: no key, no crypto.
+verify=0; f=""
+for a in "$@"; do [ "$a" = --verify ] && verify=1; f=$a; done
+echo "$verify $f" >> "$STUB_LOG"
+if [ $verify = 1 ]; then
+    [ "${STUB_FAIL:-}" = verify ] && { echo "stub: verify fails" >&2; exit 1; }
+    grep -q '^edSignature: STUB$' "$f"
+else
+    [ "${STUB_FAIL:-}" = sign ] && { echo "stub: sign fails" >&2; exit 1; }
+    # Drop an earlier signature block, then append a new one.
+    awk '/^<!-- sparkle-signatures:/ { skip = 1 } !skip { print } skip && /^-->/ { skip = 0 }' "$f" > "$f.stub" && cat "$f.stub" > "$f" && rm "$f.stub"
+    printf '<!-- sparkle-signatures:\nedSignature: STUB\n-->\n' >> "$f"
+    [ "${STUB_FAIL:-}" = sign-partial ] && { printf '<garbage' >> "$f"; echo "stub: sign fails half way" >&2; exit 1; }
+    exit 0
+fi
+STUB
+chmod +x "$W/stub/sign_update"
+FEEDOUT="$W/dist/appcast.xml"
+SIG64=$(printf '%064d' 0 | base64 | tr -d '\n')
+item() { # version [--from FEED] -> exit code; output in $W/item.out
+    local v=$1; shift
+    : > "$W/stub.log"
+    STUB_LOG="$W/stub.log" Scripts/appcast-item.sh --out "$FEEDOUT" --sign-update "$W/stub/sign_update" \
+        --version "$v" --url "https://downloads.example.invalid/v$v/Owlink-$v.zip" --length 1234 --signature "$SIG64" \
+        "$@" -- --account owlink-test-only > "$W/item.out" 2>&1
+}
+leftovers() { ls -A "$W/dist" | grep -v '^appcast\.xml$' | tr '\n' ' '; }
+items() { grep -c "<sparkle:shortVersionString>$1</sparkle:shortVersionString>" "$FEEDOUT"; }
+if item 1.0.0 && xmllint --noout "$FEEDOUT" && [ "$(items 1.0.0)" = 1 ] && grep -q '^edSignature: STUB$' "$FEEDOUT" && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh starts a new feed, signed and verified"
+else
+    bad "appcast-item.sh new feed: $(tail -2 "$W/item.out") leftovers: $(leftovers)"
+fi
+# sign_update saw only a temp .xml beside the feed, never the feed itself.
+if [ "$(wc -l < "$W/stub.log" | tr -d ' ')" = 2 ] && ! awk '{ print $2 }' "$W/stub.log" | grep -vqE "^$W/dist/\.appcast-new\.[A-Za-z0-9]+\.xml$"; then
+    ok "appcast-item.sh signs and verifies a temp .xml beside the feed, not the feed"
+else
+    bad "appcast-item.sh signed: $(tr '\n' ' ' < "$W/stub.log")"
+fi
+cp "$FEEDOUT" "$W/last-signed.xml"
+for how in sign sign-partial verify; do
+    rc=0; STUB_FAIL=$how item 1.1.0 --from "$FEEDOUT" || rc=$?
+    if [ $rc != 0 ] && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ -z "$(leftovers)" ]; then
+        ok "appcast-item.sh: when $how fails, the last signed feed is byte-identical and no temp file is left"
+    else
+        bad "appcast-item.sh with $how failing (exit $rc): feed $(cmp -s "$FEEDOUT" "$W/last-signed.xml" && echo unchanged || echo CHANGED), leftovers: $(leftovers)"
+    fi
+done
+if item 1.1.0 --from "$FEEDOUT" && xmllint --noout "$FEEDOUT" && [ "$(items 1.1.0)" = 1 ] && [ "$(items 1.0.0)" = 1 ] \
+    && [ "$(grep -c '^edSignature: STUB$' "$FEEDOUT")" = 1 ] && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh: the retry after a failure isn't refused as a duplicate and adds the item"
+else
+    bad "appcast-item.sh retry: $(tail -2 "$W/item.out")"
+fi
+cp "$FEEDOUT" "$W/last-signed.xml"
+rc=0; item 1.1.0 --from "$FEEDOUT" || rc=$?
+if [ $rc != 0 ] && grep -q 'already has an item for 1.1.0' "$W/item.out" && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ ! -s "$W/stub.log" ]; then
+    ok "appcast-item.sh refuses a version the feed has, before signing, feed unchanged"
+else
+    bad "appcast-item.sh duplicate (exit $rc): $(tail -2 "$W/item.out")"
+fi
+printf '<rss><channel><item></channel>\n' > "$W/broken.xml"
+rc=0; item 1.2.0 --from "$W/broken.xml" 2>/dev/null || rc=$?
+if [ $rc != 0 ] && cmp -s "$FEEDOUT" "$W/last-signed.xml" && [ ! -s "$W/stub.log" ] && [ -z "$(leftovers)" ]; then
+    ok "appcast-item.sh refuses malformed XML before signing, feed unchanged"
+else
+    bad "appcast-item.sh with malformed XML (exit $rc): $(tail -2 "$W/item.out")"
+fi
 
 if [ -n "$APP" ]; then
     P="$APP/Contents/Info.plist"
