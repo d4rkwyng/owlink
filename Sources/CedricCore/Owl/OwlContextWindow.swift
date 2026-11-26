@@ -168,12 +168,12 @@ public struct OwlFileProbe: Sendable, Equatable {
             guard markdownExtensions.contains(ext) || imageExtensions.contains(ext) else { continue }
             // Its place under `base` by the path bytes (FolderTree.relativePath):
             // a text prefix test fused "base/" with a folder name starting
-            // with a combining mark and dropped its files. As enumerated,
-            // else resolved; the first nonempty one.
-            if let rel = [url, url.resolvingSymlinksInPath()].lazy
-                .compactMap({ FolderTree.relativePath(of: $0, in: base) }).first(where: { !$0.isEmpty }) {
-                out.append(rel)
-            }
+            // with a combining mark and dropped its files. As enumerated;
+            // only if that's missing or empty, resolved (resolving every
+            // entry costs a symlink walk per file).
+            var rel = FolderTree.relativePath(of: url, in: base)
+            if rel?.isEmpty ?? true { rel = FolderTree.relativePath(of: url.resolvingSymlinksInPath(), in: base) }
+            if let rel, !rel.isEmpty { out.append(rel) }
         }
         return out
     }
