@@ -29,4 +29,19 @@ import Testing
         // The extension allowlist still holds.
         #expect(vault.resolveImage("doc.md") == nil)
     }
+
+    /// A note or image directly in the vault root whose name starts with a
+    /// combining mark is inside the vault; a sibling folder whose name only
+    /// starts like the root's is not.
+    @Test func aRootNameStartingWithACombiningMarkIsInTheVault() throws {
+        let t = try makeTree(["v/.obsidian/app.json", "v/notes/doc.md", "v/\u{301}x.md", "v/\u{301}p.png", "v\u{301}/z.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let root = t.appendingPathComponent("v"), folder = root.appendingPathComponent("notes")
+        try FileManager.default.createSymbolicLink(at: folder.appendingPathComponent("z.md"),
+                                                   withDestinationURL: t.appendingPathComponent("v\u{301}/z.md"))
+        let vault = WikiVault(documentFolder: folder)
+        #expect(vault.resolve("\u{301}x")?.path == root.appendingPathComponent("\u{301}x.md").path)
+        #expect(vault.resolveImage("\u{301}p.png")?.path == root.appendingPathComponent("\u{301}p.png").path)
+        #expect(vault.resolve("z") == nil, "a link to the sibling folder v\u{301} stays out")
+    }
 }
