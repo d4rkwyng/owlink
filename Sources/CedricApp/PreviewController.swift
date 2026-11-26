@@ -307,6 +307,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         let js = allowJavaScript, net = allowNetwork, pageScripts = !bundledScriptsOnly
         guard language == .markdown else {
             shellKey = nil
+            lastNeeds = []
             load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
             return
         }

@@ -696,6 +696,11 @@ final class MarkdownRenderer {
         }
     }
 
+    /// The longest display-math block looked for, in lines: a run of
+    /// openers that never close (`\[a` and `# h` alternating, no blank
+    /// line) would otherwise be rescanned from each opener.
+    static let maxDisplayMathLines = 200
+
     /// A display-math block starting at line `i`: its TeX and the line after it.
     func displayMath(_ lines: ArraySlice<String>, from i: Int, end: Int) -> (String, Int)? {
         let first = lines[i].trimmingCharacters(in: .whitespaces)
@@ -713,7 +718,7 @@ final class MarkdownRenderer {
             body = [rest]
             var j = i + 1
             var closed = false
-            while j < end {
+            while j < end, j - i <= Self.maxDisplayMathLines {
                 let t = lines[j].trimmingCharacters(in: .whitespaces)
                 if t.isEmpty { return nil }
                 if let r = t.range(of: close) {

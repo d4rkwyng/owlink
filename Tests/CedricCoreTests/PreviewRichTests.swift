@@ -163,6 +163,21 @@ $not math$
         #expect(Date().timeIntervalSince(t0) < 5)
     }
 
+    /// Openers that never close, with no blank line to stop the scan.
+    @Test func unclosedDisplayOpenersStayLinear() {
+        let doc = String(repeating: "\\[a\n# h\n", count: 10_000)
+        let t0 = Date()
+        let out = m(doc)
+        #expect(out.contains("math") == false)
+        #expect(Date().timeIntervalSince(t0) < 5)
+        // Past the cap no block is looked for: the lines are a paragraph
+        // (whose `$$…$$` is then an inline display span).
+        let long = "$$\n" + String(repeating: "x\n", count: MarkdownRenderer.maxDisplayMathLines + 5) + "$$"
+        #expect(m(long).hasPrefix("<p><span class=\"math math-display\">x\nx"))
+        let fits = "$$\n" + String(repeating: "x\n", count: MarkdownRenderer.maxDisplayMathLines - 2) + "$$"
+        #expect(m(fits).hasPrefix("<div class=\"math math-display\">x\nx"))
+    }
+
     @Test func needs() {
         #expect(PreviewRich.needs(body: m(richCorpus)) == [.mermaid, .math])
         #expect(PreviewRich.needs(body: m("```mermaid\ngraph TD\n```")) == [.mermaid])
