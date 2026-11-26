@@ -4,7 +4,8 @@ import CedricCore
 /// The preview for CSV and TSV: a read-only grid. The first record is the
 /// header; row numbers stay at the left when scrolling sideways; columns
 /// resize; clicking a header sorts the grid (never the text); clicking a
-/// cell puts the editor's caret in that field.
+/// cell puts the editor's caret in that field. The "#" cell above the row
+/// numbers puts the rows back in file order (lit while the grid is sorted).
 ///
 /// The table is view-based and virtual (cells are made for the rows on
 /// screen only). Parsing (CSV in CedricCore) and sorting run on a
@@ -55,7 +56,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         PreviewBarItem.rowCountText(rows: min(order.count, Self.maxRows), capped: data.truncated || order.count > Self.maxRows)
     }
 
-    /// The preview bar's Unsort: back to file order.
+    /// The preview bar's Unsort (and the "#" cell): back to file order.
     func resetSort() { table.sortDescriptors = [] }
 
     var view: NSView { container }
@@ -83,6 +84,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
             guard let self, row < self.order.count else { return nil }
             return self.order[row] // the record's index: its line in a file without quoted line breaks
         }
+        ruler.header.onClick = { [weak self] in self?.resetSort() }
         scroll.verticalRulerView = ruler
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
@@ -158,6 +160,9 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         table.reloadData()
         ruler.ruleThickness = max(28, CGFloat(String(t.rows.count).count) * 7.5 + 12)
         ruler.needsDisplay = true
+        ruler.needsLayout = true
+        ruler.header.isActive = isSorted
+        ruler.header.needsDisplay = true
         let shown = min(order.count, Self.maxRows)
         var notes: [String] = []
         if let line = t.unclosedQuoteLine {
@@ -227,6 +232,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        ruler.header.isActive = isSorted
         let rows = data.rows, sort = tableView.sortDescriptors.first
         generation += 1
         let gen = generation, t = data
@@ -296,6 +302,7 @@ final class CSVContainer: NSView {
         super.layout()
         let noteH: CGFloat = (note?.isHidden ?? true) ? 0 : 22
         scroll?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - noteH))
+        (scroll?.verticalRulerView as? RowNumberRuler)?.needsLayout = true
         note?.frame = NSRect(x: 8, y: bounds.height - noteH + 3, width: max(0, bounds.width - 16), height: 16)
     }
 }
@@ -305,8 +312,10 @@ final class RowNumberRuler: NSRulerView {
     weak var table: NSTableView?
     /// The number shown for a row (in view order), 1-based is added here.
     var number: ((Int) -> Int?)?
-    var background = NSColor.windowBackgroundColor
+    var background = NSColor.windowBackgroundColor { didSet { header.background = background } }
     var textColor = NSColor.secondaryLabelColor
+    /// The "#" cell at the top, beside the table's header row.
+    let header = RowNumberHeader()
 
     init(scrollView: NSScrollView, table: NSTableView) {
         self.table = table
@@ -315,11 +324,32 @@ final class RowNumberRuler: NSRulerView {
         ruleThickness = 36
         reservedThicknessForMarkers = 0
         reservedThicknessForAccessoryView = 0
+        header.table = table
+        addSubview(header)
     }
 
     required init(coder: NSCoder) { fatalError("not used") }
 
     override var requiredThickness: CGFloat { ruleThickness }
+
+    override func layout() {
+        super.layout()
+        placeHeader()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+    }
+
+    /// The "#" cell level with the table's header row: the header's own
+    /// frame, seen from here (it doesn't scroll up and down).
+    func placeHeader() {
+        guard let hv = table?.headerView, hv.window != nil, hv.window === window else { header.isHidden = true; return }
+        let r = convert(hv.bounds, from: hv)
+        header.isHidden = r.height <= 0
+        header.frame = NSRect(x: 0, y: r.minY, width: bounds.width, height: r.height)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         // macOS 14: dirtyRect can extend past the bounds. Never draw outside them.
@@ -348,5 +378,85 @@ final class RowNumberRuler: NSRulerView {
             let size = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: bounds.width - size.width - 6, y: rr.minY + (rr.height - size.height) / 2), withAttributes: attrs)
         }
+    }
+}
+
+/// The "#" cell above the row numbers: the table header's look (its own
+/// header cell draws the "#"), lit in the accent colour while the grid is
+/// sorted. A click, or VoiceOver's press, puts the rows back in file order.
+final class RowNumberHeader: NSView {
+    weak var table: NSTableView?
+    /// The grid is sorted: the cell is lit.
+    var isActive = false {
+        didSet { if isActive != oldValue { needsDisplay = true } }
+    }
+    var onClick: (() -> Void)?
+    var background = NSColor.windowBackgroundColor { didSet { needsDisplay = true } }
+    private var pressed = false
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The cell that draws the "#": a copy of the first column's header
+    /// cell (its font and colours, in this appearance).
+    func titleCell() -> NSTableHeaderCell {
+        let cell = (table?.tableColumns.first?.headerCell.copy() as? NSTableHeaderCell) ?? NSTableHeaderCell(textCell: "")
+        let font = cell.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        let color: NSColor = isActive ? .controlAccentColor : .headerTextColor
+        let weight: NSFont = isActive ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : font
+        cell.attributedStringValue = NSAttributedString(string: "#", attributes: [.font: weight, .foregroundColor: color, .paragraphStyle: para])
+        return cell
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        background.setFill()
+        bounds.fill()
+        if isActive || pressed {
+            NSColor.controlAccentColor.withAlphaComponent(pressed ? 0.28 : 0.16).setFill()
+            bounds.fill()
+        }
+        // Centred on the header row's titles, right-aligned as the numbers below.
+        let title = titleCell().attributedStringValue
+        let size = title.size()
+        title.draw(at: NSPoint(x: bounds.width - size.width - 6, y: ((bounds.height - 1 - size.height) / 2).rounded()))
+        // The line under the header row, as the table draws it.
+        (table?.gridColor ?? .separatorColor).setFill()
+        NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+    }
+
+    /// Tracks the press as a button does: pressed while the mouse is
+    /// over it, a click if it is let go there.
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        var inside = true
+        pressed = true
+        display()
+        while let e = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            inside = bounds.contains(convert(e.locationInWindow, from: nil))
+            if pressed != inside {
+                pressed = inside
+                display()
+            }
+            if e.type == .leftMouseUp { break }
+        }
+        pressed = false
+        needsDisplay = true
+        if inside { onClick?() }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { String(localized: "Row number, click to restore file order") }
+    override func accessibilityValue() -> Any? { isActive ? String(localized: "Sorted") : String(localized: "File order") }
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 }

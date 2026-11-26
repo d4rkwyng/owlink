@@ -6,7 +6,7 @@ import CedricCore
 /// the other DevChecks: the menus' key equivalents and real key events
 /// sent to the step-through's panel, clicks on its buttons.
 ///
-///   CEDRIC_CHECK=spellstep|detachpreview|csvpreview
+///   CEDRIC_CHECK=spellstep|detachpreview|csvpreview|csvrownumber
 @MainActor
 extension DevChecks {
     static func featureCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -14,6 +14,7 @@ extension DevChecks {
         case "spellstep": spellStep(app)
         case "detachpreview": detachPreview(app)
         case "csvpreview": csvPreview(app)
+        case "csvrownumber": csvRowNumberHeader(app)
         case "grammar": grammarCheck(app)
         case "cert": certificateCheck(app)
         default: return markdownCheck(name, app)
@@ -537,6 +538,129 @@ extension DevChecks {
     /// The text drawn in a grid cell (the table's own view for it).
     static func shown(_ g: CSVPreview, _ row: Int, _ col: Int) -> String {
         (g.table.view(atColumn: col, row: row, makeIfNecessary: true) as? NSTextField)?.stringValue ?? "<no cell>"
+    }
+
+    /// The grid's "#" cell (above the row numbers, level with the header
+    /// row): plain in file order, lit once a column header click sorts,
+    /// and a click on it (then VoiceOver's press) puts file order back.
+    /// Snapshots in light and dark.
+    static func csvRowNumberHeader(_ app: AppDelegate) {
+        let tab = app.open(write("ages.csv", "name,age\nzoe,30\nbob,20\namy,40\n"))!
+        sized(tab)
+        var g: CSVPreview? { tab.previewPane?.renderer as? CSVPreview }
+        var before = 0
+        let theme = Settings.shared.themeOverride
+        func setTheme(_ t: EditorTheme) {
+            Settings.shared.themeOverride = t
+            NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
+        }
+        /// The cell's frame and the table header's, in window coordinates.
+        func frames(_ g: CSVPreview) -> (cell: NSRect, header: NSRect)? {
+            g.ruler.placeHeader()
+            guard let hv = g.table.headerView else { return nil }
+            return (g.ruler.header.convert(g.ruler.header.bounds, to: nil), hv.convert(hv.bounds, to: nil))
+        }
+        func inFileOrder(_ g: CSVPreview, _ how: String) {
+            expect(!g.isSorted && g.cell(row: 0, column: 0) == "zoe" && g.cell(row: 2, column: 0) == "amy",
+                   "\(how) puts the rows back in file order", "\(g.table.sortDescriptors.map { $0.key ?? "-" }) \(g.cell(row: 0, column: 0))")
+            expect(g.ruler.number?(0) == 1, "row numbers are file order again", "\(String(describing: g.ruler.number?(0)))")
+            expect(!g.ruler.header.isActive, "and the # cell is plain again")
+            expect(g.ruler.header.accessibilityValue() as? String == "File order", "its value says file order",
+                   "\(String(describing: g.ruler.header.accessibilityValue()))")
+        }
+        let steps: [Step] = [
+            sync {
+                setTheme(.light)
+                focus(tab)
+                key("p", [.command, .option])
+                expect(g != nil, "⌥⌘P shows the grid")
+            },
+            waitForGrid(tab, after: { 0 }, "the grid renders"),
+            sync {
+                guard let g else { return }
+                tab.window?.layoutIfNeeded()
+                let cell = g.ruler.header
+                expect(!cell.isHidden && cell.superview === g.ruler, "a # cell sits in the row-number ruler")
+                if let f = frames(g) {
+                    expect(abs(f.cell.minY - f.header.minY) < 0.5 && abs(f.cell.height - f.header.height) < 0.5 && f.cell.height > 0,
+                           "level with the header row, the same height", "cell \(f.cell) header \(f.header)")
+                    expect(abs(f.cell.maxX - f.header.minX) < 1.5 && f.cell.width > 0, "just left of the first column's header",
+                           "cell \(f.cell) header \(f.header)")
+                } else {
+                    expect(false, "the table has a header row")
+                }
+                expect(cell.titleCell().stringValue == "#", "it shows #", cell.titleCell().stringValue)
+                expect(cell.titleCell().font == g.table.tableColumns.first?.headerCell.font, "in the header's font")
+                expect(!cell.isActive && !g.isSorted, "plain in file order")
+                expect(cell.isAccessibilityElement() && cell.accessibilityRole() == .button, "a button to VoiceOver")
+                expect(cell.accessibilityLabel() == "Row number, click to restore file order", "its label",
+                       cell.accessibilityLabel() ?? "-")
+                expect(cell.accessibilityValue() as? String == "File order", "its value says file order")
+            },
+            snapshot("csv-rownumber-light.png"),
+            sync {
+                guard let g, let header = g.table.headerView else { return }
+                before = g.renders
+                let hr = header.headerRect(ofColumn: 1)
+                click(header, at: NSPoint(x: hr.midX, y: hr.midY))
+            },
+            waitForGrid(tab, after: { before }, "a header click sorts"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.table.sortDescriptors.first?.key == "c1", "sorted by age",
+                       "\(g.table.sortDescriptors.map { $0.key ?? "-" })")
+                expect(g.cell(row: 0, column: 0) == "bob" && g.ruler.number?(0) == 2, "bob (row 2) first", g.cell(row: 0, column: 0))
+                expect(g.ruler.header.isActive, "the # cell is lit while sorted")
+                expect(g.ruler.header.accessibilityValue() as? String == "Sorted", "its value says sorted")
+                expect(g.ruler.header.titleCell().attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+                       == .controlAccentColor, "# in the accent colour")
+            },
+            snapshot("csv-rownumber-sorted-light.png"),
+            sync { setTheme(.dark) },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { next() } },
+            snapshot("csv-rownumber-sorted-dark.png"),
+            sync {
+                guard let g else { return }
+                expect(g.ruler.header.isActive, "still lit after the theme changes")
+                before = g.renders
+                let cell = g.ruler.header
+                if let w = cell.window {
+                    let p = cell.convert(NSPoint(x: cell.bounds.midX, y: cell.bounds.midY), to: nil)
+                    let root = w.contentView?.superview ?? w.contentView
+                    let hit = root?.hitTest(root?.superview?.convert(p, from: nil) ?? p)
+                    expect(hit === cell, "a click there reaches the # cell", "\(String(describing: hit))")
+                }
+                click(cell, at: NSPoint(x: cell.bounds.midX, y: cell.bounds.midY))
+            },
+            waitForGrid(tab, after: { before }, "clicking # re-renders"),
+            sync {
+                guard let g else { return }
+                inFileOrder(g, "clicking #")
+                expect(tab.text == "name,age\nzoe,30\nbob,20\namy,40\n" && !tab.doc.isDirty, "the text is untouched")
+            },
+            snapshot("csv-rownumber-dark.png"),
+            sync {
+                guard let g else { return }
+                before = g.renders
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c0", ascending: false)]
+            },
+            waitForGrid(tab, after: { before }, "sorting by name re-renders"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.cell(row: 0, column: 0) == "zoe" && g.cell(row: 1, column: 0) == "bob" && g.ruler.header.isActive,
+                       "sorted by name (descending), the cell lit", g.cell(row: 1, column: 0))
+                before = g.renders
+                expect(g.ruler.header.accessibilityPerformPress(), "VoiceOver can press it")
+            },
+            waitForGrid(tab, after: { before }, "the press re-renders"),
+            sync {
+                guard let g else { return }
+                inFileOrder(g, "VoiceOver's press")
+                Settings.shared.themeOverride = theme
+                NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
+            },
+        ]
+        run(steps, gap: 0.4)
     }
 
     static func csvPreview(_ app: AppDelegate) {
