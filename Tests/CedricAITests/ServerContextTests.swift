@@ -254,6 +254,32 @@ import Testing
         #expect(contexts.current(client: client, model: "m", kind: .ollama)?.tokens == 4_096)
     }
 
+    /// The clock stands still, so the first answer stays fresh: however
+    /// many callers race (one ending as the next looks), the server is
+    /// asked once per model. Checking the entry and starting the probe in
+    /// separate holds of the lock asked again when the probe ended between.
+    @Test func callersRacingAProbeThatEndsAskItOnce() async {
+        for round in 0..<2_000 {
+            let fake = Fake()
+            let contexts = cache(fake)
+            let client = self.client
+            await withTaskGroup(of: Void.self) { group in
+                for i in 0..<8 {
+                    group.addTask {
+                        if i.isMultiple(of: 2) {
+                            _ = await contexts.refresh(client: client, model: "m", kind: .lmStudio)
+                        } else {
+                            _ = contexts.current(client: client, model: "m", kind: .lmStudio)
+                        }
+                    }
+                }
+            }
+            #expect(await contexts.refresh(client: client, model: "m", kind: .lmStudio)?.tokens == 4_096)
+            #expect(fake.count == 1, "round \(round): asked once")
+            if fake.count != 1 { return }
+        }
+    }
+
     @Test func anAnswerAfterTheDeadlineIsLateEvenWhenItArrivesFirst() async {
         let fake = Fake()
         let contexts = cache(fake)
