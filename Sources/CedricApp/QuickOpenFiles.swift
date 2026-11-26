@@ -28,6 +28,8 @@ final class QuickOpenFiles {
     private var stale = false
     /// The index (or a refresh of it) landed (the palette shows it).
     var onUpdate: (() -> Void)?
+    /// The same, for the `[[` note names (WikiNotes).
+    var onIndexLanded: (() -> Void)?
     /// Full builds and folder refreshes done (the checks).
     private(set) var builds = 0, refreshes = 0
     /// How long the last full build took (listing and preparing), in ms.
@@ -78,6 +80,7 @@ final class QuickOpenFiles {
         matcher = m
         running = false
         onUpdate?()
+        onIndexLanded?()
         drain()
     }
 

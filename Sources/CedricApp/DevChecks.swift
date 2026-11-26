@@ -235,6 +235,7 @@ enum DevChecks {
         case "defaulteditor": defaultEditorCheck(app)
         case "palette": paletteCheck(app)
         case "quickopen": quickOpenCheck(app)
+        case "wikilinks": wikiLinksCheck(app)
         case "contextbar": contextBarCheck(app)
         case "terminalhere": terminalHereCheck(app)
         case "writing": writingCheck(app)

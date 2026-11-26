@@ -662,7 +662,11 @@ final class EditorTextView: NSTextView {
     // MARK: Multiple carets: the entry points (MultiCaretEditing.swift)
 
     /// Key commands (arrows, Delete, Return, Esc…) at every caret.
+    /// Takes keys first while a list shows over the text (the `[[` notes list).
+    var commandInterceptor: ((Selector) -> Bool)?
+
     override func doCommand(by selector: Selector) {
+        if let commandInterceptor, commandInterceptor(selector) { return }
         if multiCarets != nil, multiCommand(selector) { return }
         if folding != nil {
             keyNavigating = true
@@ -685,6 +689,12 @@ final class EditorTextView: NSTextView {
                 folding.unfold(folding.state.folds.filter { $0.location == hit.hidden.location })
                 return
             }
+        }
+        // ⌘-click on a [[wiki link]] opens its note (WikiLinksApp.swift).
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.clickCount == 1,
+           let tab = window?.windowController as? EditorWindowController {
+            let i = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+            if i != NSNotFound, tab.wikiCommandClick(at: i, in: self) { return }
         }
         if !event.modifierFlags.isDisjoint(with: [.option, .command]), multiMouseDown(event) { return }
         super.mouseDown(with: event)

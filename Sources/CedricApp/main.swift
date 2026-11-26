@@ -313,6 +313,8 @@ func buildMainMenu() -> NSMenu {
         // "Hide Context Bar" while shown (AppDelegate.validateMenuItem).
         item(String(localized: "Show Context Bar"), #selector(AppDelegate.toggleContextBarMenu(_:))),
         item(String(localized: "Show Outline"), #selector(AppDelegate.toggleOutlineMenu(_:)), "o", [.control, .command]),
+        // The notes in the open folder that link here (BacklinksSidebar.swift).
+        item(String(localized: "Show Backlinks"), #selector(AppDelegate.toggleBacklinksMenu(_:))),
         item(String(localized: "Show Folder Sidebar"), #selector(AppDelegate.toggleFolderSidebarMenu(_:)), "1", [.control, .command]),
         // The status bar word count's popover, from the keyboard and the palette (StatsPopover.swift).
         item(String(localized: "Show Statistics"), #selector(AppDelegate.showStatisticsMenu(_:))),

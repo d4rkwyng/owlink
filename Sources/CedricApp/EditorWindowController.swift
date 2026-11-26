@@ -24,6 +24,15 @@ final class EditorContainer: NSView {
             needsLayout = true
         }
     }
+    /// Backlinks, beside the outline (nil while hidden; BacklinksSidebar.swift).
+    var backlinks: NSView? {
+        didSet {
+            guard oldValue !== backlinks else { return }
+            oldValue?.removeFromSuperview()
+            if let backlinks { addSubview(backlinks) }
+            needsLayout = true
+        }
+    }
 
     init(gutter: GutterView, scrollView: NSScrollView) {
         self.gutter = gutter
@@ -37,8 +46,11 @@ final class EditorContainer: NSView {
 
     override func layout() {
         super.layout()
-        let side = sidebar == nil ? 0 : min(OutlineSidebar.width, max(0, bounds.width - 200))
-        sidebar?.frame = NSRect(x: 0, y: 0, width: side, height: bounds.height)
+        let outlineW = sidebar == nil ? 0 : min(OutlineSidebar.width, max(0, bounds.width - 200))
+        let backW = backlinks == nil ? 0 : min(BacklinksSidebar.width, max(0, bounds.width - 200 - outlineW))
+        let side = outlineW + backW
+        sidebar?.frame = NSRect(x: 0, y: 0, width: outlineW, height: bounds.height)
+        backlinks?.frame = NSRect(x: outlineW, y: 0, width: backW, height: bounds.height)
         let g = showsGutter ? gutterWidth : 0
         // Beside the scroll view, at the window edge. Readable Width draws
         // it in the column's margin instead, just left of the text.
@@ -252,6 +264,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     let fences = FenceIndex()
     /// The Markdown outline sidebar (OutlineSidebar.swift).
     let outline = OutlineState()
+    /// `[[` completion and Backlinks (WikiLinksApp.swift, BacklinksSidebar.swift).
+    let wiki = WikiTabState()
     /// The owl's disk facts (OwlFacts.swift), made when first asked.
     var fileProbe: FileProbe?
     /// The file has the quarantine attribute (read after open, OwlFacts.swift).
@@ -718,6 +732,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         refreshLineEndingNoticeIfChanged()
         schedulePreview()
         outlineTextChanged()
+        wikiTextChanged()
         // Before the owl hears of the edit: a paste may take it over the cap.
         updateAutoReviewCap(newText: false)
         if let owl {
@@ -754,6 +769,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         scheduleHighlights()
         updateBracketMatch()
         updateOutlineCurrent()
+        wikiSelectionChanged()
         if !editing.writing.isOff { writingSelectionChanged() }
     }
 
@@ -824,6 +840,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         splitEditor?.applyPalette(p)
         if previewVisible { renderPreview() }
         outline.sidebar?.applyPalette(p)
+        wiki.backlinks?.applyPalette(p)
         owl?.layoutViews()
         spelling.apply()
         gitState?.settingChanged()
@@ -1489,6 +1506,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     func windowWillClose(_ notification: Notification) {
+        wikiHideCompletion()
+        if let o = wiki.observer { NotificationCenter.default.removeObserver(o); wiki.observer = nil }
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers = []
         unsplit(closing: true)
