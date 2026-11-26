@@ -21,10 +21,24 @@
 #      unsaved with the "deleted or moved" notice, not dropped.
 #   7. A truncated session.json: the app launches, keeps the bad file
 #      aside (session.unreadable-*.json) and loses no unsaved text.
+#   8. Killed between writing a new tab's buffer and committing the
+#      session that names it, with an older valid session in place
+#      (CEDRIC_TEST_HOLD_SESSION_COMMIT): the text comes back, and
+#      survives the next save's prune.
+#   9. Two quick changes, then steady typing, killed while it goes on
+#      (after a quiet spell, and right after a save): the leading save
+#      was not put off by the typing.
+#  10. Quit while every session write fails (CEDRIC_TEST_SESSION_WRITE_FAIL):
+#      the app stays open.
+#  11. A buffer that can't be read at launch: kept, said, never pruned.
 #
-# Only processes this script started are killed. Relaunches pass
-# -ApplePersistenceIgnoreState YES. Needs a GUI session (works with the
-# screen locked).
+# Safety: before the first case the binary must report "dev hooks: on"
+# (a release build ignores CEDRIC_SESSION_DIR and would use the real
+# session), asked with restore and session saving off; every session
+# directory handed to the app must be inside this script's temp folder.
+# Only processes this script started are killed, and a reaped one is no
+# longer tracked. Relaunches pass -ApplePersistenceIgnoreState YES. Needs
+# a GUI session (works with the screen locked).
 #
 #   Scripts/crash-check.sh [APP]     default "dist/Owlink.app"
 set -euo pipefail
@@ -34,12 +48,43 @@ BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
 W=$(mktemp -d)
 PIDS=()
+# A tracked pid is killed only while it is still this script's child
+# running the app binary (a reaped pid can be reused by anything).
+kill_ours() { # PID
+    kill -0 "$1" 2>/dev/null || return 0
+    [ "$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')" = "$$" ] || return 0
+    case "$(ps -o comm= -p "$1" 2>/dev/null)" in *"/Contents/MacOS/Cedric") kill -9 "$1" 2>/dev/null || true ;; esac
+}
 cleanup() {
-    for p in ${PIDS[@]+"${PIDS[@]}"}; do kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null; done
+    for p in ${PIDS[@]+"${PIDS[@]}"}; do kill_ours "$p"; done
+    chmod -R u+rwX "$W" 2>/dev/null || true
     rm -rf "$W"
 }
 trap cleanup EXIT
-unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE
+untrack() { # PID: reaped, no longer ours to kill
+    local keep=() q
+    for q in ${PIDS[@]+"${PIDS[@]}"}; do [ "$q" != "$1" ] && keep+=("$q"); done
+    PIDS=(${keep[@]+"${keep[@]}"})
+}
+unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR \
+    CEDRIC_TEST_TYPE_BURST CEDRIC_TEST_HOLD_SESSION_COMMIT CEDRIC_TEST_SESSION_WRITE_FAIL CEDRIC_TEST_QUIT_SAVE_CHOICE
+REAL_SESSION="$HOME/Library/Application Support/Cedric/Session"
+# A session directory this script may hand the app: inside $W, never the real one.
+safe_dir() {
+    case "$1" in "$W"/?*) ;; *) return 1 ;; esac
+    case "$1" in "$REAL_SESSION"|"$REAL_SESSION"/*) return 1 ;; esac
+}
+# Preflight, before anything destructive: a check build ("dev hooks: on"),
+# asked with restore and session saving off, so even a release build
+# touches no session here. CEDRIC_LLAMA_CHECK prints the hook status first.
+pre=$(env CEDRIC_SESSION_DIR="$W/preflight" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_LLAMA_CHECK=1 \
+    perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
+if ! printf '%s\n' "$pre" | grep -qx 'dev hooks: on'; then
+    echo "crash-check: REFUSED: $APP is not a check build (no 'dev hooks: on'; got '$(printf '%s' "$pre" | head -1)'). It would ignore CEDRIC_SESSION_DIR and use the real session. Build one with Scripts/bundle-app.sh." >&2
+    exit 2
+fi
+echo "crash-check: preflight: dev hooks: on"
+
 fail=0; oks=0
 ok() { echo "crash-check: OK   $1"; oks=$((oks + 1)); }
 bad() { echo "crash-check: FAIL $1" >&2; fail=1; }
@@ -51,18 +96,20 @@ len16() { python3 -I -c 'import sys; print(len(sys.argv[1].encode("utf-16-le")) 
 # launch DIR OUT [VAR=value ...]: start the app on session DIR, stdout to OUT; sets $pid.
 launch() {
     local dir=$1 out=$2; shift 2
+    safe_dir "$dir" || { echo "crash-check: REFUSED: session dir $dir is not inside $W" >&2; exit 2; }
     env CEDRIC_SESSION_DIR="$dir" "$@" "$BIN" -ApplePersistenceIgnoreState YES > "$out" 2>/dev/null &
     pid=$!
     PIDS+=("$pid")
 }
-kill9() { kill -9 "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+kill9() { kill_ours "$1"; wait "$1" 2>/dev/null || true; untrack "$1"; }
 quit_app() {
     osascript -l JavaScript -e "ObjC.import('AppKit'); var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier($1); if (a) a.terminate; ''" >/dev/null
-    for _ in $(seq 1 20); do kill -0 "$1" 2>/dev/null || { wait "$1" 2>/dev/null || true; return 0; }; sleep 0.5; done
+    for _ in $(seq 1 20); do kill -0 "$1" 2>/dev/null || { wait "$1" 2>/dev/null || true; untrack "$1"; return 0; }; sleep 0.5; done
     bad "the app did not quit"; kill9 "$1"
 }
 # The restored state, printed by a relaunch that saves nothing.
 dump() { # DIR
+    safe_dir "$1" || { echo "crash-check: REFUSED: session dir $1 is not inside $W" >&2; exit 2; }
     env CEDRIC_SESSION_DIR="$1" CEDRIC_SESSION_DUMP=1 CEDRIC_NO_SESSION_SAVE=1 \
         perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES > "$W/dump.txt" 2>/dev/null || true
     grep -E '^(exact|notice):' "$W/dump.txt" | sed 's/^/    /' || true
@@ -203,6 +250,7 @@ T4u='untitled before the crash'
 S=$W/s4
 launch "$S" "$W/out4" CEDRIC_OPEN="$W/crash.txt" CEDRIC_TEST_TYPE=" edited before the crash" CEDRIC_TEST_TYPE_UNTITLED="$T4u" CEDRIC_TEST_ABORT_AFTER=1
 code=0; { wait $pid; } 2>/dev/null || code=$?
+untrack $pid
 [ $code = 134 ] && ok "4: the app crashed (SIGABRT, status 134)" || bad "4: exit status $code, want 134 (abort)"
 expect_disk "4: the file on disk is untouched" "$W/crash.txt" "$orig"
 dump "$S"
@@ -333,6 +381,113 @@ dump "$S"
 expect_tab "7: after a save and a relaunch: the file's edit still there" - "$T7f"
 expect_tab "7: after a save and a relaunch: the untitled text still there" - "$T7u"
 expect_count "7 (after a save)" 2
+
+# 8. Killed between writing a new tab's buffer and committing the session
+#    that names it, with an older, valid session in place.
+T8a='in the committed session'
+T8b='a new tab: its buffer written, the session naming it not yet'
+S=$W/s8
+launch "$S" "$W/out8a" CEDRIC_TEST_TYPE_UNTITLED="$T8a"
+wait_holds "$S" - "$(sha_s "$T8a")" 10 || bad "8: the first tab never reached the session store"
+kill9 $pid
+launch "$S" "$W/out8b" CEDRIC_TEST_TYPE_UNTITLED="$T8b" CEDRIC_TEST_HOLD_SESSION_COMMIT="$W/held8"
+for _ in $(seq 1 150); do [ -s "$W/held8" ] && break; sleep 0.1; done
+[ -s "$W/held8" ] && ok "8: a save stopped between the new buffer and the session" || bad "8: the save never reached the hold"
+in_store=$(python3 -I - "$S" "$(sha_s "$T8b")" <<'PY'
+import hashlib, os, sys
+d, sha = sys.argv[1], sys.argv[2]
+print(sum(1 for f in os.listdir(d) if f.endswith(".txt") and hashlib.sha256(open(os.path.join(d, f), "rb").read()).hexdigest() == sha))
+PY
+)
+if [ "$in_store" = 1 ] && holds "$S" - "$(sha_s "$T8a")" && ! holds "$S" - "$(sha_s "$T8b")"; then
+    ok "8: the new buffer is on disk, the older valid session doesn't name it"
+else bad "8: store state at the kill: buffer files with the text $in_store, want 1, named by the old session: no"; fi
+kill9 $pid
+dump "$S"
+expect_tab "8: the committed tab is back" - "$T8a"
+expect_tab "8: the new tab's text is back (recovered), exact text, caret" - "$T8b"
+expect_count "8" 2
+# A normal launch (it saves and prunes), a quit, and again.
+launch "$S" "$W/out8c"
+sleep 4
+quit_app $pid
+dump "$S"
+expect_tab "8: after a save, a prune and a relaunch: the committed tab" - "$T8a"
+expect_tab "8: after a save, a prune and a relaunch: the new tab's text" - "$T8b"
+expect_count "8 (after a save)" 2
+
+# 9. Two quick changes in one turn, then a character every 0.1 s, killed
+#    while the typing goes on: (a) after a quiet spell, 1 s in (the
+#    leading save, a few ms after the first change, must not be cancelled
+#    by the second); (b) starting 0.3 s after the launch's own save,
+#    2.5 s in (the leading save comes 1.5 s after the last one, whatever
+#    the typing). Typing after the last save may be lost, the first
+#    changes never.
+burst_case() { # NAME DELAY KILL_AFTER
+    S=$W/s$1
+    launch "$S" "$W/out$1" CEDRIC_TEST_TYPE_BURST="two quick| changes" CEDRIC_TEST_TYPE_BURST_DELAY="$2"
+    t0=$(typed_at "$W/out$1")
+    sleep "$3"
+    killed=$(now); kill9 $pid
+    echo "crash-check: $1: killed $(python3 -I -c "print(int(($killed - $t0) * 1000))") ms after the two changes, still typing"
+    dump "$S"
+    r9=$(python3 -I - "$W/dump.txt" <<'PY'
+import hashlib, re, sys
+lines = [l for l in open(sys.argv[1]) if l.startswith("exact:")]
+want = {hashlib.sha256(("two quick changes" + "." * k).encode()).hexdigest(): k for k in range(0, 40)}
+for l in lines:
+    m = re.search(r"file=- dirty=true sha=([0-9a-f]+) len=(\d+) sel=(\d+),0", l)
+    if m and m.group(1) in want and m.group(2) == m.group(3):
+        print("dots=%d" % want[m.group(1)]); break
+else:
+    print("none (%d tab(s))" % len(lines))
+PY
+)
+    case "$r9" in dots=*) ok "$1: both quick changes are back (then ${r9#dots=} typed dot(s)), caret at the end" ;; *) bad "$1: the quick changes were not saved: $r9" ;; esac
+    expect_count "$1" 1
+}
+burst_case 9a 2 1
+burst_case 9b 0.3 2.5
+
+# 10. Quit while every session write fails: the app must stay open.
+T10='typed while the disk is full'
+S=$W/s10
+launch "$S" "$W/out10" CEDRIC_TEST_TYPE_UNTITLED="$T10" CEDRIC_TEST_SESSION_WRITE_FAIL=1 CEDRIC_TEST_QUIT_SAVE_CHOICE=keep
+typed_at "$W/out10" >/dev/null
+sleep 1
+osascript -l JavaScript -e "ObjC.import('AppKit'); var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier($pid); if (a) a.terminate; ''" >/dev/null
+sleep 3
+if kill -0 $pid 2>/dev/null; then ok "10: the session couldn't be saved: quit refused, the app is still open"
+else bad "10: the app quit although its session couldn't be saved"; fi
+grep -q '^quit: session save failed, choice=keep' "$W/out10" && ok "10: the user was asked (Keep Owlink Open)" || bad "10: no failed-save question at quit"
+kill9 $pid
+
+# 11. A buffer that can't be read at launch: kept, said, never pruned.
+S=$W/s11
+U11=$(python3 -I - "$S" <<'PY'
+import json, os, sys, uuid
+d = sys.argv[1]
+os.makedirs(d)
+i = str(uuid.uuid4()).upper()
+open(os.path.join(d, i + ".txt"), "w").write("text that can't be read for now")
+json.dump({"version": 1, "untitledCounter": 0, "windows": [{"tabs": [{"id": i, "untitledName": "Untitled", "hasBuffer": True,
+    "encoding": "utf8", "lineEnding": "lf", "selectionLocation": 0, "selectionLength": 0, "topLine": 0}], "selectedTab": 0}]},
+    open(os.path.join(d, "session.json"), "w"))
+print(i)
+PY
+)
+chmod 000 "$S/$U11.txt"
+launch "$S" "$W/out11"
+sleep 4
+quit_app $pid
+[ -e "$S/$U11.txt" ] && ok "11: the unreadable buffer survived a save and its prune" || bad "11: the unreadable buffer was deleted"
+grep -q "\"$U11\"" "$S/session.json" && python3 -I -c 'import json,sys; s=json.load(open(sys.argv[1])); sys.exit(0 if sys.argv[2] in s.get("heldBuffers", []) else 1)' "$S/session.json" "$U11" \
+    && ok "11: the session names it as held" || bad "11: the session doesn't name the held buffer"
+dump "$S"
+grep -q "^notice: .*info=.*Owlink couldn’t read unsaved text from its last session" "$W/dump.txt" && ok "11: launch says it couldn't read it, and where it is kept" || bad "11: no notice about the unreadable buffer"
+chmod 600 "$S/$U11.txt"
+dump "$S"
+expect_tab "11: readable again: the text is back, exact" - "text that can't be read for now" "name=Recovered"
 
 [ $fail = 0 ] && echo "crash-check: all OK ($oks checks)" || echo "crash-check: FAILED ($oks OK)" >&2
 exit $fail
