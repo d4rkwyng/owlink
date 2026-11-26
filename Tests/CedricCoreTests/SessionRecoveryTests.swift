@@ -198,6 +198,40 @@ import Testing
         #expect(second.allTabs.contains { $0.id == closed.id && $0.hasBuffer }, "the closed tab stays open")
     }
 
+    /// Commit numbers no commit can have: a journal numbered Int.min (or
+    /// 0) is damaged (launch scans), and a session numbered Int.max
+    /// spends no journal and is committed past without overflowing.
+    @Test func impossibleCommitNumbersAreDamagedNotTrusted() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let b = UUID()
+        try s1.writeBuffer(b, text: "b")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        for g in [Int.min, 0, -1] {
+            try JSONEncoder().encode(SessionStore.Journal(generation: g, ids: [])).write(to: journal)
+            guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+            #expect(recovered == [b], "journal numbered \(g): damaged, scanned")
+        }
+        try JSONEncoder().encode(SessionStore.Journal(generation: 2, ids: [b.uuidString])).write(to: journal)
+        let file = dir.appendingPathComponent("session.json")
+        var manifest = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        manifest["generation"] = Int.max
+        try JSONSerialization.data(withJSONObject: manifest).write(to: file)
+        let s2 = store(dir)
+        guard case .session(_, let recovered) = s2.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [b], "a session numbered Int.max spends no journal")
+        try s2.save(Session(windows: [SessionWindow(tabs: [a, SessionTab(id: b, untitledName: "Recovered", hasBuffer: true)])]))
+        let c = UUID()
+        try s2.writeBuffer(c, text: "c")
+        guard case .session(let s, let again) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s.allTabs.map(\.id) == [a.id, b], "committed past it")
+        #expect(again == [c])
+    }
+
     // MARK: Reopened closed tabs
 
     /// A closed tab whose entry kept a buffer, closed just inside

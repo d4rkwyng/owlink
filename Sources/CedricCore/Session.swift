@@ -437,14 +437,21 @@ public final class SessionStore: @unchecked Sendable {
     private func loadUnlocked() -> Session? { loadManifest()?.session }
 
     /// The session, its commit number (0: saved before commits were
-    /// numbered) and the held runs' journals it adopted.
-    private func loadManifest() -> (session: Session, generation: Int, adopted: Set<String>)? {
+    /// numbered; nil: a number no commit can have, so which journals are
+    /// spent is unknown) and the held runs' journals it adopted.
+    private func loadManifest() -> (session: Session, generation: Int?, adopted: Set<String>)? {
         guard let data = try? Data(contentsOf: sessionFile),
               let s = try? JSONDecoder().decode(Session.self, from: data),
               s.version <= Session.currentVersion else { return nil }
         let g = try? JSONDecoder().decode(Generation.self, from: data)
-        return (s, g?.generation ?? 0, Set(g?.adoptedJournals ?? []))
+        let n = g?.generation ?? 0
+        return (s, (0...Self.maxGeneration).contains(n) ? n : nil, Set(g?.adoptedJournals ?? []))
     }
+
+    /// Commit numbers go up by one per commit: far below this. A number
+    /// outside 0...this (a journal's: 1...this) is damaged bookkeeping,
+    /// never trusted, and never near overflow.
+    static let maxGeneration = 1 << 52
 
     /// `session.json`'s commit number and the held runs' journals the
     /// commit adopted (`adoptedJournals`), beside the session's own keys
@@ -519,9 +526,12 @@ public final class SessionStore: @unchecked Sendable {
         let heldJournals = heldJournalsSeen.map(readJournal)
         for j in heldJournals { committedGeneration = max(committedGeneration, (j.generation ?? 0) - 1) }
         if let (s, generation, adopted) = loadManifest() {
-            committedGeneration = max(committedGeneration, generation)
+            // An impossible number: no journal counts as spent, and the
+            // next commit is numbered from the journals (a journal at or
+            // above it is applied once more, then removed by it).
+            if let generation { committedGeneration = max(committedGeneration, generation) }
             // Spent: the commit it waited for is in session.json already.
-            if let g = journal.generation, g <= generation, !journal.damaged { journal = ([], [], g, false) }
+            if let g = journal.generation, let generation, g <= generation, !journal.damaged { journal = ([], [], g, false) }
             pending = journal.ids
             pendingReopened = journal.reopened
             committed = s.bufferIDs
@@ -645,6 +655,9 @@ public final class SessionStore: @unchecked Sendable {
         } else {
             return ([], [], nil, true)
         }
+        // A number no commit waits for (0, negative, past maxGeneration):
+        // which commit it waited for is unknown, as for an unreadable one.
+        if let g = j.generation, !(1...Self.maxGeneration).contains(g) { return ([], [], nil, true) }
         let ids = j.ids.compactMap(UUID.init(uuidString:))
         let reopened = (j.reopened ?? []).compactMap(UUID.init(uuidString:))
         guard ids.count == j.ids.count, reopened.count == (j.reopened ?? []).count else { return ([], [], j.generation, true) }
