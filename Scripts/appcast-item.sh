@@ -46,6 +46,11 @@ case "$EDSIG" in *[!A-Za-z0-9+/=]*) fail "--signature is not base64" ;; esac
 case "$URL" in https://?*) ;; *) fail "--url must be an https:// URL" ;; esac
 case "$URL" in *[\<\>\&\"\'[:space:]]*) fail "--url may not hold spaces or < > & quotes" ;; esac
 [ -x "$SIGN_UPDATE" ] || fail "no sign_update at $SIGN_UPDATE"
+# OUT is replaced by a rename at the end; onto a folder (or a link to one)
+# mv would put the feed inside it and succeed, so that is refused before
+# anything is staged, and checked again just before the rename.
+not_file() { [ -e "$OUT" ] && [ ! -f "$OUT" ]; }
+not_file && fail "$OUT is not a file (a folder, or a link to one); nothing was written"
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ -n "$FROM" ]; then
     [ -f "$FROM" ] || fail "$FROM is not a file"
@@ -77,5 +82,6 @@ echo "+ $(printf '%q ' "$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW")"
 xmllint --noout "$NEW" || fail "the signed feed is not well-formed XML; $OUT is unchanged"
 one || fail "the signed feed doesn't have exactly one channel item for $VERSION; $OUT is unchanged"
 # Same folder, so a rename: OUT is either the old feed or the new one.
+not_file && fail "$OUT is no longer a file (a folder, or a link to one); nothing was written"
 mv -f "$NEW" "$OUT"
 echo "Wrote $OUT (item $VERSION added, feed signed and verified)"

@@ -308,9 +308,13 @@ cp "$R/dist/Owlink-$RV.zip" "$W/zip-before"
 # Sparkle's namespace under another prefix, the value on its own line.
 printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:s="http://www.andymatuschak.org/xml-namespaces/sparkle">\n<channel><item><s:shortVersionString>\n  %s\n</s:shortVersionString></item></channel>\n</rss>\n' "$RV" > "$W/has-version.xml"
 printf '<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">\n<channel><item><sparkle:shortVersionString>%s</sparkle:shortVersionString></item></channel>\n</rss>\n' "${RV//./-}" > "$W/other-version.xml"
-rel() { # dist-feed [CEDRIC_SPARKLE_APPCAST] -> output in $W/rel.out
-    rm -f "$R/dist/appcast.xml" "$R/bundle-app-ran"
-    [ -z "$1" ] || cp "$1" "$R/dist/appcast.xml"
+rel() { # dist-feed|keep [CEDRIC_SPARKLE_APPCAST] -> output in $W/rel.out
+    # keep: leave whatever the test put at dist/appcast.xml.
+    rm -f "$R/bundle-app-ran"
+    if [ "$1" != keep ]; then
+        rm -f "$R/dist/appcast.xml"
+        [ -z "$1" ] || cp "$1" "$R/dist/appcast.xml"
+    fi
     local rc=0
     env -u CEDRIC_VERSION -u TAG -u CEDRIC_SPARKLE_KEY_FILE "${SET[@]}" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519 \
         CEDRIC_SPARKLE_BIN="$W/stub" CEDRIC_SIGN_ID="Developer ID Application: TEST ONLY (TEAMID)" \
@@ -335,6 +339,40 @@ if [ $rc = 0 ] && ! grep -q 'already has an item' "$W/rel.out" && grep -q '^+ Sc
 else
     bad "release.sh --appcast with ${RV//./-} only (exit $rc): $(grep -m2 'release.sh:' "$W/rel.out")"
 fi
+# A folder at dist/appcast.xml, or a link to one: the final rename would
+# put the signed feed inside it (dist/appcast.xml/appcast.xml) and report
+# success. Preflight refuses before the build; the zip is byte-identical
+# and the folder stays empty.
+mkdir -p "$W/feed-folder"
+for how in folder link; do
+    rm -f "$R/dist/appcast.xml"
+    if [ $how = folder ]; then mkdir "$R/dist/appcast.xml"; FOLDER="$R/dist/appcast.xml"; else ln -s "$W/feed-folder" "$R/dist/appcast.xml"; FOLDER="$W/feed-folder"; fi
+    rc=0; rel keep || rc=$?
+    if [ $rc != 0 ] && grep -q 'dist/appcast.xml is not a file' "$W/rel.out" && ! grep -qE '^\+ (Scripts/bundle-app.sh|security|rm|ditto|codesign|xcrun)' "$W/rel.out" \
+        && untouched "" && [ -d "$R/dist/appcast.xml" ] && [ -z "$(ls -A "$FOLDER")" ]; then
+        ok "release.sh --appcast refuses a $how at dist/appcast.xml before building; the zip is byte-identical, the folder empty"
+    else
+        bad "release.sh --appcast with a $how at dist/appcast.xml (exit $rc): $(grep -m2 -E 'release.sh:|^\+ ' "$W/rel.out" | tr '\n' ' ') folder: $(ls -A "$FOLDER" | tr '\n' ' ')"
+    fi
+    if [ $how = folder ]; then rmdir "$R/dist/appcast.xml"; else rm "$R/dist/appcast.xml"; fi
+done
+# appcast-item.sh refuses the same before it stages anything: sign_update
+# never runs, the folder stays empty, no temp folder is left beside it.
+mkdir -p "$W/outdir" "$W/outdir-target"
+for how in folder link; do
+    if [ $how = folder ]; then mkdir "$W/outdir/appcast.xml"; FOLDER="$W/outdir/appcast.xml"; else ln -s "$W/outdir-target" "$W/outdir/appcast.xml"; FOLDER="$W/outdir-target"; fi
+    : > "$W/stub.log"
+    rc=0; STUB_LOG="$W/stub.log" Scripts/appcast-item.sh --out "$W/outdir/appcast.xml" --sign-update "$W/stub/sign_update" \
+        --version 2.1.0 --url https://downloads.example.invalid/v2.1.0/Owlink-2.1.0.zip --length 1 --signature "$SIG64" \
+        -- --account owlink-test-only > "$W/item.out" 2>&1 || rc=$?
+    if [ $rc != 0 ] && grep -q 'is not a file' "$W/item.out" && [ ! -s "$W/stub.log" ] && [ -z "$(ls -A "$FOLDER")" ] \
+        && [ "$(ls -A "$W/outdir" | tr '\n' ' ')" = "appcast.xml " ]; then
+        ok "appcast-item.sh refuses a $how at --out before staging; nothing signed, the folder empty"
+    else
+        bad "appcast-item.sh with a $how at --out (exit $rc): $(tail -2 "$W/item.out" | tr '\n' ' ') folder: $(ls -A "$FOLDER" | tr '\n' ' ') beside: $(ls -A "$W/outdir" | tr '\n' ' ')"
+    fi
+    if [ $how = folder ]; then rm -rf "$W/outdir/appcast.xml"; else rm "$W/outdir/appcast.xml"; fi
+done
 # A refused or failed run removes only its own temp folder: files beside
 # the feed that look like its temp names (the old scheme's .xml) stay.
 mkdir -p "$W/own"

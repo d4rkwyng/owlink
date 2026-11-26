@@ -189,6 +189,13 @@ ZIP="dist/Owlink-${CEDRIC_VERSION:-$SOURCE_VERSION}.zip"
 #     would go into and the local dist/appcast.xml are checked, by XML
 #     value (Scripts/appcast-versions.sh), as appcast-item.sh does later.
 if [ $APPCAST = 1 ]; then
+    # The new feed is renamed onto dist/appcast.xml at the end; onto a
+    # folder (or a link to one) that rename would put it inside the folder
+    # and still report success, so anything there that isn't a file is
+    # refused now.
+    if [ -e dist/appcast.xml ] && [ ! -f dist/appcast.xml ]; then
+        fail "--appcast: dist/appcast.xml is not a file (a folder, or a link to one); nothing was built and $ZIP is as it was (move it aside)"
+    fi
     FEEDS=(dist/appcast.xml)
     [ -z "${CEDRIC_SPARKLE_APPCAST:-}" ] || FEEDS+=("$CEDRIC_SPARKLE_APPCAST")
     for f in "${FEEDS[@]}"; do
