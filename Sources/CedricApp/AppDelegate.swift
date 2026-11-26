@@ -953,7 +953,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DevEnvironment.values["CEDRIC_RESTORE_DELAY"].flatMap(Double.init) ?? 0.25
 
     private func restoreSession() {
-        guard let session = store.load() else { return }
+        let session: Session
+        switch store.loadForLaunch() {
+        case .none: return
+        case .session(let s): session = s
+        case .recover(let aside, let buffers):
+            recoverBuffers(buffers, setAside: aside)
+            return
+        }
         // Closed tabs past ClosedTabs.keepDays go, with their unsaved text.
         let kept = ClosedTabs.expire(session.closedTabs ?? [])
         closedTabs = kept.list
@@ -1015,6 +1022,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         window.tabbingMode = .disallowed
         if key { window.makeKeyAndOrderFront(nil) } else { window.orderFront(nil) }
         window.tabbingMode = mode
+    }
+
+    /// The session file couldn't be read (SessionStore.loadForLaunch: kept
+    /// aside as `setAside`), or there is none but unsaved text is in the
+    /// store: each buffer opens as an unsaved "Recovered" tab, oldest
+    /// first, in one window, caret at the end, with a notice saying what
+    /// happened. Their files, places and the closed list were in the
+    /// session; the text is all the store still has, and it is not lost:
+    /// the tabs are unsaved, so the next save keeps their buffers.
+    private func recoverBuffers(_ ids: [UUID], setAside: URL?) {
+        var host: NSWindow?
+        var built: [EditorWindowController] = []
+        var names: [String] = []
+        for id in ids {
+            let name = UntitledNames.next(open: names, base: String(localized: "Recovered"))
+            let st = SessionTab(id: id, untitledName: name, hasBuffer: true, selectionLocation: Int.max)
+            let place = host.map { h in (host: h, index: h.tabGroup?.windows.count ?? 1) }
+            guard let tab = restoreTab(st, into: place) as? EditorWindowController else { continue }
+            names.append(name)
+            built.append(tab)
+            // On screen before the next joins its tab group.
+            if host == nil, let w = tab.window { host = w; orderInAlone(w, key: true) }
+        }
+        let kept = setAside.map { String(localized: "Its session file was kept as “\($0.lastPathComponent)” in \($0.deletingLastPathComponent().path).") } ?? ""
+        let text = String(localized: "Owlink couldn’t read its last session. This is unsaved text it found from it.") + (kept.isEmpty ? "" : " " + kept)
+        for tab in built { tab.showNotice(text, buttons: []) }
+        host?.makeKeyAndOrderFront(nil)
+        if let setAside { FileHandle.standardError.write(Data("session: unreadable, kept as \(setAside.path); \(built.count) unsaved text(s) recovered\n".utf8)) }
     }
 
     /// Builds one saved tab; nil if its file has gone and it had no buffer.
