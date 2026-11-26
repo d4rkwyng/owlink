@@ -587,6 +587,8 @@ extension DevChecks {
         func release() { if held { held = false; gate.signal() } }
         var parseBefore = 0
         let edited = "name,age\nzoe,30\nbob,20\namy,40\nann,10\n"
+        let edited2 = edited + "cat,25\n"
+        let landed = DispatchSemaphore(value: 0)
         func inFileOrder(_ g: CSVPreview, _ how: String) {
             expect(!g.isSorted && g.cell(row: 0, column: 0) == "zoe" && g.cell(row: 2, column: 0) == "amy",
                    "\(how) puts the rows back in file order", "\(g.table.sortDescriptors.map { $0.key ?? "-" }) \(g.cell(row: 0, column: 0))")
@@ -727,6 +729,64 @@ extension DevChecks {
                 g.selectField(row: 3, column: 1)
                 let want = (edited as NSString).range(of: "10\n").location
                 expect(tab.textView.selectedRange().location == want, "a click on ann's age puts the caret there",
+                       "\(tab.textView.selectedRange().location), want \(want)")
+                // Again, sorted, then: hold the queue, edit, click "#". Behind
+                // the edit's parse, a second hold, so the re-sort of the edited
+                // table that the parse queues waits; a column click lands then.
+                before = g.renders
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c1", ascending: false)]
+            },
+            waitForGrid(tab, after: { before }, "sorted by age, oldest first"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.cell(row: 0, column: 0) == "amy", "sorted by age descending, amy first", g.cell(row: 0, column: 0))
+                held = true
+                CSVPreview.queue.async { gate.wait() }
+                parseBefore = g.parseRevision
+                before = g.renders
+                focus(tab)
+                tab.textView.insertText("cat,25\n", replacementRange: NSRange(location: (tab.text as NSString).length, length: 0))
+            },
+            wait("the second edit starts a parse") { (g?.parseRevision ?? 0) > parseBefore },
+            sync {
+                guard let g else { release(); return }
+                expect(g.renders == before && g.table.numberOfRows == 4, "the second parse is under way: the old table shown",
+                       "\(g.renders - before) renders, \(g.table.numberOfRows) rows")
+                let cell = g.ruler.header
+                click(cell, at: NSPoint(x: cell.bounds.midX, y: cell.bounds.midY))
+                expect(!g.isSorted, "# clicked while the second edit parses: no sort")
+                // The second hold, queued behind the parse: once it starts,
+                // the parse has posted its result to the main queue.
+                CSVPreview.queue.async {
+                    landed.signal()
+                    gate.wait()
+                }
+                release()
+                held = true
+            },
+            wait("the edited parse is done, its re-sort held") { landed.wait(timeout: .now()) == .success },
+            // A main-queue turn after that: the parse's result has been applied.
+            { next in DispatchQueue.main.async { next() } },
+            sync {
+                guard let g else { release(); return }
+                expect(g.renders == before, "the edited table waits for its re-sort", "\(g.renders - before) renders")
+                // A column click before that re-sort applies.
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c1", ascending: true)]
+                release()
+            },
+            wait("the edited table lands, sorted") { (g?.renders ?? 0) > before && g?.table.numberOfRows == 5 },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                guard let g else { return }
+                expect(tab.text == edited2, "the second edit is in the text", tab.text)
+                let names = (0..<g.table.numberOfRows).map { g.cell(row: $0, column: 0) }
+                expect(names == ["ann", "bob", "cat", "zoe", "amy"], "the edited table is shown, sorted by age",
+                       "\(names)")
+                expect(g.isSorted && g.ruler.header.isActive, "sorted: # lit")
+                expect(g.ruler.number?(2) == 5, "cat is row 5", "\(String(describing: g.ruler.number?(2)))")
+                g.selectField(row: 2, column: 1)
+                let want = (edited2 as NSString).range(of: "25\n").location
+                expect(tab.textView.selectedRange().location == want, "a click on cat's age puts the caret there",
                        "\(tab.textView.selectedRange().location), want \(want)")
                 Settings.shared.themeOverride = theme
                 NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
