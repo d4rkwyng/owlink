@@ -12,7 +12,9 @@
 #  - appcast-item.sh (the feed step) keeps the last signed feed when
 #    signing or verifying fails, with a stub sign_update;
 #  - with an APP: its Info.plist has the empty placeholders, a required
-#    signed feed and automatic checks off.
+#    signed feed and automatic checks off, and bundle-app.sh's ad-hoc
+#    signing (sign-adhoc.sh) keeps Downloader.xpc's entitlements on a temp
+#    copy with Sparkle.framework added.
 # No key of any kind is generated or read: the "key file" below is an
 # empty temp file, refused before anything would read it.
 #
@@ -214,6 +216,52 @@ if [ -n "$APP" ]; then
     [ "$(v SUAutomaticallyUpdate)" = false ] && ok "$APP: no silent installs" || bad "$APP: SUAutomaticallyUpdate"
     # Nothing of Sparkle's is linked: the app loads it only when set up.
     otool -L "$APP/Contents/MacOS/Cedric" | grep -q Sparkle && bad "$APP links Sparkle at launch" || ok "$APP doesn't link Sparkle (dlopen only when set up)"
+
+    # bundle-app.sh's ad-hoc signing (Scripts/sign-adhoc.sh) on a temp copy
+    # of APP with the pinned Sparkle.framework added, as a --release build
+    # has it (no release build is made; nothing is launched). Sparkle
+    # 2.10.1's Downloader.xpc ships with no entitlements, so the copy's is
+    # first given a test-only one; signing must keep it (a --deep first
+    # pass dropped it), sign llama.framework on its own, and verify --deep
+    # --strict.
+    SP_SRC=$(find .build/artifacts -maxdepth 6 -type d -path '*Sparkle.xcframework/macos-*/Sparkle.framework' 2>/dev/null | head -1)
+    if [ -n "$SP_SRC" ]; then
+        A="$W/adhoc/Owlink.app"
+        mkdir -p "$W/adhoc"
+        ditto "$APP" "$A" && ditto "$SP_SRC" "$A/Contents/Frameworks/Sparkle.framework"
+        DL_XPC="$A/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+        cat > "$W/test-only.entitlements" <<'ENTS'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>
+ENTS
+        ents() { codesign -d --entitlements - --xml "$1" 2>/dev/null | tr -d '\0' | grep -o '<key>[^<]*</key><true/>' | tr '\n' ' '; }
+        codesign -s - --force --entitlements "$W/test-only.entitlements" "$DL_XPC" 2>/dev/null
+        before=$(ents "$DL_XPC")
+        if [ "$before" != '<key>com.apple.security.network.client</key><true/> ' ]; then
+            bad "sign-adhoc.sh: couldn't give the test copy's Downloader.xpc its test entitlement ($before)"
+        elif ! out=$(Scripts/sign-adhoc.sh "$A" 2>&1); then
+            bad "sign-adhoc.sh failed: $(tail -2 <<<"$out")"
+        else
+            after=$(ents "$DL_XPC")
+            [ "$after" = "$before" ] && ok "sign-adhoc.sh: Downloader.xpc keeps its entitlements ($after)" \
+                || bad "sign-adhoc.sh: Downloader.xpc entitlements were [$before], now [$after]"
+            codesign --verify --strict "$A/Contents/Frameworks/llama.framework" 2>/dev/null \
+                && codesign --verify --strict "$A/Contents/Frameworks/Sparkle.framework" 2>/dev/null \
+                && codesign --verify --deep --strict "$A" 2>/dev/null \
+                && ok "sign-adhoc.sh: llama.framework, Sparkle.framework and the app verify (the app --deep --strict)" \
+                || bad "sign-adhoc.sh: a signature doesn't verify"
+            [ "$(ents "$A/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc")" = "" ] \
+                && ok "sign-adhoc.sh: Installer.xpc gets no entitlements" || bad "sign-adhoc.sh: Installer.xpc has entitlements"
+        fi
+    else
+        echo "note: no Sparkle.framework in .build/artifacts (run swift build); ad-hoc Sparkle signing not checked"
+    fi
 fi
 
 echo "updates-check: $pass passed, $failed failed"

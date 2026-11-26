@@ -31,9 +31,10 @@ never loaded, and nothing goes to the network.
   EdDSA signature), `SUVerifyUpdateBeforeExtraction` = true,
   `SUEnableAutomaticChecks` = false, `SUAutomaticallyUpdate` = false (never
   installs without asking).
-- **Signing order** (`Scripts/sign-sparkle.sh`, used by bundle-app.sh and
-  release.sh): Installer.xpc, Downloader.xpc (keeps its entitlements),
-  Autoupdate, Updater.app, the framework, then the app. Never `--deep`.
+- **Signing order** (`Scripts/sign-sparkle.sh`, used by release.sh and by
+  bundle-app.sh's ad-hoc signing, `Scripts/sign-adhoc.sh`): Installer.xpc,
+  Downloader.xpc (keeps its entitlements), Autoupdate, Updater.app, the
+  framework, then the app. Never `--deep` to sign, only to verify.
   release.sh checks that all of them have the app's Team ID and the hardened
   runtime.
 - **`Scripts/release.sh --appcast`** (off by default; the normal release is
