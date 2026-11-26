@@ -289,6 +289,18 @@ public struct SessionFolder: Codable, Equatable, Sendable {
 /// already in `session.json` (the app died after the commit, before the
 /// journal was removed, or removing it failed) is spent: launch ignores
 /// it, so a buffer that commit let go can't come back from it.
+///
+/// Going back to an older build is not supported for a store with work
+/// still pending (a journal, a held run's journal). The 0.5 releases have
+/// no journal and prune every buffer their session doesn't name; the
+/// unreleased 0.6 builds before the review (1bb8787) read only a bare
+/// array in `pending-buffers.json`, so they can't express a reopened
+/// tab's promotion or a commit number. What is kept for them: whenever
+/// pending ids exist, `pending-buffers.json` exists too, in this format,
+/// which those builds read as damaged, so they scan and reopen every
+/// buffer their session doesn't name. A held run that found no journal
+/// writes there itself (unnumbered) rather than beside it. A closed tab
+/// reopened since the commit can still stay closed in those builds.
 public final class SessionStore: @unchecked Sendable {
     public let directory: URL
     private let fm = FileManager.default
@@ -319,8 +331,17 @@ public final class SessionStore: @unchecked Sendable {
     /// This run's journal while `hold` is set.
     private lazy var heldJournalFile = directory.appendingPathComponent("\(Self.heldJournalPrefix)\(UUID().uuidString).json")
     static let heldJournalPrefix = "pending-buffers.held-"
-    /// Held runs' journals launch read: removed by the next commit.
+    /// Held runs' journals launch read: adopted (named in
+    /// `adoptedJournals`) and removed by the next commit.
     private var heldJournalsSeen: [URL] = []
+    /// Held runs' journals adopted by a commit whose removal didn't
+    /// happen: named again in each commit until they are gone.
+    private var adoptedLeft = Set<String>()
+    /// Launch found no journal at all (`lstat`: no such file). A held run
+    /// then journals in the main journal itself, unnumbered (pending until
+    /// a commit removes it): there is nothing there to keep, and an older
+    /// build, which reads only that file, still sees every pending id.
+    private var journalAbsentAtLaunch = false
     /// The newest write sequence (the caller's number for each buffer
     /// write it queues) that succeeded, per buffer. Kept here, on the
     /// serial writer, so a commit can tell a write an earlier snapshot
@@ -415,24 +436,31 @@ public final class SessionStore: @unchecked Sendable {
 
     private func loadUnlocked() -> Session? { loadManifest()?.session }
 
-    /// The session and its commit number (0: saved before commits were numbered).
-    private func loadManifest() -> (session: Session, generation: Int)? {
+    /// The session, its commit number (0: saved before commits were
+    /// numbered) and the held runs' journals it adopted.
+    private func loadManifest() -> (session: Session, generation: Int, adopted: Set<String>)? {
         guard let data = try? Data(contentsOf: sessionFile),
               let s = try? JSONDecoder().decode(Session.self, from: data),
               s.version <= Session.currentVersion else { return nil }
-        return (s, (try? JSONDecoder().decode(Generation.self, from: data))?.generation ?? 0)
+        let g = try? JSONDecoder().decode(Generation.self, from: data)
+        return (s, g?.generation ?? 0, Set(g?.adoptedJournals ?? []))
     }
 
-    /// `session.json`'s commit number, beside the session's own keys
-    /// (older versions ignore it). Not part of `Session`: it is the
+    /// `session.json`'s commit number and the held runs' journals the
+    /// commit adopted (`adoptedJournals`), beside the session's own keys
+    /// (older versions ignore them). Not part of `Session`: they are the
     /// store's bookkeeping, not what the user had open.
-    private struct Generation: Codable { var generation: Int? }
+    private struct Generation: Codable {
+        var generation: Int?
+        var adoptedJournals: [String]?
+    }
     private struct Manifest: Encodable {
         let session: Session
         let generation: Int
+        let adopted: [String]
         func encode(to encoder: Encoder) throws {
             try session.encode(to: encoder)
-            try Generation(generation: generation).encode(to: encoder)
+            try Generation(generation: generation, adoptedJournals: adopted.isEmpty ? nil : adopted).encode(to: encoder)
         }
     }
 
@@ -478,6 +506,8 @@ public final class SessionStore: @unchecked Sendable {
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
         lock.lock(); defer { lock.unlock() }
         var journal = readJournal(journalFile)
+        var st = stat()
+        journalAbsentAtLaunch = lstat(journalFile.path, &st) != 0 && errno == ENOENT
         committedGeneration = max(0, (journal.generation ?? 0) - 1)
         // Journals of runs that were held (heldJournalFile): listed, so a
         // folder that can't be listed holds this run too.
@@ -488,7 +518,7 @@ public final class SessionStore: @unchecked Sendable {
         }
         let heldJournals = heldJournalsSeen.map(readJournal)
         for j in heldJournals { committedGeneration = max(committedGeneration, (j.generation ?? 0) - 1) }
-        if let (s, generation) = loadManifest() {
+        if let (s, generation, adopted) = loadManifest() {
             committedGeneration = max(committedGeneration, generation)
             // Spent: the commit it waited for is in session.json already.
             if let g = journal.generation, g <= generation, !journal.damaged { journal = ([], [], g, false) }
@@ -500,7 +530,11 @@ public final class SessionStore: @unchecked Sendable {
             var candidates = journal.ids
             var reopened = Set(journal.reopened)
             var damaged = journal.damaged
-            for j in heldJournals where !(j.generation.map { $0 <= generation } ?? false) || j.damaged {
+            // A held run's journal is applied whatever its number: that run
+            // couldn't read the commit it would have waited for, so its
+            // number proves nothing. Only a commit that names it as
+            // adopted (made by a launch that applied it) spends it.
+            for (url, j) in zip(heldJournalsSeen, heldJournals) where !adopted.contains(url.lastPathComponent) {
                 damaged = damaged || j.damaged
                 candidates += j.ids.filter { !candidates.contains($0) }
                 reopened.formUnion(j.reopened)
@@ -610,8 +644,8 @@ public final class SessionStore: @unchecked Sendable {
         return (ids, reopened, j.generation, false)
     }
 
-    private func encodeJournal(_ ids: [UUID], reopened: [UUID]) throws -> Data {
-        try JSONEncoder().encode(Journal(generation: committedGeneration + 1, ids: ids.map(\.uuidString),
+    private func encodeJournal(_ ids: [UUID], reopened: [UUID], numbered: Bool = true) throws -> Data {
+        try JSONEncoder().encode(Journal(generation: numbered ? committedGeneration + 1 : nil, ids: ids.map(\.uuidString),
                                          reopened: reopened.isEmpty ? nil : reopened.map(\.uuidString)))
     }
 
@@ -668,8 +702,11 @@ public final class SessionStore: @unchecked Sendable {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
         let generation = committedGeneration + 1
+        // The held runs' journals launch applied: this commit names what
+        // they listed (or let it go), so it says it adopted them.
+        let adopting = adoptedLeft.union(heldJournalsSeen.map(\.lastPathComponent)).sorted()
         do {
-            try writeDurably(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
+            try writeDurably(enc.encode(Manifest(session: s, generation: generation, adopted: adopting)), to: sessionFile)
         } catch let e as PrivateDirectory.Unconfirmed {
             // Renamed into place, not confirmed on the disk: session.json
             // is this commit now and may be the one before after a power
@@ -696,10 +733,14 @@ public final class SessionStore: @unchecked Sendable {
             pendingReopened = []
             try? fm.removeItem(at: journalFile)
         }
-        // Held runs' journals: launch applied them, so this commit names
-        // what they listed or let it go.
+        // Held runs' journals: adopted by this commit, so they can go. One
+        // that stays (removing it failed) is named again by the next.
         for url in heldJournalsSeen { try? fm.removeItem(at: url) }
         heldJournalsSeen = []
+        adoptedLeft = Set(adopting.filter { name in
+            var st = stat()
+            return lstat(directory.appendingPathComponent(name).path, &st) == 0 || errno != ENOENT
+        })
     }
 
     /// Writes tab `id`'s unsaved text. `open`: the tab is open (false: a
@@ -735,8 +776,10 @@ public final class SessionStore: @unchecked Sendable {
         guard fresh || reopening else { return }
         let ids = fresh ? pending + [id] : pending, again = reopening ? pendingReopened + [id] : pendingReopened
         // Held: never over the journal launch found (it may be all that
-        // says which buffers are pending), but beside it.
-        try writeDurably(encodeJournal(ids, reopened: again), to: hold == nil ? journalFile : heldJournalFile)
+        // says which buffers are pending), but beside it. With none found,
+        // in the main journal, unnumbered (`journalAbsentAtLaunch`).
+        let main = hold == nil || journalAbsentAtLaunch
+        try writeDurably(encodeJournal(ids, reopened: again, numbered: hold == nil), to: main ? journalFile : heldJournalFile)
         pending = ids
         pendingReopened = again
     }

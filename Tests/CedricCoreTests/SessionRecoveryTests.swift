@@ -517,6 +517,54 @@ import Testing
         #expect(recovered == [new])
     }
 
+    /// A held launch that couldn't read the session (commit 20) nor list
+    /// the folder knows no commit number. Text written once the disk
+    /// works again must come back at the next launch, which reads commit
+    /// 20 again: a held run's journal is applied whatever its number.
+    /// With no journal at launch it is the main journal (unnumbered), with
+    /// one it is a journal of its own beside it; either is applied until
+    /// a commit adopts it by name, and a copy left after that commit (its
+    /// removal failed) is spent.
+    @Test func aHeldRunsJournalIsAppliedWhateverTheCommitNumber() throws {
+        for withJournal in [false, true] {
+            let dir = tempDir()
+            defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+            let s1 = store(dir)
+            let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+            try s1.writeBuffer(a.id, text: "a")
+            for _ in 0..<20 { try s1.save(Session(windows: [SessionWindow(tabs: [a])])) }
+            let older = UUID()
+            if withJournal { try s1.writeBuffer(older, text: "pending before the held run") }
+            let file = dir.appendingPathComponent("session.json")
+            try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+            try fm.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+            let held = store(dir)
+            _ = held.loadForLaunch()
+            #expect(held.hold != nil, "held")
+            try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            let new = UUID()
+            try held.writeBuffer(new, text: "typed once the disk worked again")
+            let next = store(dir)
+            guard case .session(_, let recovered) = next.loadForLaunch() else { Issue.record("readable"); return }
+            #expect(Set(recovered) == Set(withJournal ? [older, new] : [new]), "journal at launch: \(withJournal)")
+            let journals = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix("pending-buffers") }
+            #expect(journals.count == (withJournal ? 2 : 1), "\(journals)")
+            // A held journal whose removal fails (locked): still there after
+            // the commit that adopted it, and after the next one.
+            let side = journals.filter { $0.hasPrefix("pending-buffers.held-") }.map { dir.appendingPathComponent($0).path }
+            defer { for p in side { try? fm.setAttributes([.immutable: false], ofItemAtPath: p) } }
+            for p in side { try fm.setAttributes([.immutable: true], ofItemAtPath: p) }
+            try next.save(Session(windows: [SessionWindow(tabs: [a] + recovered.map { SessionTab(id: $0, untitledName: "Recovered", hasBuffer: true) })]))
+            guard case .session(_, let after) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+            #expect(after.isEmpty, "adopted: spent, even though it is still there")
+            try next.save(Session(windows: [SessionWindow(tabs: [a])]))
+            guard case .session(_, let later) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+            #expect(later.isEmpty, "and after the next commit, which names it again")
+            #expect(side.allSatisfy { fm.fileExists(atPath: $0) }, "the locked journal is still there")
+        }
+    }
+
     @Test func aMissingFolderIsAFirstLaunchNotAHold() {
         let s = store(tempDir())
         #expect(s.loadForLaunch() == .none)

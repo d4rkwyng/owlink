@@ -61,6 +61,22 @@ them; orphan buffers are pruned after each save.
   with a buffer gets the buffer's text and stays unsaved; a clean file tab
   reopens the file from disk; a file that has gone and had no buffer is
   dropped.
+- Crash safety (SessionStore): a buffer the committed `session.json`
+  doesn't name yet is listed in the journal `pending-buffers.json` before
+  it is written, and a reopened closed tab is listed as `reopened`. Each
+  commit is numbered (`generation`), and a journal numbered at or below
+  the commit on disk is spent. A commit renamed into place whose folder
+  flush fails is uncertain: it counts as taken for numbering, so the next
+  journal outranks whichever `session.json` survives. A held run (launch
+  couldn't read or list the store) never replaces the journal it found.
+  It writes `pending-buffers.held-<uuid>.json` beside it, or the main
+  journal unnumbered when there was none. A held run's journal is applied
+  whatever its number until a commit names it in `adoptedJournals`.
+  Rollback to an
+  older build with work pending is not supported: the 0.5 releases prune
+  unnamed buffers. 1bb8787 reads the current journal as damaged and
+  scans, so it reopens every unnamed buffer, but it can leave a reopened
+  closed tab on the closed list.
 - `Scripts/session-check.sh` checks it end to end (kill -9 and normal quit).
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
