@@ -1158,14 +1158,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// One failure can pass (the retry may work); a second in a row means
     /// unsaved work isn't being backed up: every text tab says so, with
     /// Save As, until a save writes everything (buffers and session).
-    /// The notice stays: Dismiss hides it on that tab only until the next
+    /// The notice is in a bar of its own (`backupBar`), so a recovery or
+    /// file notice on the same tab never hides it, and it never hides
+    /// one. It stays: Dismiss hides it on that tab only until the next
     /// failed save.
     func noteSessionSave(failure: String?) {
         guard let failure else {
             Self.failedSessionSaves = 0
-            guard let shown = Self.backupNotice else { return }
+            guard Self.backupNotice != nil else { return }
             Self.backupNotice = nil
-            for t in tabs where t.noticeBar?.isHidden == false && t.noticeBar?.label.stringValue == shown { t.noticeBar?.isHidden = true }
+            for t in tabs { t.backupBar?.isHidden = true }
             FileHandle.standardError.write(Data("session: saving again, backup notice cleared\n".utf8))
             return
         }
@@ -1173,14 +1175,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         guard Self.failedSessionSaves >= 2 else { return }
         let text = String(localized: "Unsaved work isn’t being backed up: Owlink can’t save its session (\(failure)). It keeps trying. Save your tabs with File › Save As… to keep them.")
         if Self.backupNotice == nil { FileHandle.standardError.write(Data("session: backup notice: \(failure)\n".utf8)) }
-        let previous = Self.backupNotice
         Self.backupNotice = text
         for t in tabs {
-            let label = t.noticeBar?.isHidden == false ? t.noticeBar?.label.stringValue : nil
-            if label == text { continue }
-            // Another notice showing (not an older one of these): left alone.
-            if label != nil, label != previous { continue }
-            t.showNotice(text, buttons: [(String(localized: "Save As…"), { [weak t] in _ = t?.saveAs() })])
+            if t.backupBar?.isHidden == false, t.backupBar?.label.stringValue == text { continue }
+            let bar = t.noticeBar(\.backupBar, symbol: "exclamationmark.triangle")
+            bar.show(text, buttons: [
+                (String(localized: "Save As…"), { [weak t] in _ = t?.saveAs() }),
+                (String(localized: "Dismiss"), { [weak bar] in bar?.isHidden = true }),
+            ])
+            bar.setAccessibilityLabel(text)
         }
     }
 

@@ -237,6 +237,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// "This file isn’t valid UTF-8…" and "mixed line endings" (FileNotices.swift).
     var encodingBar: NoticeBar?
     var lineEndingBar: NoticeBar?
+    /// "Unsaved work isn’t being backed up" (AppDelegate.noteSessionSave):
+    /// a bar of its own, so another notice never hides it.
+    var backupBar: NoticeBar?
     /// Keep / Keep Mixed was chosen: the bar stays away for this tab.
     var encodingNoticeKept = false
     var lineEndingNoticeKept = false

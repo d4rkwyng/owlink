@@ -733,13 +733,30 @@ extension DevChecks {
         sized(file)
         app.newTab(nil)
         let untitled = app.tabs.last!
+        // A tab already showing another notice (a recovered tab's, say).
+        app.newTab(nil)
+        let other = app.tabs.last!
+        let otherNotice = "A notice this tab already shows."
+        let savedAs = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("backup-fail-saved-\(getpid()).txt")
+        // In either bar, on screen: not hidden itself, nor in a hidden view, laid out with some height.
+        func visible(_ bar: NoticeBar?) -> Bool {
+            guard let bar, !bar.isHiddenOrHasHiddenAncestor, bar.window != nil else { return false }
+            bar.window?.layoutIfNeeded()
+            return bar.frame.height > 0
+        }
         func says(_ t: EditorWindowController) -> Bool {
-            t.noticeBar?.isHidden == false && t.noticeBar?.label.stringValue.contains("isn’t being backed up") == true
+            [t.backupBar, t.noticeBar].contains { visible($0) && $0?.label.stringValue.contains("isn’t being backed up") == true }
+        }
+        func saysOnly(_ t: EditorWindowController) -> NoticeBar? {
+            [t.backupBar, t.noticeBar].compactMap { $0 }.first { visible($0) && $0.label.stringValue.contains("isn’t being backed up") }
         }
         run([
             sync {
                 expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
                 expect(AppDelegate.sessionRetryDelay <= 3, "a short retry for this check", "\(AppDelegate.sessionRetryDelay)")
+                focus(other)
+                type("kept by Save As")
+                other.showNotice(otherNotice, buttons: [])
                 focus(untitled)
                 type("typed while the disk is full")
                 focus(file)
@@ -763,8 +780,23 @@ extension DevChecks {
             sync {
                 expect(app.backupNoticeShown, "then unsaved work isn't being backed up")
                 expect(says(file) && says(untitled), "every text tab says so", file.noticeBar?.label.stringValue ?? "-")
-                expect(file.noticeBar?.button("Save As…") != nil, "with Save As")
-                expect(file.noticeBar?.button("Dismiss") != nil, "and Dismiss (it is not modal)")
+                expect(saysOnly(file)?.button("Save As…") != nil, "with Save As")
+                expect(saysOnly(file)?.button("Dismiss") != nil, "and Dismiss (it is not modal)")
+                focus(other)
+                expect(other.window?.isVisible == true && says(other), "a tab already showing another notice says so too, on screen",
+                       "backup bar: \(other.backupBar.map { "\($0.isHiddenOrHasHiddenAncestor ? "hidden" : "shown") \($0.frame.height)" } ?? "none")")
+                expect(visible(other.noticeBar) && other.noticeBar?.label.stringValue == otherNotice, "and still shows its own notice",
+                       other.noticeBar?.label.stringValue ?? "-")
+                // Its Save As works from there (the check chooses the place).
+                let button = saysOnly(other)?.button("Save As…")
+                expect(button?.isEnabled == true, "that tab's Save As is there and enabled")
+                EditorWindowController.checkSaveAsURL = savedAs
+                button?.performClick(nil)
+                expect(EditorWindowController.checkSaveAsURL == nil, "Save As… ran")
+                expect((try? String(contentsOf: savedAs, encoding: .utf8)) == "kept by Save As", "and wrote the tab's text",
+                       (try? String(contentsOf: savedAs, encoding: .utf8)) ?? "-")
+                EditorWindowController.checkSaveAsURL = nil
+                try? FileManager.default.removeItem(at: savedAs)
             },
             waitFor("more retries fail", 8) { app.sessionSaveFailures >= 3 },
             sync {
@@ -776,7 +808,8 @@ extension DevChecks {
                 expect(app.store.readBuffer(file.doc.id) == "on disk edited\n", "a save that works writes the text",
                        app.store.readBuffer(file.doc.id) ?? "-")
                 expect(app.store.load()?.allTabs.contains { $0.id == untitled.doc.id && $0.hasBuffer } == true, "and the session names both tabs")
-                expect(!says(file) && !says(untitled), "and the notice goes from every tab")
+                expect(!says(file) && !says(untitled) && !says(other), "and the notice goes from every tab")
+                expect(visible(other.noticeBar) && other.noticeBar?.label.stringValue == otherNotice, "the other notice stays")
             },
         ])
     }
