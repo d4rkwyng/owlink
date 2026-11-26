@@ -159,6 +159,10 @@ final class EditorSpelling {
 extension EditorTextView {
     /// Every batch of continuous-checking results: only misspellings in
     /// scope are kept (see EditorSpelling). Recorded for the checks.
+    /// The results' ranges can be relative to `range` (TextKit 2 hands
+    /// them over so when the pass doesn't start at the top of the text):
+    /// the scope and the record use document offsets, AppKit gets the
+    /// results it handed over.
     override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange,
                                             types checkingTypes: NSTextCheckingTypes,
                                             options: [NSSpellChecker.OptionKey: Any] = [:],
@@ -170,11 +174,18 @@ extension EditorTextView {
             return
         }
         let scope = spelling.scope(for: range)
-        let kept = results.filter { r in
-            r.resultType != .spelling || spelling.scopeContains(r.range, in: scope)
+        let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range))
+        var kept: [NSTextCheckingResult] = []
+        var marked: [NSRange] = []
+        for (r, d) in zip(results, inDocument) {
+            guard r.resultType == .spelling else { kept.append(r); continue }
+            guard spelling.scopeContains(d, in: scope) else { continue }
+            kept.append(r)
+            marked.append(d)
         }
-        markedMisspellings.removeAll { NSIntersectionRange($0, range).length > 0 || NSMaxRange($0) > (string as NSString).length }
-        markedMisspellings += kept.filter { $0.resultType == .spelling }.map(\.range)
+        let length = (string as NSString).length
+        markedMisspellings.removeAll { NSIntersectionRange($0, range).length > 0 || NSMaxRange($0) > length }
+        markedMisspellings += marked
         super.handleTextCheckingResults(kept, forRange: range, types: checkingTypes, options: options,
                                         orthography: orthography, wordCount: wordCount)
     }

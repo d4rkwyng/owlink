@@ -2305,7 +2305,12 @@ inside `SpellScope.ranges`: prose in Plain Text and Markdown (minus code,
 links and markup tokens), only comments and strings in code, nothing in
 data (`SpellScope.checks`: JSON, YAML, TOML/INI/.env, XML, and CSV/TSV
 files; checking is off for those tabs, so no underlines and no typo
-hint). The marks are
+hint). On TextKit 2 a pass that doesn't start at the top of the text
+hands its results over relative to the checked range (`{15, 4}` for a
+word 15 characters into `{14875, 1215}`); the scope test and the record
+use document offsets (`TextCheckingOffset`: relative when every result
+fits within the checked range's length). Until 0.6 the results were read
+as document offsets, so nothing scrolled to was ever marked. The marks are
 the text view's spelling state, a drawing attribute, so text colours are
 never touched; suggestions, Learn and Ignore are the standard context menu.
 Check Document Now walks our scope (the system's would stop on
