@@ -42,6 +42,10 @@ import WebKit
 ///   CEDRIC_TEST_EARLY_CLOSE=1     close the selected tab 0.5 s in, before deferred tabs are built
 ///   CEDRIC_TEST_EARLY_REOPEN=1    reopen the newest closed tab 0.5 s in, likewise
 ///   CEDRIC_SESSION_DUMP=1         print the restored tabs and closed tabs, and quit
+///   CEDRIC_TEST_ABORT_AFTER=2     abort() this many seconds in: a crash, no quit path (crash-check)
+///   CEDRIC_TEST_SAVE_PAUSE=/tmp/m ⌘S the front tab CEDRIC_TEST_SAVE_PAUSE_AFTER s in (default 3) and
+///                                 hold the write half way: the marker gets the bytes written, then the
+///                                 save waits for the kill (crash-check)
 ///   CEDRIC_TEST_SAVE_AS_DIR=dir   with the dump: Save As each mixed-endings tab into dir (its name), the real write
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
 ///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
@@ -158,6 +162,29 @@ enum DevHooks {
             app.newTab(nil)
             if let tab = app.tabs.last { tab.textView.insertText(t, replacementRange: NSRange(location: 0, length: 0)) }
         }
+        if env["CEDRIC_TEST_TYPE"] != nil || env["CEDRIC_TEST_TYPE_UNTITLED"] != nil {
+            // When the typing happened, for crash-check's "killed at once".
+            print(String(format: "typed: t=%.3f", now()))
+            fflush(stdout)
+        }
+        // Crash check: a real crash (SIGABRT), none of the quit path's saving.
+        if let delay = env["CEDRIC_TEST_ABORT_AFTER"].flatMap(Double.init) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { abort() }
+        }
+        // Crash check: ⌘S on the front tab, held half way through writing
+        // the new file (DocumentWrite.Faults.pauseAfter) until the kill.
+        if let marker = env["CEDRIC_TEST_SAVE_PAUSE"], let tab = app.currentTab ?? app.tabs.last {
+            let delay = env["CEDRIC_TEST_SAVE_PAUSE_AFTER"].flatMap(Double.init) ?? 3
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak tab] in
+                guard let tab else { return }
+                let half = (tab.doc.encoded(tab.text)?.count ?? 2) / 2
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(pauseAfter: half, paused: { n in
+                    try? Data("\(n)\n".utf8).write(to: URL(fileURLWithPath: marker))
+                    while true { sleep(60) }
+                })
+                _ = tab.save()
+            }
+        }
         // Session check: detach the front tab's preview to this frame ("x,y,w,h").
         if let f = env["CEDRIC_TEST_DETACH_PREVIEW"]?.split(separator: ",").compactMap({ Double($0) }), f.count == 4,
            let tab = app.currentTab ?? app.tabs.last {
@@ -245,6 +272,21 @@ enum DevHooks {
             let earlySplits = app.tabs.filter(\.isSplit).count
             AfterFirstFrame.run { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 // Windows in on-screen order, tabs in tab-bar order.
+                // crash-check: each tab's window, whole text (SHA-256 of
+                // its UTF-8 and its UTF-16 length), selection, large mode,
+                // and the notices it shows.
+                for (w, group) in app.tabGroups().enumerated() {
+                    for t in group {
+                        let text = t.text
+                        let sel = t.primaryTextView.selectedRange()
+                        print("exact: win=\(w) name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) "
+                              + "sha=\(FileReplace.sha256(Data(text.utf8)).map { String(format: "%02x", $0) }.joined()) len=\((text as NSString).length) "
+                              + "sel=\(sel.location),\(sel.length) large=\(t.largeReason.map { "\($0)" } ?? "-")")
+                        let disk = t.diskBar.flatMap { $0.isHidden ? nil : $0.label.stringValue } ?? "-"
+                        let info = t.noticeBar.flatMap { $0.isHidden ? nil : $0.label.stringValue } ?? "-"
+                        print("notice: name=\(t.doc.displayName) missing=\(t.doc.missingOnDisk) disk=\(disk) info=\(info)")
+                    }
+                }
                 for t in app.tabGroups().joined() {
                     let body = t.text.replacingOccurrences(of: "\n", with: "\\n")
                     print("tab: name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) language=\(t.doc.language.rawValue) text=\(body.prefix(60))")
