@@ -158,7 +158,8 @@ public enum WikiLinks {
         while i < caret {
             let c = b[i]
             if let o = open {
-                if c == lb || c == nl || i - o > maxBody { open = nil; continue }
+                // A `[`, or a backtick (a code span may start there), ends the name.
+                if c == lb || c == tick || c == nl || i - o > maxBody { open = nil; continue }
                 if c == rb {
                     open = nil
                     i += (i + 1 < caret && b[i + 1] == rb) ? 2 : 1

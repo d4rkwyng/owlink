@@ -62,6 +62,8 @@ private func targets(_ line: String) -> [String] { WikiLinks.links(inLine: line)
         // In a code span, closed or still being typed.
         #expect(WikiLinks.typing(inLine: "`[[x", caret: 4) == nil)
         #expect(WikiLinks.typing(inLine: "`a` [[x", caret: 7) == .init(start: 6, query: "x"))
+        // An unclosed [[ before a code span being typed.
+        #expect(WikiLinks.typing(inLine: "[[zz `[[", caret: 8) == nil)
         #expect(WikiLinks.typing(inLine: "[[[x", caret: 4) == .init(start: 3, query: "x"))
         // Caret before the `]]` already there.
         #expect(WikiLinks.typing(inLine: "[[Al]]", caret: 4) == .init(start: 2, query: "Al"))
