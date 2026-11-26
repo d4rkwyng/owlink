@@ -86,6 +86,24 @@ import Testing
         #expect(MarkdownRules.rewrite("a.md", to: "new b.md", encode: false) == "new b.md")
     }
 
+    /// Astra batch 9b: Markdown and images in a folder whose name starts
+    /// with a combining mark, first-level and nested, are listed by their
+    /// own paths (a text prefix test fused "folder/" and the mark and
+    /// dropped them); a sibling named folder + mark isn't.
+    @Test func folderScanKeepsCombiningMarkFolders() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("owl-scan-\(UUID().uuidString)")
+        let dir = base.appendingPathComponent("doc")
+        defer { try? FileManager.default.removeItem(at: base) }
+        let fm = FileManager.default
+        for p in ["doc/\u{301}m/a.md", "doc/\u{301}m/i.png", "doc/s/\u{301}n/b.md", "doc/c.md", "doc\u{301}/out.md"] {
+            let u = base.appendingPathComponent(p)
+            try fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("x".utf8).write(to: u)
+        }
+        let got = Set(OwlFileProbe.scan(folder: dir).map { Array($0.utf8) })
+        #expect(got == Set(["\u{301}m/a.md", "\u{301}m/i.png", "s/\u{301}n/b.md", "c.md"].map { Array($0.utf8) }))
+    }
+
     @Test func folderScanIsBoundedAndSkipsHiddenAndInstalledCopies() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("owl-scan-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
