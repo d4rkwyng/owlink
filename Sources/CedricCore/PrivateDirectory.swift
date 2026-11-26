@@ -101,7 +101,13 @@ public enum PrivateDirectory {
     /// are both there. Writes made durable one after another reach the
     /// disk in that order. A failed flush or close throws, and the old file
     /// stays. `failSync` (check builds): the flush fails, as on a dying disk.
-    public static func writePrivateFile(_ data: Data, to url: URL, durable: Bool = false, failSync: Bool = false) throws {
+    /// A folder flush that fails after the rename throws `Unconfirmed`:
+    /// the new file is in place (readers see it) but may not survive a
+    /// power loss, so the caller can't treat the write as either done or
+    /// not done. `syncFolder` flushes the folder (default
+    /// `PrivateDirectory.syncFolder`; the session store's injects failures).
+    public static func writePrivateFile(_ data: Data, to url: URL, durable: Bool = false, failSync: Bool = false,
+                                        syncFolder: ((String) throws -> Void)? = nil) throws {
         let dir = url.deletingLastPathComponent().path
         var template = Array((dir + "/." + url.lastPathComponent + ".XXXXXX").utf8CString)
         let fd = mkstemp(&template)
@@ -126,7 +132,16 @@ public enum PrivateDirectory {
             unlink(tmp)
             throw failure(code)
         }
-        if durable { try syncFolder(dir) }
+        if durable {
+            do { try (syncFolder ?? Self.syncFolder)(dir) } catch { throw Unconfirmed(underlying: error) }
+        }
+    }
+
+    /// A durable replace whose rename happened but whose folder flush
+    /// failed (`writePrivateFile`).
+    public struct Unconfirmed: Error, LocalizedError {
+        public let underlying: Error
+        public var errorDescription: String? { underlying.localizedDescription }
     }
 
     /// The folder's entries (a rename, an unlink) on the disk itself.

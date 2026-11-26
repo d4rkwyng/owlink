@@ -353,7 +353,8 @@ public final class SessionStore: @unchecked Sendable {
     /// naming them is written, and the session before the journal is
     /// removed or anything pruned.
     private func writeDurably(_ data: Data, to url: URL) throws {
-        try PrivateDirectory.writePrivateFile(data, to: url, durable: true, failSync: checkFailSync)
+        try PrivateDirectory.writePrivateFile(data, to: url, durable: true, failSync: checkFailSync,
+                                              syncFolder: { [unowned self] in try self.syncFolder($0) })
     }
     /// Check builds only: runs just before a session is committed while
     /// journaled buffers or reopened tabs wait for it (crash-check kills
@@ -667,7 +668,22 @@ public final class SessionStore: @unchecked Sendable {
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
         let generation = committedGeneration + 1
-        try writeDurably(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
+        do {
+            try writeDurably(enc.encode(Manifest(session: s, generation: generation)), to: sessionFile)
+        } catch let e as PrivateDirectory.Unconfirmed {
+            // Renamed into place, not confirmed on the disk: session.json
+            // is this commit now and may be the one before after a power
+            // loss. Either way the next journal must outrank it, so it
+            // counts as committed for numbering (a journal numbered above
+            // the commit on disk is always applied). For the rest, what
+            // either commit could be: a buffer counts as named only if
+            // both name it, a tab as closed if either lists it. The
+            // journal stays (it may still be needed), and nothing is pruned.
+            committedGeneration = generation
+            committed.formIntersection(s.bufferIDs)
+            committedClosed.formUnion((s.closedTabs ?? []).map(\.id))
+            throw e
+        }
         committedGeneration = generation
         committed = s.bufferIDs
         committedClosed = Set((s.closedTabs ?? []).map(\.id))

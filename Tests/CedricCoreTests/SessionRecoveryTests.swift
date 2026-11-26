@@ -311,6 +311,35 @@ import Testing
         #expect(s.readBuffer(a.id) == "confirmed")
     }
 
+    /// A commit renamed into place whose folder flush then fails: the
+    /// writer can't know which commit is on disk. A new tab written next
+    /// must come back after a kill whether session.json is that commit
+    /// (it was in place) or the one before (it was lost with the flush):
+    /// its journal mustn't be numbered as spent by the commit on disk.
+    @Test func aCommitWhoseFlushFailsAfterItsRenameDoesntSpendTheNextJournal() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s.writeBuffer(a.id, text: "a")
+        try s.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let before = try Data(contentsOf: dir.appendingPathComponent("session.json"))
+        s.checkFailFolderSync = true
+        #expect(throws: (any Error).self) { try s.save(Session(windows: [SessionWindow(tabs: [a])], untitledCounter: 1)) }
+        s.checkFailFolderSync = false
+        #expect(s.load()?.untitledCounter == 1, "the unconfirmed commit is in place")
+        let b = UUID()
+        try s.writeBuffer(b, text: "a new tab after the unconfirmed commit")
+        // Killed here. session.json as the rename left it:
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [b], "the new tab comes back over the unconfirmed commit")
+        // Or as a power loss could leave it, the commit before:
+        try before.write(to: dir.appendingPathComponent("session.json"))
+        guard case .session(_, let again) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(again == [b], "and over the commit before it")
+        #expect(store(dir).readBuffer(b) == "a new tab after the unconfirmed commit")
+    }
+
     /// First use makes the store's folders (Cedric, Session): each new
     /// folder's entry is flushed through its parent, and a flush that
     /// fails fails the write (nothing counts as kept in a folder whose
