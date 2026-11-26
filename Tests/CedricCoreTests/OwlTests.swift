@@ -33,7 +33,7 @@ func context(_ text: String, language: String = "plain") -> OwlContext { window(
 @Suite final class OwlCoordinatorTests {
     let clock = FakeClock()
     let suiteName = TestDefaults.name("cedric-owl-test-")
-    var defaults: UserDefaults { UserDefaults(suiteName: suiteName)! }
+    var defaults: UserDefaults { TestDefaults.defaults(suiteName) }
 
     deinit { TestDefaults.remove(suiteName) }
 

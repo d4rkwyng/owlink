@@ -9,7 +9,7 @@ import Testing
 @Suite final class OwlRecentReplayTests {
     let clock = FakeClock()
     let suiteName = TestDefaults.name("cedric-owl-test-")
-    var defaults: UserDefaults { UserDefaults(suiteName: suiteName)! }
+    var defaults: UserDefaults { TestDefaults.defaults(suiteName) }
 
     deinit { TestDefaults.remove(suiteName) }
 
