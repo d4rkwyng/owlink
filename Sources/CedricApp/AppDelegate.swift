@@ -29,7 +29,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var certificateTabs: [CertificateTabController] = []
     let store = SessionStore(directory: SessionStore.defaultDirectory())
     private let env = DevEnvironment.values
+    /// The trailing save: 1.5 s after the last change (scheduleSessionSave).
     private var sessionTimer: Timer?
+    /// The leading save: the first change after a quiet spell, a few ms
+    /// on. Armed apart from the trailing one, so later changes never
+    /// cancel or postpone it.
+    private var leadingSaveTimer: Timer?
+    /// What went wrong at launch reading the last session (shown on the
+    /// front tab: `noteRecoveryProblem`).
+    private var recoveryProblems: [String] = []
     /// When the last session save started (system uptime).
     private var lastSessionSave: TimeInterval = -.infinity
     /// A first save after a quiet spell is waiting for the first frame.
@@ -65,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Caught, not ignored: git and other programs Owlink starts get
         // the default action back.
         DocumentWrite.catchFileSizeSignal()
+        DevHooks.configureSessionStore(store)
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),
@@ -987,13 +996,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func restoreSession() {
         let session: Session
-        switch store.loadForLaunch() {
+        var recovered: [UUID]
+        let load = store.loadForLaunch()
+        if let hold = store.hold {
+            noteRecoveryProblem(String(localized: "Owlink isn’t saving its session this run, and keeps everything in \(store.directory.path) as it is: \(hold). Save your unsaved tabs with File › Save As…."))
+        }
+        switch load {
         case .none: return
-        case .session(let s): session = s
+        case .session(let s, let r): session = s; recovered = r
         case .recover(let aside, let buffers):
-            recoverBuffers(buffers, setAside: aside)
+            recoverBuffers(buffers, setAside: aside, unreadableSession: true)
             return
         }
+        // Buffers an earlier launch couldn't read: again.
+        for id in session.heldBuffers ?? [] {
+            switch store.readBufferResult(id) {
+            case .text: store.releaseBuffer(id); recovered.append(id)
+            case .missing: store.releaseBuffer(id)
+            case .unreadable(let why): noteUnreadableBuffer(id, why)
+            }
+        }
+        defer { if !recovered.isEmpty { recoverBuffers(recovered, setAside: nil, unreadableSession: false) } }
         // Closed tabs past ClosedTabs.keepDays go, with their unsaved text.
         let kept = ClosedTabs.expire(session.closedTabs ?? [])
         closedTabs = kept.list
@@ -1059,12 +1082,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// The session file couldn't be read (SessionStore.loadForLaunch: kept
     /// aside as `setAside`), or there is none but unsaved text is in the
-    /// store: each buffer opens as an unsaved "Recovered" tab, oldest
-    /// first, in one window, caret at the end, with a notice saying what
-    /// happened. Their files, places and the closed list were in the
-    /// session; the text is all the store still has, and it is not lost:
-    /// the tabs are unsaved, so the next save keeps their buffers.
-    private func recoverBuffers(_ ids: [UUID], setAside: URL?) {
+    /// store, or (`unreadableSession` false) the session was read but
+    /// didn't name buffers written just before the app died (the journal)
+    /// or held since an earlier launch: each buffer opens as an unsaved
+    /// "Recovered" tab, oldest first, in one window, caret at the end,
+    /// with a notice saying what happened. Their files, places and the
+    /// closed list were in the session; the text is all the store still
+    /// has, and it is not lost: the tabs are unsaved, so the next save
+    /// keeps their buffers. One that can't be read is held (kept, never
+    /// pruned) and reported.
+    private func recoverBuffers(_ ids: [UUID], setAside: URL?, unreadableSession: Bool) {
         var host: NSWindow?
         var built: [EditorWindowController] = []
         var names: [String] = []
@@ -1079,10 +1106,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if host == nil, let w = tab.window { host = w; orderInAlone(w, key: true) }
         }
         let kept = setAside.map { String(localized: "Its session file was kept as “\($0.lastPathComponent)” in \($0.deletingLastPathComponent().path).") } ?? ""
-        let text = String(localized: "Owlink couldn’t read its last session. This is unsaved text it found from it.") + (kept.isEmpty ? "" : " " + kept)
+        let text = unreadableSession
+            ? String(localized: "Owlink couldn’t read its last session. This is unsaved text it found from it.") + (kept.isEmpty ? "" : " " + kept)
+            : String(localized: "Owlink found this unsaved text in its session folder. Its last session didn’t list it: Owlink stopped while saving it, or couldn’t read it before.")
         for tab in built { tab.showNotice(text, buttons: []) }
         host?.makeKeyAndOrderFront(nil)
         if let setAside { FileHandle.standardError.write(Data("session: unreadable, kept as \(setAside.path); \(built.count) unsaved text(s) recovered\n".utf8)) }
+        if !unreadableSession, !built.isEmpty { FileHandle.standardError.write(Data("session: \(built.count) unsaved text(s) the session didn’t list recovered\n".utf8)) }
+    }
+
+    /// A buffer that is there but couldn't be read: kept (held) and said.
+    private func noteUnreadableBuffer(_ id: UUID, _ why: String) {
+        store.holdBuffer(id)
+        noteRecoveryProblem(String(localized: "Owlink couldn’t read unsaved text from its last session (\(why)). It is kept as \(store.bufferURL(id).path) and tried again next launch."))
+    }
+
+    /// Something launch couldn't recover: on stderr, and on the front tab
+    /// once launch is done (after the notices restored tabs show).
+    private func noteRecoveryProblem(_ text: String) {
+        FileHandle.standardError.write(Data("session: recovery problem: \(text)\n".utf8))
+        recoveryProblems.append(text)
+        guard recoveryProblems.count == 1 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let all = self.recoveryProblems.joined(separator: " ")
+            self.recoveryProblems = []
+            guard let tab = self.currentTab ?? self.tabs.last else { return }
+            let shown = tab.noticeBar.flatMap { $0.isHidden ? nil : $0.label.stringValue }
+            tab.showNotice(shown.map { $0 + " " + all } ?? all, buttons: [])
+        }
     }
 
     /// Builds one saved tab; nil if its file has gone and it had no buffer.
@@ -1095,12 +1147,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return restorePDFTab(st, into: place)
         }
         if st.image != nil || st.office != nil || st.certificate != nil { return restoreViewerTab(st, into: place) }
-        let doc = EditorDocument(id: st.id, fileURL: st.path.map { URL(fileURLWithPath: $0) },
+        var text: String?
+        var held = false
+        if st.hasBuffer {
+            switch store.readBufferResult(st.id) {
+            case .text(let t): text = t
+            case .missing: break
+            case .unreadable(let why):
+                // Kept, never pruned; the tab (if its file is there) gets
+                // another id, so its own writes can't replace that buffer.
+                held = true
+                noteUnreadableBuffer(st.id, why)
+            }
+        }
+        let doc = EditorDocument(id: held ? UUID() : st.id, fileURL: st.path.map { URL(fileURLWithPath: $0) },
                                  untitledName: st.untitledName ?? st.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled"))
         doc.indentation = st.indentation
-        var text: String?
         var binary = false
-        if st.hasBuffer { text = store.readBuffer(st.id) }
         // The text goes into the tab's storage and is let go (shareBytes: no second copy of a big file).
         let fromBuffer = text != nil
         if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding, shareBytes: true) {
@@ -1125,7 +1188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         let tab = makeTab(doc, text: binary ? "" : body, in: place?.host, newWindow: place == nil, show: false, tabIndex: place?.index)
         if binary { tab.holdBinary(body) }
-        if st.hasBuffer { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
+        if st.hasBuffer, !held { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
         tab.updateTitle()
         // Unsaved text for a file deleted or moved while the app was not
         // running: the "deleted or moved" bar, as when it goes while open.

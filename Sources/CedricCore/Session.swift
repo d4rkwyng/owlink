@@ -159,6 +159,10 @@ public struct Session: Codable, Equatable, Sendable {
     /// Files' word goals (the stats popover), by path, most recently set
     /// last (`FileWordGoals`). Nil with none and in sessions before 0.4.0.
     public var wordGoals: [FileWordGoal]?
+    /// Buffers launch found but couldn't read (permissions, an I/O
+    /// error): kept, never pruned, and tried again at the next launch
+    /// (`SessionStore.holdBuffer`). Nil with none and in older sessions.
+    public var heldBuffers: [UUID]?
 
     public init(windows: [SessionWindow], untitledCounter: Int = 0, closedTabs: [SessionTab]? = nil, folder: SessionFolder? = nil,
                 wordGoals: [FileWordGoal]? = nil) {
@@ -170,6 +174,12 @@ public struct Session: Codable, Equatable, Sendable {
     }
 
     public var allTabs: [SessionTab] { windows.flatMap(\.tabs) }
+
+    /// Every tab id whose unsaved text this session keeps in a buffer
+    /// file: open and closed tabs with `hasBuffer`, and held buffers.
+    public var bufferIDs: Set<UUID> {
+        Set(allTabs.filter(\.hasBuffer).map(\.id) + (closedTabs ?? []).filter(\.hasBuffer).map(\.id) + (heldBuffers ?? []))
+    }
 }
 
 /// Whether the last session's open tabs should be restored at launch.
@@ -257,10 +267,39 @@ public struct SessionFolder: Codable, Equatable, Sendable {
 /// Support. Every write is atomic (temp file + rename), so a crash
 /// mid-write leaves the previous version intact; buffers are written
 /// before the session that refers to them.
+///
+/// A buffer the committed `session.json` doesn't name yet (a new tab's
+/// first text, a file's first edit) is first listed in the journal
+/// `pending-buffers.json`, then written. Committing a session clears
+/// the journal. If the app dies in between, the older session still
+/// reads fine, but launch (`loadForLaunch`) finds the journaled buffers
+/// and brings them back instead of leaving them for the next prune.
+/// A buffer that was deliberately let go (its tab saved, discarded or
+/// closed empty) is not in the journal once a session without it has
+/// been committed, so it never comes back.
 public final class SessionStore: @unchecked Sendable {
     public let directory: URL
     private let fm = FileManager.default
     private let lock = NSLock()
+
+    /// Buffer ids the last committed (or launched) session names.
+    private var committed = Set<UUID>()
+    /// Buffer ids written (or being written) since: the journal, in order.
+    private var pending: [UUID] = []
+    /// Buffers launch couldn't read: never pruned, saved in the session.
+    private var held = Set<UUID>()
+    /// Set when launch couldn't make the store safe to write (an unreadable
+    /// session it couldn't keep a copy of, a folder it couldn't list):
+    /// `save` refuses to replace `session.json` and nothing is pruned,
+    /// for the rest of the run. Buffers are still written (journaled).
+    public private(set) var hold: String?
+
+    /// Check builds only (inert otherwise): every write fails, as on a
+    /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
+    public var checkFailWrites = false
+    /// Check builds only: runs just before a session is committed while
+    /// journaled buffers wait for it (crash-check kills the app there).
+    public var checkBeforeCommit: (@Sendable () -> Void)?
 
     public init(directory: URL) {
         self.directory = directory
@@ -275,6 +314,7 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     var sessionFile: URL { directory.appendingPathComponent("session.json") }
+    var journalFile: URL { directory.appendingPathComponent("pending-buffers.json") }
 
     public func bufferURL(_ id: UUID) -> URL { directory.appendingPathComponent("\(id.uuidString).txt") }
 
@@ -289,9 +329,17 @@ public final class SessionStore: @unchecked Sendable {
         directoryReady = true
     }
 
+    private func injectedFailure() throws {
+        if DevEnvironment.checksEnabled, checkFailWrites { throw CocoaError(.fileWriteOutOfSpace) }
+    }
+
     /// The saved session, or nil if there is none or it can't be read.
     public func load() -> Session? {
         lock.lock(); defer { lock.unlock() }
+        return loadUnlocked()
+    }
+
+    private func loadUnlocked() -> Session? {
         guard let data = try? Data(contentsOf: sessionFile),
               let s = try? JSONDecoder().decode(Session.self, from: data),
               s.version <= Session.currentVersion else { return nil }
@@ -302,14 +350,20 @@ public final class SessionStore: @unchecked Sendable {
     public enum LaunchLoad: Equatable, Sendable {
         /// No session and no unsaved text: a first launch.
         case none
-        case session(Session)
+        /// The session, with any journaled buffer it already names as a
+        /// tab marked `hasBuffer`, and `recovered`: journaled buffers it
+        /// doesn't name at all (written, then the app died before the
+        /// session listing them was committed), oldest first. The caller
+        /// opens those as tabs; else the next save's prune deletes them.
+        case session(Session, recovered: [UUID])
         /// No session to restore, but unsaved text in the store that no
         /// session now refers to: the session file couldn't be read
         /// (truncated, not JSON, from a newer version) and was moved aside
-        /// to `setAside` (nil: there was none, or the move failed), or the
-        /// app died between writing its first buffers and the session that
-        /// lists them. `buffers`: those buffers' tab ids, oldest first. The
-        /// caller opens them as tabs; else the next save's prune deletes them.
+        /// to `setAside` (nil: there was none, or it couldn't be moved or
+        /// copied: then `hold` is set), or the app died between writing
+        /// its first buffers and the session that lists them. `buffers`:
+        /// those buffers' tab ids, oldest first. The caller opens them as
+        /// tabs; else the next save's prune deletes them.
         case recover(setAside: URL?, buffers: [UUID])
     }
 
@@ -317,10 +371,36 @@ public final class SessionStore: @unchecked Sendable {
     /// can't be read is never left for the next save to overwrite, and
     /// its unsaved text is never left for the prune to delete: the file
     /// is renamed `session.unreadable-<date>.json` (kept, beside the
-    /// buffers) and the buffers are returned for the caller to reopen.
+    /// buffers; copied there if it can't be moved) and the buffers are
+    /// returned for the caller to reopen. When neither works, or the
+    /// folder can't be listed, `hold` says why and the store neither
+    /// replaces the session file nor prunes until the next launch.
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
-        if let s = load() { return .session(s) }
         lock.lock(); defer { lock.unlock() }
+        let journal = readJournal()
+        pending = journal.ids
+        if let s = loadUnlocked() {
+            committed = s.bufferIDs
+            held = Set(s.heldBuffers ?? [])
+            var candidates = journal.ids
+            // A journal that can't be read: every buffer the session
+            // doesn't name could be one it listed. Bringing back one
+            // that was let go beats deleting one that wasn't.
+            if journal.damaged {
+                do { candidates = try bufferFiles() } catch { hold = "the session folder couldn’t be listed: \(error.localizedDescription)" }
+            }
+            let r = Self.applyJournal(s, journal: candidates) { fm.fileExists(atPath: bufferURL($0).path) }
+            return .session(r.session, recovered: r.recovered)
+        }
+        let listed: [UUID]
+        do {
+            listed = try bufferFiles()
+        } catch {
+            // Which buffers are here is unknown: keep the session file
+            // where it is and every buffer, and write neither over.
+            hold = "the session folder couldn’t be listed: \(error.localizedDescription)"
+            return .recover(setAside: nil, buffers: [])
+        }
         var aside: URL?
         if fm.fileExists(atPath: sessionFile.path) {
             let f = DateFormatter()
@@ -328,21 +408,76 @@ public final class SessionStore: @unchecked Sendable {
             f.timeZone = TimeZone(identifier: "UTC")
             f.dateFormat = "yyyyMMdd-HHmmss"
             let stem = "session.unreadable-\(f.string(from: now))"
+            var failure: Error?
             for n in 1...100 {
                 let url = directory.appendingPathComponent(n == 1 ? "\(stem).json" : "\(stem)-\(n).json")
                 if fm.fileExists(atPath: url.path) { continue }
-                if (try? fm.moveItem(at: sessionFile, to: url)) != nil { aside = url }
+                do {
+                    try fm.moveItem(at: sessionFile, to: url)
+                    aside = url
+                } catch {
+                    // Not movable (a locked file): a copy keeps it as well.
+                    do { try fm.copyItem(at: sessionFile, to: url); aside = url } catch let e { failure = e }
+                }
                 break
             }
+            if aside == nil {
+                hold = "the unreadable session file couldn’t be kept aside"
+                    + (failure.map { ": \($0.localizedDescription)" } ?? "")
+            }
         }
-        let buffers = bufferFiles()
-        guard aside != nil || !buffers.isEmpty else { return .none }
-        return .recover(setAside: aside, buffers: buffers)
+        guard aside != nil || hold != nil || !listed.isEmpty else { return .none }
+        return .recover(setAside: aside, buffers: listed)
     }
 
-    /// The buffer files in the store, oldest first.
-    private func bufferFiles() -> [UUID] {
-        guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+    /// `session` with the journaled ids in `journal` (whose buffer files
+    /// exist) put back: an open tab gets `hasBuffer`; a closed tab
+    /// without it (reopened and edited since) opens again, in a window
+    /// of its own; any other id is returned in `recovered`.
+    public static func applyJournal(_ session: Session, journal: [UUID], bufferExists: (UUID) -> Bool)
+        -> (session: Session, recovered: [UUID]) {
+        var s = session
+        var recovered: [UUID] = []
+        var reopened: [SessionTab] = []
+        let held = Set(s.heldBuffers ?? [])
+        var seen = Set<UUID>()
+        for id in journal where seen.insert(id).inserted && bufferExists(id) && !held.contains(id) {
+            if let w = s.windows.firstIndex(where: { $0.tabs.contains { $0.id == id } }),
+               let t = s.windows[w].tabs.firstIndex(where: { $0.id == id }) {
+                s.windows[w].tabs[t].hasBuffer = true
+                continue
+            }
+            if let c = s.closedTabs?.firstIndex(where: { $0.id == id }) {
+                guard s.closedTabs?[c].hasBuffer == false, var tab = s.closedTabs?.remove(at: c) else { continue }
+                tab.hasBuffer = true
+                tab.closed = nil
+                reopened.append(tab)
+                continue
+            }
+            recovered.append(id)
+        }
+        if s.closedTabs?.isEmpty == true { s.closedTabs = nil }
+        if !reopened.isEmpty { s.windows.append(SessionWindow(tabs: reopened)) }
+        return (s, recovered)
+    }
+
+    /// The journal's ids; `damaged` if the file is there but can't be read.
+    private func readJournal() -> (ids: [UUID], damaged: Bool) {
+        guard fm.fileExists(atPath: journalFile.path) else { return ([], false) }
+        guard let data = try? Data(contentsOf: journalFile),
+              let strings = try? JSONDecoder().decode([String].self, from: data) else { return ([], true) }
+        return (strings.compactMap(UUID.init(uuidString:)), false)
+    }
+
+    /// The buffer files in the store, oldest first. Throws if the folder
+    /// is there but can't be listed (none at all: no buffers).
+    private func bufferFiles() throws -> [UUID] {
+        let files: [URL]
+        do {
+            files = try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey])
+        } catch let e as CocoaError where e.code == .fileReadNoSuchFile {
+            return []
+        }
         let found: [(UUID, Date)] = files.compactMap { f in
             guard f.pathExtension == "txt", let id = UUID(uuidString: f.deletingPathExtension().lastPathComponent) else { return nil }
             let date = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
@@ -351,38 +486,111 @@ public final class SessionStore: @unchecked Sendable {
         return found.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0.uuidString < $1.0.uuidString }.map(\.0)
     }
 
+    /// Commits `session` (with the held buffers): then the journal is
+    /// cleared. Throws, writing nothing, while `hold` is set.
     public func save(_ session: Session) throws {
         lock.lock(); defer { lock.unlock() }
+        if let hold { throw SessionStoreError.held(hold) }
         try ensureDirectory()
+        try injectedFailure()
+        var s = session
+        s.heldBuffers = held.isEmpty ? nil : held.sorted { $0.uuidString < $1.uuidString }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try PrivateDirectory.writePrivateFile(enc.encode(session), to: sessionFile)
+        if DevEnvironment.checksEnabled, !pending.isEmpty, let hook = checkBeforeCommit { hook() }
+        try PrivateDirectory.writePrivateFile(enc.encode(s), to: sessionFile)
+        committed = s.bufferIDs
+        // Every buffer written before this session's snapshot is named in
+        // it or was let go (writes are serialized with saves).
+        if !pending.isEmpty || fm.fileExists(atPath: journalFile.path) {
+            pending = []
+            try? fm.removeItem(at: journalFile)
+        }
     }
 
     public func writeBuffer(_ id: UUID, text: String) throws {
         lock.lock(); defer { lock.unlock() }
         try ensureDirectory()
+        try injectedFailure()
+        if !committed.contains(id), !pending.contains(id) {
+            // Journaled before the buffer exists, so a buffer is never on
+            // disk unnamed by both the session and the journal.
+            try PrivateDirectory.writePrivateFile(JSONEncoder().encode((pending + [id]).map(\.uuidString)), to: journalFile)
+            pending.append(id)
+        }
         try PrivateDirectory.writePrivateFile(Data(text.utf8), to: bufferURL(id))
     }
 
+    /// What reading a buffer found.
+    public enum BufferRead: Equatable, Sendable {
+        case text(String)
+        /// No such file.
+        case missing
+        /// It is there but couldn't be read: keep it (`holdBuffer`).
+        case unreadable(String)
+    }
+
+    public func readBufferResult(_ id: UUID) -> BufferRead {
+        do {
+            return .text(String(decoding: try Data(contentsOf: bufferURL(id)), as: UTF8.self))
+        } catch let e as CocoaError where e.code == .fileReadNoSuchFile {
+            return .missing
+        } catch {
+            return .unreadable(error.localizedDescription)
+        }
+    }
+
     public func readBuffer(_ id: UUID) -> String? {
-        guard let data = try? Data(contentsOf: bufferURL(id)) else { return nil }
-        return String(decoding: data, as: UTF8.self)
+        if case .text(let t) = readBufferResult(id) { return t }
+        return nil
+    }
+
+    /// Keeps a buffer that couldn't be read: never pruned, named in every
+    /// session saved from now on, tried again at the next launch.
+    public func holdBuffer(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        held.insert(id)
+    }
+
+    /// A held buffer was read after all (or has gone): an ordinary one again.
+    public func releaseBuffer(_ id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        held.remove(id)
+    }
+
+    public var heldBuffers: Set<UUID> {
+        lock.lock(); defer { lock.unlock() }
+        return held
     }
 
     public func removeBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
+        guard !held.contains(id) else { return }
         try? fm.removeItem(at: bufferURL(id))
     }
 
-    /// Deletes buffer files no tab refers to.
+    /// Deletes buffer files no tab refers to (called right after a
+    /// commit). Never held ones, and nothing at all while `hold` is set.
     public func pruneBuffers(keeping ids: Set<UUID>) {
         lock.lock(); defer { lock.unlock() }
+        guard hold == nil else { return }
+        let keep = ids.union(held)
         guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
         for f in files where f.pathExtension == "txt" {
-            if let id = UUID(uuidString: f.deletingPathExtension().lastPathComponent), !ids.contains(id) {
+            if let id = UUID(uuidString: f.deletingPathExtension().lastPathComponent), !keep.contains(id) {
                 try? fm.removeItem(at: f)
             }
+        }
+    }
+}
+
+public enum SessionStoreError: Error, LocalizedError, Equatable {
+    /// `SessionStore.hold`: the session isn't written this run.
+    case held(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .held(let why): return "Owlink isn’t saving its session this run: \(why)."
         }
     }
 }

@@ -1,0 +1,207 @@
+import Foundation
+import Testing
+@testable import CedricCore
+
+/// The session store across a kill between writing buffers and committing
+/// `session.json` (the journal), and when launch can't read or keep
+/// what it finds (holds).
+@Suite struct SessionRecoveryTests {
+    private func store(_ dir: URL) -> SessionStore { SessionStore(directory: dir) }
+    private let fm = FileManager.default
+
+    // MARK: The journal
+
+    @Test func aBufferWrittenAfterAValidSessionComesBackAfterAKill() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let first = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try first.writeBuffer(a.id, text: "committed text")
+        try first.save(Session(windows: [SessionWindow(tabs: [a])]))
+        // A new tab's first text: written, then the app dies before the
+        // session naming it is committed. The older session still reads.
+        let b = UUID()
+        try first.writeBuffer(b, text: "only copy")
+        #expect(first.load()?.allTabs.map(\.id) == [a.id])
+
+        let relaunch = store(dir)
+        guard case .session(let s, let recovered) = relaunch.loadForLaunch() else { Issue.record("a readable session"); return }
+        #expect(s.allTabs.map(\.id) == [a.id])
+        #expect(recovered == [b])
+        #expect(relaunch.readBuffer(b) == "only copy")
+        // The tab is opened and saved: an ordinary buffer from then on.
+        try relaunch.save(Session(windows: [SessionWindow(tabs: [a, SessionTab(id: b, untitledName: "Recovered", hasBuffer: true)])]))
+        relaunch.pruneBuffers(keeping: [a.id, b])
+        guard case .session(_, let again) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(again.isEmpty)
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("pending-buffers.json").path))
+    }
+
+    @Test func aBufferLetGoIsNotBroughtBack() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        let b = UUID()
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.writeBuffer(b, text: "b, discarded before the next save")
+        // The tab was discarded; the next session doesn't name it, and the
+        // app dies after committing it but before the prune.
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        #expect(s1.readBuffer(b) != nil)
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered.isEmpty)
+    }
+
+    @Test func steadyTypingInATabTheSessionNamesWritesNoJournal() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "1")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        try s1.writeBuffer(a.id, text: "12")
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("pending-buffers.json").path))
+        // Also after a relaunch: what the launched session names counts.
+        let s2 = store(dir)
+        _ = s2.loadForLaunch()
+        try s2.writeBuffer(a.id, text: "123")
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("pending-buffers.json").path))
+    }
+
+    @Test func journaledIdsTheSessionNamesWithoutTextGetTheirBuffer() {
+        let open = SessionTab(path: "/tmp/edited.txt", hasBuffer: false)
+        var closedClean = SessionTab(path: "/tmp/reopened.txt", hasBuffer: false)
+        closedClean.closed = Date()
+        var closedUnsaved = SessionTab(path: "/tmp/closed-unsaved.txt", hasBuffer: true)
+        closedUnsaved.closed = Date()
+        let gone = UUID(), stray = UUID()
+        let session = Session(windows: [SessionWindow(tabs: [open])], closedTabs: [closedClean, closedUnsaved])
+        let r = SessionStore.applyJournal(session, journal: [open.id, closedClean.id, closedUnsaved.id, gone, stray, stray]) { $0 != gone }
+        // The file's first edit: the tab comes back with it.
+        #expect(r.session.windows[0].tabs[0].hasBuffer)
+        // Reopened from the closed list and edited: open again, with it.
+        #expect(r.session.windows.count == 2)
+        #expect(r.session.windows[1].tabs.map(\.id) == [closedClean.id])
+        #expect(r.session.windows[1].tabs[0].hasBuffer && r.session.windows[1].tabs[0].closed == nil)
+        #expect(r.session.closedTabs?.map(\.id) == [closedUnsaved.id])
+        // Named nowhere: recovered, once; a buffer that isn't there: nothing.
+        #expect(r.recovered == [stray])
+    }
+
+    @Test func aDamagedJournalBringsBackEveryUnnamedBuffer() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let b = UUID()
+        try s1.writeBuffer(b, text: "b")
+        try Data("{".utf8).write(to: dir.appendingPathComponent("pending-buffers.json"))
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [b])
+    }
+
+    // MARK: Holds
+
+    @Test func anUnreadableSessionThatCantBeMovedIsCopiedAside() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.immutable: false], ofItemAtPath: dir.appendingPathComponent("session.json").path); try? fm.removeItem(at: dir) }
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("session.json")
+        try Data("{truncated".utf8).write(to: file)
+        try fm.setAttributes([.immutable: true], ofItemAtPath: file.path)
+        let s = store(dir)
+        guard case .recover(let aside?, _) = s.loadForLaunch() else { Issue.record("kept aside (copied)"); return }
+        #expect(try Data(contentsOf: aside) == Data("{truncated".utf8))
+        #expect(s.hold == nil)
+    }
+
+    @Test func anUnreadableSessionThatCantBeKeptHoldsTheStore() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "unsaved")
+        let orphan = UUID()
+        try s1.writeBuffer(orphan, text: "named nowhere")
+        let file = dir.appendingPathComponent("session.json")
+        try Data("{truncated".utf8).write(to: file)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
+        let s = store(dir)
+        guard case .recover(nil, let buffers) = s.loadForLaunch() else { Issue.record("recover, nothing set aside"); return }
+        #expect(Set(buffers) == [a.id, orphan])
+        #expect(s.hold != nil)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        // Writable again: still held for this run. Never overwritten, never pruned.
+        #expect(throws: SessionStoreError.self) { try s.save(Session(windows: [])) }
+        s.pruneBuffers(keeping: [])
+        #expect(try Data(contentsOf: file) == Data("{truncated".utf8))
+        #expect(s.readBuffer(a.id) == "unsaved")
+        #expect(s.readBuffer(orphan) == "named nowhere")
+    }
+
+    @Test func aFolderThatCantBeListedIsLeftAsItIs() throws {
+        let dir = tempDir()
+        defer { try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path); try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = UUID()
+        try s1.writeBuffer(a, text: "unsaved")
+        let file = dir.appendingPathComponent("session.json")
+        try Data("{truncated".utf8).write(to: file)
+        // Search and write, no read: the session file opens, the folder doesn't list.
+        try fm.setAttributes([.posixPermissions: 0o300], ofItemAtPath: dir.path)
+        let s = store(dir)
+        #expect(s.loadForLaunch() == .recover(setAside: nil, buffers: []))
+        #expect(s.hold != nil)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
+        #expect(fm.fileExists(atPath: file.path))
+        #expect(throws: SessionStoreError.self) { try s.save(Session(windows: [])) }
+        s.pruneBuffers(keeping: [])
+        #expect(s.readBuffer(a) == "unsaved")
+        // The next launch, folder readable: the usual recovery.
+        guard case .recover(_?, let buffers) = store(dir).loadForLaunch() else { Issue.record("recovered next launch"); return }
+        #expect(buffers == [a])
+    }
+
+    @Test func aMissingFolderIsAFirstLaunchNotAHold() {
+        let s = store(tempDir())
+        #expect(s.loadForLaunch() == .none)
+        #expect(s.hold == nil)
+    }
+
+    @Test func anUnreadableBufferIsHeldNeverPruned() throws {
+        let dir = tempDir()
+        let s1 = store(dir)
+        let a = UUID()
+        try s1.writeBuffer(a, text: "unsaved")
+        let path = s1.bufferURL(a).path
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path); try? fm.removeItem(at: dir) }
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        guard case .unreadable = s1.readBufferResult(a) else { Issue.record("unreadable"); return }
+        #expect(s1.readBufferResult(UUID()) == .missing)
+        s1.holdBuffer(a)
+        try s1.save(Session(windows: []))
+        s1.pruneBuffers(keeping: [])
+        s1.removeBuffer(a)
+        #expect(fm.fileExists(atPath: path))
+        // Named in the session, so the next launch tries it again.
+        guard case .session(let s, _) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s.heldBuffers == [a])
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        #expect(s1.readBufferResult(a) == .text("unsaved"))
+    }
+
+    @Test func injectedWriteFailuresFailEveryWrite() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        s.checkFailWrites = true
+        #expect(DevEnvironment.checksEnabled)
+        #expect(throws: (any Error).self) { try s.writeBuffer(UUID(), text: "x") }
+        #expect(throws: (any Error).self) { try s.save(Session(windows: [])) }
+        s.checkFailWrites = false
+        try s.save(Session(windows: []))
+    }
+}

@@ -46,6 +46,15 @@ import WebKit
 ///   CEDRIC_TEST_SAVE_PAUSE=/tmp/m ⌘S the front tab CEDRIC_TEST_SAVE_PAUSE_AFTER s in (default 3) and
 ///                                 hold the write half way: the marker gets the bytes written, then the
 ///                                 save waits for the kill (crash-check)
+///   CEDRIC_TEST_TYPE_BURST=a|b    2 s after the first frame (CEDRIC_TEST_TYPE_BURST_DELAY), a new untitled
+///                                 tab: insert "a" and "b" in one turn (two quick changes), then "." every
+///                                 0.1 s until killed (crash-check)
+///   CEDRIC_TEST_HOLD_SESSION_COMMIT=/tmp/m  a session save that wrote a buffer its session doesn't name yet
+///                                 stops before committing session.json: the marker gets the ids, then it
+///                                 waits for the kill (crash-check)
+///   CEDRIC_TEST_SESSION_WRITE_FAIL=1  every session write fails, as on a full disk (crash-check)
+///   CEDRIC_TEST_QUIT_SAVE_CHOICE=keep  answer the "couldn't save your unsaved work" quit alert
+///                                 (keep|saveas|retry|quit) instead of showing it
 ///   CEDRIC_TEST_SAVE_AS_DIR=dir   with the dump: Save As each mixed-endings tab into dir (its name), the real write
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
 ///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
@@ -111,6 +120,18 @@ enum DevHooks {
     /// and close tabs freely), or when a session test asks for it.
     static let allowsQuitOnLastClose = env["CEDRIC_TEST_QUIT_ON_LAST_CLOSE"] == "1"
         || !env.keys.contains { $0.hasPrefix("CEDRIC_") && !launchOnly.contains($0) }
+
+    /// Session-store faults for crash-check, before the first save.
+    static func configureSessionStore(_ store: SessionStore) {
+        guard DevEnvironment.checksEnabled else { return }
+        if env["CEDRIC_TEST_SESSION_WRITE_FAIL"] == "1" { store.checkFailWrites = true }
+        if let marker = env["CEDRIC_TEST_HOLD_SESSION_COMMIT"], !marker.isEmpty {
+            store.checkBeforeCommit = {
+                try? Data("held\n".utf8).write(to: URL(fileURLWithPath: marker))
+                while true { sleep(60) }
+            }
+        }
+    }
 
     static func afterLaunch(_ app: AppDelegate) {
         // The hooks below expect every restored tab to exist now, not
