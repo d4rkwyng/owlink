@@ -232,4 +232,21 @@ import Testing
         let notMine = try FileReplace.plan(q, root: t, candidates: cands, buffers: [FolderTree.PathKey(other): "owl owl unsaved"])
         #expect(notMine.files.first?.disk != nil && notMine.files.first?.edits.count == 1, "planned from disk, not the other spelling's tab")
     }
+
+    /// .gitignore answers are kept per folder by the folder's bytes, as git
+    /// matches them: a folder ignored in the Ohm-sign spelling doesn't make
+    /// the Omega spelling ignored (asked in that order, the cached answer
+    /// was handed to the other spelling).
+    @Test func gitignoreAnswersAreKeptByBytes() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        try fm.createDirectory(at: t.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try Data("\u{2126}/\n".utf8).write(to: t.appendingPathComponent(".gitignore"))
+        let g = GitIgnore(folder: t)
+        #expect(g.isIgnored(relative: "\u{2126}/a.txt", isDirectory: false))
+        #expect(!g.isIgnored(relative: "\u{3A9}/a.txt", isDirectory: false), "another folder to git")
+        let fresh = GitIgnore(folder: t)
+        #expect(!fresh.isIgnored(relative: "\u{3A9}/a.txt", isDirectory: false))
+        #expect(fresh.isIgnored(relative: "\u{2126}/a.txt", isDirectory: false), "either order")
+    }
 }

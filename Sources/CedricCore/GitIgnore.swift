@@ -83,8 +83,11 @@ public final class GitIgnore {
     /// apply (a copy of a repo without its .git).
     public let root: URL
     private let exclude: GitIgnoreRules?
-    private var rules: [String: GitIgnoreRules?] = [:]
-    private var ignoredDirs: [String: Bool] = [:]
+    // By the relative folder's bytes (`FolderTree.PathKey`): a `String`
+    // key gave a canonically equivalent folder (the Ohm sign for Omega)
+    // the other's rules and answer, where git matches bytes.
+    private var rules: [FolderTree.PathKey: GitIgnoreRules?] = [:]
+    private var ignoredDirs: [FolderTree.PathKey: Bool] = [:]
 
     /// `folder`: where the walk starts (symbolic links resolved).
     public init(folder: URL) {
@@ -121,10 +124,11 @@ public final class GitIgnore {
         if isDir.boolValue { return dotGit }
         guard let s = try? String(contentsOf: dotGit, encoding: .utf8), s.hasPrefix("gitdir:") else { return nil }
         let p = s.dropFirst(7).trimmingCharacters(in: .whitespacesAndNewlines)
-        var dir = p.hasPrefix("/") ? URL(fileURLWithPath: p) : repo.appendingPathComponent(p)
+        // Absolute by the first byte, as git and the kernel read it.
+        var dir = p.utf8.first == 0x2f ? URL(fileURLWithPath: p) : repo.appendingPathComponent(p)
         if let common = try? String(contentsOf: dir.appendingPathComponent("commondir"), encoding: .utf8) {
             let c = common.trimmingCharacters(in: .whitespacesAndNewlines)
-            dir = c.hasPrefix("/") ? URL(fileURLWithPath: c) : dir.appendingPathComponent(c)
+            dir = c.utf8.first == 0x2f ? URL(fileURLWithPath: c) : dir.appendingPathComponent(c)
         }
         return dir.standardizedFileURL
     }
@@ -155,12 +159,12 @@ public final class GitIgnore {
     }
 
     private func dirIgnored(_ rel: String) -> Bool {
-        if let d = ignoredDirs[rel] { return d }
+        if let d = ignoredDirs[FolderTree.PathKey(rel)] { return d }
         let comps = FolderTree.components(rel)
         var parentIgnored = false
         if comps.count > 1 { parentIgnored = dirIgnored(comps.dropLast().joined(separator: "/")) }
         let d = parentIgnored || ownDecision(comps, isDirectory: true)
-        ignoredDirs[rel] = d
+        ignoredDirs[FolderTree.PathKey(rel)] = d
         return d
     }
 
@@ -179,7 +183,7 @@ public final class GitIgnore {
     }
 
     private func rulesFor(_ dirRel: String) -> GitIgnoreRules? {
-        if let r = rules[dirRel] { return r }
+        if let r = rules[FolderTree.PathKey(dirRel)] { return r }
         let file = dirRel.isEmpty ? root.appendingPathComponent(".gitignore") : root.appendingPathComponent(dirRel).appendingPathComponent(".gitignore")
         var r: GitIgnoreRules?
         if let data = try? Data(contentsOf: file), data.count < 1_048_576 {
@@ -187,7 +191,7 @@ public final class GitIgnore {
             let parsed = GitIgnoreRules(text)
             r = parsed.patterns.isEmpty ? nil : parsed
         }
-        rules[dirRel] = .some(r)
+        rules[FolderTree.PathKey(dirRel)] = .some(r)
         return r
     }
 
