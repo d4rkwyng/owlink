@@ -1689,7 +1689,11 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 [Dracula Theme](https://draculatheme.com), used under the MIT license.
 
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
-(MIT, © the ggml authors), bundled as `llama.framework`. The Markdown
+(MIT, © the ggml authors), bundled as `llama.framework`. Release builds
+include [Sparkle](https://sparkle-project.org) (MIT, © Andy Matuschak and
+the Sparkle Project contributors) as `Sparkle.framework` for Check for
+Updates…, with its licence in `Owlink.app/Contents/Resources/Sparkle-LICENSE.txt`.
+The Markdown
 preview draws diagrams with [Mermaid](https://github.com/mermaid-js/mermaid)
 (MIT) and math with [KaTeX](https://github.com/KaTeX/KaTeX) (MIT), both
 bundled in the app (versions, sources and checksums in

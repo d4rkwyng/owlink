@@ -8,7 +8,8 @@
 #   Scripts/bundle-app.sh --arch x86_64   one specific architecture
 #   Scripts/bundle-app.sh --no-sign       leave it unsigned
 #   Scripts/bundle-app.sh --out DIR       where "Owlink.app" goes (default: dist)
-#   Scripts/bundle-app.sh --release       a release build: no dev/check switches
+#   Scripts/bundle-app.sh --release       a release build: no dev/check switches,
+#                                         Sparkle.framework embedded
 #
 # By default this is a CHECK build: it compiles with CEDRIC_CHECKS, so the
 # CEDRIC_* switches the check scripts use (DevHooks.swift) work. Never
@@ -35,6 +36,14 @@
 # The new bundle isn't force-registered: a dev build in dist shouldn't take
 # over Open With from an installed copy; Launch Services registers it (with
 # its new name) the first time it is opened.
+#
+# Updates (Sparkle 2, docs/updates.md): Info.plist's SUFeedURL and
+# SUPublicEDKey come from CEDRIC_SPARKLE_FEED_URL and
+# CEDRIC_SPARKLE_PUBLIC_KEY (the EdDSA PUBLIC key, base64; never the
+# private one) and are empty unless those are set. With either empty the
+# app's updater is off: Check for Updates… is disabled and Sparkle is
+# never loaded. A --release build embeds Sparkle.framework (signed inside
+# out, below); a check build doesn't and never updates.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -50,7 +59,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift ;;
         --no-sign) SIGN=none ;;
         --release) CHECKS=0 ;;
-        -h|--help) sed -n '2,38p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
         *) echo "bundle-app.sh: unknown option $1" >&2; exit 2 ;;
     esac
     shift
@@ -60,6 +69,18 @@ SOURCE_VERSION=$(sed -n 's/.*static let source = "\([^"]*\)".*/\1/p' Sources/Ced
 [ -n "$SOURCE_VERSION" ] || { echo "bundle-app.sh: no CedricVersion.source in Sources/CedricCore/Version.swift" >&2; exit 1; }
 VERSION=${CEDRIC_VERSION:-$SOURCE_VERSION}
 BUILD=$VERSION
+
+# The update feed and public key (see the top): placeholders, empty by
+# default. A value with XML-special characters or whitespace can't be
+# either; refuse it rather than write a broken or misleading plist.
+SPARKLE_FEED=${CEDRIC_SPARKLE_FEED_URL:-}
+SPARKLE_KEY=${CEDRIC_SPARKLE_PUBLIC_KEY:-}
+case "$SPARKLE_FEED$SPARKLE_KEY" in
+    *[\<\>\&\"\'[:space:]]*) echo "bundle-app.sh: CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY may not hold spaces or < > & quotes" >&2; exit 1 ;;
+esac
+if [ -n "$SPARKLE_FEED" ] && [ "${SPARKLE_FEED#https://}" = "$SPARKLE_FEED" ]; then
+    echo "bundle-app.sh: CEDRIC_SPARKLE_FEED_URL must be an https:// URL" >&2; exit 1
+fi
 
 # The dev switches: compiled in for a check build only (see the top).
 SWIFTC_FLAGS=()
@@ -122,6 +143,29 @@ fi
 [ -n "$FW_SRC" ] && [ -d "$FW_SRC" ] || { echo "bundle-app.sh: missing llama.framework (not in $BIN or .build/artifacts)" >&2; exit 1; }
 mkdir -p "$APP/Contents/Frameworks"
 ditto "$FW_SRC" "$APP/Contents/Frameworks/llama.framework"
+# Sparkle 2 for Check for Updates… (Package.swift pins it), release builds
+# only: the app loads it with dlopen when its Info.plist has a feed and a
+# key (Updater.swift), so a check build without it just has updates off.
+# The framework keeps what Sparkle ships inside it: Autoupdate,
+# Updater.app and the Installer/Downloader XPC services (Sparkle uses the
+# XPC services only in a sandboxed app; Owlink isn't sandboxed, and they
+# stay as shipped). Same fallback as llama.framework for xcbuild.
+SPARKLE_FW="$APP/Contents/Frameworks/Sparkle.framework"
+if [ $CHECKS = 0 ]; then
+    SP_SRC="$BIN/Sparkle.framework"
+    if [ ! -d "$SP_SRC" ]; then
+        SP_SRC=$(find .build/artifacts -maxdepth 6 -type d -path '*Sparkle.xcframework/macos-*/Sparkle.framework' 2>/dev/null | head -1)
+    fi
+    [ -n "$SP_SRC" ] && [ -d "$SP_SRC" ] || { echo "bundle-app.sh: missing Sparkle.framework (not in $BIN or .build/artifacts)" >&2; exit 1; }
+    ditto "$SP_SRC" "$SPARKLE_FW"
+    for p in Autoupdate Updater.app XPCServices/Installer.xpc XPCServices/Downloader.xpc; do
+        [ -e "$SPARKLE_FW/Versions/B/$p" ] || { echo "bundle-app.sh: Sparkle.framework lacks Versions/B/$p" >&2; exit 1; }
+    done
+    # Sparkle's MIT licence (and the ones it includes) ships with it.
+    SP_LICENSE=$(find .build/artifacts -maxdepth 4 -type f -path '*/Sparkle/LICENSE' 2>/dev/null | head -1)
+    [ -n "$SP_LICENSE" ] || { echo "bundle-app.sh: missing Sparkle's LICENSE in .build/artifacts" >&2; exit 1; }
+    cp "$SP_LICENSE" "$APP/Contents/Resources/Sparkle-LICENSE.txt"
+fi
 # The built-in engine's model list (downloads are pinned by URL + SHA-256).
 mkdir -p "$APP/Contents/Resources/AI"
 cp Resources/AI/models.json "$APP/Contents/Resources/AI/models.json"
@@ -230,6 +274,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <false/>
     <key>NSSupportsSuddenTermination</key>
     <false/>
+    <!-- Updates (Sparkle 2, docs/updates.md). Feed and EdDSA public key are
+         empty unless set at build time; with either empty the updater is off.
+         Signed feed and signed updates only; automatic checks off by default. -->
+    <key>SUFeedURL</key>
+    <string>$SPARKLE_FEED</string>
+    <key>SUPublicEDKey</key>
+    <string>$SPARKLE_KEY</string>
+    <key>SURequireSignedFeed</key>
+    <true/>
+    <key>SUVerifyUpdateBeforeExtraction</key>
+    <true/>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAutomaticallyUpdate</key>
+    <false/>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -325,8 +384,16 @@ Scripts/doctypes-check.sh "$APP" >/dev/null
 if [ "$SIGN" = adhoc ]; then
     # Ad-hoc: no identity, no Gatekeeper approval. No App Sandbox: an
     # editor opens arbitrary files by path from the command line.
+    # --deep --force re-signs every nested piece the same way, so a
+    # release build's Sparkle.framework is signed again after it in
+    # Sparkle's own inside-out order (Scripts/sign-sparkle.sh), then the
+    # app once more, so its seal covers the framework as signed last.
     codesign -s - --force --deep "$APP"
+    if [ -d "$SPARKLE_FW" ]; then
+        Scripts/sign-sparkle.sh "$SPARKLE_FW" codesign -s - --force
+        codesign -s - --force "$APP"
+    fi
     codesign --verify --deep --strict "$APP"
 fi
 
-echo "==> $APP ($VERSION): $(lipo -archs "$APP/Contents/MacOS/Cedric"), signing: $SIGN, $([ $CHECKS = 1 ] && echo "CHECK build (dev switches on; don't ship)" || echo "release build (dev switches off)")"
+echo "==> $APP ($VERSION): $(lipo -archs "$APP/Contents/MacOS/Cedric"), signing: $SIGN, $([ $CHECKS = 1 ] && echo "CHECK build (dev switches on; don't ship)" || echo "release build (dev switches off)"), updates: $([ -d "$SPARKLE_FW" ] && echo "Sparkle embedded, " || echo "no Sparkle, ")$([ -n "$SPARKLE_FEED" ] && [ -n "$SPARKLE_KEY" ] && echo "feed and key set" || echo "off (no feed/key)")"
