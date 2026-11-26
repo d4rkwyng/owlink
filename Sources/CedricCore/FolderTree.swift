@@ -156,6 +156,16 @@ public enum FolderTree {
         relativePath.utf8.split(separator: 0x2f).map { String(decoding: $0, as: UTF8.self) }
     }
 
+    /// The folder holding the file at `url` (File › Open Enclosing Folder),
+    /// or nil for an untitled document, a non-file URL or the volume root.
+    public static func enclosingFolder(of url: URL?) -> URL? {
+        guard let url, url.isFileURL, !url.path.isEmpty else { return nil }
+        let file = url.standardizedFileURL
+        let parent = file.deletingLastPathComponent().standardizedFileURL
+        guard parent.path != file.path, !parent.path.isEmpty else { return nil }
+        return URL(fileURLWithPath: parent.path, isDirectory: true)
+    }
+
     /// Whether `name` starts with a `.` byte: a dot file or dot folder to
     /// the kernel and Finder. A text test misses a dot followed by a
     /// combining mark, which is one Swift character.
@@ -178,14 +188,28 @@ public enum FolderTree {
         public var string: String { String(decoding: bytes, as: UTF8.self) }
     }
 
-    /// The folder holding the file at `url` (File › Open Enclosing Folder),
-    /// or nil for an untitled document, a non-file URL or the volume root.
-    public static func enclosingFolder(of url: URL?) -> URL? {
-        guard let url, url.isFileURL, !url.path.isEmpty else { return nil }
-        let file = url.standardizedFileURL
-        let parent = file.deletingLastPathComponent().standardizedFileURL
-        guard parent.path != file.path, !parent.path.isEmpty else { return nil }
-        return URL(fileURLWithPath: parent.path, isDirectory: true)
+    /// A dictionary keyed by paths or names compared by their UTF-8 bytes
+    /// (`PathKey`), read and written with `String` keys: the drop-in for a
+    /// `[String: Value]` that must not take canonically equivalent but
+    /// byte-distinct paths for one.
+    public struct PathMap<Value>: Sequence, ExpressibleByDictionaryLiteral {
+        private var storage: [PathKey: Value] = [:]
+        public init() {}
+        public init(dictionaryLiteral elements: (String, Value)...) {
+            for (k, v) in elements { storage[PathKey(k)] = v }
+        }
+        public subscript(_ key: String) -> Value? {
+            get { storage[PathKey(key)] }
+            set { storage[PathKey(key)] = newValue }
+        }
+        /// The keys, as their strings (each decoded from its bytes).
+        public var keys: [String] { storage.keys.map(\.string) }
+        public var count: Int { storage.count }
+        public var isEmpty: Bool { storage.isEmpty }
+        public func makeIterator() -> AnyIterator<(key: String, value: Value)> {
+            var i = storage.makeIterator()
+            return AnyIterator { i.next().map { (key: $0.key.string, value: $0.value) } }
+        }
     }
 }
 
@@ -306,3 +330,6 @@ public final class FolderNode {
         return [self] + children.flatMap(\.loadedFolders)
     }
 }
+
+extension FolderTree.PathMap: Sendable where Value: Sendable {}
+extension FolderTree.PathMap: Equatable where Value: Equatable {}

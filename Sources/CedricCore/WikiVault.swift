@@ -145,22 +145,6 @@ public final class WikiVault: @unchecked Sendable {
     /// a name just below `root` that starts with a combining mark makes
     /// "/" and the mark one Swift character, so a text prefix test missed
     /// the boundary and refused it.
-    /// The folder `.obsidian/app.json`'s `attachmentFolderPath` names: the
-    /// note's own folder for "" or "current", else a folder below `root`;
-    /// nil for an absolute path, one that climbs with "..", a backslash, or
-    /// one that leads out. Read as UTF-8 bytes (`FolderTree.components`, a
-    /// first "/" byte): as Swift text a slash followed by a combining mark
-    /// is one character, so "/" + mark wasn't absolute and "../" + mark
-    /// wasn't a climb.
-    static func attachmentFolder(_ path: String, root: URL, documentFolder: URL) -> URL? {
-        let b = Array(path.utf8)
-        if b.isEmpty || FolderTree.sameBytes(path, "current") { return documentFolder }
-        guard b.first != 0x2f, !b.contains(0x5c),
-              !FolderTree.components(path).contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
-        let folder = root.appendingPathComponent(path).standardizedFileURL
-        return Self.contains(folder, in: root) ? folder : nil
-    }
-
     private static func contains(_ url: URL, in root: URL) -> Bool {
         let base = Array(PreviewFolder.resolved(root).path.utf8)
         let path = Array(PreviewFolder.resolved(url).path.utf8)
@@ -205,6 +189,22 @@ public final class WikiVault: @unchecked Sendable {
         }
         built = Date()
         return (index, attachmentFolder)
+    }
+
+    /// The folder `.obsidian/app.json`'s `attachmentFolderPath` names: the
+    /// note's own folder for "" or "current", else a folder below `root`;
+    /// nil for an absolute path, one that climbs with "..", a backslash, or
+    /// one that leads out. Read as UTF-8 bytes (`FolderTree.components`, a
+    /// first "/" byte): as Swift text a slash followed by a combining mark
+    /// is one character, so "/" + mark wasn't absolute and "../" + mark
+    /// wasn't a climb.
+    static func attachmentFolder(_ path: String, root: URL, documentFolder: URL) -> URL? {
+        let b = Array(path.utf8)
+        if b.isEmpty || FolderTree.sameBytes(path, "current") { return documentFolder }
+        guard b.first != 0x2f, !b.contains(0x5c),
+              !FolderTree.components(path).contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
+        let folder = root.appendingPathComponent(path).standardizedFileURL
+        return Self.contains(folder, in: root) ? folder : nil
     }
 
     /// Builds the note-name index when it is older than `refreshSeconds`.

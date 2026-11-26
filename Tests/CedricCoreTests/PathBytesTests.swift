@@ -31,6 +31,13 @@ import Testing
         #expect(Set([FolderTree.PathKey("\u{2126}"), FolderTree.PathKey("\u{3A9}")]).count == 2)
         #expect(FolderTree.PathKey(URL(fileURLWithPath: "/a/./b")) == FolderTree.PathKey("/a/b"), "a URL's standardized path")
         #expect(FolderTree.PathKey("\u{301}d/x").string == "\u{301}d/x")
+        var m: FolderTree.PathMap<Int> = ["\u{2126}": 1]
+        m["\u{3A9}"] = 2
+        #expect(m.count == 2 && m["\u{2126}"] == 1 && m["\u{3A9}"] == 2, "two keys")
+        #expect(Set(m.keys.map { Array($0.utf8) }) == [Array("\u{2126}".utf8), Array("\u{3A9}".utf8)])
+        #expect(Set(m.map { $0.value }) == [1, 2])
+        m["\u{2126}"] = nil
+        #expect(m.count == 1 && m["\u{2126}"] == nil && !m.isEmpty)
     }
 
     // MARK: Containment

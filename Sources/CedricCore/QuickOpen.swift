@@ -69,7 +69,7 @@ public struct FileIndex: Sendable {
     public let limit: Int
     /// By the relative paths' bytes (`FolderTree.PathKey`): a `String` key
     /// let canonically equivalent folders share one listing.
-    var dirs: [FolderTree.PathKey: Dir] = [:]
+    var dirs: FolderTree.PathMap<Dir> = [:]
     /// The walk stopped at `limit`: some files aren't in the index.
     public private(set) var truncated = false
     public private(set) var fileCount = 0
@@ -93,8 +93,7 @@ public struct FileIndex: Sendable {
     public var paths: [String] {
         var out: [String] = []
         out.reserveCapacity(fileCount)
-        for (key, d) in dirs {
-            let rel = key.string
+        for (rel, d) in dirs {
             for f in d.files { out.append(rel.isEmpty ? f : rel + "/" + f) }
         }
         return out
@@ -129,7 +128,7 @@ public struct FileIndex: Sendable {
             let room = limit - fileCount
             if d.files.count > room { d.files.removeLast(d.files.count - room); truncated = true }
             fileCount += d.files.count
-            dirs[FolderTree.PathKey(rel)] = d
+            dirs[rel] = d
             if fileCount >= limit {
                 if !queue.isEmpty || !d.subdirs.isEmpty { truncated = true }
                 // Folders not reached aren't in `dirs`: a refresh can add them.
@@ -144,9 +143,9 @@ public struct FileIndex: Sendable {
     /// with a child whose name starts with a combining mark, and kept it).
     private mutating func dropSubtree(_ rel: String) {
         let r = Array(rel.utf8)
-        func inside(_ k: FolderTree.PathKey) -> Bool {
+        func inside(_ k: String) -> Bool {
             if r.isEmpty { return true }
-            let b = k.bytes
+            let b = Array(k.utf8)
             return b == r || (b.count > r.count && b.starts(with: r) && b[r.count] == 0x2f)
         }
         for k in Array(dirs.keys) where inside(k) {
@@ -166,9 +165,9 @@ public struct FileIndex: Sendable {
         // A folder the index doesn't hold, and that its (indexed) parent
         // doesn't list either, is ignored, hidden or past the cap: skipped
         // (a build folder's churn costs nothing).
-        if !rel.isEmpty, dirs[FolderTree.PathKey(rel)] == nil {
+        if !rel.isEmpty, dirs[rel] == nil {
             let parent = (rel as NSString).deletingLastPathComponent, name = (rel as NSString).lastPathComponent
-            guard dirs[FolderTree.PathKey(parent)]?.subdirs.contains(where: { FolderTree.sameBytes($0, name) }) == true else { return }
+            guard dirs[parent]?.subdirs.contains(where: { FolderTree.sameBytes($0, name) }) == true else { return }
         }
         if recursive {
             dropSubtree(rel)
@@ -177,14 +176,14 @@ public struct FileIndex: Sendable {
             return
         }
         guard var d = list(rel, ignore: ignore) else { dropSubtree(rel); return }
-        let old = dirs[FolderTree.PathKey(rel)]
+        let old = dirs[rel]
         fileCount -= old?.files.count ?? 0
         let room = limit - fileCount
         if d.files.count > room { d.files.removeLast(d.files.count - room); truncated = true }
         fileCount += d.files.count
         // Folder names by their bytes too (a `Set<String>` is canonical).
         let oldSubs = Set((old?.subdirs ?? []).map { FolderTree.PathKey($0) }), newSubs = Set(d.subdirs.map { FolderTree.PathKey($0) })
-        dirs[FolderTree.PathKey(rel)] = d
+        dirs[rel] = d
         for s in oldSubs.subtracting(newSubs) { dropSubtree(rel.isEmpty ? s.string : rel + "/" + s.string) }
         let added = d.subdirs.filter { !oldSubs.contains(FolderTree.PathKey($0)) }.map { rel.isEmpty ? $0 : rel + "/" + $0 }
         if !added.isEmpty, fileCount < limit { walk(from: added, ignore: ignore, cancelled: cancelled) }
