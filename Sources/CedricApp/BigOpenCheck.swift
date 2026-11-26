@@ -154,8 +154,8 @@ extension DevChecks {
                 expect(tab.lineIndex.length == originalLength && tab.lineIndex.lineCount == LineIndex(original as NSString).lineCount,
                        "the line index (made in the background) is the text's")
                 // The same index, not a second scan of the text on the main thread.
-                let made = app.lastBackgroundIndexForChecks?.starts.withUnsafeBufferPointer { $0.baseAddress }
-                expect(made != nil && tab.lineIndex.starts.withUnsafeBufferPointer { $0.baseAddress } == made,
+                let made = app.lastBackgroundIndexForChecks?.starts.storageAddress
+                expect(made != nil && tab.lineIndex.starts.storageAddress == made,
                        "…the very index made in the background (no second scan)")
                 expect(tab.textView.isEditable, "editable once shown")
                 expect(!tab.doc.isDirty, "clean once open")
