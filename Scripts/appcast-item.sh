@@ -3,8 +3,8 @@
 # Scripts/release.sh --appcast (docs/updates.md).
 #
 # OUT, the last signed feed, is never edited in place. The new feed is
-# written to a temp file beside OUT whose name ends in .xml (sign_update
-# chooses feed signing by the extension), with the item added as a direct
+# written to appcast.xml in a private temp folder beside OUT (sign_update
+# chooses feed signing by the .xml extension), with the item added as a direct
 # child of /rss/channel by an XML parser (Scripts/appcast-insert.swift),
 # checked with xmllint and for exactly one channel item with VERSION
 # (Scripts/appcast-versions.sh), signed and verified there, and only then renamed over OUT. Any failure leaves OUT
@@ -56,13 +56,12 @@ fi
 
 DIR=$(dirname "$OUT")
 mkdir -p "$DIR"
-# mktemp reserves a unique name; the feed itself is that name plus .xml,
-# created only if nothing is there (noclobber). Both go on any exit; on
-# success the .xml one has been renamed to OUT by then.
-STEM=$(mktemp "$DIR/.appcast-new.XXXXXX") || fail "can't make a temp file in $DIR"
-NEW="$STEM.xml"
-trap 'rm -f "$STEM" "$NEW"' EXIT
-(set -C; : > "$NEW") 2>/dev/null || fail "$NEW already exists"
+# A private folder beside OUT (same filesystem, so the last step is a
+# rename) that only this run created; the new feed is appcast.xml in it.
+# On any exit only that folder goes, never a file this run didn't make.
+TMPD=$(mktemp -d "$DIR/.appcast-new.XXXXXX") || fail "can't make a temp folder in $DIR"
+trap 'rm -rf "$TMPD"' EXIT
+NEW="$TMPD/appcast.xml"
 
 # The item goes in as a direct child of /rss/channel, through an XML
 # parser (Scripts/appcast-insert.swift), never by line.

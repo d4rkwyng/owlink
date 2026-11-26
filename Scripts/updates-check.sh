@@ -190,9 +190,10 @@ if item 1.0.0 && xmllint --noout "$FEEDOUT" && [ "$(items 1.0.0)" = 1 ] && grep 
 else
     bad "appcast-item.sh new feed: $(tail -2 "$W/item.out") leftovers: $(leftovers)"
 fi
-# sign_update saw only a temp .xml beside the feed, never the feed itself.
-if [ "$(wc -l < "$W/stub.log" | tr -d ' ')" = 2 ] && ! awk '{ print $2 }' "$W/stub.log" | grep -vqE "^$W/dist/\.appcast-new\.[A-Za-z0-9]+\.xml$"; then
-    ok "appcast-item.sh signs and verifies a temp .xml beside the feed, not the feed"
+# sign_update saw only appcast.xml in a temp folder beside the feed, never
+# the feed itself.
+if [ "$(wc -l < "$W/stub.log" | tr -d ' ')" = 2 ] && ! awk '{ print $2 }' "$W/stub.log" | grep -vqE "^$W/dist/\.appcast-new\.[A-Za-z0-9]+/appcast\.xml$"; then
+    ok "appcast-item.sh signs and verifies appcast.xml in a temp folder beside the feed, not the feed"
 else
     bad "appcast-item.sh signed: $(tr '\n' ' ' < "$W/stub.log")"
 fi
@@ -333,6 +334,24 @@ if [ $rc = 0 ] && ! grep -q 'already has an item' "$W/rel.out" && grep -q '^+ Sc
     ok "release.sh --appcast: a feed with ${RV//./-} only doesn't stop a dry run of $RV"
 else
     bad "release.sh --appcast with ${RV//./-} only (exit $rc): $(grep -m2 'release.sh:' "$W/rel.out")"
+fi
+# A refused or failed run removes only its own temp folder: files beside
+# the feed that look like its temp names (the old scheme's .xml) stay.
+mkdir -p "$W/own"
+printf 'keep me\n' > "$W/own/.appcast-new.KEEP01.xml"
+printf 'keep me too\n' > "$W/own/.appcast-new.KEEP02"
+cp "$W/own/.appcast-new.KEEP01.xml" "$W/keep1"; cp "$W/own/.appcast-new.KEEP02" "$W/keep2"
+ownitem() { STUB_LOG="$W/stub.log" Scripts/appcast-item.sh --out "$W/own/appcast.xml" --sign-update "$W/stub/sign_update" \
+    --version 2.0.0 --url https://downloads.example.invalid/v2.0.0/Owlink-2.0.0.zip --length 1 --signature "$SIG64" \
+    "$@" -- --account owlink-test-only > "$W/item.out" 2>&1; }
+rc=0; STUB_FAIL=sign ownitem || rc=$?
+rc2=0; ownitem --from "$W/dup-lines.xml" || rc2=$?   # 1.3.0 there, so 2.0.0 is new: succeeds
+rc3=0; ownitem --from "$W/own/appcast.xml" || rc3=$? # now a duplicate: refused
+if [ $rc != 0 ] && [ $rc2 = 0 ] && [ $rc3 != 0 ] && cmp -s "$W/own/.appcast-new.KEEP01.xml" "$W/keep1" && cmp -s "$W/own/.appcast-new.KEEP02" "$W/keep2" \
+    && [ "$(ls -A "$W/own" | tr '\n' ' ')" = ".appcast-new.KEEP01.xml .appcast-new.KEEP02 appcast.xml " ]; then
+    ok "appcast-item.sh removes only its own temp folder (look-alike files beside the feed stay)"
+else
+    bad "appcast-item.sh cleanup (exits $rc $rc2 $rc3): $(ls -A "$W/own" | tr '\n' ' ')"
 fi
 
 if [ -n "$APP" ]; then
