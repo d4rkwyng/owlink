@@ -100,7 +100,8 @@ extension PreviewFolder {
 
     /// `file(for:in:openedRoot:vaultRoot:scriptOn:vault:)` with the root
     /// it was approved under: the file is read from beneath that root's
-    /// descriptor (`PreviewRead.data`), never by its path.
+    /// descriptor, pinned when the root was granted (`PreviewGrants`),
+    /// never by its path.
     public static func approved(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                                 vault: WikiVault? = nil) -> (root: URL, file: URL)? {
         func containsFolder(_ root: URL) -> Bool {

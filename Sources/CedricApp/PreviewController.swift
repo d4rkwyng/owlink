@@ -296,6 +296,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         folderFiles.vaultRoot = vault?.root
         folderFiles.vault = vault
+        folderFiles.grantRoots()
         let vault = self.vault
         let exportLinks = self.exportLinks
         let baseURL = folder.flatMap(DocumentFolderFiles.pageURL(for:))
@@ -735,6 +736,16 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     /// The page may run JavaScript: serve only images, fonts and CSS.
     var scriptOn = false
     private var stopped: Set<ObjectIdentifier> = []
+    /// The granted roots, held open by descriptor (`grantRoots`).
+    let grants = PreviewGrants()
+
+    /// Pins the document's, the opened and the vault's folders as granted
+    /// now; when they changed, the earlier pins (site roots too) close.
+    /// No folder: every grant is withdrawn.
+    func grantRoots() {
+        guard folder != nil else { grants.revoke(); return }
+        grants.grant([folder, openedRoot, vaultRoot])
+    }
 
     nonisolated static func pageURL(for folder: URL) -> URL? { PreviewFolder.pageURL(for: folder) }
     nonisolated static func fileURL(for url: URL) -> URL? { PreviewFolder.fileURL(for: url) }
@@ -747,15 +758,18 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         // The file is read from beneath the root it was approved under, by
         // descriptor (PreviewRead), so a folder or link swapped after this
         // check can't hand the page another file's bytes.
+        // The root is the descriptor pinned when it was granted
+        // (PreviewGrants), never reopened by path, so a folder renamed
+        // away and replaced can't become the root either.
         guard let url = task.request.url, let folder,
-              let (root, file) = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
+              let (root, parts, file) = grants.approve(url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
         let box = TaskBox(task)
         let scriptOn = scriptOn
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = PreviewRead.data(file, beneath: root, scriptOn: scriptOn)
+            let data = PreviewRead.data(parts, beneath: root, scriptOn: scriptOn)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let task = box.task
