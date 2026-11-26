@@ -145,6 +145,15 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     /// AppKit asks to check `request` for `requestTypes`, with options
     /// (`hasOptions`), the dictionary now being `dictionary`. True when the
     /// early check already did all of it (skip the request). Always clears.
+    ///
+    /// The accepted exception: a word learned by a background writer (a
+    /// script, another process learning while Owlink stays in front with
+    /// no spelling UI shown) after the early check and before this pass is
+    /// not asked about (`asksLearned` stays false), so this pass is
+    /// skipped and its underline stays. The ~1 s interval bounds only when
+    /// that can happen, not how long the stale underline lasts: it stays
+    /// until AppKit's next pass over that text (scrolling it out of view
+    /// and back, an edit there, a language change, Check Document Now).
     public mutating func take(_ request: NSRange, types requestTypes: UInt64, hasOptions: Bool = false,
                               dictionary now: SpellDictionaryState) -> Bool {
         defer { clear() }

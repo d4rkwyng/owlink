@@ -150,7 +150,9 @@ import Testing
     }
 
     /// The accepted gap: a word learned with no notice while Owlink stays
-    /// in front (a background script) isn't asked about.
+    /// in front with no spelling UI shown (a background script) isn't
+    /// asked about, and the pass is skipped: the underline stays until
+    /// AppKit's next pass over that text.
     @Test func learnedWithoutNoticeWhileInFrontIsNotAsked() {
         let d = RecordingSpellDictionary()
         var c = early(d)
