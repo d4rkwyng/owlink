@@ -226,7 +226,7 @@ extension EditorTextView {
     /// scope are kept (see EditorSpelling). Recorded for the checks.
     /// The results' ranges can be relative to `range` (TextKit 2 hands
     /// them over so when the pass doesn't start at the top of the text;
-    /// TextKit 1 as document offsets; TextCheckingOffset tells them apart):
+    /// TextKit 1 as document offsets; TextCheckingOffset says which):
     /// the scope and the record use document offsets, AppKit gets the
     /// results it handed over.
     override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange,
@@ -243,7 +243,6 @@ extension EditorTextView {
         let scope = spelling.scope(for: range)
         let ns = string as NSString
         let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range),
-                                                           spelling: results.map { $0.resultType == .spelling }, text: ns,
                                                            expected: textLayoutManager != nil ? .relative : .document)
         var kept: [NSTextCheckingResult] = []
         var marked: [NSRange] = []

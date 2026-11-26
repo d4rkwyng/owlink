@@ -42,62 +42,45 @@ import Testing
         }
     }
 
-    /// {10, 1000} with one misspelling at {20, 3}: both readings fit.
-    /// "abc" sits at 20 (document) in one text and at 30 (relative) in the
-    /// other; the checked text settles it, whatever the path expects.
-    static func text(wordAt at: Int) -> NSString {
-        var s = Array(repeating: Character(" "), count: 1100)
-        for (i, c) in "abc".enumerated() { s[at + i] = c }
-        return String(s) as NSString
-    }
-
-    @Test func anAmbiguousBatchFollowsTheText() {
+    /// {10, 1000} with one misspelling at {20, 3}: both readings fit, so
+    /// the callback path's convention decides (TextKit 2: relative, TextKit
+    /// 1: document), whatever the text holds.
+    @Test func anAmbiguousBatchFollowsThePath() {
         let checked = NSRange(location: 10, length: 1000)
         let results = [NSRange(location: 20, length: 3)]
-        let asDocument = Self.text(wordAt: 20), asRelative = Self.text(wordAt: 30)
-        for expected in [TextCheckingOffset.Convention.relative, .document] {
-            #expect(TextCheckingOffset.documentRanges(checked: checked, results: results, text: asDocument, expected: expected)
-                    == [NSRange(location: 20, length: 3)])
-            #expect(TextCheckingOffset.documentRanges(checked: checked, results: results, text: asRelative, expected: expected)
-                    == [NSRange(location: 30, length: 3)])
-        }
+        #expect(TextCheckingOffset.offset(checked: checked, results: results, expected: .relative) == 10)
+        #expect(TextCheckingOffset.offset(checked: checked, results: results, expected: .document) == 0)
     }
 
-    /// A word at both places: the text can't tell, so the callback path's
-    /// convention decides (TextKit 2: relative, TextKit 1: document).
-    @Test func anAmbiguousBatchTheTextCantSettleFollowsThePath() {
+    /// `cat` at 20 and `🙂err` with `err` at 30 (Astra's case): a word
+    /// guess read the emoji's trailing surrogate as a letter, took `err`
+    /// for part of a word and picked `cat` on TextKit 2. Its mirror,
+    /// `🙂cat` with `cat` at 20 and `err` at 30, would pick `err` on
+    /// TextKit 1. Both readings fit, so the path decides in both.
+    static func text(_ parts: [(Int, String)]) -> NSString {
+        let s = NSMutableString(string: String(repeating: " ", count: 1100))
+        for (at, word) in parts {
+            let w = word as NSString
+            s.replaceCharacters(in: NSRange(location: at, length: w.length), with: word)
+        }
+        return s
+    }
+
+    @Test func anEmojiBeforeAWordDoesntOverruleThePath() {
         let checked = NSRange(location: 10, length: 1000)
         let results = [NSRange(location: 20, length: 3)]
-        let both = (String(repeating: " ", count: 20) + "abc" + String(repeating: " ", count: 7) + "def"
-                    + String(repeating: " ", count: 1000)) as NSString
-        let neither = String(repeating: " ", count: 1100) as NSString
-        for text in [both, neither, nil] {
-            #expect(TextCheckingOffset.offset(checked: checked, results: results, text: text, expected: .relative) == 10)
-            #expect(TextCheckingOffset.offset(checked: checked, results: results, text: text, expected: .document) == 0)
+        let emojiBeforeErr = Self.text([(20, "cat"), (28, "🙂err")])
+        let emojiBeforeCat = Self.text([(18, "🙂cat"), (30, "err")])
+        for text in [emojiBeforeErr, emojiBeforeCat] {
+            #expect(text.substring(with: NSRange(location: 20, length: 3)) == "cat")
+            #expect(text.substring(with: NSRange(location: 30, length: 3)) == "err")
+            let relative = TextCheckingOffset.documentRanges(checked: checked, results: results, expected: .relative)
+            #expect(relative == [NSRange(location: 30, length: 3)])
+            #expect(text.substring(with: relative[0]) == "err")
+            let document = TextCheckingOffset.documentRanges(checked: checked, results: results, expected: .document)
+            #expect(document == [NSRange(location: 20, length: 3)])
+            #expect(text.substring(with: document[0]) == "cat")
         }
-    }
-
-    /// Only spelling results have to be words: an orthography result
-    /// spans sentences and is no evidence either way.
-    @Test func onlySpellingResultsAreCheckedAgainstTheText() {
-        let checked = NSRange(location: 10, length: 1000)
-        let results = [NSRange(location: 15, length: 400), NSRange(location: 20, length: 3)]
-        let asRelative = Self.text(wordAt: 30)
-        #expect(TextCheckingOffset.offset(checked: checked, results: results, spelling: [false, true], text: asRelative,
-                                          expected: .document) == 10)
-        // Counted as words, the orthography range covers neither reading.
-        #expect(TextCheckingOffset.offset(checked: checked, results: results, text: asRelative, expected: .document) == 0)
-    }
-
-    /// Part of a word isn't the word: "xabcx" at 19 doesn't make {20, 3} a word.
-    @Test func partOfAWordIsNotAWord() {
-        let ns = "                   xabcx      abc   " as NSString
-        #expect(!TextCheckingOffset.isWord(NSRange(location: 20, length: 3), in: ns))
-        #expect(TextCheckingOffset.isWord(NSRange(location: 30, length: 3), in: ns))
-        #expect(!TextCheckingOffset.isWord(NSRange(location: 33, length: 3), in: ns))
-        #expect(!TextCheckingOffset.isWord(NSRange(location: 35, length: 5), in: ns))
-        #expect(TextCheckingOffset.isWord(NSRange(location: 0, length: 3), in: "abc" as NSString))
-        #expect(TextCheckingOffset.isWord(NSRange(location: 0, length: 5), in: "naïve!" as NSString))
     }
 
     @Test func noResultsNoOffsetNeeded() {
