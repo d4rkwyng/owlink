@@ -33,6 +33,39 @@ public enum FolderActions {
         return url
     }
 
+    /// A new empty file `name` in `folder`, which must be `root` or inside
+    /// it once symbolic links are resolved. The folder is opened first and
+    /// judged from the opened descriptor (`F_GETPATH`, against `root`
+    /// opened the same way); the file is then made relative to that
+    /// descriptor with `O_EXCL | O_NOFOLLOW`, so a link swapped in after
+    /// the check can't move it and an existing file is never replaced.
+    public static func createFile(named name: String, in folder: URL, within root: URL) throws -> URL {
+        let url = try destination(in: folder, name: name)
+        let rfd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard rfd >= 0 else { throw error(root) }
+        defer { close(rfd) }
+        let dfd = open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard dfd >= 0 else { throw error(folder) }
+        defer { close(dfd) }
+        guard let r = realPath(rfd), let d = realPath(dfd), d == r || d.hasPrefix(r.hasSuffix("/") ? r : r + "/") else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [
+                NSFilePathErrorKey: url.path,
+                NSLocalizedDescriptionKey: String(localized: "The folder “\(folder.lastPathComponent)” leads outside the open folder, so the note wasn’t created."),
+            ])
+        }
+        let fd = openat(dfd, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
+        guard fd >= 0 else { throw error(url) }
+        guard close(fd) == 0 else { throw error(url) }
+        return url
+    }
+
+    /// The folder a descriptor has open (symbolic links resolved).
+    static func realPath(_ fd: Int32) -> String? {
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buf) == 0 else { return nil }
+        return String(cString: buf)
+    }
+
     public static func rename(_ source: URL, name: String) throws -> URL {
         let destination = try destination(in: source.deletingLastPathComponent(), name: name)
         if source.lastPathComponent == name { return source }

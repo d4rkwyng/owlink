@@ -167,6 +167,8 @@ final class WikiTabState {
     var backlinksVisible: Bool { backlinks?.superview != nil }
     /// Asks the user before creating a missing note (a check answers instead).
     static var confirmCreate: ((String) -> Bool)?
+    /// Gets a failed create instead of an alert (the checks).
+    static var createFailed: ((Error) -> Void)?
 }
 
 // MARK: - The [[ popup
@@ -491,13 +493,17 @@ extension EditorWindowController {
                 throw NSError(domain: NSCocoaErrorDomain, code: NSFileNoSuchFileError,
                               userInfo: [NSLocalizedDescriptionKey: String(localized: "The folder “\(folder.lastPathComponent)” doesn’t exist.")])
             }
-            let url = try FolderActions.create(in: folder, name: file, directory: false)
+            // The parent is judged against the open folder's real root, and the
+            // note made relative to that checked folder (a symlinked parent that
+            // leads out is refused; O_EXCL keeps an existing file).
+            let url = try FolderActions.createFile(named: file, in: folder, within: URL(fileURLWithPath: notes.realRoot))
             if let s = FolderSidebar.shared, let rel = FolderTree.relativePath(of: folder, in: s.rootURL) {
                 let node = rel.isEmpty ? s.root : s.root.descendant(rel)
                 if let node, node.isLoaded { s.load(node) }
             }
             openWikiNote(url, heading: nil)
         } catch {
+            if let report = WikiTabState.createFailed { report(error); return }
             NSAlert(error: error).runModal()
         }
     }

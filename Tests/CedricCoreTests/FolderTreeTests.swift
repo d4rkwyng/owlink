@@ -37,6 +37,41 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         }
     }
 
+    /// Astra review finding 4: a note made from a missing wiki link stays
+    /// in the open folder even when its parent is a symbolic link out.
+    @Test func aNewNoteNeverLandsOutsideTheOpenFolder() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(atPath: vault.appendingPathComponent("alias").path, withDestinationPath: "sub")
+        #expect(throws: (any Error).self) {
+            try FolderActions.createFile(named: "Escape.md", in: vault.appendingPathComponent("out"), within: vault)
+        }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the outside folder is untouched")
+        // Inside: the root, a subfolder, and a link to a subfolder of the vault.
+        let a = try FolderActions.createFile(named: "A.md", in: vault, within: vault)
+        #expect(fm.fileExists(atPath: a.path))
+        _ = try FolderActions.createFile(named: "B.md", in: vault.appendingPathComponent("sub"), within: vault)
+        _ = try FolderActions.createFile(named: "C.md", in: vault.appendingPathComponent("alias"), within: vault)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("sub/B.md").path) && fm.fileExists(atPath: vault.appendingPathComponent("sub/C.md").path))
+        // Never replaces, and a link of the note's name is not followed.
+        try Data("keep".utf8).write(to: vault.appendingPathComponent("Keep.md"))
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "Keep.md", in: vault, within: vault) }
+        #expect(fm.contents(atPath: vault.appendingPathComponent("Keep.md").path) == Data("keep".utf8))
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("Dangling.md"), withDestinationURL: outside.appendingPathComponent("made.md"))
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "Dangling.md", in: vault, within: vault) }
+        #expect(!fm.fileExists(atPath: outside.appendingPathComponent("made.md").path), "a dangling link isn't followed")
+        // Root given through a link (the sidebar's real root and its path may differ).
+        let rootLink = base.appendingPathComponent("vault-link")
+        try fm.createSymbolicLink(at: rootLink, withDestinationURL: vault)
+        _ = try FolderActions.createFile(named: "D.md", in: rootLink, within: vault)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("D.md").path))
+    }
+
     @Test func explorerMovesOnlyTheRenamedPathAndDescendants() {
         let old = URL(fileURLWithPath: "/p/dir")
         let new = URL(fileURLWithPath: "/p/new")

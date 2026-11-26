@@ -4,7 +4,8 @@ import CedricCore
 /// CEDRIC_CHECK=wikilinks: a temp folder of notes opened in the sidebar;
 /// `[[` typed with real key events (the list, filtering, ↑/↓, Return,
 /// Tab, ⎋, nothing in a code span or fence), ⌘-click on links (the right
-/// tab, a heading, a missing note created), Backlinks (the list, its
+/// tab, a heading, a missing note created, none outside the folder
+/// through a symlinked parent), Backlinks (the list, its
 /// snippets, a click to the line), a note renamed on disk (names and
 /// backlinks follow), and no list in large mode.
 extension DevChecks {
@@ -57,6 +58,8 @@ extension DevChecks {
         var alphaTab: EditorWindowController? { tab("Alpha.md") }
         var side: BacklinksSidebar? { alphaTab?.wiki.backlinks }
         var created: [String] = []
+        var failures: [Error] = []
+        let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
 
         run([
             sync {
@@ -133,6 +136,20 @@ extension DevChecks {
             sync {
                 expect(created == ["Missing note.md"], "the offer names the new note", "\(created)")
                 expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("Missing note.md").path), "the note is on disk")
+                // A link whose folder is a symbolic link out of the open folder: confirming creates nothing there.
+                try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+                try? FileManager.default.createSymbolicLink(at: root.appendingPathComponent("away"), withDestinationURL: outside)
+                WikiTabState.createFailed = { failures.append($0) }
+                setText(draft, "Draft [[away/Escape]]\n")
+                commandClick(draft, "[[away/Escape]]")
+            },
+            wait("⌘-click on a note behind a symlinked folder is answered") { created.count == 2 && !failures.isEmpty || tab("Escape.md") != nil },
+            sync {
+                expect(created.last == "away/Escape.md", "the offer names the note inside the folder", "\(created)")
+                expect(((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty,
+                       "confirming leaves the outside folder untouched", "\((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])")
+                expect(!failures.isEmpty && tab("Escape.md") == nil, "the create is refused and nothing opens", "\(failures)")
+                WikiTabState.createFailed = nil
                 guard let a = alphaTab else { expect(false, "Alpha tab"); return }
                 focus(a)
                 if let i = menuItem(action: #selector(AppDelegate.toggleBacklinksMenu(_:))) {
