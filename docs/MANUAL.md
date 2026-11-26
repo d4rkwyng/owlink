@@ -871,7 +871,26 @@ quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 folder on disk (`static/`, `public/`, `quartz/static/` and `content/`), never the network. Fenced code blocks are
 coloured by their language (```` ```swift ````, `py`, `js`, `bash`, …)
 both in the editor and in the preview, by Owlink's own tokenizers and
-the theme's colours (no JavaScript highlighter). **Detach Preview** (View menu, ⇧⌥⌘P,
+the theme's colours (no JavaScript highlighter).
+
+**Diagrams and math** (with Allow JavaScript on): a ```` ```mermaid ````
+block is drawn as a [Mermaid](https://mermaid.js.org) diagram, and TeX
+math is typeset by [KaTeX](https://katex.org): `$e^{i\pi}+1=0$` inline,
+`$$…$$` or `\[…\]` (on lines of their own) as a display. A diagram that
+doesn't parse keeps its source and shows Mermaid's error above it. A
+dollar sign is math only when it reads as math: `$` followed by a space,
+or a closing `$` after a space or before a digit, is no delimiter, so
+"$5 and $10" stays text; `\$` is a plain dollar, and code spans and
+fenced code are never math. Both libraries are bundled in Owlink
+(nothing is fetched), loaded only for a document that has a diagram or
+math, and allowed by the page's security policy by their exact file
+names; Allow Network stays as it was. With Allow JavaScript off, the
+preview is exactly as before: the block shows its source and the TeX is
+text. Export as PDF… follows the tab's Allow JavaScript (only the
+bundled scripts run, never the page's own); Export as HTML… and Copy as
+HTML / Rich Text never carry script, so they keep the source.
+
+**Detach Preview** (View menu, ⇧⌥⌘P,
 or Detach on the preview bar) moves it into its own resizable
 window, "notes.md — Preview", still updating as you type; it stays
 with its own document whichever tab is in front, and closes with that
@@ -985,7 +1004,10 @@ unresolved wikilink is plain text), and embedded notes are written out in
 place. Edit › Copy as HTML puts
 the rendered HTML of the selection (or the whole document) on the
 clipboard as text; Copy as Rich Text puts it there as rich text (RTF and
-HTML) for Mail, Notes or a word processor.
+HTML) for Mail, Notes or a word processor. With the preview's Allow
+JavaScript on, the PDF draws Mermaid diagrams and math as the preview
+does; the HTML file and the copies keep the diagram's source and the TeX
+as typed.
 
 ## CSV and TSV as a spreadsheet
 

@@ -18,6 +18,8 @@ extension EditorWindowController {
     /// A standalone page, light style, with no script: raw HTML blocks'
     /// `<script>`, frames and `on…=` handlers are removed (it is opened
     /// in a browser later), and a CSP forbids script as a second layer.
+    /// So Mermaid blocks stay code and math stays TeX here, whatever the
+    /// preview's Allow JavaScript (the PDF export follows it instead).
     /// Wikilinks and `![[embeds]]` resolve in `vault` and point at their
     /// files relative to the document's folder; notes are inlined.
     nonisolated static func exportPage(markdown: String, title: String, vault: WikiVault? = nil) -> String {
@@ -60,9 +62,11 @@ extension EditorWindowController {
         if let dir = doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         let text = textView.string
         let folder = doc.fileURL?.deletingLastPathComponent()
+        // Diagrams and math are drawn when the preview's Allow JavaScript is on.
+        let rich = preview?.liveDocumentJavaScript ?? false
         let done: (NSApplication.ModalResponse) -> Void = { [weak self] r in
             guard r == .OK, let url = panel.url else { return }
-            MarkdownPDFExport.run(markdown: text, folder: folder, title: self?.exportBaseName ?? "", to: url) { error in
+            MarkdownPDFExport.run(markdown: text, folder: folder, title: self?.exportBaseName ?? "", rich: rich, to: url) { error in
                 if let error { self?.showSaveError(error, saving: url, offer: .none) }
             }
         }
@@ -183,7 +187,10 @@ enum MarkdownWork {
 
 /// Renders the Markdown in an offscreen preview (light style, same rules:
 /// no page script, no network, files from the document's folder only) and
-/// writes it, paginated between blocks, to a PDF file.
+/// writes it, paginated between blocks, to a PDF file. `rich` (the tab's
+/// Allow JavaScript is on): Mermaid diagrams and math are drawn, by the
+/// bundled scripts alone (the policy lets no other script run), and the
+/// page is printed once they are done.
 @MainActor
 final class MarkdownPDFExport: NSObject {
     private static var running: [MarkdownPDFExport] = []
@@ -209,13 +216,15 @@ final class MarkdownPDFExport: NSObject {
         window.contentView?.addSubview(preview.webView)
     }
 
-    static func run(markdown: String, folder: URL?, title: String, to url: URL, done: @escaping (Error?) -> Void) {
+    static func run(markdown: String, folder: URL?, title: String, rich: Bool = false, to url: URL, done: @escaping (Error?) -> Void) {
         let job = MarkdownPDFExport(url: url, done: done)
         running.append(job)
         job.preview.exportLinks = true
+        job.preview.bundledScriptsOnly = true
+        job.preview.allowJavaScript = rich
         job.preview.onLoaded = { [weak job] in
-            // Let images settle a moment before printing.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { job?.print() }
+            // Let images settle a moment (and diagrams draw) before printing.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { job?.waitForRich(until: Date().addingTimeInterval(15)) }
         }
         job.preview.show(text: markdown, language: .markdown, palette: EditorPalettes.light, baseURL: folder)
         // Never hang: give up after 30 s.
@@ -227,6 +236,20 @@ final class MarkdownPDFExport: NSObject {
     /// A page: US Letter's proportions at the page's 760-point width.
     static let pageWidth: CGFloat = 760
     static var pageHeight: CGFloat { (pageWidth * 11 / 8.5).rounded() }
+
+    /// Prints once the page's diagrams and math are drawn (PreviewRich's
+    /// done mark), or at `deadline`; at once when it has none.
+    private func waitForRich(until deadline: Date) {
+        guard !finished else { return }
+        guard !preview.lastNeeds.isEmpty, Date() < deadline else { print(); return }
+        preview.webView.evaluateJavaScript("document.documentElement.getAttribute('\(PreviewRich.doneAttribute)')", in: nil, in: .defaultClient) { [weak self] result in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if case .success(let v) = result, v as? String == "done" { self.print() }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForRich(until: deadline) } }
+            }
+        }
+    }
 
     /// Pages cut between blocks (never through a line where a block
     /// boundary fits), each made with createPDF and joined. (WebKit's

@@ -6,7 +6,7 @@ import WebKit
 /// In-process checks of the Markdown preview and tools, run by
 /// Scripts/tools-check.sh like the other DevChecks.
 ///
-///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport
+///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport|mermaidmath
 @MainActor
 extension DevChecks {
     static func markdownPreviewCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -18,6 +18,7 @@ extension DevChecks {
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
         case "previewnav": previewNavigationDemo(app)
+        case "mermaidmath": mermaidMathCheck(app)
         default: return false
         }
         return true

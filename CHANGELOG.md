@@ -4,6 +4,11 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- Markdown preview: Mermaid diagrams and math render when Allow JavaScript is on (bundled, nothing fetched).
+
 ## [0.5.4] - 2026-11-25
 
 ### Changed
