@@ -1581,8 +1581,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func topLine(in pane: EditorPane) -> Int {
         let textView = pane.textView
         guard let vr = textView.viewportCharacterRange else { return 0 }
-        // The viewport range starts above the visible rect; use the visible rect's top instead.
-        let visibleTop = pane.scrollView.contentView.bounds.minY
+        // The viewport range starts above the visible rect; use the visible rect's top instead,
+        // a backing pixel down: a line whose top is less than a pixel above it (an estimated,
+        // fractional y the scroll view can't stop on) is the one shown.
+        let pixel = PixelSnap.pixel(scale: Double(textView.window?.backingScaleFactor ?? 1))
+        let visibleTop = pane.scrollView.contentView.bounds.minY + pixel
         if let tlm = textView.textLayoutManager,
            let frag = tlm.textLayoutFragment(for: CGPoint(x: 0, y: max(0, visibleTop - textView.textContainerOrigin.y))) {
             return lineIndex.line(containing: textView.offset(of: frag.rangeInElement.location))
@@ -1618,6 +1621,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // out: until its viewport is laid out, a fragment far down can
         // report a frame near the top (and look visible already).
         let secondPane = pane !== primaryPane
+        // The scroll view stops on whole backing pixels: round the target up to
+        // one so the line's top is at or above the visible top, not inside the line above.
+        let scale = Double(textView.window?.backingScaleFactor ?? 1)
         for _ in 0..<10 {
             tlm.ensureLayout(for: r)
             if secondPane { vlc.layoutViewport() }
@@ -1629,9 +1635,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             if inView && position == .center { break }
             var y = fy
             if position == .center { y -= max(0, (visible.height - f.height) / 2) }
-            y = max(0, y)
-            if abs(y - visible.minY) < 1 { break }
+            y = CGFloat(PixelSnap.up(Double(max(0, y)), scale: scale))
+            if abs(y - visible.minY) < CGFloat(PixelSnap.pixel(scale: scale)) / 2 { break }
             textView.scroll(NSPoint(x: 0, y: y))
+            // Clamped at the end of the text: it can't get any closer.
+            if scrollView.contentView.bounds.minY == visible.minY { break }
             vlc.layoutViewport()
         }
         colorizer.scheduleViewport()
