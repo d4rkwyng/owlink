@@ -67,13 +67,16 @@ public enum Beneath {
     /// Returns the descriptor, or -1 with `errno` set (`EINVAL` for an
     /// empty list or a component that isn't one name). `walk` forces the
     /// component walk (tests; it is the default where the kernel doesn't
-    /// enforce beneath lookups).
+    /// enforce beneath lookups). `followLast`: a final symbolic link is
+    /// followed too, only where the kernel keeps that inside the folder;
+    /// the component walk still refuses it.
     public static func open(_ components: [String], beneath root: Int32, flags: Int32, mode: mode_t = 0o666,
-                            walk: Bool = !kernelEnforced) -> Int32 {
+                            followLast: Bool = false, walk: Bool = !kernelEnforced) -> Int32 {
         guard let last = components.last, components.allSatisfy(isName) else { errno = EINVAL; return -1 }
         let lastFlags = flags | O_NOFOLLOW | O_CLOEXEC
         if !walk {
-            return openat(root, components.joined(separator: "/"), lastFlags | resolveBeneath, mode)
+            let beneathFlags = (followLast ? lastFlags & ~O_NOFOLLOW : lastFlags) | resolveBeneath
+            return openat(root, components.joined(separator: "/"), beneathFlags, mode)
         }
         var dir = root
         for c in components.dropLast() {

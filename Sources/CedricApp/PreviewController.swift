@@ -743,14 +743,18 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         stopped.remove(id)
         // With JavaScript on, only images, fonts and CSS (no dotfiles):
         // page script must not be able to read the folder's other files.
+        // The file is read from beneath the root it was approved under, by
+        // descriptor (PreviewRead), so a folder or link swapped after this
+        // check can't hand the page another file's bytes.
         guard let url = task.request.url, let folder,
-              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
+              let (root, file) = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
         let box = TaskBox(task)
+        let scriptOn = scriptOn
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = try? Data(contentsOf: file, options: .mappedIfSafe)
+            let data = PreviewRead.data(file, beneath: root, scriptOn: scriptOn)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let task = box.task
