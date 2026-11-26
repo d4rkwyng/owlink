@@ -917,6 +917,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Session writes, in order, off the main thread (a 636 KB unsaved
     /// buffer is a few ms of disk work); quit waits for them.
     let sessionQueue = DispatchQueue(label: "cedric.session-save", qos: .utility)
+    /// Numbers each buffer write a snapshot queues (EditorDocument.sessionWritingSequence).
+    private var sessionWriteSequence = 0
 
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
@@ -936,8 +938,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         finishRestore()
         var windows: [SessionWindow] = []
         var keep = Set<UUID>()
-        var buffers: [(UUID, String, LineBreaks?)] = []
+        var buffers: [(UUID, String, LineBreaks?, Int)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
+        // What the commit needs of each buffer it names: a write queued
+        // now or by an earlier snapshot (by its number), or one on disk.
+        var needs: [UUID: SessionStore.BufferNeed] = [:]
+        var docs: [UUID: EditorDocument] = [:]
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
             var selected = 0
@@ -953,16 +959,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let needsBuffer = d.isDirty || d.fileURL == nil && !isEmpty
                 if needsBuffer {
                     keep.insert(d.id)
-                    if d.sessionChangeCount != d.changeCount, quitting || d.sessionWritingCount != d.changeCount {
+                    docs[d.id] = d
+                    if d.sessionChangeCount == d.changeCount {
+                        needs[d.id] = .onDisk
+                    } else if quitting || d.sessionWritingCount != d.changeCount {
                         // One copy of the text (the storage keeps changing).
                         // A mixed file's breaks go into the buffer with it (restoreFormat).
-                        buffers.append((d.id, t.text, d.lineBreaks))
+                        sessionWriteSequence += 1
+                        buffers.append((d.id, t.text, d.lineBreaks, sessionWriteSequence))
                         written[d.id] = (d, d.changeCount)
                         // sessionChangeCount moves only once the write has
                         // worked (finished, below): hot close skips its own
                         // write when it matches, so a failed write must not
                         // look done.
                         d.sessionWritingCount = d.changeCount
+                        d.sessionWritingSequence = sessionWriteSequence
+                        needs[d.id] = .written(sessionWriteSequence)
+                    } else {
+                        // Queued by an earlier snapshot, not done yet.
+                        needs[d.id] = .written(d.sessionWritingSequence)
                     }
                 } else {
                     d.sessionChangeCount = -1
@@ -998,58 +1013,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               floatOnTop: floats ? true : nil))
             }
         }
-        for c in closedTabs where c.hasBuffer { keep.insert(c.id) }
-        // Closed tabs whose text couldn't be written when they closed.
-        let memoryOnly: [(UUID, String)] = quitting ? closedTabs.filter(\.hasBuffer).compactMap { c in closedTexts[c.id].map { (c.id, $0) } } : []
+        // Closed tabs whose text couldn't be written when they closed: on
+        // every save until it is (not only at quit).
+        var memoryOnly: [(UUID, String, Int)] = []
+        for c in closedTabs where c.hasBuffer {
+            keep.insert(c.id)
+            if let text = closedTexts[c.id] {
+                sessionWriteSequence += 1
+                memoryOnly.append((c.id, text, sessionWriteSequence))
+                needs[c.id] = .written(sessionWriteSequence)
+            } else {
+                needs[c.id] = .onDisk
+            }
+        }
         let session = Session(windows: windows, closedTabs: closedTabs.isEmpty ? nil : closedTabs, folder: folderSessionState,
                               wordGoals: fileWordGoals.isEmpty ? nil : fileWordGoals)
         let store = self.store
-        let toWrite = buffers, keeping = keep
-        let write: @Sendable () -> (ok: Set<UUID>, failures: [String]) = {
+        let toWrite = buffers, keeping = keep, needed = needs, lateClosed = memoryOnly
+        let write: @Sendable () -> (ok: Set<UUID>, failures: [String], missing: [UUID]) = {
             var ok = Set<UUID>()
             var failures: [String] = []
-            for (id, text, breaks) in toWrite {
+            var missing: [UUID] = []
+            for (id, text, breaks, seq) in toWrite {
                 do {
-                    try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks))
+                    try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks), sequence: seq)
                     ok.insert(id)
                 } catch {
                     FileHandle.standardError.write(Data("session: buffer write failed: \(error)\n".utf8))
                     failures.append(error.localizedDescription)
                 }
             }
-            for (id, text) in memoryOnly {
+            for (id, text, seq) in lateClosed {
                 do {
-                    try store.writeBuffer(id, text: text, open: false)
+                    try store.writeBuffer(id, text: text, open: false, sequence: seq)
                     ok.insert(id)
                 } catch {
+                    FileHandle.standardError.write(Data("session: closed tab's buffer write failed: \(error)\n".utf8))
                     failures.append(error.localizedDescription)
                 }
             }
             do {
-                try store.save(session)
-                // Only after a save that wrote everything: a buffer whose
-                // write failed may still have an older copy worth keeping.
+                // Commits (and clears the journal) only with every buffer it
+                // names on disk, this snapshot's writes and earlier ones it
+                // relies on included; else the older commit and the journal
+                // stay. Pruned only after that.
+                try store.save(session, requiring: needed)
                 if failures.isEmpty { store.pruneBuffers(keeping: keeping) }
             } catch {
+                if case SessionStoreError.buffersMissing(let ids) = error { missing = ids }
                 FileHandle.standardError.write(Data("session: save failed: \(error)\n".utf8))
                 failures.append(error.localizedDescription)
             }
-            return (ok, failures)
+            return (ok, failures, missing)
         }
         // Each written tab's count, once its write is done: advanced if it
         // worked (never back: an older async write can finish after a
         // newer sync one), else left as it was so the next save (or a
         // close) tries again.
-        let finished: @MainActor (Set<UUID>) -> Void = { [weak self] ok in
+        // A buffer the commit needed on disk that isn't there: an open
+        // tab's text is written again next save; a closed tab's that is
+        // certainly gone (and not in memory) can't be, so its entry stops
+        // claiming one (else no session would ever be committed again).
+        let finished: @MainActor (Set<UUID>, [UUID]) -> Void = { [weak self] ok, missing in
             for (id, (d, count)) in written {
                 if d.sessionWritingCount == count { d.sessionWritingCount = -1 }
                 if ok.contains(id), count > d.sessionChangeCount { d.sessionChangeCount = count }
             }
-            for (id, _) in memoryOnly where ok.contains(id) { self?.closedTexts[id] = nil }
+            for (id, _, _) in lateClosed where ok.contains(id) { self?.closedTexts[id] = nil }
+            guard let self else { return }
+            for id in missing where needed[id] == .onDisk {
+                if let d = docs[id] { d.sessionChangeCount = -1; continue }
+                if self.closedTexts[id] == nil, case .missing = self.store.readBufferResult(id),
+                   let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) {
+                    FileHandle.standardError.write(Data("session: closed tab \(id)'s buffer is gone\n".utf8))
+                    self.closedTabs[i].hasBuffer = false
+                }
+            }
         }
         if sync {
             let r = sessionQueue.sync(execute: write)
-            finished(r.ok)
+            finished(r.ok, r.missing)
             if let first = r.failures.first { return first }
             guard quitting else { return nil }
             // Everything that needs its text kept has it on disk now.
@@ -1067,7 +1110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let r = write()
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
-                        finished(r.ok)
+                        finished(r.ok, r.missing)
                         if !r.failures.isEmpty { self.retrySessionSaveLater() }
                     }
                 }

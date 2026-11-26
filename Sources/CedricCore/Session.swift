@@ -321,6 +321,19 @@ public final class SessionStore: @unchecked Sendable {
     static let heldJournalPrefix = "pending-buffers.held-"
     /// Held runs' journals launch read: removed by the next commit.
     private var heldJournalsSeen: [URL] = []
+    /// The newest write sequence (the caller's number for each buffer
+    /// write it queues) that succeeded, per buffer. Kept here, on the
+    /// serial writer, so a commit can tell a write an earlier snapshot
+    /// queued has really landed (`BufferNeed.written`).
+    private var writtenSequence: [UUID: Int] = [:]
+
+    /// What a commit needs of a buffer it names (`save(_:requiring:)`).
+    public enum BufferNeed: Equatable, Sendable {
+        /// The write with this sequence number (or a later one) succeeded.
+        case written(Int)
+        /// It is on disk already (read back, or written earlier and verified).
+        case onDisk
+    }
 
     /// Check builds only (inert otherwise): every write fails, as on a
     /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
@@ -600,10 +613,21 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     /// Commits `session` (with the held buffers): then the journal is
-    /// cleared. Throws, writing nothing, while `hold` is set.
-    public func save(_ session: Session) throws {
+    /// cleared. Throws, writing nothing, while `hold` is set, and unless
+    /// every buffer in `needs` is there as needed (a write it depends on
+    /// failed or hasn't landed: the older commit and the journal stay,
+    /// and the caller prunes nothing).
+    public func save(_ session: Session, requiring needs: [UUID: BufferNeed] = [:]) throws {
         lock.lock(); defer { lock.unlock() }
         if let hold { throw SessionStoreError.held(hold) }
+        let missing = needs.filter { id, need in
+            if held.contains(id) { return false }
+            var st = stat()
+            guard lstat(bufferURL(id).path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return true }
+            if case .written(let seq) = need { return (writtenSequence[id] ?? Int.min) < seq }
+            return false
+        }.keys.sorted { $0.uuidString < $1.uuidString }
+        guard missing.isEmpty else { throw SessionStoreError.buffersMissing(missing) }
         try ensureDirectory()
         try injectedFailure()
         var s = session
@@ -633,7 +657,9 @@ public final class SessionStore: @unchecked Sendable {
 
     /// Writes tab `id`'s unsaved text. `open`: the tab is open (false: a
     /// closed tab's text kept in memory since its close couldn't write it).
-    public func writeBuffer(_ id: UUID, text: String, open: Bool = true) throws {
+    /// `sequence`: the caller's number for this write, noted once it has
+    /// succeeded (`BufferNeed.written`).
+    public func writeBuffer(_ id: UUID, text: String, open: Bool = true, sequence: Int? = nil) throws {
         lock.lock(); defer { lock.unlock() }
         try ensureDirectory()
         try injectedFailure()
@@ -642,6 +668,7 @@ public final class SessionStore: @unchecked Sendable {
         // for a reopened tab the session still lists as closed.
         try journal(id, reopened: open)
         try PrivateDirectory.writePrivateFile(Data(text.utf8), to: bufferURL(id))
+        if let sequence { writtenSequence[id] = max(writtenSequence[id] ?? Int.min, sequence) }
     }
 
     /// File › Reopen Closed Tab brought `id` back: journaled at once, so
@@ -736,10 +763,13 @@ public final class SessionStore: @unchecked Sendable {
 public enum SessionStoreError: Error, LocalizedError, Equatable {
     /// `SessionStore.hold`: the session isn't written this run.
     case held(String)
+    /// A commit's buffers that aren't on disk as it needs (`save(_:requiring:)`).
+    case buffersMissing([UUID])
 
     public var errorDescription: String? {
         switch self {
         case .held(let why): return "Owlink isn’t saving its session this run: \(why)."
+        case .buffersMissing(let ids): return "\(ids.count) unsaved text(s) aren’t on disk yet, so the session wasn’t updated."
         }
     }
 }

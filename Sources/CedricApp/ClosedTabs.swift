@@ -96,12 +96,16 @@ extension AppDelegate {
         // else its buffer. A buffer that is there but can't be read stays
         // where it is, held (never pruned), and so does the entry: the
         // tab isn't reopened without its text, nor its buffer let go.
+        // `onDisk`: the text was read back from its buffer, so the buffer
+        // holds it. Text kept in memory is not on disk: the next save
+        // writes it (and quit checks it was).
         var text: String?
+        var onDisk = false
         if let kept = closedTexts[st.id] {
             text = kept
         } else if st.hasBuffer {
             switch store.readBufferResult(st.id) {
-            case .text(let t): text = t; store.releaseBuffer(st.id)
+            case .text(let t): text = t; onDisk = true; store.releaseBuffer(st.id)
             case .missing: store.releaseBuffer(st.id)
             case .unreadable(let why):
                 store.holdBuffer(st.id)
@@ -170,8 +174,8 @@ extension AppDelegate {
         if let w = st.writing, !w.isOff { tab.setWriting(w) }
         if st.hasBuffer || url == nil && st.path != nil {
             doc.markDirtyFromSession()
-            // The buffer on disk already holds this text.
-            if sessionSaving, st.hasBuffer { doc.sessionChangeCount = doc.changeCount }
+            // The buffer on disk already holds this text (read back from it).
+            if sessionSaving, onDisk { doc.sessionChangeCount = doc.changeCount }
         }
         let len = (body as NSString).length
         let loc = min(st.selectionLocation, len)

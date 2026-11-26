@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|reopenfail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -18,6 +18,7 @@ extension DevChecks {
         case "closefail": closeAfterFailedSave(app)
         case "quitfail": quitAfterFailedSave(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
+        case "closedmemory": closedTextOnlyInMemory(app)
         case "closedraw": closedTabsStillDrawn(app)
         case "jsonwhole": formatWholeJSONCheck(app)
         case "colours": colourConsistency(app)
@@ -550,6 +551,76 @@ extension DevChecks {
                        back?.text ?? "-")
                 expect(!app.closedTabs.contains { $0.id == id }, "and it leaves the closed list")
                 expect(!app.store.heldBuffers.contains(id), "no longer held")
+            },
+        ])
+    }
+
+    /// A closed tab whose text couldn't be written when it closed (kept in
+    /// memory, `closedTexts`): a timed save writes it once the disk works
+    /// again, not only quit. Reopened while still only in memory, the tab
+    /// isn't counted as written (it was, before: quit then skipped it and
+    /// let the app go with the text nowhere on disk). Needs session saving
+    /// on (run like closefail).
+    static func closedTextOnlyInMemory(_ app: AppDelegate) {
+        let first = app.open(write("memory-one.txt", "on disk\n"))!
+        let second = app.open(write("memory-two.txt", "on disk\n"))!
+        sized(first)
+        let one = first.doc.id, two = second.doc.id
+        func buffer(_ id: UUID) -> String? { app.store.readBuffer(id) }
+        func waitForSaves() { app.sessionQueue.sync {}; RunLoop.main.run(until: Date().addingTimeInterval(0.2)); app.sessionQueue.sync {} }
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(first)
+                first.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                focus(second)
+                second.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" two")
+                app.store.checkFailWrites = true
+                first.window?.close()
+                second.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[one] == "on disk one\n" && app.closedTexts[two] == "on disk two\n",
+                       "the closes couldn't write: both texts kept in memory")
+                expect(buffer(one) == nil && buffer(two) == nil, "nothing on disk")
+                app.store.checkFailWrites = false
+                app.saveSession(sync: false)
+                waitForSaves()
+            },
+            sync {
+                expect(buffer(one) == "on disk one\n" && buffer(two) == "on disk two\n", "a timed save writes them once it can",
+                       "\(buffer(one) ?? "-") / \(buffer(two) ?? "-")")
+                expect(app.closedTexts.isEmpty, "and lets the memory copies go")
+                expect(app.store.load()?.closedTabs?.filter(\.hasBuffer).count == 2, "the session names both")
+                // Again, closed and reopened while the disk still fails.
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == two }) else { expect(false, "⇧⌘T reopens the second tab"); return }
+                focus(back)
+                type(" more")
+                app.store.checkFailWrites = true
+                back.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[two] == "on disk two more\n", "closed again with the write failing: in memory",
+                       app.closedTexts[two] ?? "-")
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == two }) else { expect(false, "⇧⌘T reopens it"); return }
+                expect(back.text == "on disk two more\n" && back.doc.isDirty, "reopened from memory with its text", back.text)
+                expect(back.doc.sessionChangeCount != back.doc.changeCount, "and not counted as written: it isn't on disk")
+                expect(buffer(two) == "on disk two\n", "the disk still has the older text", buffer(two) ?? "-")
+                app.store.checkFailWrites = false
+                var asked: [String] = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                let reply = app.applicationShouldTerminate(NSApp)
+                expect(reply == .terminateNow && asked.isEmpty, "quit saves without a failure", "\(asked)")
+                expect(buffer(two) == "on disk two more\n", "and quit wrote the reopened text", buffer(two) ?? "-")
+                AppDelegate.checkQuitSaveChoice = nil
             },
         ])
     }

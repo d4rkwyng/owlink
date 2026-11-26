@@ -70,6 +70,10 @@ final class EditorDocument {
     /// The change count of a buffer write queued and not yet done, so the
     /// next timed save doesn't queue the same text again; -1 if none.
     var sessionWritingCount = -1
+    /// That write's number (AppDelegate.sessionWriteSequence): a later
+    /// snapshot that relies on it commits only once the store has seen it
+    /// succeed (SessionStore.BufferNeed.written).
+    var sessionWritingSequence = 0
 
     var isDirty: Bool { edited.isDirty }
     /// When the document last went from saved to unsaved (the owl's "Save a copy?").

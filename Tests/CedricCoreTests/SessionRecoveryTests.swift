@@ -238,6 +238,53 @@ import Testing
         #expect(s.closedTabs?.map(\.id) == [closed.id] && s.windows.isEmpty && recovered.isEmpty)
     }
 
+    // MARK: Commits that depend on buffer writes
+
+    /// A commit names a buffer whose write failed (its own snapshot's, or
+    /// an earlier one's it relied on as still in flight): refused, the
+    /// older session and the journal stay. Once a write with that number
+    /// or a later one has worked, it goes through.
+    @Test func aCommitWaitsForTheWritesItNeeds() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s.writeBuffer(a.id, text: "a", sequence: 1)
+        try s.save(Session(windows: [SessionWindow(tabs: [a])]), requiring: [a.id: .written(1)])
+        let b = SessionTab(untitledName: "Untitled 2", hasBuffer: true)
+        s.checkFailWrites = true
+        #expect(throws: (any Error).self) { try s.writeBuffer(b.id, text: "b", sequence: 2) }
+        s.checkFailWrites = false
+        // A later snapshot that skipped b's write as in flight.
+        #expect(throws: SessionStoreError.buffersMissing([b.id])) {
+            try s.save(Session(windows: [SessionWindow(tabs: [a, b])]), requiring: [a.id: .onDisk, b.id: .written(2)])
+        }
+        #expect(s.load()?.allTabs.map(\.id) == [a.id], "the older session stays")
+        // b's text written, but by an older write than the one needed.
+        try s.writeBuffer(b.id, text: "b, older", sequence: 1)
+        #expect(throws: SessionStoreError.self) {
+            try s.save(Session(windows: [SessionWindow(tabs: [a, b])]), requiring: [b.id: .written(2)])
+        }
+        try s.writeBuffer(b.id, text: "b", sequence: 3)
+        try s.save(Session(windows: [SessionWindow(tabs: [a, b])]), requiring: [a.id: .onDisk, b.id: .written(2)])
+        #expect(s.load()?.allTabs.map(\.id) == [a.id, b.id])
+    }
+
+    /// A buffer the commit needs on disk that isn't there: refused (a held
+    /// one counts as there).
+    @Test func aCommitNeedsItsBuffersOnDisk() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s.save(Session(windows: []))
+        #expect(throws: SessionStoreError.buffersMissing([a.id])) {
+            try s.save(Session(windows: [SessionWindow(tabs: [a])]), requiring: [a.id: .onDisk])
+        }
+        s.holdBuffer(a.id)
+        try s.save(Session(windows: [SessionWindow(tabs: [a])]), requiring: [a.id: .onDisk])
+    }
+
     // MARK: Holds
 
     @Test func anUnreadableSessionThatCantBeMovedIsCopiedAside() throws {
