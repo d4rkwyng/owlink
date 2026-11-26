@@ -98,12 +98,10 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// The live document's Allow JavaScript, whichever entry is showing.
     var liveDocumentJavaScript: Bool { homeJavaScript }
 
-    /// The folder open in the sidebar, when it holds `folder`.
+    /// The folder open in the sidebar, when it is `folder` or holds it (by
+    /// the paths' bytes: `PreviewRoot.openedRoot(_:holding:)`).
     static func openedRoot(for folder: URL?) -> URL? {
-        let opened = FolderSidebar.shared?.rootURL.standardizedFileURL
-        return folder.flatMap { f in
-            opened.flatMap { (f.standardizedFileURL.path + "/").hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") ? $0 : nil }
-        }
+        PreviewRoot.openedRoot(FolderSidebar.shared?.rootURL, holding: folder)
     }
 
     /// The vault an exported copy of a document in `folder` resolves wikilinks in.
@@ -801,11 +799,7 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     /// or the sidebar's or the vault's when the file is inside that.
     func linkFolder(_ url: URL) -> URL? {
         guard let file = PreviewFolder.fileURL(for: linkTarget(url)) else { return folder }
-        for root in [vaultRoot, openedRoot, folder].compactMap({ $0 }) {
-            let r = root.standardizedFileURL.path
-            if file.path.hasPrefix(r.hasSuffix("/") ? r : r + "/") { return root }
-        }
-        return folder
+        return PreviewRoot.root(holding: file, among: [vaultRoot, openedRoot, folder].compactMap { $0 }) ?? folder
     }
 }
 

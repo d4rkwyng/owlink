@@ -27,30 +27,49 @@ public enum PreviewRoot {
     /// searched the folder holding it.
     public static func searchFolders(from folder: URL, openedRoot: URL?, home: URL? = nil) -> [URL] {
         let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
-        let rootPath = openedRoot?.standardizedFileURL.path
+        // The opened folder by its path bytes (`FolderTree.sameBytes`):
+        // Swift text calls canonically equivalent spellings equal.
+        func isOpened(_ u: URL) -> Bool { openedRoot.map { FolderTree.sameBytes(u.path, $0.standardizedFileURL.path) } ?? false }
         var dirs: [URL] = []
         var dir = folder.standardizedFileURL
         for _ in 0..<maxLevels {
-            let p = dir.path
-            if p != rootPath, !WikiVault.mayBeVaultRoot(dir, home: home) { break }
+            if !isOpened(dir), !WikiVault.mayBeVaultRoot(dir, home: home) { break }
             dirs.append(dir)
-            if p == rootPath { break }
+            if isOpened(dir) { break }
             dir = dir.deletingLastPathComponent()
         }
-        if let openedRoot, !dirs.contains(where: { $0.path == rootPath }) { dirs.append(openedRoot.standardizedFileURL) }
+        if let openedRoot, !dirs.contains(where: isOpened) { dirs.append(openedRoot.standardizedFileURL) }
         return dirs
     }
 
     /// The parts of a root-absolute path, decoded; nil for one that isn't
-    /// (relative, a scheme, `//host`) or that climbs with `..`.
+    /// (relative, a scheme, `//host`) or that climbs with `..`. Read as
+    /// UTF-8 bytes and split at each `/` byte (`FolderTree.components`): a
+    /// slash followed by a combining mark is one Swift character, so a
+    /// text split kept it inside a name.
     public static func parts(of path: String) -> [String]? {
         var p = path
-        if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
-        guard p.hasPrefix("/"), !p.hasPrefix("//") else { return nil }
+        if let cut = p.utf8.firstIndex(where: { $0 == 0x3f || $0 == 0x23 }) { p = String(decoding: p.utf8[..<cut], as: UTF8.self) }
+        let head = Array(p.utf8.prefix(2))
+        guard head.first == 0x2f, head.count < 2 || head[1] != 0x2f else { return nil }
         p = p.removingPercentEncoding ?? p
-        let parts = p.split(separator: "/").map(String.init).filter { $0 != "." }
-        guard !parts.isEmpty, !parts.contains("..") else { return nil }
+        let parts = FolderTree.components(p).filter { !FolderTree.sameBytes($0, ".") }
+        guard !parts.isEmpty, !parts.contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
         return parts
+    }
+
+    /// `opened` when it is `folder` or holds it, by the paths' bytes
+    /// (`FolderTree.relativePath`); nil otherwise or without both.
+    public static func openedRoot(_ opened: URL?, holding folder: URL?) -> URL? {
+        guard let folder, let opened = opened?.standardizedFileURL,
+              FolderTree.relativePath(of: folder, in: opened) != nil else { return nil }
+        return opened
+    }
+
+    /// The first of `roots` that `file` lies below (not a root itself), by
+    /// the paths' bytes (`FolderTree.relativePath`); nil when none does.
+    public static func root(holding file: URL, among roots: [URL]) -> URL? {
+        roots.first { FolderTree.relativePath(of: file, in: $0).map { !$0.isEmpty } ?? false }
     }
 
     /// The file `path` stands for, and the root it was found under.

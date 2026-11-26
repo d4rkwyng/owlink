@@ -105,4 +105,65 @@ import Testing
         #expect(try served("pics/y.png") == nil, "the resolved folder is hidden")
         #expect(try served("v.png") == nil, "the resolved file is hidden")
     }
+
+    /// Validators round 4: the site-root search finds a root above a
+    /// document folder whose name starts with a combining mark (the
+    /// levels above were counted with a text prefix, which "/" and the
+    /// mark missed), and a site-absolute path whose first name starts
+    /// with a mark is split at its "/" bytes and served; `//host`, `..`
+    /// and the query and fragment keep their rules.
+    @Test func siteRootsAboveAndBelowCombiningMarkNames() throws {
+        #expect(PreviewRoot.parts(of: "/\u{301}img/b.png") == ["\u{301}img", "b.png"])
+        #expect(PreviewRoot.parts(of: "/a/./b.png?x=1#y") == ["a", "b.png"])
+        #expect(PreviewRoot.parts(of: "//host/a.png") == nil)
+        #expect(PreviewRoot.parts(of: "/a/../b.png") == nil)
+        #expect(PreviewRoot.parts(of: "a.png") == nil)
+        #expect(PreviewRoot.parts(of: "/") == nil)
+        let t = try makeTree(["blog/static/images/a.png", "blog/static/\u{301}img/b.png", "blog/\u{301}posts/doc.md", "blog/posts/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let blog = t.appendingPathComponent("blog").resolvingSymlinksInPath()
+        func req(_ p: String) -> URL { URL(string: PreviewFolder.scheme + "://doc/" + p)! }
+        let walks = Beneath.kernelEnforced ? [false, true] : [true]
+        for docName in ["\u{301}posts", "posts"] {
+            let doc = blog.appendingPathComponent(docName)
+            for scriptOn in [false, true] {
+                for walk in walks {
+                    let what = "\(docName) scriptOn \(scriptOn) walk \(walk)"
+                    let grants = PreviewGrants()
+                    grants.grant([doc])
+                    let a = try #require(grants.approve(req("images/a.png"), in: doc, openedRoot: nil, scriptOn: scriptOn, walk: walk), "\(what)")
+                    #expect(PreviewRead.data(a.parts, beneath: a.root, scriptOn: scriptOn, walk: walk) == Data("blog/static/images/a.png".utf8), "\(what)")
+                    let b = try #require(grants.approve(req("%CC%81img/b.png"), in: doc, openedRoot: nil, scriptOn: scriptOn, walk: walk), "\(what)")
+                    #expect(b.parts == ["\u{301}img", "b.png"], "\(what)")
+                    #expect(PreviewRead.data(b.parts, beneath: b.root, scriptOn: scriptOn, walk: walk) == Data("blog/static/\u{301}img/b.png".utf8), "\(what)")
+                }
+            }
+        }
+    }
+
+    /// Validators round 4: which root holds a document folder or a link
+    /// target is decided by the paths' bytes. A first-level combining-mark
+    /// folder is inside; the root's name plus a mark is a sibling, and a
+    /// canonically equivalent but byte-distinct spelling (Ohm sign for
+    /// Omega) is another folder. The opened folder spelled with the Ohm
+    /// sign isn't taken for a folder spelled with Omega in the search.
+    @Test func theHoldingRootIsDecidedByBytes() throws {
+        let base = URL(fileURLWithPath: "/cedric-no-such-folder-\(UUID().uuidString)")
+        let root = base.appendingPathComponent("root")
+        let mark = root.appendingPathComponent("\u{301}d"), sibling = base.appendingPathComponent("root\u{301}")
+        #expect(PreviewRoot.openedRoot(root, holding: mark) == root)
+        #expect(PreviewRoot.openedRoot(root, holding: root) == root)
+        #expect(PreviewRoot.openedRoot(root, holding: sibling) == nil)
+        #expect(PreviewRoot.openedRoot(nil, holding: mark) == nil)
+        #expect(PreviewRoot.root(holding: mark.appendingPathComponent("a.md"), among: [sibling, root]) == root)
+        #expect(PreviewRoot.root(holding: root.appendingPathComponent("\u{301}a.md"), among: [root]) == root)
+        #expect(PreviewRoot.root(holding: sibling.appendingPathComponent("a.md"), among: [root]) == nil)
+        #expect(PreviewRoot.root(holding: root, among: [root]) == nil, "the root itself isn't a file below it")
+        let ohm = base.appendingPathComponent("\u{2126}"), omega = base.appendingPathComponent("\u{3A9}")
+        #expect(PreviewRoot.openedRoot(ohm, holding: omega.appendingPathComponent("d")) == nil)
+        #expect(PreviewRoot.root(holding: omega.appendingPathComponent("a.md"), among: [ohm]) == nil)
+        let dirs = PreviewRoot.searchFolders(from: omega.appendingPathComponent("d"), openedRoot: ohm, home: URL(fileURLWithPath: "/Users/nobody"))
+        #expect(dirs.contains { Array($0.path.utf8) == Array(ohm.path.utf8) }, "the opened folder is searched")
+        #expect(Array(dirs.last?.path.utf8 ?? "".utf8) == Array(ohm.path.utf8), "added after the walk, not met on it")
+    }
 }

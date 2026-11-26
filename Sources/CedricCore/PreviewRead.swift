@@ -252,7 +252,7 @@ public final class PreviewGrants: @unchecked Sendable {
                 } else if sub.isEmpty {
                     candidate = base
                 } else {
-                    let fd = Beneath.open(sub.split(separator: "/").map(String.init), beneath: base.fd,
+                    let fd = Beneath.open(FolderTree.components(sub), beneath: base.fd,
                                           flags: O_RDONLY | O_DIRECTORY, followLast: true, walk: walk)
                     guard fd >= 0, let r = PinnedRoot(adopting: fd, url: url) else { continue }
                     candidate = r
@@ -266,14 +266,16 @@ public final class PreviewGrants: @unchecked Sendable {
     /// The folder `dir` the site search looks in, open: its pin when it
     /// is pinned, else (a folder above the document's) the document
     /// folder's pin's parent the right number of levels up, taken only
-    /// when `dir`'s path names that same folder now. nil otherwise.
+    /// when `dir`'s path names that same folder now. nil otherwise. How
+    /// far above is counted in the bytes (`FolderTree.relativePath`, split
+    /// at `/` bytes): as text a document folder whose name starts with a
+    /// combining mark wasn't below its parent.
     private func searchFolder(_ dir: URL, docPin: PinnedRoot) -> PinnedRoot? {
         let p = dir.standardizedFileURL.path
         guard !denied.contains(FolderTree.PathKey(p)) else { return nil }
         if let r = pins[FolderTree.PathKey(p)] { return r }
-        let below = docPin.url.path
-        guard below.hasPrefix(p.hasSuffix("/") ? p : p + "/") else { return nil }
-        let levels = below.split(separator: "/").count - p.split(separator: "/").count
+        guard let rel = FolderTree.relativePath(of: docPin.url, in: dir), !rel.isEmpty else { return nil }
+        let levels = FolderTree.components(rel).count
         guard levels > 0 else { return nil }
         var fd = openat(docPin.fd, "..", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         for _ in 1..<levels where fd >= 0 {
