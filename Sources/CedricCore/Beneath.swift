@@ -58,8 +58,14 @@ public enum Beneath {
     }
 
     /// One file or folder name: not empty, not `.` or `..`, no `/` or NUL.
+    /// Checked as the UTF-8 bytes the kernel gets, not as Swift text: a
+    /// slash followed by a combining mark is one Swift character, so a text
+    /// search misses it, but Darwin still splits the name at that byte
+    /// (Astra batch 4 A, batch 5 must-fix 1).
     public static func isName(_ s: String) -> Bool {
-        !s.isEmpty && s != "." && s != ".." && !s.contains("/") && !s.contains("\0")
+        let b = s.utf8
+        return !b.isEmpty && !b.elementsEqual(".".utf8) && !b.elementsEqual("..".utf8)
+            && !b.contains(0x2f) && !b.contains(0)
     }
 
     /// Opens `components` beneath the folder `root` has open, with `flags`
