@@ -12,6 +12,9 @@ import CedricCore
 ///   rebuilds the marks.
 /// - A word learned straight through it in Owlink (the spelling panel's
 ///   Learn): its notice clears the record, and the same.
+/// - A word learned in another app after another app came to the front
+///   (no notice): AppKit's pass asks, and the same. The lock screen coming
+///   to the front doesn't count as another app.
 ///
 /// The dictionary is the check's own (RecordingSpellDictionary): nothing
 /// here learns or ignores a word in the user's real one. The view drops
@@ -29,9 +32,19 @@ extension DevChecks {
         var panelTab: EditorWindowController?
         var directTab: EditorWindowController?
         var learnTab: EditorWindowController?
+        var elsewhereTab: EditorWindowController?
+        var lockTab: EditorWindowController?
         // Made up, and learned only in the check's own dictionary.
-        let learnedWord = "zqxfakelrn"
+        let learnedWord = "zqxfakelrn", elsewhereWord = "zqxfakeelse"
         let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
+        /// Another app (or the lock screen) activated, as NSWorkspace says
+        /// it: only Owlink's own observer hears this in-process notice.
+        func activated(_ bundleID: String) -> Bool {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return false }
+            NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didActivateApplicationNotification, object: NSWorkspace.shared,
+                                                       userInfo: [NSWorkspace.applicationUserInfoKey: app])
+            return true
+        }
         var typedTab: EditorWindowController?
         var imeTab: EditorWindowController?
 
@@ -148,6 +161,60 @@ extension DevChecks {
                 expect(!NSSpellChecker.shared.hasLearnedWord(learnedWord), "(and the user's own dictionary doesn't have it)")
                 rebuilt(learnTab, "learned directly", learnedWord)
                 close(learnTab)
+            },
+        ]
+        steps += [
+            sync {
+                elsewhereTab = app.open(write("learn-elsewhere.txt", "A \(elsewhereWord) and a wrnog there.\n"))
+                sized(elsewhereTab)
+                if let elsewhereTab { focus(elsewhereTab) }
+            },
+            wait("the first-frame marks (learned in another app)", 4) { early(elsewhereTab, elsewhereWord) },
+            sync {
+                inTheInterval(elsewhereTab, "learned in another app")
+                guard let v = elsewhereTab?.primaryTextView else { return }
+                expect(activated("com.apple.dock"), "(the Dock is running)")
+                expect(v.spellCoverage.asksLearned, "another app in front: AppKit's pass will ask about the marked words")
+                // Learned over there: nothing in Owlink hears of it.
+                dictionary.learnElsewhere(elsewhereWord)
+                expect(!v.spellCoverage.isEmpty, "learned in another app: no notice, the record stays")
+            },
+            wait("AppKit's pass after the word was learned in another app", 4) {
+                elsewhereTab.map { undrawn($0.primaryTextView, elsewhereWord) } ?? true
+            },
+            pause(1.5),
+            sync {
+                expect(dictionary.asked.contains(elsewhereWord), "AppKit's pass asked about it", "\(dictionary.asked)")
+                rebuilt(elsewhereTab, "learned in another app", elsewhereWord)
+                close(elsewhereTab)
+            },
+        ]
+        steps += [
+            sync {
+                lockTab = app.open(write("lock-screen.txt", "A tpyo and a wrnog there.\n"))
+                sized(lockTab)
+                if let lockTab { focus(lockTab) }
+            },
+            wait("the first-frame marks (lock screen)", 4) { early(lockTab) },
+            sync {
+                inTheInterval(lockTab, "lock screen")
+                guard let v = lockTab?.primaryTextView else { return }
+                if v.spellCoverage.asksLearned {
+                    // Owlink wasn't in front at the early check: it asks anyway.
+                    print("check: note: lock screen: Owlink not in front at the early check, the pass asks regardless")
+                } else {
+                    expect(activated(SpellFrontApp.lockScreen), "(the lock screen's process is running)")
+                    expect(!v.spellCoverage.asksLearned, "the lock screen in front: not another app")
+                }
+                expect(activated("com.apple.dock"), "(the Dock is running)")
+                expect(v.spellCoverage.asksLearned, "then another app: it asks")
+            },
+            wait("AppKit's pass (lock screen)", 4) { lockTab.map { $0.primaryTextView.spellCoverage.isEmpty } ?? true },
+            pause(1.5),
+            sync {
+                guard let v = lockTab?.primaryTextView else { return }
+                expect(v.skippedTextChecks == 1, "nothing learned or ignored: AppKit's pass is still skipped", "\(v.skippedTextChecks)")
+                close(lockTab)
             },
         ]
         steps += [
