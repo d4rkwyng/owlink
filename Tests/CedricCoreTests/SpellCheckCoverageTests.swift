@@ -113,6 +113,21 @@ import Testing
         #expect(!took)
     }
 
+    /// A word marked many times is asked about once, and learning it
+    /// still means AppKit's pass runs.
+    @Test func aWordMarkedManyTimesIsRecordedOnce() {
+        let marks = ["tpyo", "wrnog", "tpyo", "Tpyo", "wrnog", "tpyo"]
+        var c = covering(NSRange(location: 0, length: 2899), marking: marks)
+        #expect(c.markedWords == ["tpyo", "wrnog", "Tpyo"])
+        var now = dict
+        now.learned = ["tpyo"]
+        let learned = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: now)
+        #expect(!learned)
+        var unchanged = covering(NSRange(location: 0, length: 2899), marking: marks)
+        let took = unchanged.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: dict)
+        #expect(took)
+    }
+
     @Test func checksAfterALanguageChange() {
         for change in [{ (d: inout SpellDictionaryState) in d.language = "fr" }, { $0.automaticByLanguage = false }] {
             var c = covering(NSRange(location: 0, length: 2899))
