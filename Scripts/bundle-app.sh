@@ -129,6 +129,11 @@ cp Resources/AI/owl-tool-scores.json "$APP/Contents/Resources/AI/owl-tool-scores
 mkdir -p "$APP/Contents/Resources/AI/licenses"
 cp Resources/AI/licenses/Apache-2.0.txt "$APP/Contents/Resources/AI/licenses/Apache-2.0.txt"
 cp Resources/AI/licenses/Qwen-Research-License.txt "$APP/Contents/Resources/AI/licenses/Qwen-Research-License.txt"
+# Mermaid and KaTeX for the Markdown preview (Allow JavaScript only; served by
+# the preview's cedric-asset: handler, never fetched), with their licences.
+# Versions and SHA-256s: docs/THIRD_PARTY.md.
+mkdir -p "$APP/Contents/Resources/Preview"
+ditto Resources/Preview "$APP/Contents/Resources/Preview"
 # The command-line launcher ships inside the app; see Scripts/cedric.
 cp Scripts/cedric "$APP/Contents/Resources/cedric"
 chmod +x "$APP/Contents/Resources/cedric"

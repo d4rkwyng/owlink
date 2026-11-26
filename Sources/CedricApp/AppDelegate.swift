@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let store = SessionStore(directory: SessionStore.defaultDirectory())
     private let env = DevEnvironment.values
     private var sessionTimer: Timer?
+    /// When the last session save started (system uptime).
+    private var lastSessionSave: TimeInterval = -.infinity
+    /// A first save after a quiet spell is waiting for the first frame.
+    private var leadingSaveAfterFirstFrame = false
     private var appearanceObservation: NSKeyValueObservation?
     /// Files handed over before launch finished (Finder, `open`).
     private var pendingOpen: [URL] = []
@@ -777,10 +781,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: Session
 
-    /// Saves soon after a change (coalesced): a crash loses at most ~1.5 s of typing.
+    /// Coalesced session saves: 1.5 s after the last change.
+    static let sessionSaveDelay: TimeInterval = 1.5
+
+    /// Saves soon after a change. The first change after a quiet spell (no
+    /// save waiting, none for 1.5 s) is saved on the next turn, so a new
+    /// tab's first text or a file's first edit is on disk in a few
+    /// milliseconds, not only once typing pauses; the changes after it
+    /// are coalesced into one save 1.5 s after the last. A crash loses at
+    /// most the typing since the last save, never a whole new tab.
+    /// Not while restored tabs wait to be built (a save builds them all
+    /// at once: AppDelegate.finishRestore) nor before the first frame
+    /// (then right after it), and not with a large document unsaved,
+    /// whose whole text each save copies: those keep the 1.5 s.
     func scheduleSessionSave() {
+        let waiting = sessionTimer?.isValid == true
         sessionTimer?.invalidate()
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+        var delay = Self.sessionSaveDelay
+        let quiet = !waiting && ProcessInfo.processInfo.systemUptime - lastSessionSave >= Self.sessionSaveDelay
+        if quiet, pendingRestore.isEmpty, !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) {
+            if AfterFirstFrame.passed {
+                delay = 0.02
+            } else if !leadingSaveAfterFirstFrame {
+                leadingSaveAfterFirstFrame = true
+                AfterFirstFrame.run { [weak self] in
+                    guard let self else { return }
+                    self.leadingSaveAfterFirstFrame = false
+                    // Still waiting (nothing saved since): save now.
+                    if self.sessionTimer?.isValid == true, self.pendingRestore.isEmpty { self.saveSession(sync: false) }
+                }
+            }
+        }
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveSession(sync: false) }
         }
     }
@@ -815,6 +847,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func saveSession(sync: Bool = true) {
         sessionTimer?.invalidate()
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
+        lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()
         var windows: [SessionWindow] = []
@@ -953,7 +986,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DevEnvironment.values["CEDRIC_RESTORE_DELAY"].flatMap(Double.init) ?? 0.25
 
     private func restoreSession() {
-        guard let session = store.load() else { return }
+        let session: Session
+        switch store.loadForLaunch() {
+        case .none: return
+        case .session(let s): session = s
+        case .recover(let aside, let buffers):
+            recoverBuffers(buffers, setAside: aside)
+            return
+        }
         // Closed tabs past ClosedTabs.keepDays go, with their unsaved text.
         let kept = ClosedTabs.expire(session.closedTabs ?? [])
         closedTabs = kept.list
@@ -1003,8 +1043,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let host else { continue }
             if group.floatOnTop { setWindowFloats(true, host) }
             pendingRestore += rest.sorted().map { PendingTab(tab: openTabs[$0], group: group, index: $0) }
-            host.makeKeyAndOrderFront(nil)
+            orderInAlone(host, key: true)
         }
+    }
+
+    /// A restored window, ordered in on its own: AppKit's automatic
+    /// tabbing (`.preferred`) otherwise adds it to the window restored
+    /// before it, and a session saved with two windows comes back as one.
+    private func orderInAlone(_ window: NSWindow, key: Bool) {
+        let mode = window.tabbingMode
+        window.tabbingMode = .disallowed
+        if key { window.makeKeyAndOrderFront(nil) } else { window.orderFront(nil) }
+        window.tabbingMode = mode
+    }
+
+    /// The session file couldn't be read (SessionStore.loadForLaunch: kept
+    /// aside as `setAside`), or there is none but unsaved text is in the
+    /// store: each buffer opens as an unsaved "Recovered" tab, oldest
+    /// first, in one window, caret at the end, with a notice saying what
+    /// happened. Their files, places and the closed list were in the
+    /// session; the text is all the store still has, and it is not lost:
+    /// the tabs are unsaved, so the next save keeps their buffers.
+    private func recoverBuffers(_ ids: [UUID], setAside: URL?) {
+        var host: NSWindow?
+        var built: [EditorWindowController] = []
+        var names: [String] = []
+        for id in ids {
+            let name = UntitledNames.next(open: names, base: String(localized: "Recovered"))
+            let st = SessionTab(id: id, untitledName: name, hasBuffer: true, selectionLocation: Int.max)
+            let place = host.map { h in (host: h, index: h.tabGroup?.windows.count ?? 1) }
+            guard let tab = restoreTab(st, into: place) as? EditorWindowController else { continue }
+            names.append(name)
+            built.append(tab)
+            // On screen before the next joins its tab group.
+            if host == nil, let w = tab.window { host = w; orderInAlone(w, key: true) }
+        }
+        let kept = setAside.map { String(localized: "Its session file was kept as “\($0.lastPathComponent)” in \($0.deletingLastPathComponent().path).") } ?? ""
+        let text = String(localized: "Owlink couldn’t read its last session. This is unsaved text it found from it.") + (kept.isEmpty ? "" : " " + kept)
+        for tab in built { tab.showNotice(text, buttons: []) }
+        host?.makeKeyAndOrderFront(nil)
+        if let setAside { FileHandle.standardError.write(Data("session: unreadable, kept as \(setAside.path); \(built.count) unsaved text(s) recovered\n".utf8)) }
     }
 
     /// Builds one saved tab; nil if its file has gone and it had no buffer.
@@ -1049,6 +1127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if binary { tab.holdBinary(body) }
         if st.hasBuffer { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
         tab.updateTitle()
+        // Unsaved text for a file deleted or moved while the app was not
+        // running: the "deleted or moved" bar, as when it goes while open.
+        if fromBuffer, let url = doc.fileURL, case .missing = DiskStamp.status(known: doc.diskStamp, at: url) { tab.showFileMissing() }
         let len = (body as NSString).length
         tab.textView.setSelectedRange(NSRange(location: min(st.selectionLocation, len), length: min(st.selectionLength, max(0, len - st.selectionLocation))))
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }
@@ -1108,7 +1189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if let f = p.group.frame { w.setFrame(from: f) }
                 if p.group.floatOnTop { setWindowFloats(true, w) }
                 p.group.built.append((p.index, w))
-                w.orderFront(nil)
+                orderInAlone(w, key: false)
             }
             return
         }

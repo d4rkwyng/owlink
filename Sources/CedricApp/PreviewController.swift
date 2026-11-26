@@ -86,6 +86,16 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Rendering for a PDF export: wikilinks and embeds by relative path
     /// (Markdown.Options.exportLinks), not `cedric-doc:` links.
     var exportLinks = false
+    /// A PDF export with Allow JavaScript on: the bundled Mermaid and KaTeX
+    /// may run, the page's own script may not (PreviewRich.csp's `pageScripts`).
+    var bundledScriptsOnly = false
+    /// What the page loaded last needed of Mermaid and KaTeX (none with
+    /// JavaScript off).
+    private(set) var lastNeeds: PreviewRich.Needs = []
+    /// The HTML of the page loaded last, as handed to WebKit (for checks).
+    private(set) var lastPageHTML: String?
+    /// The live document's Allow JavaScript, whichever entry is showing.
+    var liveDocumentJavaScript: Bool { homeJavaScript }
 
     /// The folder open in the sidebar, when it holds `folder`.
     static func openedRoot(for folder: URL?) -> URL? {
@@ -125,6 +135,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Serves the document's folder (and nothing else) to the page.
     private let folderFiles = DocumentFolderFiles()
+    /// Serves the bundled Mermaid and KaTeX (and nothing else), with JavaScript on.
+    let assets = PreviewAssets()
 
     /// For the checks: renders applied, whole loads, and main-thread time.
     private(set) var bodySwaps = 0
@@ -137,6 +149,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(folderFiles, forURLScheme: DocumentFolderFiles.scheme)
+        config.setURLSchemeHandler(assets, forURLScheme: PreviewRich.scheme)
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
         let ucc = config.userContentController
@@ -290,8 +303,11 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         latest.set(gen)
         let csp = self.csp
         let key = "\(language.rawValue)|\(palette.name)|\(palette.isDark)|\(csp)|\(baseURL?.absoluteString ?? "-")|\(allowJavaScript)|\(allowNetwork)"
+        // Diagrams and math only with JavaScript on (PreviewRich).
+        let js = allowJavaScript, net = allowNetwork, pageScripts = !bundledScriptsOnly
         guard language == .markdown else {
             shellKey = nil
+            lastNeeds = []
             load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
             return
         }
@@ -302,14 +318,18 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             // Skip a render a newer one has already replaced.
             guard ticket.value == gen else { return }
             let t0 = DispatchTime.now()
-            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault) : .preview(vault: vault))
+            var options: Markdown.Options = exportLinks ? .export(vault: vault) : .preview(vault: vault)
+            options.math = js
+            let body = Markdown.render(text, options: options)
+            let needs = js ? PreviewRich.needs(body: body) : []
+            let pageCSP = needs.isEmpty ? csp : PreviewRich.csp(allowJavaScript: js, allowNetwork: net, needs: needs, pageScripts: pageScripts)
             let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard gen == self.generation else { return }
                     let applyStart = DispatchTime.now()
                     self.lastRenderMs = ms
-                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL)
+                    self.apply(body: body, key: key, palette: palette, csp: pageCSP, baseURL: baseURL, needs: needs)
                     self.noteMainThread(applyStart)
                 }
             }
@@ -334,7 +354,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// Swaps the body into the loaded page, or loads the page.
-    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?) {
+    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, needs: PreviewRich.Needs) {
+        lastNeeds = needs
         if key == shellKey, !allowJavaScript {
             if loadingShell { pendingBody = body; return }
             bodySwaps += 1
@@ -342,7 +363,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
                                         arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
             return
         }
-        load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL)
+        load(Self.page(body: body, palette: palette, csp: csp, head: PreviewRich.headTags(needs),
+                       tail: PreviewRich.tailTags(needs, dark: palette.isDark)), key: key, baseURL: baseURL)
     }
 
     private func load(_ html: String, key: String?, baseURL: URL?) {
@@ -355,21 +377,19 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             if !self.allowNetwork, let rules = Self.blockRules { ucc.add(rules) }
             self.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript = self.allowJavaScript
             self.folderFiles.scriptOn = self.allowJavaScript
+            self.assets.scriptOn = self.allowJavaScript
             self.shellKey = key
             self.loadingShell = true
             self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
+            self.lastPageHTML = html
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }
     }
 
-    var csp: String {
-        let net = allowNetwork ? " https: http:" : ""
-        let doc = " \(DocumentFolderFiles.scheme): file:"
-        let script = allowJavaScript ? "'unsafe-inline'\(doc)\(net)" : "'none'"
-        return "default-src 'none'; img-src\(doc) data:\(net); media-src\(doc) data:\(net); style-src 'unsafe-inline'\(doc)\(net); font-src\(doc) data:\(net); script-src \(script); connect-src \(allowNetwork ? "*" : "'none'")"
-    }
+    /// The page's policy before Mermaid or KaTeX (PreviewRich.csp adds them when a body needs them).
+    var csp: String { PreviewRich.csp(allowJavaScript: allowJavaScript, allowNetwork: allowNetwork, pageScripts: !bundledScriptsOnly) }
 
     nonisolated static func injectCSP(_ csp: String, into html: String) -> String {
         "<meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">\n" + html
@@ -377,17 +397,20 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     nonisolated static func hex(_ c: UInt32) -> String { String(format: "#%06x", c) }
 
-    /// The whole page. `csp` nil: none (an exported file).
-    nonisolated static func page(body: String, palette p: EditorPalette, csp: String?, title: String? = nil) -> String {
+    /// The whole page. `csp` nil: none (an exported file). `head` and
+    /// `tail` go at the end of `<head>` and `<body>` (PreviewRich's tags;
+    /// empty, the page is as it always was).
+    nonisolated static func page(body: String, palette p: EditorPalette, csp: String?, title: String? = nil,
+                                 head: String = "", tail: String = "") -> String {
         let meta = csp.map { "<meta http-equiv=\"Content-Security-Policy\" content=\"\($0)\">\n" } ?? ""
         let titleTag = title.map { "<title>\(Markdown.escape($0))</title>\n" } ?? ""
         return """
         <!doctype html><html><head><meta charset="utf-8">
         \(meta)\(titleTag)<style>
         \(styles(p))
-        </style></head><body>
+        </style>\(head)</head><body>
         \(body)
-        </body></html>
+        \(tail)</body></html>
         """
     }
 
@@ -764,6 +787,52 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         }
         return folder
     }
+}
+
+/// `cedric-asset://vendor/…`: the bundled Mermaid and KaTeX files
+/// (PreviewRich.files, from Owlink.app/Contents/Resources/Preview, or the
+/// source tree's Resources/Preview for `swift run`), and nothing else.
+/// Only while the page may run JavaScript; with it off every request fails.
+@MainActor
+final class PreviewAssets: NSObject, WKURLSchemeHandler {
+    var scriptOn = false
+    /// What was asked for (for the checks): served paths, and refused URLs.
+    private(set) var served: [String] = []
+    private(set) var refused: [String] = []
+
+    nonisolated static let directory: URL? = {
+        var candidates: [URL] = []
+        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("Preview")) }
+        candidates.append(URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .appendingPathComponent("../../Resources/Preview").standardizedFileURL)
+        return candidates.first { FileManager.default.fileExists(atPath: $0.appendingPathComponent(PreviewRich.glueScript).path) }
+    }()
+
+    static func mimeType(_ path: String) -> String {
+        switch (path as NSString).pathExtension {
+        case "js": return "text/javascript"
+        case "css": return "text/css"
+        case "woff2": return "font/woff2"
+        default: return "application/octet-stream"
+        }
+    }
+
+    func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        guard scriptOn, let url = task.request.url, let rel = PreviewRich.assetPath(for: url), let dir = Self.directory,
+              let data = try? Data(contentsOf: dir.appendingPathComponent(rel), options: .mappedIfSafe) else {
+            refused.append(task.request.url?.absoluteString ?? "-")
+            task.didFailWithError(URLError(.noPermissionsToReadFile))
+            return
+        }
+        served.append(rel)
+        task.didReceive(URLResponse(url: url, mimeType: Self.mimeType(rel), expectedContentLength: data.count, textEncodingName: rel.hasSuffix(".woff2") ? nil : "utf-8"))
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {}
+
+    func resetLog() { served = []; refused = [] }
 }
 
 /// A scheme task handed across the file read (WebKit calls back on the main thread).

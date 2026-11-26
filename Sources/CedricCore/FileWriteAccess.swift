@@ -164,12 +164,19 @@ public enum DocumentWrite {
         /// The atomic save's last look before the rename (`nothingElseAt`)
         /// fails with these errors, one per attempt, before it really looks.
         public var preRenameStatErrors: [Int32] = []
+        /// The atomic save (`replace`) writes this many bytes of the new
+        /// file, calls `paused` with that count, then writes the rest: a
+        /// crash check holds a save part way through and kills the app.
+        public var pauseAfter: Int?
+        public var paused: (@Sendable (Int) -> Void)?
         public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false,
-                    preRenameStatErrors: [Int32] = []) {
+                    preRenameStatErrors: [Int32] = [], pauseAfter: Int? = nil, paused: (@Sendable (Int) -> Void)? = nil) {
             self.failWriteAfter = failWriteAfter
             self.failRestore = failRestore
             self.skipSizeLimit = skipSizeLimit
             self.preRenameStatErrors = preRenameStatErrors
+            self.pauseAfter = pauseAfter
+            self.paused = paused
         }
     }
 
@@ -263,7 +270,13 @@ public enum DocumentWrite {
                     close(old)
                 }
             }
-            try writeAll(data, to: fd, at: 0, url: url)
+            if let n = faults?.pauseAfter, n < data.count {
+                try writeAll(data.prefix(n), to: fd, at: 0, url: url)
+                faults?.paused?(n)
+                try writeAll(data.dropFirst(n), to: fd, at: off_t(n), url: url)
+            } else {
+                try writeAll(data, to: fd, at: 0, url: url)
+            }
             guard fstat(fd, &written) == 0 else { throw writeError(errno, url) }
         } catch {
             close(fd)
