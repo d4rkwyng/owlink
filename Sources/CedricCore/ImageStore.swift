@@ -245,8 +245,8 @@ public final class ImageStore {
             }
             let err = errno
             guard err == EEXIST else {
-                // ENOENT: "images" is gone from the folder; ENOTCAPABLE: it leads out now.
-                if err == ENOENT || err == ENOTCAPABLE { throw Failure.destinationChanged }
+                // ENOENT: "images" is gone from the folder; ENOTCAPABLE (Beneath.notCapable): it leads out now.
+                if err == ENOENT || err == Beneath.notCapable { throw Failure.destinationChanged }
                 throw Self.posix(candidate, err)
             }
             // Taken in "images" as it is now but free in the folder checked: "images" changed.

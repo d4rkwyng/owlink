@@ -5,6 +5,11 @@ import Testing
 /// Pasted, dropped and picked images (Astra review findings 1–3): the
 /// "images" folder is pinned by descriptor, copies are staged and
 /// published without overwriting, and a source symlink's bytes are copied.
+/// Why most tests here don't run on some kernels: the macOS 15-era kernel
+/// (the Swift 6.1 CI job) has no `RENAME_RESOLVE_BENEATH`, so `open`
+/// refuses there and these need a working store.
+let needsContainment: Comment = "needs a kernel that keeps open and rename beneath a folder (O_RESOLVE_BENEATH and RENAME_RESOLVE_BENEATH; not macOS 15)"
+
 @Suite(.serialized) struct ImageStoreTests {
     let fm = FileManager.default
 
@@ -23,7 +28,7 @@ import Testing
         (try? fm.attributesOfItem(atPath: u.path)[.type] as? FileAttributeType) == .typeSymbolicLink
     }
 
-    @Test func copiesIntoANewImagesFolderWithoutOverwriting() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func copiesIntoANewImagesFolderWithoutOverwriting() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = outside.appendingPathComponent("one.png")
@@ -44,7 +49,7 @@ import Testing
         #expect(MarkdownPaste.imagesPath("my pic.png") == "images/my%20pic.png")
     }
 
-    @Test func anImagesLinkOutIsRefusedAndOneInsideIsTaken() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func anImagesLinkOutIsRefusedAndOneInsideIsTaken() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = d.appendingPathComponent("p.png")
@@ -67,7 +72,7 @@ import Testing
     /// The race the review describes: "images" is swapped for a link out
     /// after it was checked. Nothing is written: not through the link, not
     /// in the folder that was checked (images/<name> no longer leads there).
-    @Test func aSwappedImagesFolderDoesNotRedirectTheCopy() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aSwappedImagesFolderDoesNotRedirectTheCopy() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = d.appendingPathComponent("p.png")
@@ -92,7 +97,7 @@ import Testing
     /// Must-fix 1 (Astra, batch 3): the pinned "images" moved outside the
     /// document's folder after it was opened. The moved-out folder gets
     /// neither staged bytes nor a published file.
-    @Test func anImagesFolderMovedOutAfterOpenReceivesNothing() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func anImagesFolderMovedOutAfterOpenReceivesNothing() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = d.appendingPathComponent("p.png")
@@ -113,7 +118,7 @@ import Testing
     /// the rename is resolved beneath the document's folder, so a moved-out
     /// "images" (gone, or swapped for a link out) gets nothing, and the
     /// staging file is removed.
-    @Test func anImagesFolderMovedOutBeforePublishReceivesNothing() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func anImagesFolderMovedOutBeforePublishReceivesNothing() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = d.appendingPathComponent("p.png")
@@ -156,19 +161,31 @@ import Testing
     }
 
     /// Where the kernel can't keep the open and the rename beneath the
-    /// document's folder, nothing is made, staged or published.
+    /// document's folder, nothing is made, staged or published. Runs on
+    /// every kernel: one without containment refuses for real (macOS 15),
+    /// one with it is told to behave as one without.
     @Test func withoutKernelContainmentNothingIsWritten() throws {
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        try Data([3]).write(to: outside.appendingPathComponent("p.png"))
+        if #available(macOS 26, *) {
+            #expect(ImageStore.containmentEnforced, "this macOS enforces O_RESOLVE_BENEATH and RENAME_RESOLVE_BENEATH")
+        }
+        defer { ImageStore.forceNoContainment = false }
+        ImageStore.forceNoContainment = ImageStore.containmentEnforced
+        #expect(throws: ImageStore.Failure.noContainment) { _ = try ImageStore.open(in: doc) }
+        #expect(listing(doc).isEmpty, "no images folder is made, nothing is staged")
+        #expect(listing(outside) == ["p.png"], "nothing written outside")
+    }
+
+    /// A store opened where containment works, then refused (forced) before
+    /// a byte is written.
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aStoreOpenedBeforeWritesNothingWithoutContainment() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = outside.appendingPathComponent("p.png")
         try Data([3]).write(to: pic)
-        #expect(ImageStore.containmentEnforced, "this macOS enforces O_RESOLVE_BENEATH and RENAME_RESOLVE_BENEATH")
         defer { ImageStore.forceNoContainment = false }
-        ImageStore.forceNoContainment = true
-        #expect(throws: ImageStore.Failure.noContainment) { _ = try ImageStore.open(in: doc) }
-        #expect(listing(doc).isEmpty, "no images folder is made")
-        // A store opened before: copies and writes are refused before a byte is written.
-        ImageStore.forceNoContainment = false
         let store = try ImageStore.open(in: doc)
         ImageStore.forceNoContainment = true
         #expect(throws: ImageStore.Failure.noContainment) { _ = try store.copy(from: pic, name: "p.png") }
@@ -178,7 +195,7 @@ import Testing
     }
 
     /// The link handed to the editor is checked against the published file.
-    @Test func aLinkIsGivenOnlyWhileItLeadsToThePublishedFile() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aLinkIsGivenOnlyWhileItLeadsToThePublishedFile() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = d.appendingPathComponent("p q.png")
@@ -200,7 +217,7 @@ import Testing
     }
 
     /// The document's folder replaced at its path after "images" was pinned.
-    @Test func aReplacedDocumentFolderGivesNoLink() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aReplacedDocumentFolderGivesNoLink() throws {
         let (d, doc, _) = try layout()
         defer { try? fm.removeItem(at: d) }
         let store = try ImageStore.open(in: doc)
@@ -217,7 +234,7 @@ import Testing
     /// followed by a combining mark is one Swift character (a text search
     /// for "/" misses it) but Darwin still splits the name at that byte
     /// (Astra batch 5, must-fix 1).
-    @Test func aNameThatIsNotOneFileNameIsRefused() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aNameThatIsNotOneFileNameIsRefused() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = outside.appendingPathComponent("p.png")
@@ -234,7 +251,7 @@ import Testing
         #expect(listing(d) == ["doc", "outside"] && listing(outside) == ["p.png"], "nothing written beside the folders")
     }
 
-    @Test func aSourceSymlinkIsCopiedAsItsBytes() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aSourceSymlinkIsCopiedAsItsBytes() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         try Data("the real picture".utf8).write(to: outside.appendingPathComponent("real.png"))
@@ -250,7 +267,7 @@ import Testing
         #expect(fm.contents(atPath: copied.path) == Data("the real picture".utf8), "the target's bytes")
     }
 
-    @Test func foldersAndPipesAreNotCopied() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func foldersAndPipesAreNotCopied() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let folder = outside.appendingPathComponent("x.png")
@@ -263,7 +280,7 @@ import Testing
         #expect(listing(doc.appendingPathComponent("images")).isEmpty, "nothing staged or published")
     }
 
-    @Test func aFailedPublishLeavesNoStagingFile() throws {
+    @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aFailedPublishLeavesNoStagingFile() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = outside.appendingPathComponent("p.png")

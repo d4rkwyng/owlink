@@ -14,6 +14,12 @@ public enum Beneath {
     /// SDKs (Swift 6.1's) may not name it.
     static let resolveBeneath: Int32 = 0x0000_1000
 
+    /// `ENOTCAPABLE` from sys/errno.h (Darwin 107), written as its value:
+    /// the macOS 15 SDK (Swift 6.1's) doesn't name it. What a lookup or
+    /// rename the kernel keeps beneath a folder fails with when it would
+    /// leave it.
+    public static let notCapable: Int32 = 107
+
     /// Whether this kernel enforces `O_RESOLVE_BENEATH`: `..` beneath
     /// /usr must be refused while `bin` opens. A kernel that ignored the
     /// flag would open `..`, and the component walk is used instead.
