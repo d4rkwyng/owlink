@@ -1124,6 +1124,15 @@ and `FolderWatcher.swift`. `cedric -w some/dir` returns at once: `-w`
 waits for each file's tab, a folder has none, so the app deletes the
 folder's wait marker as it opens it (the `cli` check).
 
+Open in Terminal Here (File menu, the sidebar's row and header menus;
+`OpenInTerminal.swift`, the folder from `CedricCore/TerminalHere.swift`,
+`TerminalHereTests`): a document's folder, a folder row itself, a file
+row's folder. `TerminalOpener` hands the folder's file URL to
+`NSWorkspace.open(_:withApplicationAt:configuration:)` with Terminal's
+app URL (by bundle id): no shell string or AppleScript, so spaces and
+quotes need no escaping. Off for an untitled tab. In checks `opener`
+only records the folder (`CEDRIC_CHECK=terminalhere`, in tools-check).
+
 - **Invisible until used.** Nothing is built at launch: no view, no
   listing, no FSEvents stream, no per-tab object. A session with a
   folder whose sidebar was hidden only remembers it

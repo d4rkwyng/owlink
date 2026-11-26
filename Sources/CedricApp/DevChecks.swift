@@ -236,6 +236,7 @@ enum DevChecks {
         case "palette": paletteCheck(app)
         case "quickopen": quickOpenCheck(app)
         case "contextbar": contextBarCheck(app)
+        case "terminalhere": terminalHereCheck(app)
         case "writing": writingCheck(app)
         case "readable": readableWidthCheck(app)
         case "writingrestore": writingRestoreCheck(app)

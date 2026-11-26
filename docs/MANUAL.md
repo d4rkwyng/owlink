@@ -117,7 +117,8 @@ of the editor. **View › Show Folder Sidebar** (⌃⌘1) hides and shows it
 again. Until a folder is open nothing is loaded or watched.
 **File › Open Enclosing Folder** (⌥⇧⌘O) opens the folder holding the
 current tab's file, with the file selected; **File › Reveal in Finder**
-shows the file in Finder. Both are off for an untitled tab.
+shows the file in Finder; **File › Open in Terminal Here** opens a
+Terminal window at the file's folder. All three are off for an untitled tab.
 
 - Click a file to open it in a tab, or to go to its tab if it is open
   (Return does the same). Click a folder's triangle, or select it and
@@ -128,7 +129,8 @@ shows the file in Finder. Both are off for an untitled tab.
 - The tree follows files created, deleted and renamed on disk.
 - A newly created or renamed hidden file is shown so you can see it, without turning on Show Hidden Files.
 - Right-click a folder or file for New File, New Folder, Rename, Move to
-  Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
+  Trash, Reveal in Finder, Open in Terminal Here (Terminal at that folder,
+  or at a file's folder), Copy Path and Find in Folder… (Find in Files
   on that folder). New items go inside the folder, or beside the file;
   a new file opens in a tab. Rename edits the name in the tree (the extension is left unselected) and open
   tabs follow a renamed file or folder without losing edits. Move to Trash

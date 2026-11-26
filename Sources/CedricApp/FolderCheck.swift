@@ -153,7 +153,7 @@ extension DevChecks {
                 expect(actions.accessibilityLabel() == String(localized: "Folder Actions") &&
                        actions.toolTip == String(localized: "Folder Actions"), "folder-actions has a VoiceOver label and tooltip")
                 let expectedMenu = ["", "New File…", "New Folder…", "|", "Rename", "Move to Trash…", "|",
-                                    "Reveal in Finder", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
+                                    "Reveal in Finder", "Open in Terminal Here", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
                                     "Refresh", "Collapse All", "|", "Show Hidden Files", "|", "Open Folder…", "|", "Close Folder"]
                 @MainActor func checkMenu(_ name: String) {
                     s.updateHeaderMenu()

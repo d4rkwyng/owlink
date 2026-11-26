@@ -199,6 +199,8 @@ func buildMainMenu() -> NSMenu {
         // The tab's file: its folder in the sidebar, or in Finder.
         item(String(localized: "Open Enclosing Folder"), #selector(AppDelegate.openEnclosingFolderMenu(_:)), "o", [.command, .shift, .option]),
         item(String(localized: "Reveal in Finder"), #selector(AppDelegate.revealFileInFinderMenu(_:))),
+        // Terminal at the tab's folder (OpenInTerminal.swift).
+        item(String(localized: "Open in Terminal Here"), #selector(AppDelegate.openInTerminalMenu(_:))),
         // A PDF tab's text in a new editable tab (PDFTab.swift).
         item(String(localized: "Open as Text"), #selector(PDFTabController.openAsText(_:))),
         // Viewer tabs: the file in its default app ("Open in Default App"; ViewerTabs.swift).

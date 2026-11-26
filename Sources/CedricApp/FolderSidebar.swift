@@ -55,6 +55,7 @@ extension AppDelegate {
         case #selector(openEnclosingFolderMenu(_:)):
             return FolderTree.enclosingFolder(of: currentFileURL) != nil && (currentTab ?? tabs.last) != nil
         case #selector(revealFileInFinderMenu(_:)): return currentFileURL != nil
+        case #selector(openInTerminalMenu(_:)): return TerminalHere.folder(forDocument: currentFileURL) != nil
         case #selector(toggleFolderSidebarMenu(_:)):
             setShowHide(item, shown: FolderSidebar.shared?.isShown == true,
                         show: String(localized: "Show Folder Sidebar"), hide: String(localized: "Hide Folder Sidebar"))
@@ -704,6 +705,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             add(String(localized: "Move to Trash…"), #selector(trashItem(_:)))
             menu.addItem(.separator())
             add(String(localized: "Reveal in Finder"), #selector(revealInFinder(_:)))
+            add(String(localized: "Open in Terminal Here"), #selector(openInTerminal(_:)))
             // A file below the root: its own folder as the sidebar's root.
             if let n, !n.isDirectory, n.url.deletingLastPathComponent().standardizedFileURL.path != rootURL.standardizedFileURL.path {
                 add(String(localized: "Open Enclosing Folder"), #selector(openEnclosing(_:)))
@@ -762,6 +764,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         case .rename: String(localized: "Rename")
         case .moveToTrash: String(localized: "Move to Trash…")
         case .revealInFinder: String(localized: "Reveal in Finder")
+        case .openInTerminal: String(localized: "Open in Terminal Here")
         case .openEnclosingFolder: String(localized: "Open Enclosing Folder")
         case .copyPath: String(localized: "Copy Path")
         case .findInFolder: String(localized: "Find in Folder…")
@@ -780,6 +783,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         case .rename: #selector(renameItem(_:))
         case .moveToTrash: #selector(trashItem(_:))
         case .revealInFinder: #selector(revealInFinder(_:))
+        case .openInTerminal: #selector(openInTerminal(_:))
         case .openEnclosingFolder: #selector(openEnclosing(_:))
         case .copyPath: #selector(copyPath(_:))
         case .findInFolder: #selector(findInFolder(_:))
@@ -912,6 +916,13 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     @objc func revealInFinder(_ sender: Any?) {
         NSWorkspace.shared.activateFileViewerSelecting([target(sender).url])
+    }
+
+    /// Open in Terminal Here: a folder row's folder, a file row's own folder.
+    @objc func openInTerminal(_ sender: Any?) {
+        let n = target(sender)
+        guard let folder = TerminalHere.folder(forItem: n.url, isDirectory: n.isDirectory) else { NSSound.beep(); return }
+        TerminalOpener.open(folder)
     }
 
     @objc func openEnclosing(_ sender: Any?) {

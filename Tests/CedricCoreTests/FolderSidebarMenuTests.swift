@@ -11,6 +11,7 @@ import Testing
         .command(.moveToTrash, isEnabled: false),
         .separator,
         .command(.revealInFinder, isEnabled: true),
+        .command(.openInTerminal, isEnabled: true),
         .command(.openEnclosingFolder, isEnabled: false),
         .command(.copyPath, isEnabled: true),
         .command(.findInFolder, isEnabled: true),
