@@ -30,6 +30,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     let store = SessionStore(directory: SessionStore.defaultDirectory())
     private let env = DevEnvironment.values
     private var sessionTimer: Timer?
+    /// When the last session save started (system uptime).
+    private var lastSessionSave: TimeInterval = -.infinity
+    /// A first save after a quiet spell is waiting for the first frame.
+    private var leadingSaveAfterFirstFrame = false
     private var appearanceObservation: NSKeyValueObservation?
     /// Files handed over before launch finished (Finder, `open`).
     private var pendingOpen: [URL] = []
@@ -777,10 +781,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: Session
 
-    /// Saves soon after a change (coalesced): a crash loses at most ~1.5 s of typing.
+    /// Coalesced session saves: 1.5 s after the last change.
+    static let sessionSaveDelay: TimeInterval = 1.5
+
+    /// Saves soon after a change. The first change after a quiet spell (no
+    /// save waiting, none for 1.5 s) is saved on the next turn, so a new
+    /// tab's first text or a file's first edit is on disk in a few
+    /// milliseconds, not only once typing pauses; the changes after it
+    /// are coalesced into one save 1.5 s after the last. A crash loses at
+    /// most the typing since the last save, never a whole new tab.
+    /// Not while restored tabs wait to be built (a save builds them all
+    /// at once: AppDelegate.finishRestore) nor before the first frame
+    /// (then right after it), and not with a large document unsaved,
+    /// whose whole text each save copies: those keep the 1.5 s.
     func scheduleSessionSave() {
+        let waiting = sessionTimer?.isValid == true
         sessionTimer?.invalidate()
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
+        var delay = Self.sessionSaveDelay
+        let quiet = !waiting && ProcessInfo.processInfo.systemUptime - lastSessionSave >= Self.sessionSaveDelay
+        if quiet, pendingRestore.isEmpty, !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) {
+            if AfterFirstFrame.passed {
+                delay = 0.02
+            } else if !leadingSaveAfterFirstFrame {
+                leadingSaveAfterFirstFrame = true
+                AfterFirstFrame.run { [weak self] in
+                    guard let self else { return }
+                    self.leadingSaveAfterFirstFrame = false
+                    // Still waiting (nothing saved since): save now.
+                    if self.sessionTimer?.isValid == true, self.pendingRestore.isEmpty { self.saveSession(sync: false) }
+                }
+            }
+        }
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.saveSession(sync: false) }
         }
     }
@@ -815,6 +847,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func saveSession(sync: Bool = true) {
         sessionTimer?.invalidate()
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
+        lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()
         var windows: [SessionWindow] = []
