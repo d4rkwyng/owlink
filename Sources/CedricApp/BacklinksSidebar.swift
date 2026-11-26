@@ -23,6 +23,8 @@ final class BacklinksSidebar: NSView, NSTableViewDataSource, NSTableViewDelegate
     /// Lists applied (the checks wait for one).
     private(set) var builds = 0
     private(set) var partial = false
+    /// The latest list asked for (a result for an older one is dropped).
+    var request = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -83,6 +85,7 @@ final class BacklinksSidebar: NSView, NSTableViewDataSource, NSTableViewDelegate
 
     /// The list, or a message instead of it (`message`), and whether it is partial.
     func set(_ l: [BacklinkScan.Backlink], message: String?, partial: Bool) {
+        if message != nil { request += 1 }
         links = l
         self.partial = partial
         builds += 1
@@ -202,7 +205,25 @@ extension EditorWindowController {
             notes.ensure()
             return
         }
-        side.set(notes.scan.backlinks(to: rel, in: idx), message: nil, partial: notes.isPartial)
+        // The traversal runs on the query queue against this snapshot; its
+        // list is shown only if it is still the latest asked for this pane,
+        // the tab still shows this note and the notes haven't changed since
+        // (a change posts didChange, which asks again).
+        let scan = notes.scan, gen = notes.generation, partial = notes.isPartial
+        side.request += 1
+        let token = side.request
+        let me = WeakRef(self), pane = WeakRef(side), model = WeakRef(notes)
+        WikiNotes.queryQueue.async {
+            let found = scan.backlinks(to: rel, in: idx)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let tab = me.value, let side = pane.value, let notes = model.value,
+                          side.request == token, notes.generation == gen, tab.wiki.backlinks === side, tab.wiki.backlinksVisible,
+                          notes.relativePath(of: tab.doc.fileURL) == rel else { return }
+                    side.set(found, message: nil, partial: partial)
+                }
+            }
+        }
     }
 
     private func openBacklink(_ b: BacklinkScan.Backlink) {

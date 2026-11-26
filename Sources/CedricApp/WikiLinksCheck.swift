@@ -6,7 +6,8 @@ import CedricCore
 /// Tab, ⎋, nothing in a code span or fence), ⌘-click on links (the right
 /// tab, a heading, a missing note created, none outside the folder
 /// through a symlinked parent), Backlinks (the list, its
-/// snippets, a click to the line), a note renamed on disk (names and
+/// snippets, a click to the line; the list and the backlinks computed
+/// off the main thread), a note renamed on disk (names and
 /// backlinks follow), and no list in large mode.
 extension DevChecks {
     static func wikiLinksCheck(_ app: AppDelegate) {
@@ -59,6 +60,7 @@ extension DevChecks {
         var side: BacklinksSidebar? { alphaTab?.wiki.backlinks }
         var created: [String] = []
         var failures: [Error] = []
+        var builds = 0
         let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
 
         run([
@@ -88,6 +90,11 @@ extension DevChecks {
                 expect(popup?.selectedRow == 0, "↑ moves back up")
                 expect(draft.text == "See [[", "the arrows didn't move the caret or edit", draft.text)
                 type("be")
+                // Ranked on the query queue, not in the keystroke.
+                expect(popup?.ranking == true, "the names are ranked off the main thread")
+            },
+            wait("the list for be lands") { popup?.ranking == false },
+            sync {
                 expect(popup?.shownNames.first == "Beta", "typing filters by prefix", "\(popup?.shownNames ?? [])")
             },
             snapshot("wikilinks-popup.png", window: draft.window),
@@ -97,14 +104,28 @@ extension DevChecks {
                 expect(popup?.isShown != true, "and the list goes")
                 expect(draft.textView.selectedRange().location == 12, "the caret is after the ]]")
                 type(" [[gma")
+            },
+            wait("the list for gma lands") { popup?.ranking == false && popup?.isShown == true },
+            sync {
                 expect(popup?.shownNames.first == "Gamma", "fuzzy: gma finds Gamma", "\(popup?.shownNames ?? [])")
                 type("\t")
                 expect(draft.text == "See [[Beta]] [[Gamma]]", "Tab inserts too", draft.text)
                 type(" [[zz")
+            },
+            wait("the list for zz lands") { popup?.ranking == false && popup?.isShown == true },
+            sync {
                 expect(popup?.isShown == true && popup?.shownNames.isEmpty == true, "no match: the list says so")
                 press("\u{1b}", 53)
                 expect(popup?.isShown != true, "⎋ dismisses the list")
                 expect(draft.text == "See [[Beta]] [[Gamma]] [[zz", "and leaves the text", draft.text)
+                // Return straight after typing, before the list lands: it takes the match for what was typed.
+                setText(draft, "")
+                type("[[alp\n")
+            },
+            wait("Return while ranking is answered") { popup?.isActive != true },
+            sync {
+                expect(draft.text == "[[Alpha]]", "Return before the list lands inserts the match for what was typed", draft.text)
+                setText(draft, "See [[Beta]] [[Gamma]] [[zz")
                 type(" `[[")
                 expect(popup?.isShown != true, "no list inside a code span")
                 setText(draft, "```\n")
@@ -170,6 +191,17 @@ extension DevChecks {
                            "the pane sits left of the text", "\(s.frame) \(a.editorContainer.scrollView.frame)")
                 }
             },
+            sync {
+                // A refresh walks the references on the query queue: nothing is applied in the call.
+                builds = side?.builds ?? -1
+                alphaTab?.refreshBacklinks()
+                expect(side?.builds == builds, "a backlinks refresh doesn't traverse on the main thread", "\(side?.builds ?? -1) vs \(builds)")
+            },
+            wait("the refreshed backlinks land") { (side?.builds ?? -1) > builds },
+            sync {
+                expect(side?.links.map(\.source) == ["Beta.md", "notes.txt", "sub/Gamma.md"], "the refreshed list is the same",
+                       "\(side?.links.map(\.source) ?? [])")
+            },
             snapshot("wikilinks-backlinks.png", window: alphaTab?.window),
             sync { side?.activate(0) },
             wait("a backlink click opens its note at the line") {
@@ -185,6 +217,9 @@ extension DevChecks {
                 focus(draft)
                 setText(draft, "")
                 type("[[b")
+            },
+            wait("the list for b lands") { popup?.ranking == false && popup?.isShown == true },
+            sync {
                 let names = popup?.shownNames ?? []
                 expect(names.contains("Bravo") && !names.contains("Beta"), "and the suggestions", "\(names)")
                 press("\u{1b}", 53)

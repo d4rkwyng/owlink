@@ -39,6 +39,12 @@ final class WikiNotes {
     /// For the checks.
     private(set) var notesBuilt = 0, scansDone = 0
     private static let queue = DispatchQueue(label: "cedric.wiki-notes", qos: .utility)
+    /// Completion ranking and backlink lookups: run against a snapshot
+    /// (`notes`, `scan` are values) off the main thread.
+    static let queryQueue = DispatchQueue(label: "cedric.wiki-query", qos: .userInitiated)
+    /// Bumped whenever `notes` or `scan` changes: a query result made from
+    /// an older snapshot is dropped.
+    private(set) var generation = 0
 
     init(sidebar: FolderSidebar) {
         self.sidebar = sidebar
@@ -79,6 +85,7 @@ final class WikiNotes {
                     guard let me = ref.value else { return }
                     me.building = false
                     me.notes = out.value
+                    me.generation += 1
                     me.notesBuilt += 1
                     let waiting = me.whenReady
                     me.whenReady = []
@@ -127,6 +134,7 @@ final class WikiNotes {
                 MainActor.assumeIsolated {
                     guard let me = ref.value else { return }
                     me.scan = out.value
+                    me.generation += 1
                     me.scanning = false
                     me.scansDone += 1
                     NotificationCenter.default.post(name: Self.didChange, object: me)
@@ -190,6 +198,13 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
     private weak var textView: EditorTextView?
     var onAccept: ((NoteIndex.Suggestion) -> Void)?
     var isShown: Bool { panel.isVisible }
+    /// Shown, or its first list is still being ranked.
+    var isActive: Bool { panel.isVisible || ranking }
+    /// A ranking is out on the query queue; `request` names the latest.
+    private(set) var ranking = false
+    private var request = 0
+    /// Return or Tab came while ranking: taken when the list lands.
+    private var pendingKey: Selector?
     /// Lists shown (the checks).
     private(set) var updates = 0
 
@@ -237,14 +252,57 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
     }
 
     /// Shows (or refreshes) the list for `query` typed at `start` in `tv`.
-    func show(in tv: EditorTextView, start: Int, query: String, notes: NoteIndex?) {
+    /// The names are ranked on the query queue against the index as it is
+    /// now; the result is used only if the query, the tab and the index
+    /// generation are still the same when it lands (a newer index ranks
+    /// again).
+    func show(in tv: EditorTextView, start: Int, query: String, notes: WikiNotes) {
         self.start = start
         self.query = query
         textView = tv
+        tv.commandInterceptor = { [weak self] sel in self?.handle(sel) ?? false }
+        request += 1
+        guard let idx = notes.notes else {
+            ranking = false
+            apply([], ready: false, in: tv)
+            return
+        }
+        ranking = true
+        let token = request, gen = notes.generation
+        let ref = WeakRef(self), source = WeakRef(notes), view = WeakRef(tv)
+        WikiNotes.queryQueue.async {
+            let found = idx.suggestions(query, limit: Self.maxRows)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let me = ref.value, let tv = view.value, me.request == token, me.ranking,
+                          me.query == query, me.start == start, me.textView === tv, tv.window != nil,
+                          let notes = source.value else { return }
+                    guard notes.generation == gen else {
+                        me.show(in: tv, start: start, query: query, notes: notes)
+                        return
+                    }
+                    me.ranking = false
+                    me.apply(found, ready: true, in: tv)
+                }
+            }
+        }
+    }
+
+    private func apply(_ found: [NoteIndex.Suggestion], ready: Bool, in tv: EditorTextView) {
         let old = rows.first?.path
-        rows = notes?.suggestions(query, limit: Self.maxRows) ?? []
+        rows = found
         updates += 1
-        note.stringValue = notes == nil ? String(localized: "Indexing notes…") : String(localized: "No matching notes")
+        if let key = pendingKey {
+            pendingKey = nil
+            if rows.isEmpty {
+                hide()
+                tv.doCommand(by: key)
+            } else {
+                accept(0)
+            }
+            return
+        }
+        note.stringValue = ready ? String(localized: "No matching notes") : String(localized: "Indexing notes…")
         note.isHidden = !rows.isEmpty
         table.reloadData()
         if !rows.isEmpty {
@@ -260,7 +318,6 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
             w.addChildWindow(panel, ordered: .above)
             panel.orderFront(nil)
         }
-        tv.commandInterceptor = { [weak self] sel in self?.handle(sel) ?? false }
     }
 
     func hide() {
@@ -269,6 +326,9 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
             panel.orderOut(nil)
         }
         textView?.commandInterceptor = nil
+        request += 1
+        ranking = false
+        pendingKey = nil
         rows = []
         table.reloadData()
     }
@@ -287,6 +347,8 @@ final class WikiCompletion: NSObject, NSTableViewDataSource, NSTableViewDelegate
             table.scrollRowToVisible(next)
             return true
         case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+            // The list for what was just typed isn't in yet: answer when it is.
+            if ranking { pendingKey = sel; return true }
             guard !rows.isEmpty else { hide(); return false }
             accept(max(0, table.selectedRow))
             return true
@@ -345,7 +407,7 @@ extension EditorWindowController {
 
     /// textDidChange: a `[[` just typed opens the list; typing in it filters.
     func wikiTextChanged() {
-        if wiki.completion?.isShown == true { wikiUpdateCompletion(); return }
+        if wiki.completion?.isActive == true { wikiUpdateCompletion(); return }
         guard doc.language == .markdown || doc.language == .plain, FolderSidebar.shared != nil else { return }
         let sel = textView.selectedRange()
         guard sel.length == 0, sel.location >= 2 else { return }
@@ -356,7 +418,7 @@ extension EditorWindowController {
 
     /// The caret moved: the list follows it or goes.
     func wikiSelectionChanged() {
-        if wiki.completion?.isShown == true { wikiUpdateCompletion() }
+        if wiki.completion?.isActive == true { wikiUpdateCompletion() }
     }
 
     func wikiHideCompletion() { wiki.completion?.hide() }
@@ -390,11 +452,11 @@ extension EditorWindowController {
         }()
         if !notes.isReady {
             notes.whenReady { [weak self] in
-                guard let self, self.wiki.completion?.isShown == true else { return }
+                guard let self, self.wiki.completion?.isActive == true else { return }
                 self.wikiUpdateCompletion()
             }
         }
-        c.show(in: textView, start: t.start, query: t.query, notes: notes.notes)
+        c.show(in: textView, start: t.start, query: t.query, notes: notes)
     }
 
     /// Return or Tab in the list: the name replaces what was typed and the `]]` closes.
