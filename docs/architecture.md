@@ -2358,7 +2358,10 @@ lets AppKit's pass run; Fix Typos' Ignore All and a word ignored through
 the spell checker between the early reply and AppKit's pass (the ignored
 word's mark goes, the other's stays); an edit and an IME composition
 before the queued check (no early check, AppKit's pass marks); JSON
-checked not at all.
+checked not at all. A mark only counts when AppKit draws it: the text
+layout manager's `.spellingState` rendering attribute at the word and not
+at the words either side (after a scroll down too), and it has to go when
+the word is corrected, not Owlink's own record of what it passed on.
 
 The marks are
 the text view's spelling state, a drawing attribute, so text colours are
