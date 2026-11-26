@@ -339,9 +339,10 @@ public final class ImageStore {
 
     /// Fallback: renames the staged file (in the held "images") to the
     /// first free name there, both operands single names relative to that
-    /// folder's descriptor; never replaces one (`RENAME_EXCL`). Refused
-    /// (`Failure.destinationChanged`) when the held folder is no longer in
-    /// the document's folder.
+    /// folder's descriptor; never replaces one (`RENAME_EXCL`). Throws
+    /// `Failure.destinationChanged` if the parent check immediately before
+    /// a rename attempt observes that the held folder has moved out of the
+    /// document's folder.
     private func publishInHeld(_ tmp: String, as name: String) throws -> String {
         func taken(_ n: String) -> Bool {
             var st = stat()
