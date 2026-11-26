@@ -136,10 +136,14 @@ public final class WikiVault: @unchecked Sendable {
         return Self.contains(url, in: root) && fm.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
     }
 
+    /// `url` is `root` or below it, by the bytes of the two resolved paths:
+    /// a name just below `root` that starts with a combining mark makes
+    /// "/" and the mark one Swift character, so a text prefix test missed
+    /// the boundary and refused it.
     private static func contains(_ url: URL, in root: URL) -> Bool {
-        let base = PreviewFolder.resolved(root).path
-        let path = PreviewFolder.resolved(url).path
-        return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        let base = Array(PreviewFolder.resolved(root).path.utf8)
+        let path = Array(PreviewFolder.resolved(url).path.utf8)
+        return path == base || path.starts(with: base.last == 0x2f ? base : base + [0x2f])
     }
 
     /// Resolve an exact, bare image name, preferring the note's folder and
