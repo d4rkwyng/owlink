@@ -23,7 +23,8 @@ final class QuickOpenFiles {
     private(set) var index: FileIndex?
     private(set) var matcher: FileMatchIndex?
     private var running = false
-    private var pending: [String: Bool] = [:]
+    /// Folders to list again, by their relative paths' bytes.
+    private var pending: [FolderTree.PathKey: Bool] = [:]
     private var pendingFull = false
     private var stale = false
     /// The index (or a refresh of it) landed (the palette shows it).
@@ -91,9 +92,9 @@ final class QuickOpenFiles {
         guard !pending.isEmpty, var idx = index else { return }
         // Parents before children: a new folder is walked from its parent.
         let jobs = pending.sorted { a, b in
-            let da = a.key.split(separator: "/").count, db = b.key.split(separator: "/").count
-            return da != db ? da < db : a.key < b.key
-        }
+            let da = FolderTree.components(a.key.string).count, db = FolderTree.components(b.key.string).count
+            return da != db ? da < db : a.key.string < b.key.string
+        }.map { ($0.key.string, $0.value) }
         pending = [:]
         running = true
         let ref = WeakRef(self), box = MainBox(value: jobs)
@@ -123,9 +124,9 @@ final class QuickOpenFiles {
             case .folder(let p):
                 guard let r = rel(p) else { continue }
                 let gitignore = FileManager.default.fileExists(atPath: (p as NSString).appendingPathComponent(".gitignore"))
-                pending[r] = gitignore || pending[r] == true
+                pending[FolderTree.PathKey(r)] = gitignore || pending[FolderTree.PathKey(r)] == true
             case .subtree(let p):
-                if let r = rel(p) { pending[r] = true }
+                if let r = rel(p) { pending[FolderTree.PathKey(r)] = true }
             }
         }
         drain()

@@ -185,4 +185,34 @@ import Testing
         #expect(try Data(contentsOf: moved) == Data("x".utf8))
         #expect(try FolderActions.rename(moved, name: "\u{3A9}.txt") == moved, "the same bytes: nothing to do")
     }
+
+    // MARK: Path-keyed collections
+
+    /// The sidebar keys a folder's entries by their names' bytes: two
+    /// canonically equivalent names are two nodes with their own URLs, and
+    /// a name re-listed in the other spelling is a remove and an insert.
+    @Test func sidebarEntriesAreKeyedByBytes() {
+        let a = FolderEntry(name: "\u{2126}.md", isDirectory: false), b = FolderEntry(name: "\u{3A9}.md", isDirectory: false)
+        let root = FolderNode(root: base)
+        root.apply([a, b])
+        root.apply([a, b])
+        let kids = root.children ?? []
+        #expect(kids.count == 2 && kids[0] !== kids[1], "two nodes")
+        #expect(kids.map { Array($0.url.lastPathComponent.utf8) } == [Array(a.name.utf8), Array(b.name.utf8)], "each its own URL")
+        let d = FolderTree.diff(old: [a], new: [b])
+        #expect(d.removed == [0] && d.inserted == [0], "the other spelling replaces the entry")
+    }
+
+    /// Open Quickly's index keeps a listing per folder by the relative
+    /// path's bytes, and finds a file's name after the last "/" byte.
+    @Test func openQuicklyIsKeyedByBytes() {
+        var idx = FileIndex(root: base, showHidden: false, limit: 100)
+        idx.dirs["\u{2126}"] = FileIndex.Dir(files: ["a.txt"], subdirs: [])
+        idx.dirs["\u{3A9}"] = FileIndex.Dir(files: ["b.txt"], subdirs: [])
+        let paths = Set(idx.paths.map { Array($0.utf8) })
+        #expect(paths == [Array("\u{2126}/a.txt".utf8), Array("\u{3A9}/b.txt".utf8)], "each folder's own files")
+        let p = "\u{301}d/x/\u{301}n.txt"
+        let m = FileMatchIndex(paths: [p])
+        #expect(m.nameStart == [p.count - "\u{301}n.txt".count], "the name starts after the last slash byte")
+    }
 }

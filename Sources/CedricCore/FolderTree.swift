@@ -21,8 +21,11 @@ public struct FolderEntry: Equatable, Hashable, Sendable {
     }
 
     /// What a re-listing matches entries by: a file that became a folder
-    /// of the same name is a remove and an insert.
-    public var key: String { (isDirectory ? "d:" : "f:") + name }
+    /// of the same name is a remove and an insert. By the name's bytes
+    /// (`FolderTree.PathKey`): a `String` key let canonically equivalent
+    /// names in one folder (the Ohm sign and Omega) share one node, and so
+    /// one URL.
+    public var key: FolderTree.PathKey { FolderTree.PathKey((isDirectory ? "d:" : "f:") + name) }
 }
 
 /// The folder sidebar's model (plan-0.2.0.md §6): listing one folder
@@ -113,7 +116,7 @@ public enum FolderTree {
     }
 
     public static func diff(old: [FolderEntry], new: [FolderEntry]) -> Diff {
-        var oldByKey: [String: FolderEntry] = [:]
+        var oldByKey: [FolderTree.PathKey: FolderEntry] = [:]
         for e in old { oldByKey[e.key] = e }
         let newKeys = Set(new.map(\.key))
         return Diff(removed: old.indices.filter { !newKeys.contains(old[$0].key) },
@@ -166,9 +169,10 @@ public enum FolderTree {
 
     /// A path or name as a dictionary or set key, by its UTF-8 bytes (see
     /// `sameBytes`): a `String` key hashes and compares canonically.
-    public struct PathKey: Hashable, Sendable {
+    public struct PathKey: Hashable, Sendable, ExpressibleByStringLiteral {
         public let bytes: [UInt8]
         public init(_ s: String) { bytes = Array(s.utf8) }
+        public init(stringLiteral s: String) { self.init(s) }
         /// `url`'s standardized path.
         public init(_ url: URL) { self.init(url.standardizedFileURL.path) }
         public var string: String { String(decoding: bytes, as: UTF8.self) }
@@ -272,7 +276,7 @@ public final class FolderNode {
     public func apply(_ listing: [FolderEntry]) -> FolderTree.Diff {
         let old = children ?? []
         let d = FolderTree.diff(old: old.map(\.entry), new: listing)
-        var byKey: [String: FolderNode] = [:]
+        var byKey: [FolderTree.PathKey: FolderNode] = [:]
         for c in old { byKey[c.entry.key] = c }
         children = listing.map { e in
             if let kept = byKey[e.key] { kept.entry = e; return kept }
