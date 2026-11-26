@@ -316,37 +316,41 @@ public enum TextCodec {
         // Saturating: `maxBytes: Int.max` (no real limit) must not trap.
         let ceiling = limit.map { $0 == Int.max ? $0 : $0 + 1 } ?? Int.max
         let hint = max(sizeHint, 0)
-        var capacity = min(hint == Int.max ? hint : hint + 1, ceiling)
-        guard var buffer = malloc(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
+        // A big file's buffer is mapped (BigBuffer): freed once its text
+        // is in a tab's storage, it leaves the app's memory at once.
+        var capacity = max(1, min(hint == Int.max ? hint : hint + 1, ceiling))
+        guard var buffer = BigBuffer.allocate(capacity) else { throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path]) }
         var count = 0
         while true {
             if count == capacity {
                 if capacity >= ceiling {
-                    free(buffer)
+                    BigBuffer.free(buffer, count: capacity)
                     throw tooLarge(url)
                 }
-                capacity = capacity > ceiling / 2 ? ceiling : capacity * 2
-                guard let grown = realloc(buffer, capacity) else {
-                    free(buffer)
+                let wanted = capacity > ceiling / 2 ? ceiling : capacity * 2
+                guard let grown = BigBuffer.grow(buffer, count: capacity, to: wanted) else {
+                    BigBuffer.free(buffer, count: capacity)
                     throw CocoaError(.fileReadTooLarge, userInfo: [NSFilePathErrorKey: url.path])
                 }
                 buffer = grown
+                capacity = wanted
             }
             let n = read(fd, buffer + count, min(capacity - count, Int(Int32.max)))
             if n == 0 { break }
             if n < 0 {
                 if errno == EINTR { continue }
                 let e = errno
-                free(buffer)
+                BigBuffer.free(buffer, count: capacity)
                 throw readError(url, e)
             }
             count += n
         }
         if let limit, count > limit {
-            free(buffer)
+            BigBuffer.free(buffer, count: capacity)
             throw tooLarge(url)
         }
-        return Data(bytesNoCopy: buffer, count: count, deallocator: .free)
+        let room = capacity
+        return Data(bytesNoCopy: buffer, count: count, deallocator: .custom { p, _ in BigBuffer.free(p, count: room) })
     }
 
     /// What tests run around a read (`readText`, Find in Files): `before`
@@ -495,14 +499,15 @@ public enum TextCodec {
             var fits = true
             text = body.withUnsafeBytes { raw in
                 let length = max(0, raw.count - scan.crlf)
+                // Mapped (BigBuffer): it leaves memory as soon as the text goes.
                 if scan.ascii, !binary, length >= sharedBytesMinimum,
-                   let buffer = malloc(max(1, length))?.assumingMemoryBound(to: UInt8.self) {
+                   let buffer = BigBuffer.allocate(length)?.assumingMemoryBound(to: UInt8.self) {
                     if let written = lfOnly(raw, into: buffer, capacity: length, recording: &breaks),
                        let s = NSString(bytesNoCopy: buffer, length: written, encoding: String.Encoding.ascii.rawValue,
-                                        deallocator: { p, _ in free(p) }) {
+                                        deallocator: { p, _ in BigBuffer.free(p, count: length) }) {
                         return s as String
                     }
-                    free(buffer)
+                    BigBuffer.free(buffer, count: length)
                     breaks = mixed ? BreakRecorder(dominant: ending, ascii: scan.ascii) : nil
                 }
                 return String(unsafeUninitializedCapacity: length) { out in
