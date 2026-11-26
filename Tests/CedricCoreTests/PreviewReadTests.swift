@@ -212,6 +212,83 @@ import Testing
         }
     }
 
+    /// A granted root that couldn't be opened when it was granted is
+    /// refused for that grant's lifetime (Astra review, batch 8c): put
+    /// back as it was, or replaced by another folder, before the request,
+    /// it is never pinned by path then. Only a fresh grant opens it.
+    @Test func aRootUnavailableAtItsGrantStaysRefused() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        for g in try grantedRoots(t) {
+            // The top folder holding this case's granted roots (t/d, t/o, t/v, t/s).
+            let top = t.appendingPathComponent(g.doc.path.dropFirst(t.path.count + 1).split(separator: "/")[0].description)
+            let away = t.appendingPathComponent(top.lastPathComponent + "-away")
+            for replaced in [false, true] {
+                for scriptOn in [false, true] {
+                    for walk in modes {
+                        let vault = WikiVault(documentFolder: g.doc, openedRoot: g.opened)
+                        let vaultRoot = g.vault ? vault.root : nil
+                        let grants = PreviewGrants()
+                        try fm.moveItem(at: top, to: away)
+                        grants.grant([g.doc, g.opened, vaultRoot])
+                        if replaced {
+                            // Another folder in its place, with the same layout.
+                            try fm.copyItem(at: away, to: top)
+                            _ = try put(g.file.deletingLastPathComponent(), g.file.lastPathComponent, "EVIL")
+                        } else {
+                            try fm.moveItem(at: away, to: top)
+                        }
+                        let what = "\(g.name) replaced \(replaced) scriptOn \(scriptOn) walk \(walk)"
+                        let hit = grants.approve(g.request, in: g.doc, openedRoot: g.opened, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault)
+                        #expect(hit == nil, "\(what)")
+                        if let hit { #expect(PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn, walk: walk) == nil, "\(what)") }
+                        // Granted the same again: still refused.
+                        grants.grant([g.doc, g.opened, vaultRoot])
+                        #expect(grants.approve(g.request, in: g.doc, openedRoot: g.opened, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) == nil, "\(what)")
+                        // A fresh grant opens what is there now.
+                        grants.revoke()
+                        grants.grant([g.doc, g.opened, vaultRoot])
+                        let fresh = try #require(grants.approve(g.request, in: g.doc, openedRoot: g.opened, vaultRoot: vaultRoot,
+                                                                scriptOn: scriptOn, vault: vault), "\(what)")
+                        #expect(PreviewRead.data(fresh.parts, beneath: fresh.root, scriptOn: scriptOn, walk: walk) == Data((replaced ? "EVIL" : "ORIG").utf8), "\(what)")
+                        if replaced {
+                            try fm.removeItem(at: top)
+                            try fm.moveItem(at: away, to: top)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The document's folder pins, but the opened folder granted with it
+    /// (by a link not there yet) doesn't: once the link appears, a file
+    /// in the opened folder is still refused, not pinned by its path.
+    @Test func aDeniedOpenedFolderIsNotPinnedLater() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let real = t.appendingPathComponent("real")
+        let doc = real.appendingPathComponent("doc")
+        try fm.createDirectory(at: doc, withIntermediateDirectories: true)
+        let img = try put(real, "img/a.png", "ORIG")
+        let link = t.appendingPathComponent("link")
+        let request = page(link.appendingPathComponent("img/a.png"))
+        for scriptOn in [false, true] {
+            let grants = PreviewGrants()
+            grants.grant([doc, link])
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: real.path)
+            #expect(PreviewFolder.approved(for: request, in: doc, openedRoot: link, scriptOn: scriptOn)?.root == link, "approved by path")
+            #expect(grants.approve(request, in: doc, openedRoot: link, scriptOn: scriptOn) == nil, "scriptOn \(scriptOn)")
+            // A fresh grant: served.
+            grants.revoke()
+            grants.grant([doc, link])
+            let hit = try #require(grants.approve(request, in: doc, openedRoot: link, scriptOn: scriptOn))
+            #expect(PreviewRead.data(hit.parts, beneath: hit.root, scriptOn: scriptOn) == Data("ORIG".utf8))
+            try fm.removeItem(at: link)
+        }
+        _ = img
+    }
+
     /// How many descriptors this process has open on something inside
     /// `t` (by the kernel's path for each, against `t`'s real path): other
     /// suites running alongside open files too, but never in this test's

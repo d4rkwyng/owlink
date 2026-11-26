@@ -119,11 +119,17 @@ public final class PinnedRoot: @unchecked Sendable {
 /// site root the first time a file is approved under it. A grant that
 /// changes drops every pin (`grant` again); a read in flight keeps its
 /// own reference until it finishes. At most `limit` roots are kept.
+/// A granted root that doesn't open when it is granted is denied for
+/// that grant's lifetime (Astra review, batch 8c): it is never opened by
+/// its path later, whatever is there by then, and a document whose own
+/// folder was denied is refused altogether. Only a fresh grant (`revoke`,
+/// or a grant of other roots) tries it again.
 public final class PreviewGrants: @unchecked Sendable {
     public static let limit = 64
     private let lock = NSLock()
     private var pins: [String: PinnedRoot] = [:]
     private var granted: [String] = []
+    private var denied: Set<String> = []
 
     public init() {}
 
@@ -131,28 +137,40 @@ public final class PreviewGrants: @unchecked Sendable {
     public var count: Int { lock.lock(); defer { lock.unlock() }; return pins.count }
 
     /// Grants `roots` (nil entries skipped): when they differ from the
-    /// current grant, every pin is dropped and these are pinned now.
+    /// current grant, every pin is dropped and these are pinned now; one
+    /// that doesn't open is denied until the next fresh grant.
     public func grant(_ roots: [URL?]) {
         let paths = roots.compactMap { $0?.standardizedFileURL.path }
         lock.lock(); defer { lock.unlock() }
         guard paths != granted else { return }
         granted = paths
         pins = [:]
-        for p in paths where pins[p] == nil { pins[p] = PinnedRoot(URL(fileURLWithPath: p)) }
+        denied = []
+        for p in paths where pins[p] == nil && !denied.contains(p) {
+            if let r = PinnedRoot(URL(fileURLWithPath: p)) { pins[p] = r } else { denied.insert(p) }
+        }
     }
 
     /// Withdraws every grant and closes the pins (reads in flight keep theirs).
-    public func revoke() { lock.lock(); pins = [:]; granted = []; lock.unlock() }
+    public func revoke() { lock.lock(); pins = [:]; granted = []; denied = []; lock.unlock() }
 
     /// The pinned descriptor for `root`: the one pinned when it was
-    /// granted or first approved, or else pinned now.
+    /// granted or first approved, or else pinned now; nil for a granted
+    /// root that was denied.
     public func pin(_ root: URL) -> PinnedRoot? {
         let p = root.standardizedFileURL.path
         lock.lock(); defer { lock.unlock() }
         if let r = pins[p] { return r }
+        guard !denied.contains(p) else { return nil }
         guard let r = PinnedRoot(root) else { return nil }
         if pins.count < Self.limit { pins[p] = r }
         return r
+    }
+
+    /// Whether `root` was granted and didn't open.
+    func isDenied(_ root: URL) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return denied.contains(root.standardizedFileURL.path)
     }
 
     /// What the preview reads for `url`: the file `PreviewFolder.approved`
@@ -160,7 +178,7 @@ public final class PreviewGrants: @unchecked Sendable {
     /// validated parts below that root; nil when refused.
     public func approve(_ url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                         vault: WikiVault? = nil) -> (root: PinnedRoot, parts: [String], file: URL)? {
-        guard let hit = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot,
+        guard !isDenied(folder), let hit = PreviewFolder.approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot,
                                                scriptOn: scriptOn, vault: vault),
               let root = pin(hit.root),
               let parts = PreviewRead.components(of: hit.file, below: root.url),
