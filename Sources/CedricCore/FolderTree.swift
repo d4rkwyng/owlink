@@ -261,8 +261,8 @@ public final class FolderNode {
     /// The node at `relativePath` below this one, walking only loaded folders.
     public func descendant(_ relativePath: String) -> FolderNode? {
         var n: FolderNode? = self
-        for part in relativePath.split(separator: "/") where !part.isEmpty {
-            n = n?.child(named: String(part))
+        for part in FolderTree.components(relativePath) {
+            n = n?.child(named: part)
         }
         return n
     }
