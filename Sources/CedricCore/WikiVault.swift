@@ -145,8 +145,10 @@ public final class WikiVault: @unchecked Sendable {
     /// Resolve an exact, bare image name, preferring the note's folder and
     /// then Obsidian's configured attachment folder.
     public func resolveImage(_ name: String) -> URL? {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
-              !name.contains("\\"), !name.contains("\0"), !name.contains(":"),
+        // One bare name by its bytes (Astra batch 6 must-fix 2): a slash or
+        // backslash before a combining mark is one Swift character, so a text
+        // search misses it, and a slash would make the local candidate a path.
+        guard Beneath.isName(name), !name.utf8.contains(0x5c), !name.utf8.contains(0x3a),
               Self.imageExtensions.contains((name as NSString).pathExtension.lowercased()) else { return nil }
         let local = documentFolder.appendingPathComponent(name)
         if isFile(local) { return local }
