@@ -36,7 +36,7 @@ public enum Beneath {
     }()
 
     /// A file's identity: device and inode.
-    public struct FileID: Equatable, Sendable {
+    public struct FileID: Hashable, Sendable {
         public let dev: dev_t
         public let ino: ino_t
         init(_ st: stat) { dev = st.st_dev; ino = st.st_ino }

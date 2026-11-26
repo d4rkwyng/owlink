@@ -154,6 +154,45 @@ public enum FolderTree {
         guard parent.path != file.path, !parent.path.isEmpty else { return nil }
         return URL(fileURLWithPath: parent.path, isDirectory: true)
     }
+
+    /// Whether two paths or names are the same UTF-8 bytes. Swift's `==`
+    /// is canonical equivalence. Same bytes is only ever a fast "yes, the
+    /// same name"; different bytes never mean "a different file": APFS
+    /// takes case and normalization variants for one name, so a miss is
+    /// settled by file-system identity (`Beneath.FileID`).
+    public static func sameBytes(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
+
+    /// A path or name as a dictionary or set key, by its UTF-8 bytes (see
+    /// `sameBytes`): a `String` key hashes and compares canonically, which
+    /// would fold two names a volume holds apart. A lookup miss is not
+    /// "not there": see `sameBytes`.
+    public struct PathKey: Hashable, Sendable, ExpressibleByStringLiteral {
+        public let bytes: [UInt8]
+        public init(_ s: String) { bytes = Array(s.utf8) }
+        public init(stringLiteral s: String) { self.init(s) }
+        public var string: String { String(decoding: bytes, as: UTF8.self) }
+    }
+
+    /// A dictionary keyed by `PathKey`, read and written with `String` keys.
+    public struct PathMap<Value>: Sequence, ExpressibleByDictionaryLiteral {
+        private var storage: [PathKey: Value] = [:]
+        public init() {}
+        public init(dictionaryLiteral elements: (String, Value)...) {
+            for (k, v) in elements { storage[PathKey(k)] = v }
+        }
+        public subscript(_ key: String) -> Value? {
+            get { storage[PathKey(key)] }
+            set { storage[PathKey(key)] = newValue }
+        }
+        /// The keys, as their strings (each decoded from its bytes).
+        public var keys: [String] { storage.keys.map(\.string) }
+        public var count: Int { storage.count }
+        public var isEmpty: Bool { storage.isEmpty }
+        public func makeIterator() -> AnyIterator<(key: String, value: Value)> {
+            var i = storage.makeIterator()
+            return AnyIterator { i.next().map { (key: $0.key.string, value: $0.value) } }
+        }
+    }
 }
 
 /// Which listed entries the folder's .gitignore files ignore, for the
@@ -273,3 +312,6 @@ public final class FolderNode {
         return [self] + children.flatMap(\.loadedFolders)
     }
 }
+
+extension FolderTree.PathMap: Sendable where Value: Sendable {}
+extension FolderTree.PathMap: Equatable where Value: Equatable {}
