@@ -89,4 +89,20 @@ import Testing
             if idx.starts != fresh.starts { break }
         }
     }
+
+    /// A copy shares the storage until either side is changed; equal
+    /// starts made apart, and empty starts, share nothing.
+    @Test func sharesStorageMeansTheSameStorage() {
+        let a: LineStarts = [0, 4, 9]
+        var b = a
+        #expect(a.sharesStorage(with: b) && b.sharesStorage(with: a))
+        b.append(12)
+        #expect(!a.sharesStorage(with: b), "changed: a copy of its own")
+        let c: LineStarts = [0, 4, 9]
+        #expect(a == c && !a.sharesStorage(with: c), "equal, but made apart")
+        #expect(!LineStarts().sharesStorage(with: LineStarts()))
+        let wide: LineStarts = [0, Int(UInt32.max) + 10]
+        let wideCopy = wide
+        #expect(wide.sharesStorage(with: wideCopy) && !wide.sharesStorage(with: a))
+    }
 }

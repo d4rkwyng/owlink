@@ -245,10 +245,19 @@ public struct LineStarts: RandomAccessCollection, Equatable, Sendable, Expressib
         wide.replaceSubrange(range, with: new)
     }
 
-    /// Where the starts are kept (checks: the same index, not a copy).
-    public var storageAddress: UnsafeRawPointer? {
-        isWide ? wide.withUnsafeBufferPointer { UnsafeRawPointer($0.baseAddress) }
-               : narrow.withUnsafeBufferPointer { UnsafeRawPointer($0.baseAddress) }
+    /// Whether `other` keeps its starts in the very same storage as this
+    /// one (checks: the same index, not a copy). Empty starts share
+    /// nothing. The addresses are compared only while both are borrowed.
+    public func sharesStorage(with other: LineStarts) -> Bool {
+        guard isWide == other.isWide else { return false }
+        func same<T>(_ a: [T], _ b: [T]) -> Bool {
+            a.withUnsafeBufferPointer { pa in
+                b.withUnsafeBufferPointer { pb in
+                    pa.count > 0 && pa.count == pb.count && pa.baseAddress != nil && pa.baseAddress == pb.baseAddress
+                }
+            }
+        }
+        return isWide ? same(wide, other.wide) : same(narrow, other.narrow)
     }
 
     public static func == (a: LineStarts, b: LineStarts) -> Bool {
