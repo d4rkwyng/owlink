@@ -65,6 +65,7 @@ extension DevChecks {
         var created: [String] = []
         var failures: [Error] = []
         var slashBefore: [String] = []
+        var offersBefore = 0
         var builds = 0
         var skipped = 0
         var oldNotes: WikiNotes?
@@ -222,6 +223,7 @@ extension DevChecks {
                 // A slash followed by a combining mark: one Swift character, but the
                 // kernel splits the name there. It names no single note, so nothing is made.
                 failures = []
+                offersBefore = created.count
                 slashBefore = FileManager.default.subpaths(atPath: root.path)?.sorted() ?? ["?"]
                 setText(draft, "Draft [[sub/\u{301}Slash]]\n")
                 commandClick(draft, "[[sub/\u{301}Slash]]")
@@ -235,6 +237,7 @@ extension DevChecks {
                        "a slash before a combining mark: the create is refused and nothing opens", "\(failures)")
                 expect(failures.first.map { ($0 as NSError).code } == NSFileWriteInvalidFileNameError, "refused as a bad name",
                        "\(failures)")
+                expect(created.count == offersBefore, "refused before the offer is shown", "\(created.dropFirst(offersBefore))")
                 let after = fm.subpaths(atPath: root.path)?.sorted() ?? ["?"]
                 expect(after == slashBefore, "nothing made on disk", "\(Set(after).symmetricDifference(slashBefore))")
                 // The open folder replaced at its path between opening it and confirming:
