@@ -213,14 +213,19 @@ import Testing
         #expect(fm.contents(atPath: doc.appendingPathComponent("images/x.png").path) == Data([2]), "the new folder's file is untouched")
     }
 
-    /// `name` is one file name, checked before anything is staged.
+    /// `name` is one file name, checked before anything is staged. A slash
+    /// followed by a combining mark is one Swift character (a text search
+    /// for "/" misses it) but Darwin still splits the name at that byte
+    /// (Astra batch 5, must-fix 1).
     @Test func aNameThatIsNotOneFileNameIsRefused() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
         let pic = outside.appendingPathComponent("p.png")
         try Data([3]).write(to: pic)
         let store = try ImageStore.open(in: doc)
-        for bad in ["", ".", "..", "../p.png", "a/b.png", "/tmp/p.png", "p\0.png"] {
+        let slashMark = "a/\u{301}b.png", upMark = "../\u{301}p.png"
+        #expect(!slashMark.contains(Character("/")) && !upMark.contains(Character("/")), "a Character search misses these slashes")
+        for bad in ["", ".", "..", "../p.png", "a/b.png", "/tmp/p.png", "p\0.png", "\0", slashMark, upMark, "/\u{301}"] {
             #expect(throws: ImageStore.Failure.badName, "\(bad.debugDescription)") { _ = try store.copy(from: pic, name: bad) }
             #expect(throws: ImageStore.Failure.badName, "\(bad.debugDescription)") { _ = try store.write(Data([3]), name: bad) }
         }
