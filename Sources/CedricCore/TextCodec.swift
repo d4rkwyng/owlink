@@ -535,8 +535,11 @@ public enum TextCodec {
     /// The pointer comes from an immutable NSData, whose `bytes` stay put
     /// for as long as that NSData lives, and the string's deallocator holds
     /// that same NSData. (A pointer from `Data.withUnsafeBytes` is only
-    /// promised inside its closure.) Bridging a Data, a slice included,
-    /// wraps its storage rather than copying it.
+    /// promised inside its closure.) Whether bridging copies is up to
+    /// Foundation: on the runtimes tested, a Data over a no-copy buffer,
+    /// a slice included, bridges to an NSData that reads that buffer in
+    /// place (BigBufferTests pins this for a BOM slice). Were it to copy,
+    /// the text would still be right, held by the copy, but cost memory.
     static func sharedASCII(_ data: Data) -> String? {
         let owner = data as NSData
         guard owner.length > 0 else { return nil }

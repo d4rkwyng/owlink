@@ -90,6 +90,7 @@ import Testing
         let body = (0..<count).map { line[$0 % line.count] }
         let bytes: [UInt8] = [0xEF, 0xBB, 0xBF] + body
         let freed = Freed()
+        var bridgedInPlace = false
         /// Decodes `bytes` from a mapped buffer of their own; the Data is
         /// gone when this returns.
         func decode() -> DecodedText? {
@@ -101,11 +102,14 @@ import Testing
                     freed.done = true
                     BigBuffer.free(p, count: room)
                 })
+                // The bytes after the BOM, bridged as sharedASCII bridges them.
+                bridgedInPlace = (data.dropFirst(3) as NSData).bytes == UnsafeRawPointer(raw + 3)
                 return TextCodec.decode(data, shareBytes: true)
             }
         }
         var d: DecodedText? = try #require(decode())
         #expect(!freed.done, "the text holds the file's bytes")
+        #expect(bridgedInPlace, "the slice after the BOM bridges to the mapped bytes in place, not a copy")
         #expect(d?.encoding == .utf8BOM && d?.lineEnding == .lf)
         let ns = try #require(d?.text as NSString?)
         #expect(ns.length == count)
