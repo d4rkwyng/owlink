@@ -39,9 +39,6 @@ final class SpellStepController: NSObject, NSTableViewDataSource, NSTableViewDel
     private var scanScheduled = false
     /// Chunks checked per run-loop turn while looking for the next word.
     static let chunksPerTurn = 4
-    /// The check's Learn Word: learned and then forgotten again (Learn
-    /// Word writes to the user's own dictionary).
-    var onLearn: ((String) -> Void)?
     var onClose: (() -> Void)?
 
     var current: SpellStepItem? { stepper.current }
@@ -288,7 +285,7 @@ final class SpellStepController: NSObject, NSTableViewDataSource, NSTableViewDel
 
     @objc func ignoreAll(_ sender: Any?) {
         guard let c = stepper.current, let tab else { return }
-        NSSpellChecker.shared.ignoreWord(c.word, inSpellDocumentWithTag: tab.textView.spellCheckerDocumentTag)
+        EditorTextView.spellDictionary.ignoreWord(c.word, inSpellDocumentWithTag: tab.textView.spellCheckerDocumentTag)
         stepper.ignoreAll()
         recheckMarks()
         showNext()
@@ -296,7 +293,7 @@ final class SpellStepController: NSObject, NSTableViewDataSource, NSTableViewDel
 
     @objc func learn(_ sender: Any?) {
         guard let c = stepper.current else { return }
-        if let onLearn { onLearn(c.word) } else { NSSpellChecker.shared.learnWord(c.word) }
+        EditorTextView.spellDictionary.learnWord(c.word)
         stepper.ignoreAll()
         recheckMarks()
         showNext()

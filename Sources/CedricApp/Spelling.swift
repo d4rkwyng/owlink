@@ -91,7 +91,8 @@ final class EditorSpelling {
               let r = tv.visibleCharacterRange, r.length > 0 else { return }
         let types = SpellCheckCoverage.earlyTypes(enabled: tv.enabledTextCheckingTypes)
         tv.watchSpellDictionary()
-        tv.spellCoverage.checked(r, types: types, dictionary: tv.spellDictionaryState(), onlyOwlinkInFront: EditorTextView.onlyOwlinkInFront)
+        tv.spellCoverage.checked(r, types: types, dictionary: EditorTextView.spellDictionary, tag: tv.spellCheckerDocumentTag,
+                                 onlyOwlinkInFront: EditorTextView.onlyOwlinkInFront)
         tv.earlyTextChecks += 1
         tv.checkingVisibleNow = true
         tv.checkText(in: r, types: types, options: [:])
@@ -141,11 +142,13 @@ final class EditorSpelling {
         guard ns.length > 0 else { return [] }
         let r = range ?? tv.visibleCharacterRange ?? NSRange(location: 0, length: min(ns.length, 20_000))
         var found: [NSRange] = []
+        let dictionary = EditorTextView.spellDictionary
         for s in scope(for: r) where s.length > 0 {
             let results = NSSpellChecker.shared.check(tv.string, range: s, types: NSTextCheckingResult.CheckingType.spelling.rawValue,
                                                       options: nil, inSpellDocumentWithTag: tv.spellCheckerDocumentTag,
                                                       orthography: nil, wordCount: nil)
             found += results.map(\.range).filter { $0.length > 0 && NSMaxRange($0) <= NSMaxRange(s) }
+                .filter { !dictionary.suppressesMarks || !dictionary.suppressesMark(ns.substring(with: $0), inSpellDocumentWithTag: tv.spellCheckerDocumentTag) }
         }
         return found
     }
@@ -189,73 +192,60 @@ extension EditorTextView {
     /// first-frame check is skipped when that check already did it.
     override func checkText(in range: NSRange, types checkingTypes: NSTextCheckingTypes,
                             options: [NSSpellChecker.OptionKey: Any] = [:]) {
-        if !checkingVisibleNow, !spellCoverage.isEmpty, !Self.onlyOwlinkInFront { spellCoverage.anotherAppInFront() }
-        if !checkingVisibleNow, !spellCoverage.isEmpty,
-           spellCoverage.take(range, types: checkingTypes, hasOptions: !options.isEmpty,
-                              dictionary: spellDictionaryState(learnedAmong: spellCoverage.wordsToAskLearned)) {
+        if !checkingVisibleNow,
+           spellCoverage.takeAppKitPass(range, types: checkingTypes, hasOptions: !options.isEmpty, onlyOwlinkInFront: Self.onlyOwlinkInFront,
+                                        dictionary: Self.spellDictionary, tag: spellCheckerDocumentTag) {
             skippedTextChecks += 1
             return
         }
         super.checkText(in: range, types: checkingTypes, options: options)
     }
 
-    /// The spell checker's state for this document (SpellDictionaryState):
-    /// `learnedAmong`, the early check's marked words now learned.
-    func spellDictionaryState(learnedAmong words: [String] = []) -> SpellDictionaryState {
-        let sc = NSSpellChecker.shared
-        return SpellDictionaryState(language: sc.language(), automaticByLanguage: sc.automaticallyIdentifiesLanguages,
-                                    ignored: Set(sc.ignoredWords(inSpellDocumentWithTag: spellCheckerDocumentTag) ?? []),
-                                    learned: Set(words.filter { sc.hasLearnedWord($0) }))
-    }
-
-    /// What AppKit's spell checker posts in this process when a word is
-    /// learned or unlearned (the spelling panel's Learn, any learnWord
-    /// here). Not in the SDK headers; spellopen's "learned directly" step
-    /// fails if it ever stops coming.
-    static let spellCheckerLearnedNames = [Notification.Name("NSSpellCheckerDidLearnWordNotification"),
-                                           Notification.Name("NSSpellCheckerDidUnlearnWordNotification")]
+    /// The spelling dictionary Owlink reads and writes: the system's, or,
+    /// in a dev check (CEDRIC_CHECK), one of its own, so no check learns a
+    /// word in the user's real dictionary (RecordingSpellDictionary).
+    static let spellDictionary: SpellDictionaryService =
+        DevEnvironment.values["CEDRIC_CHECK"] != nil
+            ? RecordingSpellDictionary(language: { NSSpellChecker.shared.language() },
+                                       automatic: { NSSpellChecker.shared.automaticallyIdentifiesLanguages })
+            : SystemSpellDictionary()
 
     /// The frontmost app is Owlink, or the lock screen (loginwindow): the
     /// user can't be typing, nor learning a word, in any other app.
     /// (NSWorkspace keeps it in-process: no round trip once it's known.)
     static var onlyOwlinkInFront: Bool {
-        NSApp.isActive || NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.loginwindow"
+        SpellFrontApp.onlyOwlinkInFront(isActive: NSApp.isActive,
+                                        frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
     }
 
     /// Once per view, before its first early check: a word learned in
     /// Owlink clears the record, and another app coming to the front (it
     /// could learn one) makes AppKit's pass ask about the marked words
-    /// (SpellCheckCoverage.asksLearned). Selector-based, so removed with
-    /// the view.
+    /// (SpellCheckCoverage.asksLearned). Removed with the view.
     func watchSpellDictionary() {
-        guard !watchesSpellDictionary else { return }
-        watchesSpellDictionary = true
-        let nc = NotificationCenter.default
-        for name in Self.spellCheckerLearnedNames {
-            nc.addObserver(self, selector: #selector(spellDictionaryLearned(_:)), name: name, object: nil)
+        guard spellLearnedWatch == nil else { return }
+        nonisolated(unsafe) weak let view = self
+        spellLearnedWatch = SpellLearnedWatch(Self.spellDictionary) {
+            // Posted on the thread that learned the word: on the main
+            // thread at once, else as soon as it gets there.
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { view?.spellCoverage.clear() }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { view?.spellCoverage.clear() } }
+            }
         }
-        nc.addObserver(self, selector: #selector(anotherAppInFront(_:)), name: NSApplication.didResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(anotherAppInFront(_:)),
+                                               name: NSApplication.didResignActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(anotherAppInFront(_:)),
                                                           name: NSWorkspace.didActivateApplicationNotification, object: nil)
-    }
-
-    /// Posted on the thread that learned the word: on the main thread at
-    /// once, else as soon as it gets there.
-    @objc nonisolated private func spellDictionaryLearned(_ note: Notification) {
-        if Thread.isMainThread {
-            MainActor.assumeIsolated { spellCoverage.clear() }
-        } else {
-            nonisolated(unsafe) weak let view = self
-            DispatchQueue.main.async { MainActor.assumeIsolated { view?.spellCoverage.clear() } }
-        }
     }
 
     /// Owlink resigned active, or some app was activated: unless that is
     /// Owlink (or the lock screen), a word may be learned there.
     @objc private func anotherAppInFront(_ note: Notification) {
         guard !spellCoverage.isEmpty else { return }
-        let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-        if let app, app.processIdentifier == ProcessInfo.processInfo.processIdentifier || app.bundleIdentifier == "com.apple.loginwindow" { return }
+        let app = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication).map { ($0.processIdentifier, $0.bundleIdentifier) }
+        guard SpellFrontApp.mayLearnElsewhere(activated: app, ownPID: ProcessInfo.processInfo.processIdentifier) else { return }
         spellCoverage.anotherAppInFront()
     }
 
@@ -297,11 +287,14 @@ extension EditorTextView {
         let ns = string as NSString
         let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range),
                                                            expected: textLayoutManager != nil ? .relative : .document)
+        let dictionary = Self.spellDictionary
         var kept: [NSTextCheckingResult] = []
         var marked: [NSRange] = []
         for (r, d) in zip(results, inDocument) {
             guard r.resultType == .spelling else { kept.append(r); continue }
             guard spelling.scopeContains(d, in: scope) else { continue }
+            // Checks only: a word the check's own dictionary has learned or ignored.
+            if dictionary.suppressesMarks, dictionary.suppressesMark(ns.substring(with: d), inSpellDocumentWithTag: spellCheckerDocumentTag) { continue }
             kept.append(r)
             marked.append(d)
         }

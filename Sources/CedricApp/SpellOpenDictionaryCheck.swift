@@ -7,12 +7,17 @@ import CedricCore
 /// - Fix Typos' Ignore All, between the first-frame check's reply and
 ///   AppKit's first pass (it toggles continuous checking off and on): the
 ///   ignored word's mark goes, the other word's stays.
-/// - A word ignored straight through the spell checker (as the spelling
-///   panel does) in the same interval: AppKit's pass runs and rebuilds the
-///   marks.
-/// - A word learned straight through the spell checker (the spelling
-///   panel's Learn, or another app) in the same interval: the same. The
-///   word is made up and unlearned again at once.
+/// - A word ignored straight through the spelling dictionary (as the
+///   spelling panel does) in the same interval: AppKit's pass runs and
+///   rebuilds the marks.
+/// - A word learned straight through it in Owlink (the spelling panel's
+///   Learn): its notice clears the record, and the same.
+///
+/// The dictionary is the check's own (RecordingSpellDictionary): nothing
+/// here learns or ignores a word in the user's real one. The view drops
+/// the real spell checker's marks on that dictionary's words, as the real
+/// one would never have made them, so the underlines still show whether
+/// AppKit's pass ran.
 /// - An edit, and an input method's composition, before the queued
 ///   first-frame check runs: it doesn't run, and AppKit's pass marks.
 extension DevChecks {
@@ -24,7 +29,9 @@ extension DevChecks {
         var panelTab: EditorWindowController?
         var directTab: EditorWindowController?
         var learnTab: EditorWindowController?
-        let learnedWord = "zqxlrnopen"
+        // Made up, and learned only in the check's own dictionary.
+        let learnedWord = "zqxfakelrn"
+        let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
         var typedTab: EditorWindowController?
         var imeTab: EditorWindowController?
 
@@ -71,6 +78,9 @@ extension DevChecks {
             t?.window?.close()
         }
 
+        guard let dictionary else {
+            return [sync { expect(false, "spellopen uses the check's own spelling dictionary", "\(Swift.type(of: EditorTextView.spellDictionary))") }]
+        }
         var steps: [Step] = [
             sync {
                 panelTab = app.open(write("ignore-panel.txt", "A tpyo and a wrnog here.\n"))
@@ -86,6 +96,7 @@ extension DevChecks {
                 expect(t.spellStep?.current?.word == "tpyo", "Fix Typos is on the first misspelling", t.spellStep?.current?.word ?? "-")
                 if let b = t.spellStep?.ignoreButton { press(b) }
             },
+            sync { expect(dictionary.ignoreCalls.last == "tpyo", "Ignore All: ignored in the check's dictionary", "\(dictionary.ignoreCalls)") },
             wait("Ignore All's mark removed", 4) { panelTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
             sync {
@@ -105,7 +116,7 @@ extension DevChecks {
                 inTheInterval(directTab, "ignored directly")
                 guard let v = directTab?.primaryTextView else { return }
                 // The spelling panel's Ignore: the dictionary changes, nothing toggles.
-                NSSpellChecker.shared.ignoreWord("tpyo", inSpellDocumentWithTag: v.spellCheckerDocumentTag)
+                dictionary.ignoreWord("tpyo", inSpellDocumentWithTag: v.spellCheckerDocumentTag)
             },
             wait("AppKit's pass after the word was ignored", 4) { directTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
@@ -116,8 +127,6 @@ extension DevChecks {
         ]
         steps += [
             sync {
-                // A word left learned by an interrupted run would never be marked.
-                NSSpellChecker.shared.unlearnWord(learnedWord)
                 learnTab = app.open(write("learn-direct.txt", "A \(learnedWord) and a wrnog there.\n"))
                 sized(learnTab)
                 if let learnTab { focus(learnTab) }
@@ -126,18 +135,17 @@ extension DevChecks {
             sync {
                 inTheInterval(learnTab, "learned directly")
                 guard let v = learnTab?.primaryTextView else { return }
-                // The spelling panel's Learn: the spell checker's notice clears the
+                // The spelling panel's Learn: the dictionary's notice clears the
                 // record whether or not Owlink is the active app (inactive, AppKit's
                 // pass would ask about the marked words anyway).
-                NSSpellChecker.shared.learnWord(learnedWord)
+                dictionary.learnWord(learnedWord)
                 expect(v.spellCoverage.isEmpty, "learned directly: the spell checker's notice clears the record",
                        "app active=\(NSApp.isActive) asksLearned=\(v.spellCoverage.asksLearned)")
             },
             wait("AppKit's pass after the word was learned", 4) { learnTab.map { undrawn($0.primaryTextView, learnedWord) } ?? true },
             pause(1.5),
             sync {
-                NSSpellChecker.shared.unlearnWord(learnedWord)
-                expect(!NSSpellChecker.shared.hasLearnedWord(learnedWord), "(and the check forgot it again)")
+                expect(!NSSpellChecker.shared.hasLearnedWord(learnedWord), "(and the user's own dictionary doesn't have it)")
                 rebuilt(learnTab, "learned directly", learnedWord)
                 close(learnTab)
             },
