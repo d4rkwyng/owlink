@@ -1207,9 +1207,15 @@ dark theme; `session-check.sh` restores a saved folder after a kill -9.
   `GIT_OPTIONAL_LOCKS=0` (a status never takes the index lock),
   `GIT_TERMINAL_PROMPT=0`, and has a 10 s timeout.
 - **When**: nothing at launch. A tab with a file queues
-  `gitTabShown` with `AfterFirstFrame`; 0.5 s later, if the window is on
-  screen and typing has paused, the first refresh runs (an unselected
-  restored tab starts when it is first selected). Never in large mode,
+  `gitTabShown` with `AfterFirstFrame`; on the next turn, if the window is
+  on screen and typing has paused (none in the last 0.5 s, else it looks
+  again 0.5 s later), the first refresh runs (an unselected
+  restored tab starts when it is first selected). Until 0.6 it waited
+  0.5 s after the first frame; on a 1 MB file in a repository that put the
+  git processes (~15 ms of the app's CPU for the spawns) and the window
+  server's re-layout after the status bar's git label at 0.8–1.2 s, so the
+  app settled a second after its window. The processes run on `gitQueue`;
+  the main thread only applies the result. Never in large mode,
   never for untitled tabs. A refresh (on save, app focus, reload, or a
   change in the git folder) runs on one serial utility queue:
   `status --porcelain=v2 --branch -z -- file` (branch, HEAD, upstream and
