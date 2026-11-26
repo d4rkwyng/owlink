@@ -341,6 +341,11 @@ public final class SessionStore: @unchecked Sendable {
     /// Check builds only: every write's flush to disk fails (the bytes
     /// were written, the disk didn't confirm them; quitsyncfail).
     public var checkFailSync = false
+    /// Check builds only: every folder flush fails (a new folder's entry,
+    /// and a replaced file's rename: the rename is done, its flush isn't).
+    public var checkFailFolderSync = false
+    /// Check builds only: the folders flushed, in order.
+    public private(set) var checkSyncedFolders: [String] = []
 
     /// Every store file (buffers, the journals, session.json) is written
     /// durably (PrivateDirectory.writePrivateFile), on the session queue:
@@ -377,12 +382,24 @@ public final class SessionStore: @unchecked Sendable {
     private var directoryReady = false
     private func ensureDirectory() throws {
         if directoryReady, fm.fileExists(atPath: directory.path) { return }
-        try PrivateDirectory.make(directory)
+        // Every folder made for the store (Cedric, Session on first use),
+        // and the store's own entry, flushed through its parent: a failed
+        // flush fails the write, so quit never counts text as kept in a
+        // folder whose path may not be on the disk.
+        try PrivateDirectory.make(directory, syncParent: { [unowned self] in try self.syncFolder($0) })
         // Unsaved tab text: recoverable state on this Mac, not backed up.
         PrivateDirectory.excludeFromBackup(directory)
-        // The folder's own entry on disk too (best effort: made once).
-        try? PrivateDirectory.syncFolder(directory.deletingLastPathComponent().path)
         directoryReady = true
+    }
+
+    /// A folder's entries on the disk (`PrivateDirectory.syncFolder`), or
+    /// the failure check builds inject (`checkFailFolderSync`).
+    private func syncFolder(_ path: String) throws {
+        if DevEnvironment.checksEnabled {
+            checkSyncedFolders.append(path)
+            if checkFailFolderSync { throw CocoaError(.fileWriteUnknown) }
+        }
+        try PrivateDirectory.syncFolder(path)
     }
 
     private func injectedFailure() throws {

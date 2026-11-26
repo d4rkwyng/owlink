@@ -311,6 +311,35 @@ import Testing
         #expect(s.readBuffer(a.id) == "confirmed")
     }
 
+    /// First use makes the store's folders (Cedric, Session): each new
+    /// folder's entry is flushed through its parent, and a flush that
+    /// fails fails the write (nothing counts as kept in a folder whose
+    /// path may not be on the disk). Later runs flush the store's own
+    /// entry once too.
+    @Test func firstUseFlushesEveryNewFolderThroughItsParent() throws {
+        let base = tempDir()
+        defer { try? fm.removeItem(at: base) }
+        let cedric = base.appendingPathComponent("Cedric"), dir = cedric.appendingPathComponent("Session")
+        let s = store(dir)
+        s.checkFailFolderSync = true
+        let first = UUID()
+        #expect(throws: (any Error).self) { try s.writeBuffer(first, text: "not confirmed") }
+        #expect(s.readBufferResult(first) == .missing, "nothing written into an unconfirmed folder")
+        s.checkFailFolderSync = false
+        try s.writeBuffer(first, text: "kept")
+        let synced = s.checkSyncedFolders
+        #expect(synced.contains(base.path), "Cedric's entry flushed in its parent: \(synced)")
+        #expect(synced.contains(cedric.path), "Session's entry flushed in Cedric: \(synced)")
+        #expect(s.readBuffer(first) == "kept")
+        // An existing store: its own entry once, and a failure there fails too.
+        let again = store(dir)
+        again.checkFailFolderSync = true
+        #expect(throws: (any Error).self) { try again.writeBuffer(UUID(), text: "x") }
+        again.checkFailFolderSync = false
+        try again.writeBuffer(UUID(), text: "y")
+        #expect(again.checkSyncedFolders.first == cedric.path)
+    }
+
     @Test func durableWritesReplaceAtomically() throws {
         let dir = tempDir()
         defer { try? fm.removeItem(at: dir) }

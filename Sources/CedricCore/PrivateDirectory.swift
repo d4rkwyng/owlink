@@ -22,9 +22,21 @@ public enum PrivateDirectory {
     /// wider (made by an older version); only this user's own real folders,
     /// never through a symbolic link. Then each must be a real folder (not
     /// a link), owned by this user, exactly 0700, or this throws.
-    public static func make(_ dir: URL, root: URL = supportRoot) throws {
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+    ///
+    /// `syncParent` (the session store): each folder this makes is made
+    /// on its own (mkdir 0700, outermost first) and its new entry flushed
+    /// to the disk through its parent (`syncParent(parent)`) before the
+    /// next one is made inside it; `dir`'s own entry is flushed through
+    /// its parent even when it was there already. A flush that fails
+    /// throws, so nothing is written into a folder whose path to the disk
+    /// isn't confirmed.
+    public static func make(_ dir: URL, root: URL = supportRoot, syncParent: ((String) throws -> Void)? = nil) throws {
+        if let syncParent {
+            try makeDurably(dir.standardizedFileURL.path, syncParent: syncParent)
+        } else {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        }
         tighten(dir.path)
         try verify(dir.path)
         let r = root.standardizedFileURL.path, d = dir.standardizedFileURL.path
@@ -32,6 +44,25 @@ public enum PrivateDirectory {
             tighten(r)
             try verify(r)
         }
+    }
+
+    /// `path` and its missing parents, outermost first, each flushed
+    /// through its parent once made; then `path`'s own entry again (it may
+    /// have been made by an earlier run that never flushed it).
+    private static func makeDurably(_ path: String, syncParent: (String) throws -> Void) throws {
+        var missing: [String] = []
+        var p = path
+        var st = stat()
+        while p != "/", !p.isEmpty, lstat(p, &st) != 0 {
+            guard errno == ENOENT else { throw failure(errno) }
+            missing.append(p)
+            p = (p as NSString).deletingLastPathComponent
+        }
+        for m in missing.reversed() {
+            if mkdir(m, 0o700) != 0, errno != EEXIST { throw failure(errno) }
+            try syncParent((m as NSString).deletingLastPathComponent)
+        }
+        if missing.isEmpty { try syncParent((path as NSString).deletingLastPathComponent) }
     }
 
     /// Keeps `dir` out of Time Machine (and other backups that honour the
