@@ -123,6 +123,23 @@ enum DevHooks {
         || !env.keys.contains { $0.hasPrefix("CEDRIC_") && !launchOnly.contains($0) }
 
     /// Session-store faults for crash-check, before the first save.
+    /// CEDRIC_DISPOSABLE_STORE=device:inode (crash-check): exit at once,
+    /// before anything opens the store, unless the session folder is that
+    /// folder and not in or around the real one (DisposableStore). Says
+    /// "disposable store: verified" on stdout when it is.
+    static func verifyDisposableStore() {
+        guard DevEnvironment.checksEnabled, let expected = env["CEDRIC_DISPOSABLE_STORE"] else { return }
+        let dir = SessionStore.defaultDirectory()
+        let real = PrivateDirectory.supportRoot
+        if env["CEDRIC_SESSION_DIR"]?.isEmpty != false {
+            FileHandle.standardOutput.write(Data("disposable store: REFUSED no CEDRIC_SESSION_DIR\n".utf8)); exit(3)
+        }
+        if let why = DisposableStore.refusal(dir, expected: expected, protected: [real, real.appendingPathComponent("Session")]) {
+            FileHandle.standardOutput.write(Data("disposable store: REFUSED \(why)\n".utf8)); exit(3)
+        }
+        FileHandle.standardOutput.write(Data("disposable store: verified \(expected)\n".utf8))
+    }
+
     static func configureSessionStore(_ store: SessionStore) {
         guard DevEnvironment.checksEnabled else { return }
         if env["CEDRIC_TEST_SESSION_WRITE_FAIL"] == "1" { store.checkFailWrites = true }

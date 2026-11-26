@@ -391,6 +391,7 @@ func buildMainMenu() -> NSMenu {
 @MainActor
 func runApp() {
     LaunchTrace.mark("main")
+    DevHooks.verifyDisposableStore()
     let app = NSApplication.shared
     LaunchTrace.mark("nsapp")
     let delegate = AppDelegate()
