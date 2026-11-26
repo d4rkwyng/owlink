@@ -23,7 +23,7 @@ extension AppDelegate {
         guard needsBuffer(t) else { return true }
         let d = t.doc
         if !sessionSaving {
-            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
+            keepClosedText(d.id, EditorDocument.bufferText(t.text, breaks: d.lineBreaks))
             return true
         }
         if d.sessionChangeCount == d.changeCount, FileManager.default.fileExists(atPath: store.bufferURL(d.id).path) { return true }
@@ -58,7 +58,7 @@ extension AppDelegate {
         // A tab closed without windowShouldClose (programmatically): write now.
         if keepText, !keepTextForClose(t) {
             // Couldn't write it: keep it in memory at least, for this run.
-            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
+            keepClosedText(d.id, EditorDocument.bufferText(t.text, breaks: d.lineBreaks))
         }
         if !keepText { store.removeBuffer(d.id) }
         // Kept for ⇧⌘T, but the file wasn't written: say so once (ClosedNotice.swift).
@@ -77,7 +77,7 @@ extension AppDelegate {
         let r = ClosedTabs.push(entry, onto: closedTabs)
         closedTabs = r.list
         for gone in r.dropped {
-            closedTexts[gone.id] = nil
+            dropClosedText(gone.id)
             if gone.hasBuffer { store.removeBuffer(gone.id) }
         }
         // Now, not in 1.5 s: the closed list must name the buffer before a
@@ -116,7 +116,7 @@ extension AppDelegate {
             }
         }
         closedTabs.removeAll { $0.id == st.id }
-        closedTexts[st.id] = nil
+        dropClosedText(st.id)
         var url = st.path.map { URL(fileURLWithPath: $0) }
         if let u = url, let open = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == u.standardizedFileURL }) {
             guard text != nil else {

@@ -62,7 +62,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Window › Float on Top, per window (FloatOnTop.swift). The set, not
     /// the live level: full screen changes the level on its own.
     var floatingWindows = Set<ObjectIdentifier>()
-    var closedTexts: [UUID: String] = [:]
+    /// Set only through `keepClosedText` / `dropClosedText`, which keep
+    /// each entry's revision: a save that wrote an older copy may clear
+    /// only that copy, never text kept since (a later close that failed).
+    private(set) var closedTexts: [UUID: String] = [:]
+    private var closedTextRevision: [UUID: Int] = [:]
+    private var closedTextRevisions = 0
+
+    /// Keeps a closed tab's text in memory (its buffer couldn't be written).
+    func keepClosedText(_ id: UUID, _ text: String) {
+        closedTextRevisions += 1
+        closedTexts[id] = text
+        closedTextRevision[id] = closedTextRevisions
+    }
+
+    func dropClosedText(_ id: UUID) {
+        closedTexts[id] = nil
+        closedTextRevision[id] = nil
+    }
 
     // MARK: Launch
 
@@ -1015,12 +1032,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         // Closed tabs whose text couldn't be written when they closed: on
         // every save until it is (not only at quit).
-        var memoryOnly: [(UUID, String, Int)] = []
+        var memoryOnly: [(UUID, String, Int, Int?)] = []
         for c in closedTabs where c.hasBuffer {
             keep.insert(c.id)
             if let text = closedTexts[c.id] {
                 sessionWriteSequence += 1
-                memoryOnly.append((c.id, text, sessionWriteSequence))
+                memoryOnly.append((c.id, text, sessionWriteSequence, closedTextRevision[c.id]))
                 needs[c.id] = .written(sessionWriteSequence)
             } else {
                 needs[c.id] = .onDisk
@@ -1043,7 +1060,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     failures.append(error.localizedDescription)
                 }
             }
-            for (id, text, seq) in lateClosed {
+            for (id, text, seq, _) in lateClosed {
                 do {
                     try store.writeBuffer(id, text: text, open: false, sequence: seq)
                     ok.insert(id)
@@ -1079,8 +1096,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if d.sessionWritingCount == count { d.sessionWritingCount = -1 }
                 if ok.contains(id), count > d.sessionChangeCount { d.sessionChangeCount = count }
             }
-            for (id, _, _) in lateClosed where ok.contains(id) { self?.closedTexts[id] = nil }
             guard let self else { return }
+            // Only the copy this save wrote: one kept since (reopened,
+            // edited, closed again with the write failing) stays.
+            for (id, _, _, revision) in lateClosed where ok.contains(id) && self.closedTextRevision[id] == revision {
+                self.dropClosedText(id)
+            }
             for id in missing where needed[id] == .onDisk {
                 if let d = docs[id] { d.sessionChangeCount = -1; continue }
                 if self.closedTexts[id] == nil, case .missing = self.store.readBufferResult(id),

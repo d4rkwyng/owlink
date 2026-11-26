@@ -635,11 +635,49 @@ extension DevChecks {
                 expect(back.doc.sessionChangeCount != back.doc.changeCount, "and not counted as written: it isn't on disk")
                 expect(buffer(two) == "on disk two\n", "the disk still has the older text", buffer(two) ?? "-")
                 app.store.checkFailWrites = false
+                // An older copy's write finishing after a newer one is kept:
+                // the first tab, closed with its write failing (in memory)...
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == one }) else { expect(false, "⇧⌘T reopens the first tab"); return }
+                focus(back)
+                type(" A")
+                app.store.checkFailWrites = true
+                back.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[one] == "on disk one A\n", "the first tab closed with its write failing: in memory",
+                       app.closedTexts[one] ?? "-")
+                // ...a timed save writes that copy; its completion waits
+                // for the main thread, which meanwhile reopens the tab,
+                // edits it and closes it again with the write failing.
+                app.store.checkFailWrites = false
+                app.saveSession(sync: false)
+                app.sessionQueue.sync {}
+                expect(buffer(one) == "on disk one A\n", "the timed save wrote the older copy", buffer(one) ?? "-")
+                app.reopenClosedTab(nil)
+                guard let back = app.tabs.first(where: { $0.doc.id == one }) else { expect(false, "reopened again"); return }
+                focus(back)
+                type(" B")
+                app.store.checkFailWrites = true
+                back.window?.close()
+                expect(app.closedTexts[one] == "on disk one A B\n", "closed again, failing: the newer text in memory",
+                       app.closedTexts[one] ?? "-")
+            },
+            sync {
+                // The older save's completion has run by now.
+                expect(app.closedTexts[one] == "on disk one A B\n", "an older save's completion doesn't clear newer text",
+                       app.closedTexts[one] ?? "-")
+                app.store.checkFailWrites = false
+            },
+            sync {
                 var asked: [String] = []
                 AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
                 let reply = app.applicationShouldTerminate(NSApp)
                 expect(reply == .terminateNow && asked.isEmpty, "quit saves without a failure", "\(asked)")
                 expect(buffer(two) == "on disk two more\n", "and quit wrote the reopened text", buffer(two) ?? "-")
+                expect(buffer(one) == "on disk one A B\n", "and the newer closed text, not the older copy", buffer(one) ?? "-")
                 AppDelegate.checkQuitSaveChoice = nil
             },
         ])

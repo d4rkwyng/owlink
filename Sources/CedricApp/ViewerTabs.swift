@@ -126,7 +126,7 @@ extension AppDelegate {
         let r = ClosedTabs.push(t.sessionTab, onto: closedTabs)
         closedTabs = r.list
         for gone in r.dropped {
-            closedTexts[gone.id] = nil
+            dropClosedText(gone.id)
             if gone.hasBuffer { store.removeBuffer(gone.id) }
         }
         if persist { saveSession() }
