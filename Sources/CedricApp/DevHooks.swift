@@ -55,6 +55,7 @@ import WebKit
 ///   CEDRIC_TEST_SESSION_WRITE_FAIL=1  every session write fails, as on a full disk (crash-check)
 ///   CEDRIC_TEST_QUIT_SAVE_CHOICE=keep  answer the "couldn't save your unsaved work" quit alert
 ///                                 (keep|saveas|retry|quit) instead of showing it
+///   CEDRIC_TEST_SAVE_AFTER=4      ⌘S the front tab this many seconds in and print "saved: ok=…" (crash-check)
 ///   CEDRIC_TEST_SAVE_AS_DIR=dir   with the dump: Save As each mixed-endings tab into dir (its name), the real write
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
 ///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
@@ -220,6 +221,14 @@ enum DevHooks {
                     while true { sleep(60) }
                 })
                 _ = tab.save()
+            }
+        }
+        // Crash check: a plain ⌘S of the front tab this many seconds in.
+        if let delay = env["CEDRIC_TEST_SAVE_AFTER"].flatMap(Double.init), let tab = app.currentTab ?? app.tabs.last {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak tab] in
+                guard let tab else { return }
+                print("saved: ok=\(tab.save()) dirty=\(tab.doc.isDirty)")
+                fflush(stdout)
             }
         }
         // Session check: detach the front tab's preview to this frame ("x,y,w,h").

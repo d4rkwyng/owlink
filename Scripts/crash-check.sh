@@ -12,7 +12,8 @@
 #      the edit comes back unsaved.
 #   3. Killed while ⌘S is writing a 16 MB file (CEDRIC_TEST_SAVE_PAUSE holds
 #      the write half way): the file is the old one, never torn, and the
-#      edit comes back unsaved.
+#      edit comes back unsaved; the next ⌘S into that folder removes the
+#      partial .owlink-save-* file and nothing else.
 #   4. A crash (CEDRIC_TEST_ABORT_AFTER: abort()) instead of kill -9, as 1
 #      and 2: an untitled tab and an edited file.
 #   5. Two windows, one tab a 30 MB file in large-document mode: the
@@ -240,6 +241,21 @@ grep -E -q -- "$pat" "$W/dump.txt" && ok "3: the edit is back, unsaved, exact te
 expect_count "3" 1
 left=$(ls -A "$W" | grep -c '^\.owlink-save-' || true)
 echo "crash-check: NOTE 3: $left partial .owlink-save-* file(s) left beside the file by the killed save"
+# The next save into that folder removes what the killed save left, and
+# only that: a look-alike name and a link with the name stay.
+touch "$W/.owlink-save-not-a-uuid"
+ln -s "$W/notes.txt" "$W/.owlink-save-$(python3 -I -c 'import uuid; print(str(uuid.uuid4()).upper())')"
+sleep 2
+launch "$S" "$W/out3b" CEDRIC_TEST_SAVE_AFTER=4
+for _ in $(seq 1 150); do grep -q '^saved:' "$W/out3b" && break; sleep 0.1; done
+grep -q '^saved: ok=true dirty=false' "$W/out3b" && ok "3: relaunched, the restored edit saved with ⌘S" || bad "3: the relaunched save: $(grep '^saved:' "$W/out3b" || echo none)"
+quit_app $pid
+[ "$(sha_f "$W/big.txt")" = "$T3sha" ] && ok "3: the file now holds the edit" || bad "3: the saved file is not the edit"
+left=$(ls -A "$W" | grep -E '^\.owlink-save-[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$' | while read -r f; do [ -L "$W/$f" ] || echo "$f"; done | wc -l | tr -d ' ')
+[ "$left" = 0 ] && ok "3: the killed save's partial file is gone after the next save" || bad "3: $left partial .owlink-save-* file(s) still left"
+[ -e "$W/.owlink-save-not-a-uuid" ] && [ "$(ls -A "$W" | grep -E '^\.owlink-save-[0-9A-F-]{36}$' | while read -r f; do [ -L "$W/$f" ] && echo l; done)" = l ] \
+    && ok "3: a look-alike name and a link with the name are left alone" || bad "3: the sweep removed something it shouldn't"
+rm -f "$W/.owlink-save-not-a-uuid"; find "$W" -maxdepth 1 -type l -name '.owlink-save-*' -delete
 
 # 4. A crash (abort) instead of kill -9: an untitled tab and an edited
 #    file, 1 s in (before the autosave interval would have saved them).
