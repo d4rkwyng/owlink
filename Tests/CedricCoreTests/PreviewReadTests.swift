@@ -434,6 +434,40 @@ import Testing
         }
     }
 
+    /// With script on, the check of what was opened judges the opened
+    /// file's real name by its bytes (Astra batch 13d, must 2). Asked for
+    /// by a plain name (which passes the preflight on the parts asked for)
+    /// that leads to a dot-and-mark name, the read is refused: a text
+    /// "." prefix missed the dot before a mark. One leading to a
+    /// mark-leading name that isn't hidden is served where the kernel
+    /// follows the final link inside the root (a text prefix of the root
+    /// missed "/" and the mark); the walk refuses any final link.
+    @Test func theOpenedFileIsJudgedByItsBytesWithScriptOn() throws {
+        let t = try folder()
+        defer { try? fm.removeItem(at: t) }
+        let doc = t.appendingPathComponent("doc")
+        _ = try put(doc, ".\u{301}x.png", "HIDDEN")
+        _ = try put(doc, ".\u{301}d/y.png", "HIDDENDIR")
+        _ = try put(doc, "\u{301}ok.png", "MARK")
+        _ = try put(doc, "\u{301}k/z.png", "MARKDIR")
+        for (link, target) in [("v.png", ".\u{301}x.png"), ("w.png", ".\u{301}d/y.png"), ("m.png", "\u{301}ok.png"), ("n.png", "\u{301}k/z.png")] {
+            try fm.createSymbolicLink(atPath: doc.appendingPathComponent(link).path, withDestinationPath: target)
+        }
+        let root = try #require(PinnedRoot(doc))
+        #expect(!PreviewRead.scriptSafe([".\u{301}x.png"]) && !PreviewRead.scriptSafe([".\u{301}d", "y.png"]), "a dot byte then a mark")
+        #expect(PreviewRead.scriptSafe(["\u{301}ok.png"]) && PreviewRead.scriptSafe(["\u{301}k", "z.png"]))
+        for walk in modes {
+            for name in ["v.png", "w.png", "m.png", "n.png"] { #expect(PreviewRead.scriptSafe([name]), "\(name) asked for") }
+            #expect(PreviewRead.data(["v.png"], beneath: root, scriptOn: true, walk: walk) == nil, "walk \(walk)")
+            #expect(PreviewRead.data(["w.png"], beneath: root, scriptOn: true, walk: walk) == nil, "walk \(walk)")
+            #expect(PreviewRead.data(["m.png"], beneath: root, scriptOn: true, walk: walk) == (walk ? nil : Data("MARK".utf8)), "walk \(walk)")
+            #expect(PreviewRead.data(["n.png"], beneath: root, scriptOn: true, walk: walk) == (walk ? nil : Data("MARKDIR".utf8)), "walk \(walk)")
+            // Script off: no name rule, the link is followed where the kernel keeps it inside.
+            #expect(PreviewRead.data(["v.png"], beneath: root, scriptOn: false, walk: walk) == (walk ? nil : Data("HIDDEN".utf8)), "walk \(walk)")
+            #expect(PreviewRead.data(["\u{301}ok.png"], beneath: root, scriptOn: true, walk: walk) == Data("MARK".utf8), "walk \(walk)")
+        }
+    }
+
     /// The cap holds for the granted roots too (Astra review, batch 10c,
     /// should-fix): with room for one, the document's folder is pinned and
     /// served, and the opened folder past it is denied for that grant,

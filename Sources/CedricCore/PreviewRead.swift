@@ -36,9 +36,10 @@ public enum PreviewRead {
     }
 
     /// Whether `parts` (below a root) is one a page with script on may
-    /// load: no dot file or dot folder, and an image, font or CSS name.
+    /// load: no dot file or dot folder (a leading `.` byte, even with a
+    /// combining mark after it), and an image, font or CSS name.
     static func scriptSafe(_ parts: [String]) -> Bool {
-        guard let last = parts.last, !parts.contains(where: { $0.hasPrefix(".") }) else { return false }
+        guard let last = parts.last, !parts.contains(where: FolderTree.isDotName) else { return false }
         return PreviewFolder.scriptSafeExtensions.contains((last as NSString).pathExtension.lowercased())
     }
 
@@ -68,10 +69,13 @@ public enum PreviewRead {
         guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG, st.st_size <= maxBytes else { return nil }
         if scriptOn {
             // What was opened, by its real path: below the root's, and
-            // still an image, font or CSS file outside dot folders.
-            guard let r = path(of: rootFD), let f = path(of: fd) else { return nil }
-            let base = r.hasSuffix("/") ? r : r + "/"
-            guard f.hasPrefix(base), scriptSafe(f.dropFirst(base.count).split(separator: "/").map(String.init)) else { return nil }
+            // still an image, font or CSS file outside dot folders; by the
+            // bytes, split at each `/` byte (a text split keeps a slash
+            // before a combining mark inside a name, and a dot then a
+            // mark isn't a text "." prefix).
+            guard let r = path(of: rootFD), let f = path(of: fd),
+                  let rel = FolderTree.relativePath(of: URL(fileURLWithPath: f), in: URL(fileURLWithPath: r)), !rel.isEmpty,
+                  scriptSafe(FolderTree.components(rel)) else { return nil }
         }
         _ = fcntl(fd, F_SETFL, 0)
         var out = Data()

@@ -145,6 +145,11 @@ public enum FolderTree {
         relativePath.utf8.split(separator: 0x2f).map { String(decoding: $0, as: UTF8.self) }
     }
 
+    /// Whether `name` starts with a `.` byte: a dot file or dot folder to
+    /// the kernel and Finder. A text test misses a dot followed by a
+    /// combining mark, which is one Swift character.
+    public static func isDotName(_ name: String) -> Bool { name.utf8.first == 0x2e }
+
     /// The folder holding the file at `url` (File › Open Enclosing Folder),
     /// or nil for an untitled document, a non-file URL or the volume root.
     public static func enclosingFolder(of url: URL?) -> URL? {
