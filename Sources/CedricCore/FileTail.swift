@@ -359,12 +359,20 @@ public final class FileTail: @unchecked Sendable {
     /// decoding drops a leading U+FEFF on macOS 26, and Follow stamped the
     /// bytes as shown all the same: a second BOM appended on its own was
     /// missing from the tab, and ⌘S wrote the file three bytes short.
+    /// UTF-16 the same way (TextCodec.decodeUTF16: its byte order, every
+    /// U+FEFF kept, a surrogate not in a pair refused), so it no longer
+    /// depends on what Foundation does with a U+FEFF on a given macOS.
+    /// The 8-bit encodings have no BOM and map every byte (or refuse it)
+    /// the same way: Foundation.
     static func decodeAppended(_ bytes: Data, _ encoding: TextEncoding) -> String? {
-        if encoding.base == .utf8 {
+        switch encoding.base {
+        case .utf8, .utf8BOM:
             guard TextCodec.isValidUTF8(bytes) else { return nil }
             return bytes.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
+        case .utf16LE: return TextCodec.decodeUTF16(bytes, bigEndian: false)
+        case .utf16BE: return TextCodec.decodeUTF16(bytes, bigEndian: true)
+        case .latin1, .windows1252, .macRoman: return String(data: bytes, encoding: encoding.foundation)
         }
-        return String(data: bytes, encoding: encoding.foundation)
     }
 
     /// Decodes the longest prefix of `bytes` that ends on a whole character:

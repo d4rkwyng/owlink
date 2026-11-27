@@ -186,6 +186,42 @@ public enum TextCodec {
         return nil
     }
 
+    /// UTF-16 bytes in the given byte order as text, by the project's own
+    /// strict decoder, the same on every macOS: nil for an odd byte count
+    /// or a surrogate that isn't half of a pair (a high one at the very
+    /// end included, so a caller cutting at whole characters holds it for
+    /// the next bytes). Every U+FEFF is text: there is no BOM to look for
+    /// here (the caller has dropped the file's one). This is what
+    /// Foundation's `String(data:encoding:)` gave on the macOS versions
+    /// tried, pinned so it doesn't depend on one.
+    static func decodeUTF16(_ data: Data, bigEndian: Bool) -> String? {
+        guard data.count % 2 == 0 else { return nil }
+        var units = [UInt16]()
+        units.reserveCapacity(data.count / 2)
+        var pendingHigh = false
+        let ok: Bool = data.withUnsafeBytes { raw in
+            var i = 0
+            while i < raw.count {
+                let a = UInt16(raw[i]), b = UInt16(raw[i + 1])
+                let u = bigEndian ? a << 8 | b : b << 8 | a
+                if UTF16.isLeadSurrogate(u) {
+                    if pendingHigh { return false }
+                    pendingHigh = true
+                } else if UTF16.isTrailSurrogate(u) {
+                    if !pendingHigh { return false }
+                    pendingHigh = false
+                } else if pendingHigh {
+                    return false
+                }
+                units.append(u)
+                i += 2
+            }
+            return !pendingHigh
+        }
+        guard ok else { return nil }
+        return String(decoding: units, as: UTF16.self)
+    }
+
     static func isValidUTF8(_ data: Data) -> Bool {
         data.withUnsafeBytes { scanUTF8($0).valid }
     }
