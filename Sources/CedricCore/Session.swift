@@ -941,6 +941,39 @@ public final class SessionStore: @unchecked Sendable {
         held.insert(id)
     }
 
+    /// Why `holdNeededBuffer` held a buffer.
+    public enum HeldBecause: Equatable, Sendable {
+        /// Not there right now: a sync or restore may be moving it aside.
+        case missing
+        /// There, but not a regular file or not readable.
+        case unusable
+    }
+
+    /// A closed tab's buffer a commit needed (`buffersMissing`), with no
+    /// copy of its text in memory: held whatever the reason, missing
+    /// included. Let go on one miss, its entry would stop claiming it and
+    /// the first prune after it is back (a sync or restore putting it
+    /// back) would delete its text. Held, the commit goes ahead without
+    /// it, the entry keeps `hasBuffer`, and launch tries it again
+    /// (`retryHeldBuffers`). Nil if it was held already (said once).
+    public func holdNeededBuffer(_ id: UUID) -> HeldBecause? {
+        let because: HeldBecause = bufferExists(id) ? .unusable : .missing
+        lock.lock(); defer { lock.unlock() }
+        return held.insert(id).inserted ? because : nil
+    }
+
+    /// Launch's read of a restored tab's buffer: one that isn't there
+    /// right now, or can't be read, is held (never pruned, tried again
+    /// next launch), never skipped: else the session committed without
+    /// the tab no longer names it, and the first prune after a sync or
+    /// restore puts it back deletes its text.
+    public func readBufferHoldingMissing(_ id: UUID) -> BufferRead {
+        let r = readBufferResult(id)
+        if case .text = r { return r }
+        holdBuffer(id)
+        return r
+    }
+
     /// A held buffer was read after all (or has gone): an ordinary one again.
     public func releaseBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }

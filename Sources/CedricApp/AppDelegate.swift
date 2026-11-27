@@ -1126,9 +1126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // newer sync one), else left as it was so the next save (or a
         // close) tries again.
         // A buffer the commit needed on disk that isn't there: an open
-        // tab's text is written again next save; a closed tab's that is
-        // certainly gone (and not in memory) can't be, so its entry stops
-        // claiming one (else no session would ever be committed again).
+        // tab's text is written again next save; a closed tab's (not in
+        // memory) can't be, so it is held: its entry keeps claiming it,
+        // and the commits go ahead without it.
         let finished: @MainActor (Set<UUID>, [UUID]) -> Void = { [weak self] ok, missing in
             for (id, (d, count)) in written {
                 if d.sessionWritingCount == count { d.sessionWritingCount = -1 }
@@ -1143,18 +1143,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             for id in missing where needed[id] == .onDisk {
                 if let d = docs[id] { d.sessionChangeCount = -1; continue }
                 guard self.closedTexts[id] == nil, let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) else { continue }
-                // lstat only: the commit found no readable regular file
-                // there, so nothing is opened (a FIFO would block).
-                if !self.store.bufferExists(id) {
-                    FileHandle.standardError.write(Data("session: closed tab \(id)'s buffer is gone\n".utf8))
-                    self.closedTabs[i].hasBuffer = false
-                } else {
-                    // There, but not a regular file (a folder, a link) or
-                    // not readable: kept where it is (held: never pruned,
-                    // named in every commit) and said, so it doesn't block
-                    // every later commit of the healthy tabs.
-                    self.noteUnusableClosedBuffer(self.closedTabs[i])
-                }
+                // Held whatever the reason (lstat only: the commit found no
+                // readable regular file there, so nothing is opened, a
+                // FIFO would block): never pruned, named in every commit,
+                // so it doesn't block the healthy tabs' commits. Not
+                // there right now is held too, its entry keeping
+                // hasBuffer: a sync or restore may be moving it aside,
+                // and let go, the first prune after it is back deletes it
+                // (SessionStore.holdNeededBuffer).
+                self.noteUnusableClosedBuffer(self.closedTabs[i])
             }
         }
         if sync {
@@ -1402,14 +1399,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if !unreadableSession, !built.isEmpty { FileHandle.standardError.write(Data("session: \(built.count) unsaved text(s) the session didn’t list recovered\n".utf8)) }
     }
 
-    /// A closed tab's buffer that is there but isn't a regular file, or
-    /// can't be read: held (kept, never pruned, its entry stays on the
-    /// closed list) and said once.
+    /// A closed tab's buffer a commit needed that isn't there right now,
+    /// isn't a regular file, or can't be read: held (kept, never pruned,
+    /// its entry stays on the closed list with its buffer) and said once.
     func noteUnusableClosedBuffer(_ tab: SessionTab) {
-        guard !store.heldBuffers.contains(tab.id) else { return }
-        store.holdBuffer(tab.id)
+        guard let because = store.holdNeededBuffer(tab.id) else { return }
         let name = tab.untitledName ?? tab.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
-        noteRecoveryProblem(String(localized: "Owlink can’t use the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t a file it can read. It is left where it is, and the tab stays in File › Reopen Closed Tab."))
+        switch because {
+        case .missing:
+            noteRecoveryProblem(String(localized: "Owlink can’t find the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t there right now. If it comes back it is kept, and the tab stays in File › Reopen Closed Tab."))
+        case .unusable:
+            noteRecoveryProblem(String(localized: "Owlink can’t use the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t a file it can read. It is left where it is, and the tab stays in File › Reopen Closed Tab."))
+        }
     }
 
     /// A buffer that is there but couldn't be read: kept (held) and said.
@@ -1447,9 +1448,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var text: String?
         var held = false
         if st.hasBuffer {
-            switch store.readBufferResult(st.id) {
+            // Not there right now is held too (a sync or restore may be
+            // moving it aside): skipped, the next prune after it is back
+            // would delete it (SessionStore.readBufferHoldingMissing).
+            switch store.readBufferHoldingMissing(st.id) {
             case .text(let t): text = t
-            case .missing: break
+            case .missing:
+                held = true
+                noteUnreadableBuffer(st.id, String(localized: "it isn’t there right now"))
             case .unreadable(let why):
                 // Kept, never pruned; the tab (if its file is there) gets
                 // another id, so its own writes can't replace that buffer.
