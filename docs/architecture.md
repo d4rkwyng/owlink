@@ -99,6 +99,9 @@ them; orphan buffers are pruned after each save.
   (as in 0.5.3): each prunes against its own snapshot, so a second
   instance launched explicitly (open -n) can delete the first's newest
   backup. Finder and `cedric` reuse the running app.
+- Review findings 0.6.0 leaves open (session recovery, same-file and
+  name validation, the check harness) are listed in
+  [known-limits-0.6.md](known-limits-0.6.md).
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
   saved places in the tab bar (AppKit spends ~10 ms adding a window to a
