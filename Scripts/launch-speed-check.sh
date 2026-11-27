@@ -46,6 +46,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 BIN_ABS=$(cd "$(dirname "$BIN")" && pwd)/Cedric
 W=$(mktemp -d)
 [ -n "${KEEP_W:-}" ] && echo "work dir: $W" || trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 
 # Test files and the saved session (session.json format: CedricCore/Session.swift).
 python3 - "$W" <<'PY'

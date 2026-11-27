@@ -33,6 +33,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 if [ -z "$FILE" ]; then
     FILE="$W/long-line.txt"
     head -c 477300 /dev/urandom | base64 | tr -d '\n' | head -c 636293 > "$FILE"

@@ -27,6 +27,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 fail=0
 check() { # description, pattern
     if grep -q -- "$2" "$W/dump.txt"; then echo "session-check: OK   $1"; else echo "session-check: FAIL $1 (no '$2')" >&2; fail=1; fi

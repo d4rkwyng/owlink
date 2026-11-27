@@ -39,6 +39,13 @@ cleanup() {
     rm -rf "$W"
 }
 trap cleanup EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
+# A 30-day-old Replace in Files undo operation in this run's ReplaceUndo:
+# the launches' prune must take it (checked at the end), which shows they
+# pruned this folder and not the real one.
+CANARY="$CEDRIC_REPLACE_UNDO_DIR/$(uuidgen)"
+mkdir -p "$CANARY"; touch -t "$(date -v-30d +%Y%m%d%H%M)" "$CANARY"
 unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE
 fail=0; oks=0
 ok() { echo "crash-check: OK   $1"; oks=$((oks + 1)); }
@@ -333,6 +340,9 @@ dump "$S"
 expect_tab "7: after a save and a relaunch: the file's edit still there" - "$T7f"
 expect_tab "7: after a save and a relaunch: the untitled text still there" - "$T7u"
 expect_count "7 (after a save)" 2
+
+[ ! -e "$CANARY" ] && ok "the launches pruned this run's ReplaceUndo (its 30-day-old operation is gone), not the real one" \
+    || bad "the 30-day-old operation in this run's ReplaceUndo is still there: the launches pruned some other folder"
 
 [ $fail = 0 ] && echo "crash-check: all OK ($oks checks)" || echo "crash-check: FAILED ($oks OK)" >&2
 exit $fail

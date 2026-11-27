@@ -17,7 +17,12 @@
 #   --runs N      launch it N times in a row (default: 3)
 #
 # It restores and re-saves the real session, as every launch does; it
-# never edits or saves a document.
+# never edits or saves a document. The real launches still get
+# CEDRIC_REPLACE_UNDO_DIR (a temp folder): a check build would otherwise
+# prune the real Replace in Files undo copies at launch; a release build
+# ignores it and keeps its normal retention (Scripts/check-env.sh).
+#
+# isolation-lint: release-gate (launches release builds as shipped)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -64,12 +69,14 @@ if pgrep -f "^$BIN_ABS" >/dev/null; then
     exit 1
 fi
 
+LW=$(mktemp -d)
+trap 'rm -rf "$LW"' EXIT
 failed=0
 # The built-in engine's llama.framework isn't linked (dlopen on first use,
 # CLlamaLoader), so a missing or broken copy no longer stops the launch:
 # check that it loads from the bundle. The same run says whether the dev
 # switches are compiled in ("dev hooks: on" = a check build).
-out=$("${ENV_CLEAN[@]}" CEDRIC_LLAMA_CHECK=1 CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_SESSION_DIR="$(mktemp -d)" \
+out=$("${ENV_CLEAN[@]}" CEDRIC_LLAMA_CHECK=1 CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_SESSION_DIR="$LW/session" CEDRIC_REPLACE_UNDO_DIR="$LW/replace-undo" \
         "$BIN_ABS" -ApplePersistenceIgnoreState YES 2>/dev/null) || true
 if grep -qx "llama: ok" <<<"$out"; then
     echo "launch-check: llama.framework loads from the bundle"
@@ -90,7 +97,8 @@ else
 fi
 for run in $(seq 1 "$RUNS"); do
     before=$(crash_reports)
-    "${ENV_CLEAN[@]}" "$BIN_ABS" >/dev/null 2>&1 &
+    # isolation-lint: real-launch the user's real session, as a user launches it
+    "${ENV_CLEAN[@]}" CEDRIC_REPLACE_UNDO_DIR="$LW/replace-undo" "$BIN_ABS" >/dev/null 2>&1 &
     pid=$!
     alive=1
     for _ in $(seq 1 "$SECONDS_UP"); do

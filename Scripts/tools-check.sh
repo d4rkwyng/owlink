@@ -25,6 +25,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$OUT"
 fail=0
 echo "== shortcuts"

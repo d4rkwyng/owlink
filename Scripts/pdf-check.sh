@@ -29,6 +29,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_PDF_DIR="$W/pdf" CEDRIC_CHECK_OUT="$OUT" CEDRIC_THEME=${CEDRIC_THEME:-dark}
 fail=0
 run() { # name, extra env...

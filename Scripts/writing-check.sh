@@ -30,6 +30,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 fail=0
 set +e
 # 1. Writing Mode, the popover and a goal; quits normally (the session is saved).

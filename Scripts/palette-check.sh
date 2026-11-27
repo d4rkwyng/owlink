@@ -26,6 +26,8 @@ BIN="$APP/Contents/MacOS/Cedric"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$W"
 set +e
 for CHECK in palette quickopen; do
     rm -rf "$W/session"
