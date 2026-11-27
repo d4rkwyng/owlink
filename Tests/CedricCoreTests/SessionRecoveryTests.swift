@@ -266,6 +266,66 @@ import Testing
         #expect(s.allTabs.map(\.id) == [a.id, b] && again.isEmpty)
     }
 
+    /// Across the rollover (`SessionStore.maxGeneration`): a commit past
+    /// the maximum is numbered maxGeneration + 1, and a journal retained
+    /// across it (the app died before removing it) is applied once more,
+    /// not skipped. A journal written after that commit is numbered
+    /// maxGeneration + 1 as well (never + 2, which reads as damaged and
+    /// scans: a stray buffer would come back), and it is applied.
+    @Test func aJournalRetainedAcrossTheGenerationRolloverIsApplied() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let file = dir.appendingPathComponent("session.json")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        var manifest = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        manifest["generation"] = SessionStore.maxGeneration
+        try JSONSerialization.data(withJSONObject: manifest).write(to: file)
+        let stray = UUID()
+        try Data("let go".utf8).write(to: s1.bufferURL(stray))
+
+        // A buffer journaled (maxGeneration + 1), then the commit past the
+        // maximum; the journal is kept as if the app died before removing it.
+        let s2 = store(dir)
+        _ = s2.loadForLaunch()
+        let b = UUID()
+        try s2.writeBuffer(b, text: "before the rollover commit")
+        let retained = try Data(contentsOf: journal)
+        try s2.save(Session(windows: [SessionWindow(tabs: [a, SessionTab(id: b, untitledName: "Untitled 2", hasBuffer: true)])]))
+        let committed = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(committed["generation"] as? Int == SessionStore.maxGeneration + 1, "the commit past the maximum")
+        try retained.write(to: journal)
+
+        // That journal is applied (its tab named open), nothing scanned.
+        let s3 = store(dir)
+        guard case .session(let third, let none) = s3.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(third.allTabs.contains { $0.id == b && $0.hasBuffer } && none.isEmpty, "\(none)")
+        // A journal written now: numbered maxGeneration + 1, applied.
+        let c = UUID()
+        try s3.writeBuffer(c, text: "after the rollover commit")
+        let j = try JSONDecoder().decode(SessionStore.Journal.self, from: Data(contentsOf: journal))
+        #expect(j.generation == SessionStore.maxGeneration + 1)
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered.contains(c) && !recovered.contains(stray), "applied, not scanned: \(recovered)")
+        // And another commit still saves and loads (numbered as the last).
+        try s3.save(Session(windows: [SessionWindow(tabs: [a, SessionTab(id: c, untitledName: "Untitled 3", hasBuffer: true)])]))
+        let last = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        #expect(last["generation"] as? Int == SessionStore.maxGeneration + 1)
+        guard case .session(let s, let again) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s.allTabs.map(\.id) == [a.id, c] && again.isEmpty)
+        // A journal written in the same run after that commit: still
+        // maxGeneration + 1 (not + 2, damaged), and applied without a scan.
+        let d = UUID()
+        try s3.writeBuffer(d, text: "after a second commit past the end")
+        let j2 = try JSONDecoder().decode(SessionStore.Journal.self, from: Data(contentsOf: journal))
+        #expect(j2.generation == SessionStore.maxGeneration + 1)
+        guard case .session(_, let later) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(later == [d], "applied, not scanned: \(later)")
+    }
+
     // MARK: Reopened closed tabs
 
     /// A closed tab whose entry kept a buffer, closed just inside

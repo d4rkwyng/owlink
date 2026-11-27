@@ -481,7 +481,17 @@ public final class SessionStore: @unchecked Sendable {
     /// outside 0...this (a journal's: 1...this + 1, the one waiting for a
     /// commit after one numbered this) is damaged bookkeeping, never
     /// trusted, and never near overflow.
+    ///
+    /// Rollover: numbering stops at this + 1 (`nextGeneration`). Every
+    /// commit after the one numbered this is numbered this + 1, which
+    /// `loadManifest` reads as unknown (no journal counts as spent), and
+    /// every journal after it is numbered this + 1 too (never this + 2,
+    /// which would read as damaged). So past the end a leftover journal
+    /// is applied once more, never skipped: conservative, never lossy.
     static let maxGeneration = 1 << 52
+
+    /// The number after `n`, saturating at `maxGeneration + 1` (rollover).
+    static func nextGeneration(_ n: Int) -> Int { min(n, maxGeneration) + 1 }
 
     /// `session.json`'s commit number and the held runs' journals the
     /// commit adopted (`adoptedJournals`), beside the session's own keys
@@ -722,7 +732,7 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     private func encodeJournal(_ ids: [UUID], reopened: [UUID], numbered: Bool = true) throws -> Data {
-        try JSONEncoder().encode(Journal(generation: numbered ? committedGeneration + 1 : nil, ids: ids.map(\.uuidString),
+        try JSONEncoder().encode(Journal(generation: numbered ? Self.nextGeneration(committedGeneration) : nil, ids: ids.map(\.uuidString),
                                          reopened: reopened.isEmpty ? nil : reopened.map(\.uuidString)))
     }
 
@@ -783,7 +793,7 @@ public final class SessionStore: @unchecked Sendable {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
-        let generation = committedGeneration + 1
+        let generation = Self.nextGeneration(committedGeneration)
         // The held runs' journals launch applied: this commit names what
         // they listed (or let it go), so it says it adopted them.
         let adopting = adoptedLeft.union(heldJournalsSeen.map(\.lastPathComponent)).sorted()
