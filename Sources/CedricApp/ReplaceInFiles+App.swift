@@ -117,8 +117,10 @@ extension AppDelegate {
     /// tabs as they are now). The same file is decided only by file-system
     /// identity: the file the URL leads to now (device and inode) against
     /// the identity each tab recorded when it read or saved its file (its
-    /// DiskStamp), never a fresh look at the tab's path. So a tab opened
-    /// under another spelling of the file, or a hard link to it, is found
+    /// DiskStamp), not the tab's path alone; a tab found through another
+    /// name is also checked against the file its own URL leads to now (see
+    /// below). So a tab opened under another spelling of the file, or a
+    /// hard link to it, is found
     /// (Astra batch 17v), and a tab at the same path that holds the text of
     /// a file replaced there since (a sync client, a restore) is not taken
     /// for it (Sol 21v-3). The resolved paths' exact bytes only pick which
@@ -130,9 +132,12 @@ extension AppDelegate {
     /// from the file it read or wrote. A tab brought back with unsaved text
     /// (a session restore, Reopen Closed Tab) from an entry saved before
     /// 0.5.4 keeps a date-only stamp with none, and so does a restored tab
-    /// whose link stamp is unverified. Such a tab is never taken for its
-    /// file: a preview plans neither it nor the disk, and Replace All
-    /// skips it (out of date).
+    /// whose link stamp is unverified. Such a tab is found only on an exact
+    /// match of the resolved path, and then it is not taken for its file:
+    /// a preview plans neither it nor the disk, and Replace All skips it
+    /// (out of date). Through a distinct hard-link name such a tab cannot
+    /// match (it has no identity to compare), so that name has no open tab
+    /// and is planned from disk.
     ///
     /// A tab found through another name (an alias hit) is taken only when
     /// three agree: the file at the asked URL now, the file the tab's own
