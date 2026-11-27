@@ -44,3 +44,18 @@ extension Trait where Self == OffPoolTrait {
     /// Blocking or CPU-heavy: keep it off Swift's cooperative pool.
     static var offPool: Self { .init() }
 }
+
+/// Runs `body` on a thread of its own with the main thread's 8 MB stack and
+/// returns its result: off the main actor and off the cooperative pool, for
+/// CPU-heavy work that also recurses deep. GCD's and the pool's threads have
+/// 512 KB, which a debug build's `JSONFormatter` overflows at a few hundred
+/// levels (release needs under 128 KB at its 511-level cap). `body` runs
+/// without the test's task-locals: return values and `#expect` on them
+/// after the await.
+func onLargeStack<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+    await withCheckedContinuation { (c: CheckedContinuation<T, Never>) in
+        let t = Thread { c.resume(returning: body()) }
+        t.stackSize = 8 << 20
+        t.start()
+    }
+}
