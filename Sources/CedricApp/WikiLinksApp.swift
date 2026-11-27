@@ -31,7 +31,8 @@ final class WikiNotes {
     private(set) var notes: NoteIndex?
     private(set) var scan: BacklinkScan
     /// Folders changed since the last scan (relative); nil: all of them.
-    private var dirty: Set<String>?
+    /// By the event spelling's bytes; matched to the notes' folders in the scan.
+    private var dirty: Set<FolderTree.PathKey>?
     private var scanning = false, rescan = false
     private var building = false, rebuild = false
     /// Some Backlinks pane shows: the notes' links are kept read.
@@ -134,14 +135,15 @@ final class WikiNotes {
 
     /// FolderWatcher events (FolderSidebar.handle), before Open Quickly's index sees them.
     func handle(_ changes: [FolderWatcher.Change]) {
+        // By bytes, else by the root's identity (another spelling of it);
+        // the scan matches the folder to the notes' own spelling.
         func rel(_ p: String) -> String? {
-            let u = URL(fileURLWithPath: p)
-            return FolderTree.relativePath(of: u, in: URL(fileURLWithPath: realRoot)) ?? FolderTree.relativePath(of: u, in: root)
+            FolderTree.eventRelativePath(p, roots: [URL(fileURLWithPath: realRoot), root])?.rel
         }
         for c in changes {
             switch c {
             case .folder(let p):
-                if let r = rel(p) { dirty?.insert(r) }
+                if let r = rel(p) { dirty?.insert(FolderTree.PathKey(r)) }
             case .subtree, .rootChanged:
                 dirty = nil
             }

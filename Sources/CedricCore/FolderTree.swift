@@ -22,7 +22,10 @@ public struct FolderEntry: Equatable, Hashable, Sendable {
 
     /// What a re-listing matches entries by: a file that became a folder
     /// of the same name is a remove and an insert.
-    public var key: String { (isDirectory ? "d:" : "f:") + name }
+    /// By the name's bytes (`FolderTree.PathKey`): both listings come
+    /// from the same folder, and a `String` key let two canonically
+    /// equivalent names there share one node, and so one URL.
+    public var key: FolderTree.PathKey { FolderTree.PathKey((isDirectory ? "d:" : "f:") + name) }
 }
 
 /// The folder sidebar's model (plan-0.2.0.md §6): listing one folder
@@ -106,7 +109,7 @@ public enum FolderTree {
     }
 
     public static func diff(old: [FolderEntry], new: [FolderEntry]) -> Diff {
-        var oldByKey: [String: FolderEntry] = [:]
+        var oldByKey: [FolderTree.PathKey: FolderEntry] = [:]
         for e in old { oldByKey[e.key] = e }
         let newKeys = Set(new.map(\.key))
         return Diff(removed: old.indices.filter { !newKeys.contains(old[$0].key) },
@@ -171,6 +174,79 @@ public enum FolderTree {
         public init(_ s: String) { bytes = Array(s.utf8) }
         public init(stringLiteral s: String) { self.init(s) }
         public var string: String { String(decoding: bytes, as: UTF8.self) }
+    }
+
+    /// What a file or folder at `path` is now (device and inode), a final
+    /// symbolic link not followed.
+    public static func identity(_ path: String) -> Beneath.FileID? { Beneath.FileID(path: path, followLast: false) }
+
+    /// A watcher event's path (FSEvents' own spelling) relative to the
+    /// first of `roots` it lies in, with the event-spelled path of that
+    /// root. By the bytes first. On a miss, the event path's ancestors are
+    /// compared with the roots by identity (device and inode, links
+    /// followed): another spelling of the root (case, normalization, a
+    /// firmlinked path) is the root. Nil when it is in none of them.
+    public static func eventRelativePath(_ path: String, roots: [URL]) -> (rel: String, base: String)? {
+        let u = URL(fileURLWithPath: path)
+        for r in roots {
+            if let rel = relativePath(of: u, in: r) { return (rel, r.standardizedFileURL.path) }
+        }
+        let ids = Set(roots.compactMap { Beneath.FileID(path: $0.standardizedFileURL.path, followLast: true) })
+        guard !ids.isEmpty else { return nil }
+        var bytes = Array(u.standardizedFileURL.path.utf8)
+        var tail: [[UInt8]] = []
+        while bytes.count > 1 {
+            let base = String(decoding: bytes, as: UTF8.self)
+            if let id = Beneath.FileID(path: base, followLast: true), ids.contains(id) {
+                return (tail.reversed().map { String(decoding: $0, as: UTF8.self) }.joined(separator: "/"), base)
+            }
+            guard let cut = bytes.lastIndex(of: 0x2f) else { return nil }
+            let name = Array(bytes[(cut + 1)...])
+            if !name.isEmpty { tail.append(name) }
+            bytes = cut == 0 ? [0x2f] : Array(bytes[..<cut])
+        }
+        return nil
+    }
+
+    /// Where a watcher event's folder is in a listing kept under its own
+    /// spelling (the index key).
+    public enum ListedFolder: Equatable, Sendable {
+        /// This listed folder (its relative path as listed).
+        case listed(String)
+        /// Not found below this listed folder by bytes or by identity, and
+        /// gone from the disk: list this one again (it drops it).
+        case ancestor(String)
+        /// Not in the listing: below a folder that isn't listed, or there
+        /// on disk but not listed by its parent (ignored, hidden, new).
+        case unlisted
+    }
+
+    /// The listed folder a watcher event's folder is, walking down from
+    /// the root. `rel`: the event's path relative to the root, in the
+    /// event's spelling; `base`: the event-spelled root path (as
+    /// `eventRelativePath` gives them). `subfolders(key)`: the folders
+    /// listed in the listed folder `key` ("" the root), nil if it isn't
+    /// listed. Each name is matched by its bytes first; on a miss, by
+    /// identity: the event's folder (device and inode) against each listed
+    /// subfolder at `root`, so a case or normalization variant of a listed
+    /// name is that folder, and of two canonically equivalent folders only
+    /// the one that is the same folder matches. A miss is never taken for
+    /// "not listed" before identity says so. `identity` is a seam for tests.
+    public static func listedFolder(_ rel: String, base: String, root: URL, subfolders: (String) -> [String]?,
+                                    identity: (String) -> Beneath.FileID? = FolderTree.identity) -> ListedFolder {
+        let rootPath = root.standardizedFileURL.path
+        func join(_ a: String, _ b: String) -> String { a.isEmpty ? b : a + "/" + b }
+        func at(_ base: String, _ rel: String) -> String { rel.isEmpty ? base : (base == "/" ? "/" + rel : base + "/" + rel) }
+        var key = "", eventRel = ""
+        for name in components(rel) {
+            eventRel = join(eventRel, name)
+            guard let names = subfolders(key) else { return .unlisted }
+            if let n = names.first(where: { sameBytes($0, name) }) { key = join(key, n); continue }
+            guard let want = identity(at(base, eventRel)) else { return .ancestor(key) }
+            guard let n = names.first(where: { identity(at(rootPath, join(key, $0))) == want }) else { return .unlisted }
+            key = join(key, n)
+        }
+        return .listed(key)
     }
 
     /// A dictionary keyed by `PathKey`, read and written with `String` keys.
@@ -282,7 +358,7 @@ public final class FolderNode {
     public func apply(_ listing: [FolderEntry]) -> FolderTree.Diff {
         let old = children ?? []
         let d = FolderTree.diff(old: old.map(\.entry), new: listing)
-        var byKey: [String: FolderNode] = [:]
+        var byKey: [FolderTree.PathKey: FolderNode] = [:]
         for c in old { byKey[c.entry.key] = c }
         children = listing.map { e in
             if let kept = byKey[e.key] { kept.entry = e; return kept }
@@ -296,6 +372,17 @@ public final class FolderNode {
 
     /// The child with this name, if loaded.
     public func child(named name: String) -> FolderNode? { children?.first { $0.name == name } }
+
+    /// The node at the listed `relativePath` below this one, each name
+    /// matched by its bytes (a key from the listing itself, as
+    /// `FolderTree.listedFolder` gives it), walking only loaded folders.
+    public func listedDescendant(_ relativePath: String) -> FolderNode? {
+        var n: FolderNode? = self
+        for part in FolderTree.components(relativePath) {
+            n = n?.children?.first { FolderTree.sameBytes($0.name, part) }
+        }
+        return n
+    }
 
     /// The node at `relativePath` below this one, walking only loaded folders.
     public func descendant(_ relativePath: String) -> FolderNode? {
