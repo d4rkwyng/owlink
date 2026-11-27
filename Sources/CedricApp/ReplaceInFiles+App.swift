@@ -166,9 +166,11 @@ extension AppDelegate {
                 continue
             }
             // Open now (or opened since the preview): edit the buffer, never the file behind it.
+            // Exactly the planned text (UTF-16 units, not Swift's canonical
+            // equality), so the planned ranges land on the planned characters.
             let before = tab.text
-            guard before == f.sourceText else {
-                skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: .changedSincePreview)); continue
+            if let refusal = FileReplace.tabRefusal(f, tabText: before) {
+                skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: refusal)); continue
             }
             guard tab.textView.isEditable, tab.tail == nil, let (span, new) = FileReplace.span(f.edits, in: before) else {
                 skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: .readOnlyTab)); continue

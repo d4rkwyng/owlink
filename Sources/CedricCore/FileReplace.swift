@@ -213,6 +213,22 @@ public enum FileReplace {
         return (span, applying(shifted, to: ns.substring(with: span)))
     }
 
+    /// Whether `text` is exactly `source`, UTF-16 unit for UTF-16 unit.
+    /// The planned ranges are UTF-16 offsets into `source`, so only the
+    /// same units make them land on the same characters. Swift's `==` is
+    /// canonical equivalence: "\u{E9}ab" equals "e\u{301}ab", one unit
+    /// longer, where the range planned for "b" covers "a" (Sol's 21v-3).
+    public static func sameSource(_ text: String, _ source: String) -> Bool {
+        text.utf16.count == source.utf16.count && text.utf16.elementsEqual(source.utf16)
+    }
+
+    /// Why an open tab's buffer may not take `file`'s planned edits now,
+    /// or nil: its text must be exactly the text the edits were planned
+    /// against (`sameSource`), or the file changed since the preview.
+    public static func tabRefusal(_ file: ReplaceFile, tabText: String) -> ReplaceSkip? {
+        sameSource(tabText, file.sourceText) ? nil : .changedSincePreview
+    }
+
     public static func sha256(_ data: Data) -> Data { Data(SHA256.hash(data: data)) }
 
     /// Same date (within DiskStamp's tolerance) and same size.

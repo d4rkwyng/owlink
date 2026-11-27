@@ -216,6 +216,30 @@ import Testing
         #expect(try Data(contentsOf: f) == Data("owl on disk\n".utf8))
     }
 
+    /// Sol 21v-3 (class i): a preview replacing "b" in "\u{E9}ab", then the
+    /// tab's text changed to the canonically equal "e\u{301}ab" (one UTF-16
+    /// unit longer). Swift's == calls them equal, but the planned range
+    /// would now cover "a": the tab is refused, never edited there.
+    @Test func tabTextComparedByExactUTF16() throws {
+        let root = try dir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try put(root, "e.txt", Data("x\n".utf8))
+        let q = ReplaceQuery(query: "b", template: "X", caseSensitive: true)
+        let planned = "\u{E9}ab", changed = "e\u{301}ab"
+        let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]), buffers: [f.standardizedFileURL.path: planned])
+        try #require(plan.files.count == 1 && plan.files[0].edits.count == 1)
+        let file = plan.files[0]
+        #expect(file.edits[0].range == NSRange(location: 2, length: 1))
+        // Why == is not enough: equal to Swift, and the planned range lands on "a".
+        #expect(changed == planned && (changed as NSString).length == 4)
+        #expect(FileReplace.span(file.edits, in: changed).map { (changed as NSString).replacingCharacters(in: $0.0, with: $0.1) } == "e\u{301}Xb")
+        #expect(!FileReplace.sameSource(changed, planned))
+        #expect(FileReplace.tabRefusal(file, tabText: changed) == .changedSincePreview)
+        // The exact text it was planned against is taken.
+        #expect(FileReplace.sameSource(planned, "\u{E9}ab"))
+        #expect(FileReplace.tabRefusal(file, tabText: planned) == nil)
+    }
+
     @Test func unencodableReplacementSkipped() throws {
         let root = try dir()
         defer { try? FileManager.default.removeItem(at: root) }

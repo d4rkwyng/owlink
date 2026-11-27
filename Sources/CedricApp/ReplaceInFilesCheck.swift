@@ -317,6 +317,7 @@ extension DevChecks {
         ]
         steps += steps4
         steps += replaceAliasSteps(app, root: root)
+        steps += replaceExactTextSteps(app, root: root)
         run(steps)
     }
 
@@ -410,6 +411,51 @@ extension DevChecks {
                 expect(tabs[6].text == "hoot unsaved hoot alias\n" && read(onlyDisk) == disk,
                        "alias: apply edits the tab open as another path to the file (a hard link), not the disk",
                        "\(tabs[6].text.debugDescription) disk=\(String(decoding: read(onlyDisk) ?? Data(), as: UTF8.self).debugDescription)")
+            },
+        ]
+    }
+
+    /// Sol 21v-3 (class i): the preview replaces "b" in the tab's
+    /// "\u{E9}ab", then the tab's text becomes the canonically equal
+    /// "e\u{301}ab" before Replace All. Swift's == says nothing changed,
+    /// but the planned UTF-16 range would now cover "a": the tab is
+    /// skipped as changed since the preview, its text and its file kept.
+    static func replaceExactTextSteps(_ app: AppDelegate, root: URL) -> [Step] {
+        let file = root.appendingPathComponent("exact-text.txt")
+        let disk = Data("\u{E9}ab\n".utf8)
+        let changed = "e\u{301}ab\n"
+        var tab: EditorWindowController?
+        var message = ""
+        func exact(_ a: String, _ b: String) -> Bool { Array(a.utf16) == Array(b.utf16) }
+        return [
+            sync {
+                try? disk.write(to: file)
+                tab = app.open(file)
+                expect(tab != nil, "exact text: the tab opens")
+            },
+            until("exact text: the tab is read", timeout: 10) { tab.map { exact($0.text, "\u{E9}ab\n") } == true },
+            sync {
+                guard let tab else { return }
+                let q = ReplaceQuery(query: "b", template: "X", caseSensitive: true)
+                let c = FileReplace.Candidate(url: file, relativePath: file.lastPathComponent, searchStamp: DiskStamp.of(file))
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: [c], buffers: app.openBuffers(for: [file])),
+                      plan.files.count == 1, plan.files[0].disk == nil, plan.files[0].edits.map(\.range) == [NSRange(location: 2, length: 1)] else {
+                    expect(false, "exact text: planned from the tab, \"b\" at UTF-16 offset 2"); return
+                }
+                // The same text to Swift, one UTF-16 unit longer.
+                tab.textView.insertText("e\u{301}", replacementRange: NSRange(location: 0, length: 1))
+                expect(exact(tab.text, changed) && tab.text == plan.files[0].sourceText,
+                       "exact text: the tab now holds NFD text Swift calls equal to the planned text", Array(tab.text.utf16).description)
+                app.applyReplace(plan) { message = $0 }
+            },
+            until("exact text: the replace lands", timeout: 10) { !ReplaceInFiles.writing && !message.isEmpty },
+            sync {
+                guard let tab else { return }
+                expect(exact(tab.text, changed), "exact text: Replace All leaves the changed tab alone (no edit at the stale offset)",
+                       Array(tab.text.utf16).description)
+                expect(message.contains("exact-text.txt (\(ReplaceSkip.changedSincePreview.summary))"),
+                       "exact text: …and says it changed since the preview", message)
+                expect((try? Data(contentsOf: file)) == disk, "exact text: …and its file is not written")
             },
         ]
     }
