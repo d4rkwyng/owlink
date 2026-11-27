@@ -126,6 +126,14 @@ extension AppDelegate {
     /// the one there now (or none is) is still returned, not current, so
     /// that file is refused rather than written behind it.
     ///
+    /// Not every tab records an identity. A text open or a save takes one
+    /// from the file it read or wrote. A tab brought back with unsaved text
+    /// (a session restore, Reopen Closed Tab) from an entry saved before
+    /// 0.5.4 keeps a date-only stamp with none, and so does a restored tab
+    /// whose link stamp is unverified. Such a tab is never taken for its
+    /// file: a preview plans neither it nor the disk, and Replace All
+    /// skips it (out of date).
+    ///
     /// A tab found through another name (an alias hit) is taken only when
     /// three agree: the file at the asked URL now, the file the tab's own
     /// URL leads to now, and the file the tab recorded. Hard links A and B,

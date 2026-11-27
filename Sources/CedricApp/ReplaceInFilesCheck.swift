@@ -320,6 +320,7 @@ extension DevChecks {
         steps += replaceExactTextSteps(app, root: root)
         steps += replaceStaleTabSteps(app, root: root)
         steps += replaceStaleAliasSteps(app, root: root)
+        steps += replaceLegacyStampSteps(app, root: root)
         run(steps)
     }
 
@@ -588,6 +589,74 @@ extension DevChecks {
                 expect(again.files.count == 1 && again.files[0].disk != nil && again.files[0].sourceText == "owl linked\n",
                        "stale alias: …it plans B from B's file on disk",
                        again.files.map { "disk=\($0.disk != nil) \($0.sourceText.debugDescription)" }.joined())
+            },
+        ]
+    }
+
+    /// Astra batch 23v (should): a tab brought back with unsaved text from
+    /// an entry saved before 0.5.4 (date only: no size, no identity), here
+    /// by Reopen Closed Tab, records no identity, so Replace in Files can't
+    /// tell it is the file's tab. A preview from it plans neither the tab
+    /// nor the disk (out of date). A plan made from disk while it is open
+    /// is refused at Replace All. Its text is kept and the file is not
+    /// written either time.
+    static func replaceLegacyStampSteps(_ app: AppDelegate, root: URL) -> [Step] {
+        let file = root.appendingPathComponent("legacy-stamp.txt")
+        let disk = Data("owl legacy\n".utf8)
+        let typed = "owl unsaved owl legacy\n"
+        var tab: EditorWindowController?
+        var message = ""
+        let q = ReplaceQuery(query: "owl", template: "hoot")
+        let outOfDate = ReplaceSkip.tabOutOfDate.summary
+        func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
+        func cands() -> [FileReplace.Candidate] { [.init(url: file, relativePath: file.lastPathComponent, searchStamp: DiskStamp.of(file))] }
+        func isFile(_ t: EditorWindowController) -> Bool { FolderTree.sameBytes(t.doc.fileURL?.path ?? "", file.path) }
+        return [
+            sync {
+                try? disk.write(to: file)
+                tab = app.open(file)
+                expect(tab != nil, "legacy stamp: the tab opens")
+            },
+            until("legacy stamp: the tab is read", timeout: 10) { tab?.text == "owl legacy\n" },
+            sync {
+                guard let t = tab else { return }
+                t.textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0))
+                t.window?.performClose(nil)
+            },
+            until("legacy stamp: the tab closes, remembered with its text", timeout: 10) {
+                !app.tabs.contains { isFile($0) } && app.closedTabs.last.map { $0.path == file.path && $0.hasBuffer } == true
+            },
+            sync {
+                // As an entry from before 0.5.4: the date only.
+                let i = app.closedTabs.count - 1
+                app.closedTabs[i].fileSize = nil
+                app.closedTabs[i].fileID = nil
+                expect(app.closedTabs[i].diskStamp.isDateOnly, "legacy stamp: the closed entry has a date-only stamp")
+                app.reopenClosedTab(nil)
+                tab = app.tabs.last { isFile($0) }
+            },
+            until("legacy stamp: Reopen Closed Tab brings it back", timeout: 10) { tab?.text == typed },
+            sync {
+                guard let t = tab else { return }
+                expect(t.doc.isDirty && t.doc.diskStamp.identity == nil, "legacy stamp: the reopened tab is dirty and records no identity",
+                       "dirty=\(t.doc.isDirty) id=\(String(describing: t.doc.diskStamp.identity))")
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: cands(), buffers: app.openBuffers(for: [file])) else {
+                    expect(false, "legacy stamp: plan"); return
+                }
+                expect(plan.files.isEmpty && plan.skipped.map(\.reason) == [.tabOutOfDate],
+                       "legacy stamp: a preview plans neither its text nor the file behind it",
+                       "files=\(plan.files.count) skipped=\(plan.skipped.map(\.reason.rawValue))")
+                guard let fromDisk = try? FileReplace.plan(q, root: root, candidates: cands()), fromDisk.files.count == 1,
+                      fromDisk.files[0].disk != nil else { expect(false, "legacy stamp: disk plan"); return }
+                app.applyReplace(fromDisk) { message = $0 }
+            },
+            until("legacy stamp: the replace lands", timeout: 10) { !ReplaceInFiles.writing && !message.isEmpty },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == typed && t.doc.isDirty, "legacy stamp: Replace All leaves the tab's text alone", t.text.debugDescription)
+                expect(message.contains("legacy-stamp.txt (\(outOfDate))"), "legacy stamp: …says it is out of date with its file", message)
+                expect(read(file) == disk, "legacy stamp: …and does not write the file",
+                       String(decoding: read(file) ?? Data(), as: UTF8.self).debugDescription)
             },
         ]
     }
