@@ -20,8 +20,21 @@
 # CedricCheckBuild Info.plist key bundle-app.sh writes for check builds
 # only, and no embedded Sparkle.framework (only a release build embeds it).
 #
+# cedric_require_release_gate is for the release gates only (smoke-launch.sh,
+# launch-check.sh --release), which launch a RELEASE binary as shipped. A
+# release binary ignores both folder overrides, so every such launch uses
+# the real ~/Library/Application Support/Cedric of the account it runs in:
+# it rotates cli-token, and its first frame prunes ReplaceUndo (it honours
+# CEDRIC_NO_RESTORE / CEDRIC_NO_SESSION_SAVE, so the gates pass those and
+# Session is left alone). A temp extraction folder isolates nothing. Run
+# the gates only in a disposable macOS user account or VM (a CI runner);
+# they exit, having launched nothing, unless OWLINK_RELEASE_GATE=1, and
+# only Scripts/release.sh sets it, on its own release path.
+#
 # Scripts/check-isolation-lint.sh (run by the test suite) fails if a
-# script launches the app without sourcing this and calling both.
+# script launches the app without sourcing this and calling both, if a
+# release gate launches before cedric_require_release_gate, or if a script
+# other than release.sh sets OWLINK_RELEASE_GATE.
 
 cedric_isolate() { # WORKDIR
     [ -n "${1:-}" ] && [ -d "$1" ] || { echo "cedric_isolate: no work folder '${1:-}'" >&2; exit 1; }
@@ -47,4 +60,15 @@ cedric_require_check_build() { # APP: exits 1, having run nothing, unless APP is
     why=$(cedric_check_build_problem "$1") && return 0
     echo "$(basename "$0"): refusing to launch: $why. Build a check build with Scripts/bundle-app.sh (no --release)." >&2
     exit 1
+}
+
+# What a release-binary launch touches in the account that runs it.
+CEDRIC_RELEASE_GATE_TOUCHES="~/Library/Application Support/Cedric/cli-token (rotated) and ~/Library/Application Support/Cedric/ReplaceUndo (older Replace in Files undo copies pruned), and the account's crash reports and Launch Services registration"
+
+cedric_require_release_gate() { # exits 1, having launched nothing, unless OWLINK_RELEASE_GATE=1
+    if [ "${OWLINK_RELEASE_GATE:-}" != 1 ]; then
+        echo "$(basename "$0"): refusing to run a release gate: it launches a release binary, which ignores the test folders and uses $CEDRIC_RELEASE_GATE_TOUCHES. Run it only in a disposable macOS user account or VM, with OWLINK_RELEASE_GATE=1 (Scripts/release.sh sets it on its own release path)." >&2
+        exit 1
+    fi
+    echo "WARNING: $(basename "$0") launches a release binary as shipped. It touches $CEDRIC_RELEASE_GATE_TOUCHES of $(id -un) ($HOME). This belongs in a disposable macOS user account or VM." >&2
 }

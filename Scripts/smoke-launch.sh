@@ -4,6 +4,17 @@
 #
 # isolation-lint: release-gate (launches the release build that ships)
 #
+# A RELEASE GATE: run it only in a disposable macOS user account or VM
+# (the release workflow's CI runner). A release binary ignores
+# CEDRIC_SESSION_DIR and CEDRIC_REPLACE_UNDO_DIR, so its launches rotate
+# the cli-token and prune the ReplaceUndo copies in that account's
+# ~/Library/Application Support/Cedric; the temp extraction folder
+# isolates nothing. (It honours CEDRIC_NO_RESTORE / CEDRIC_NO_SESSION_SAVE,
+# which it gets, so Session is left alone.) It also renames the build
+# checkout's Resources and .build while it runs (step 2). It refuses to
+# start, having unpacked and launched nothing, unless OWLINK_RELEASE_GATE=1
+# (cedric_require_release_gate, Scripts/check-env.sh).
+#
 #   Scripts/smoke-launch.sh [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip
 #
 #   --seconds N           how long the app must stay up (default: 10)
@@ -78,6 +89,8 @@ done
 [ -n "$ZIP" ] && [ -f "$ZIP" ] || { echo "usage: $0 [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip" >&2; exit 2; }
 ZIP=$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+. "$HERE/Scripts/check-env.sh"
+cedric_require_release_gate
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 # Runs a command with a time limit (perl's alarm: no coreutils `timeout`

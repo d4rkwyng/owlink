@@ -1,28 +1,38 @@
 #!/bin/bash
-# Real-launch smoke test, after Tankard's: launches "Owlink.app" the way a
-# user does (no CEDRIC_* switches, the real session restored), checks it is
-# still running after a while and left no new crash report, then quits it
-# with a Quit Apple event. Run it before every release. Needs a logged-in
-# GUI session (works with the screen locked).
+# Real-launch smoke test, after Tankard's: launches "Owlink.app" with no
+# CEDRIC_* switches but its own folders, checks it is still running after
+# a while and left no new crash report, then quits it with a Quit Apple
+# event. Needs a logged-in GUI session (works with the screen locked).
 #
 #   Scripts/launch-check.sh [--release] [--no-build] [--seconds N] [--runs N] [PATH.app]
 #
 #   PATH.app      an existing app to check (implies --no-build)
-#   --release     the app is to ship (Scripts/release.sh passes it): fail
-#                 unless it reports its dev switches compiled out ("dev
-#                 hooks: off"), so a check build can't ship by accident;
-#                 when building, builds with bundle-app.sh --release
+#   --release     the app is to ship (Scripts/release.sh passes it): a
+#                 RELEASE GATE, see below. Fails unless the bundle has no
+#                 CedricCheckBuild marker and the app reports its dev
+#                 switches compiled out ("dev hooks: off"), so a check
+#                 build can't ship by accident; when building, builds with
+#                 bundle-app.sh --release
 #   --no-build    use the existing "dist/Owlink.app"
 #   --seconds N   how long it must stay up (default: 10)
 #   --runs N      launch it N times in a row (default: 3)
 #
-# It restores and re-saves the real session, as every launch does; it
-# never edits or saves a document. The real launches still get
-# CEDRIC_REPLACE_UNDO_DIR (a temp folder): a check build would otherwise
-# prune the real Replace in Files undo copies at launch; a release build
-# ignores it and keeps its normal retention (Scripts/check-env.sh).
+# Dev mode (no --release, what a maintainer runs): the bundle must be a
+# check build, decided from its Info.plist before anything runs
+# (cedric_require_check_build, Scripts/check-env.sh). Every launch gets a
+# temp CEDRIC_SESSION_DIR and CEDRIC_REPLACE_UNDO_DIR. The runs share one
+# session folder, so run 1 starts empty and saves its session on the Quit,
+# and every later run restores that session: restore and save stay under
+# test, on a session of the check's own, never the real one. The real
+# ~/Library/Application Support/Cedric is not read or written.
 #
-# isolation-lint: release-gate (launches release builds as shipped)
+# --release is a release gate. A release binary ignores both folder
+# overrides, so every launch rotates the real cli-token and prunes the
+# real ReplaceUndo of the account it runs in (it honours CEDRIC_NO_RESTORE
+# and CEDRIC_NO_SESSION_SAVE, which it gets, so Session is left alone).
+# Run it only in a disposable macOS user account or VM: it refuses to
+# start unless OWLINK_RELEASE_GATE=1, which only Scripts/release.sh sets,
+# on its release path (cedric_require_release_gate).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,7 +47,7 @@ while [ $# -gt 0 ]; do
         --release) RELEASE=1 ;;
         --seconds) SECONDS_UP=$2; shift ;;
         --runs) RUNS=$2; shift ;;
-        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
         *.app|*.app/) APP=${1%/}; BUILD=0 ;;
         *) echo "launch-check.sh: unknown option $1" >&2; exit 2 ;;
     esac
@@ -49,6 +59,18 @@ if [ $BUILD = 1 ]; then
 fi
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "launch-check.sh: no app at $APP" >&2; exit 1; }
+. Scripts/check-env.sh
+if [ $RELEASE = 1 ]; then
+    cedric_require_release_gate
+    # Static, before it runs: a marked check build must not ship.
+    marker=$(plutil -extract CedricCheckBuild raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)
+    [ -z "$marker" ] || { echo "launch-check: FAILED --release: $APP carries CedricCheckBuild=$marker in its Info.plist (a check build must not ship); launched nothing" >&2; exit 1; }
+    # Honoured by a release build: no restore, no save of the real session.
+    GATE_ENV=(CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1)
+else
+    cedric_require_check_build "$APP"
+    GATE_ENV=()
+fi
 
 REPORTS=~/Library/Logs/DiagnosticReports
 crash_reports() { ls "$REPORTS" 2>/dev/null | grep -E '^Cedric[-_.]' || true; }
@@ -71,6 +93,7 @@ fi
 
 LW=$(mktemp -d)
 trap 'rm -rf "$LW"' EXIT
+cedric_isolate "$LW"
 failed=0
 # The built-in engine's llama.framework isn't linked (dlopen on first use,
 # CLlamaLoader), so a missing or broken copy no longer stops the launch:
@@ -97,8 +120,9 @@ else
 fi
 for run in $(seq 1 "$RUNS"); do
     before=$(crash_reports)
-    # isolation-lint: real-launch the user's real session, as a user launches it
-    "${ENV_CLEAN[@]}" CEDRIC_REPLACE_UNDO_DIR="$LW/replace-undo" "$BIN_ABS" >/dev/null 2>&1 &
+    # One session folder for all runs: run 1 saves it, later runs restore it.
+    "${ENV_CLEAN[@]}" CEDRIC_SESSION_DIR="$LW/session" CEDRIC_REPLACE_UNDO_DIR="$LW/replace-undo" ${GATE_ENV[@]+"${GATE_ENV[@]}"} \
+        "$BIN_ABS" -ApplePersistenceIgnoreState YES >/dev/null 2>&1 &
     pid=$!
     alive=1
     for _ in $(seq 1 "$SECONDS_UP"); do
@@ -117,8 +141,14 @@ for run in $(seq 1 "$RUNS"); do
     fi
     sleep 3
     new=$(reports_for "$pid" "$before" | tr '\n' ' ')
+    saved=""
+    if [ $RELEASE = 0 ] && [ $alive = 1 ]; then
+        # The Quit saved the check's own session (restored by the next run).
+        if [ -s "$LW/session/session.json" ]; then saved=", saved its temp session"
+        else status="no session.json in the temp session folder after the Quit"; alive=0; fi
+    fi
     if [ $alive = 1 ] && [ -z "$new" ]; then
-        echo "launch-check: run $run/$RUNS OK (up ${SECONDS_UP}s, quit cleanly, no crash report)"
+        echo "launch-check: run $run/$RUNS OK (up ${SECONDS_UP}s, quit cleanly$saved, no crash report)"
     else
         echo "launch-check: run $run/$RUNS FAILED ($status${new:+, new report: $new})" >&2
         failed=1
