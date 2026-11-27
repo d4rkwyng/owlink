@@ -306,6 +306,34 @@ import Testing
         #expect(third.closedTabs?.map(\.id) == [closed.id] && third.heldBuffers == [closed.id], "unreadable: still held, still closed")
     }
 
+    /// The other a177bf9 route (sol-e): reopened near its retention, edited,
+    /// and the synchronous save that would list it open fails (a full
+    /// disk), then the app is killed. The next launch, past the old date,
+    /// opens it with the edit rather than expiring it.
+    @Test func aReopenedClosedTabSurvivesAFailedSaveAndACrashAcrossItsRetention() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(path: "/tmp/closed-with-text.txt", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "text when it closed")
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        try s1.noteReopened(closed.id)
+        try s1.writeBuffer(closed.id, text: "edited after reopening")
+        var open = closed
+        open.closed = nil
+        s1.checkFailWrites = true
+        #expect(throws: (any Error).self) { try s1.save(Session(windows: [SessionWindow(tabs: [open])])) }
+        let t2 = t1.addingTimeInterval(86_400)
+        guard case .session(let s, _) = store(dir).loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(ClosedTabs.expire(s.closedTabs ?? [], now: t2).dropped.isEmpty)
+        #expect(s.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil })
+        #expect(store(dir).readBuffer(closed.id) == "edited after reopening")
+    }
+
     /// A held closed tab reopened (journaled), then unreadable at the next
     /// launch, which saves successfully (clearing the journal), then
     /// readable again at a launch past its old closing date's retention
