@@ -332,6 +332,14 @@ public final class SessionStore: @unchecked Sendable {
     /// journaled: the next journal call (a write, a reopen) writes them
     /// all again, numbered above the uncertain commit, first.
     private var journalStale = false
+    /// The single-writer lock (`claimWriter`): an open `session.lock`
+    /// with an exclusive flock, held for the life of the process (the
+    /// kernel lets it go when the process ends, crash or kill included).
+    private var writerFD: Int32 = -1
+    /// Why this store may not write (`claimWriter` failed: another Owlink
+    /// holds the lock, or the lock couldn't be taken). Then nothing is
+    /// read for launch, written, removed or pruned for the rest of the run.
+    public private(set) var notWriter: String?
     /// Buffers launch couldn't read: never pruned, saved in the session.
     private var held = Set<UUID>()
     /// Held closed tabs whose reopen is still owed (`Session.heldReopened`):
@@ -411,6 +419,7 @@ public final class SessionStore: @unchecked Sendable {
         self.directory = directory
         self.durableFrom = durableFrom ?? directory.deletingLastPathComponent()
     }
+    deinit { if writerFD >= 0 { close(writerFD) } }
     private let durableFrom: URL
     /// Folders on the store's path made here whose entry flush failed:
     /// flushed again before anything counts as written (`ensureDirectory`).
@@ -425,6 +434,59 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     var sessionFile: URL { directory.appendingPathComponent("session.json") }
+    var lockFile: URL { directory.appendingPathComponent("session.lock") }
+
+    /// What `claimWriter` found.
+    public enum WriterClaim: Equatable, Sendable {
+        case claimed
+        /// Another process (another Owlink) holds the lock.
+        case inUse
+        /// The lock couldn't be taken (the folder or the lock file
+        /// couldn't be made or opened): why.
+        case failed(String)
+    }
+
+    /// Makes this process the store's only writer: two Owlinks on one
+    /// session folder would each commit and prune against their own
+    /// snapshot, and one could delete the other's newest buffers. Takes
+    /// an exclusive advisory lock (flock, LOCK_NB) on `session.lock` in
+    /// the folder, kept until the process ends. Unless it is `.claimed`,
+    /// `notWriter` is set and the store is read-only for the rest of the
+    /// run: `loadForLaunch` returns `.none`, `save`, `writeBuffer` and
+    /// `noteReopened` throw, `removeBuffer` and `pruneBuffers` do nothing.
+    /// A store never asked (tests, tools) writes as before.
+    public func claimWriter() -> WriterClaim {
+        lock.lock(); defer { lock.unlock() }
+        if writerFD >= 0 { return .claimed }
+        if let notWriter { return notWriter == Self.inUseReason ? .inUse : .failed(notWriter) }
+        // The folder, if new: plain here (owner-only); the first write
+        // still flushes it and its parents (`ensureDirectory`).
+        var isDir: ObjCBool = false
+        if !fm.fileExists(atPath: directory.path, isDirectory: &isDir) {
+            try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        }
+        let fd = open(lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            let why = "its lock file couldn’t be opened: \(String(cString: strerror(errno)))"
+            notWriter = why
+            return .failed(why)
+        }
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            let e = errno
+            if e == EINTR { continue }
+            close(fd)
+            if e == EWOULDBLOCK {
+                notWriter = Self.inUseReason
+                return .inUse
+            }
+            let why = "its lock file couldn’t be locked: \(String(cString: strerror(e)))"
+            notWriter = why
+            return .failed(why)
+        }
+        writerFD = fd
+        return .claimed
+    }
+    public static let inUseReason = "another Owlink is using it"
     var journalFile: URL { directory.appendingPathComponent("pending-buffers.json") }
 
     public func bufferURL(_ id: UUID) -> URL { directory.appendingPathComponent("\(id.uuidString).txt") }
@@ -555,6 +617,8 @@ public final class SessionStore: @unchecked Sendable {
     /// replaces the session file nor prunes until the next launch.
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
         lock.lock(); defer { lock.unlock() }
+        // Not the writer: the other Owlink's session is its own to restore.
+        if notWriter != nil { return .none }
         var journal = readJournal(journalFile)
         var st = stat()
         journalAbsentAtLaunch = lstat(journalFile.path, &st) != 0 && errno == ENOENT
@@ -778,6 +842,7 @@ public final class SessionStore: @unchecked Sendable {
     /// and the caller prunes nothing).
     public func save(_ session: Session, requiring needs: [UUID: BufferNeed] = [:]) throws {
         lock.lock(); defer { lock.unlock() }
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         if let hold { throw SessionStoreError.held(hold) }
         let missing = needs.filter { id, need in
             if held.contains(id) { return false }
@@ -849,6 +914,7 @@ public final class SessionStore: @unchecked Sendable {
     /// succeeded (`BufferNeed.written`).
     public func writeBuffer(_ id: UUID, text: String, open: Bool = true, sequence: Int? = nil) throws {
         lock.lock(); defer { lock.unlock() }
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         try ensureDirectory()
         try injectedFailure()
         // Journaled before the buffer exists, so a buffer is never on
@@ -864,6 +930,7 @@ public final class SessionStore: @unchecked Sendable {
     /// the next commit (its closing date could expire it meanwhile).
     public func noteReopened(_ id: UUID) throws {
         lock.lock(); defer { lock.unlock() }
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         guard committedClosed.contains(id), journalStale || !pendingReopened.contains(id) else { return }
         try ensureDirectory()
         try injectedFailure()
@@ -1018,7 +1085,7 @@ public final class SessionStore: @unchecked Sendable {
     /// set: launch couldn't tell which buffers are pending then.
     public func removeBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
-        guard hold == nil, !held.contains(id) else { return }
+        guard notWriter == nil, hold == nil, !held.contains(id) else { return }
         try? fm.removeItem(at: bufferURL(id))
     }
 
@@ -1026,7 +1093,7 @@ public final class SessionStore: @unchecked Sendable {
     /// commit). Never held ones, and nothing at all while `hold` is set.
     public func pruneBuffers(keeping ids: Set<UUID>) {
         lock.lock(); defer { lock.unlock() }
-        guard hold == nil else { return }
+        guard notWriter == nil, hold == nil else { return }
         let keep = ids.union(held)
         guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
         for f in files where f.pathExtension == "txt" {

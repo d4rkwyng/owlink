@@ -96,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // the default action back.
         DocumentWrite.catchFileSizeSignal()
         DevHooks.configureSessionStore(store)
+        claimSessionStore()
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),
@@ -105,6 +106,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSAppleEventManager.shared().setEventHandler(self, andSelector: #selector(handleURL(_:reply:)),
                                                      forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
         rotateCLIToken()
+    }
+
+    /// One Owlink per session folder (SessionStore.claimWriter): two would
+    /// each commit and prune against their own snapshot, and one could
+    /// delete the other's newest unsaved text. An Owlink that can't claim
+    /// it (another one, launched first, is running on it: `open -n`, a
+    /// second copy of the app) runs without a session: it restores
+    /// nothing, and backs up, saves and prunes nothing in that folder, so
+    /// the other Owlink's work is left alone. It says so at launch; its
+    /// own unsaved text is kept only in memory, so its quit asks first
+    /// (as when the session can't be written: Save As, Keep Owlink Open,
+    /// Quit Anyway). The claim is never retried in the same run: a store
+    /// claimed late would commit a snapshot without the other's tabs.
+    /// Handing the open request to the running Owlink instead would need
+    /// both to agree on a channel; staying open and saying so is the
+    /// least surprising for a window the user already asked for.
+    private func claimSessionStore() {
+        // A run that neither restores nor saves the session touches nothing there.
+        guard env["CEDRIC_NO_SESSION_SAVE"] != "1" || env["CEDRIC_NO_RESTORE"] != "1" else { return }
+        let why: String
+        switch store.claimWriter() {
+        case .claimed: return
+        case .inUse:
+            why = String(localized: "Another Owlink is already running with the session in \(store.directory.path), so this one doesn’t restore it or back up its unsaved text there. Save your tabs here with File › Save As…, or work in the other Owlink.")
+        case .failed(let reason):
+            why = String(localized: "Owlink couldn’t lock its session in \(store.directory.path) (\(reason)), so it doesn’t restore it or back up its unsaved text this run. Save your tabs with File › Save As….")
+        }
+        print("session: not the writer: \(store.notWriter ?? "-")")
+        fflush(stdout)
+        noteRecoveryProblem(why)
     }
 
     /// A fresh `cedric` script token every launch (the old one counts for
@@ -142,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let store = ReplaceInFiles.store
             ReplaceInFiles.queue.async { store.pruneAtLaunch() }
         }
-        if env["CEDRIC_NO_RESTORE"] != "1" { restoreSession() }
+        if env["CEDRIC_NO_RESTORE"] != "1", store.notWriter == nil { restoreSession() }
         LaunchTrace.mark("restored")
         var toOpen = pendingOpen
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
@@ -975,6 +1006,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         sessionTimer?.invalidate()
         leadingSaveTimer?.invalidate()
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return nil }
+        // Not this session's writer (claimSessionStore): nothing is
+        // written. Quitting with unsaved text, that is a failed save.
+        if let why = store.notWriter {
+            return quitting && (firstUnsavedTab() != nil || !closedTexts.isEmpty) ? why : nil
+        }
         lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()

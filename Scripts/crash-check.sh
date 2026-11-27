@@ -37,6 +37,11 @@
 #      session that lists it open is committed; its closing date passes
 #      ClosedTabs.keepDays before the next launch: it comes back open
 #      with its text, not expired with it.
+#  13. Two Owlinks on one session folder: the second (launched while
+#      the first runs, before it backs up a new tab, and typing after
+#      it) can't claim the folder's lock, so it saves and prunes nothing
+#      there; its quit asks. The first's text survives and comes back
+#      after a kill.
 #
 # Safety: the temp root must be this user's own 0700 folder, neither in
 # nor around the real ~/Library/Application Support/Cedric (compared by
@@ -236,7 +241,7 @@ untrack() { # PID: reaped, no longer ours to kill
     for q in ${PIDS[@]+"${PIDS[@]}"}; do [ "$q" != "$1" ] && keep+=("$q"); done
     PIDS=(${keep[@]+"${keep[@]}"})
 }
-unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR \
+unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_TEST_TYPE_UNTITLED_DELAY CEDRIC_NO_RESTORE CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR \
     CEDRIC_TEST_TYPE_BURST CEDRIC_TEST_HOLD_SESSION_COMMIT CEDRIC_TEST_SESSION_WRITE_FAIL CEDRIC_TEST_QUIT_SAVE_CHOICE
 # The bundle, cloned into the root (APFS clone: no copy of the bytes):
 # what is probed is what runs, whatever happens to $APP meanwhile.
@@ -721,6 +726,38 @@ dump "$S"
 expect_tab "12: past its closing date's retention: back open, exact text, caret" - "$T12"
 expect_count "12" 1
 grep -q '^closed:' "$W/dump.txt" && bad "12: still on the closed list" || ok "12: no longer on the closed list"
+
+# 13. Two Owlinks on one session folder: a second is launched on it while
+#     the first runs; the first backs up a new tab; then the second types
+#     (its own saves follow) and quits (Quit Anyway when asked). Before
+#     the lock its save committed its own snapshot and pruned the first's
+#     buffer. Now it restores, saves and prunes nothing there: the first's
+#     text survives, and a kill of the first brings it back.
+T13a='the first Owlink: a new tab, backed up'
+T13b='the second Owlink: never in this session'
+S=$(child s13)
+launch "$S" "$W/out13a" CEDRIC_TEST_TYPE_UNTITLED="$T13a" CEDRIC_TEST_TYPE_UNTITLED_DELAY=3
+first=$pid
+launch "$S" "$W/out13b" CEDRIC_TEST_TYPE_UNTITLED="$T13b" CEDRIC_TEST_TYPE_UNTITLED_DELAY=8 CEDRIC_TEST_QUIT_SAVE_CHOICE=quit
+second=$pid
+for _ in $(seq 1 100); do grep -q '^session: not the writer:' "$W/out13b" && break; sleep 0.05; done
+grep -q '^session: not the writer: another Owlink is using it' "$W/out13b" \
+    && ok "13: the second Owlink can't claim the session folder" || bad "13: the second Owlink claimed the session folder"
+typed_at "$W/out13a" >/dev/null
+wait_holds "$S" - "$(sha_s "$T13a")" 10 && ok "13: the first Owlink backed up its new tab" || bad "13: the first's tab never reached the session store"
+cp "$S/session.json" "$W/s13-before.json"
+typed_at "$W/out13b" >/dev/null
+sleep 3
+holds "$S" - "$(sha_s "$T13a")" && ok "13: the first's buffer survives the second's typing and saves" || bad "13: the first's buffer is gone after the second's saves"
+quit_app $second
+grep -q '^quit: session save failed, choice=quit' "$W/out13b" \
+    && ok "13: the second's quit asked (its unsaved text isn't backed up)" || bad "13: the second quit without asking"
+cmp -s "$S/session.json" "$W/s13-before.json" && ok "13: the second wrote no session" || bad "13: session.json changed while the second ran"
+holds "$S" - "$(sha_s "$T13a")" && ok "13: the first's buffer survives the second's quit" || bad "13: the first's buffer is gone after the second's quit"
+kill9 $first
+dump "$S"
+expect_tab "13: after a kill of the first: its tab back, exact text, caret" - "$T13a"
+expect_count "13" 1
 
 [ ! -e "$CANARY" ] && ok "the launches pruned this run's ReplaceUndo (its 30-day-old operation is gone), not the real one" \
     || bad "the 30-day-old operation in this run's ReplaceUndo is still there: the launches pruned some other folder"
