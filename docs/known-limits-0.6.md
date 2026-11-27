@@ -2,7 +2,8 @@
 
 These are review findings that 0.6.0 does not fix. The session and same-file
 items were weighed against 0.5.3; the last section records leftovers already
-known in 0.5.4. None of these is new in 0.6. Session reliability (e) is
+known in 0.5.4, two of them now fixed for 0.6.1 (marked there). None of
+these is new in 0.6. Session reliability (e) is
 otherwise covered in architecture.md (held buffers, the reopen journal,
 durable saves).
 
@@ -76,27 +77,29 @@ race. None writes user text to the wrong file.
 - The `recent` check can add entries to the maintainer's Open Recent list and
   replay a snapshot. It is now opt-in and not run by default.
 
-## Leftovers from 0.5.4 (still open, not worse)
+## Leftovers from 0.5.4
 
-These shipped as known leftovers in 0.5.4. They were checked against the 0.5.4
-release notes and history, and against `feat/0.6-speed` at the time of writing:
-no fix landed in 0.6.
+These shipped as known leftovers in 0.5.4 and were not fixed in 0.6.0. The
+first two are fixed for 0.6.1; the third is still open.
 
-1. **Undo after Revert keeps the new encoding.** After Revert to Saved or a
-   reload, ⌘Z brings the old text back but keeps the new version's encoding
-   and BOM. A later save writes those characters with the new encoding. This
-   was left open during the 0.5.4 BOM-per-version work (the encoding does not
-   follow undo the way line breaks do). No fix commit is in 0.6;
-   `FileCommands.swift` and `FileTail.swift` are unchanged vs 0.5.4 / main
-   for this path.
+1. **Undo after Revert keeps the new encoding.** Fixed for 0.6.1. Reload
+   and Revert to Saved keep the whole format before and after
+   (`DocumentFormat`: encoding with or without a BOM, the guess, line
+   endings) for their undo and redo, and `EditedState` compares the
+   encoding with the saved one, so ⌘Z brings back the old text with its
+   own encoding, and a tab whose only difference is the encoding is
+   unsaved. Covered by `ReloadUndoFormatTests` (including a save after ⌘Z
+   that fails part way) and a FileNoticesCheck step, which needs a GUI
+   session and was not run for this change.
 
-2. **UTF-16 Follow appends still go through Foundation.** UTF-8 Follow
-   appends at a nonzero offset use `TextCodec.isValidUTF8` and
-   `String(decoding:)`, which keep U+FEFF on every macOS. Other encodings,
-   including UTF-16, still use `String(data:encoding:)` in
-   `FileTail.decodeAppended`. U+FEFF was kept on the machines tried for
-   0.5.4; that UTF-16 path is unverified on other macOS versions.
-   `Sources/CedricCore/FileTail.swift` is unchanged vs 0.5.4 / main.
+2. **UTF-16 Follow appends still go through Foundation.** Fixed for 0.6.1.
+   `FileTail.decodeAppended` decodes UTF-16 with `TextCodec.decodeUTF16`
+   (the file's byte order, every U+FEFF kept as text, a surrogate not in a
+   pair refused), as UTF-8 already used the project's own decoder. Covered
+   by `UTF16FollowTests`. The 8-bit encodings still use Foundation; they
+   have no BOM. Opening a UTF-16 file (`TextCodec.decode`, also Follow's
+   first read and resets) still decodes with Foundation after dropping the
+   one BOM; a U+FEFF after it was kept on the macOS tried (27.2).
 
 3. **Inline prediction is still unverified.** After the 0.5.4 spelling-off
    change, a manual check on an unlocked Apple Intelligence Mac was left
@@ -105,4 +108,12 @@ no fix landed in 0.6.
    automated probe was inconclusive because the screen was locked. The
    in-app `SpellTypesCheck` still compares property values and menu
    validation, which can pass if the feature itself has stopped working.
-   That manual check was not run for 0.5.4 and has not been run for 0.6.
+   Still not run for 0.6.1: it needs someone typing in a visible Owlink
+   window on an unlocked Apple Intelligence Mac, which an unattended run
+   can't do without taking over that session. To run it: on an Apple
+   silicon Mac with Apple Intelligence on and the screen unlocked, open a
+   Markdown file in a check build, turn Check Spelling While Typing off
+   (and try a JSON file, where spelling is always off), type the start
+   of a common sentence and wait for grey text, then press Tab to accept
+   it; select a paragraph and run Edit › Writing Tools › Rewrite. Both
+   should work as they do with spelling on.

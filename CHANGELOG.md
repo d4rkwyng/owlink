@@ -4,7 +4,12 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
+## [0.6.1] - Unreleased
+
+### Fixed
+- **Undo after Revert to Saved keeps the file's encoding.** After Revert to Saved or Reload, ⌘Z now brings back the earlier text with its own encoding, including whether it had a byte order mark (BOM), as it already did for line endings. Before, a save after ⌘Z could add a BOM the file never had, or drop one it had. If the encoding is the only difference, the tab shows as unsaved.
+- Follow File decodes added UTF-16 text with Owlink's own decoder, so a U+FEFF character in it is shown and saved the same way on every macOS version.
+- Wiki links: a folder whose disk information can't be read, as on some network or Time Machine mounts, is no longer used as an Obsidian vault root, so links in a note there don't search the whole mount.
 
 ## [0.6.0] - 2026-11-27
 
