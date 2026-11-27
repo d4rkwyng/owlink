@@ -5,7 +5,14 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
     case utf8
     case utf8BOM
     case utf16LE
+    /// UTF-16 LE written without a BOM (recognised by its zero bytes):
+    /// held apart from `utf16LE` as `utf8` is from `utf8BOM`, so a save
+    /// writes the file back without one. Before 0.6.1 both were `utf16LE`
+    /// and every save added a BOM, and a reload's ⌘Z between a version
+    /// with one and one without looked clean (Astra, 0.6.1 review).
+    case utf16LENoBOM
     case utf16BE
+    case utf16BENoBOM
     case latin1
     case windows1252
     case macRoman
@@ -16,6 +23,8 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
         case .utf8BOM: return String(localized: "UTF-8 with BOM")
         case .utf16LE: return "UTF-16 LE"
         case .utf16BE: return "UTF-16 BE"
+        case .utf16LENoBOM: return String(localized: "UTF-16 LE without BOM")
+        case .utf16BENoBOM: return String(localized: "UTF-16 BE without BOM")
         case .latin1: return String(localized: "Latin-1 (ISO 8859-1)")
         case .windows1252: return String(localized: "Windows-1252 (Western)")
         case .macRoman: return String(localized: "Mac Roman")
@@ -38,23 +47,46 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
     /// from before: a tab that read a version with a BOM, given one
     /// without (Reload, Follow File's rotation), saved a BOM the file
     /// never had, and the reverse dropped one. TextCodec.decode as UTF-8
-    /// gives UTF-8 with BOM when the bytes start with one.
-    public var base: TextEncoding { self == .utf8BOM ? .utf8 : self }
+    /// gives UTF-8 with BOM when the bytes start with one. UTF-16 the
+    /// same: read in its byte order, with or without a BOM as the bytes
+    /// have it (TextCodec.decode).
+    public var base: TextEncoding {
+        switch self {
+        case .utf8BOM: return .utf8
+        case .utf16LENoBOM: return .utf16LE
+        case .utf16BENoBOM: return .utf16BE
+        default: return self
+        }
+    }
+
+    /// UTF-16, with a BOM or without, in either byte order.
+    var isUTF16: Bool { base == .utf16LE || base == .utf16BE }
+
+    /// The BOM a file in this encoding's family may start with (UTF-8's
+    /// for UTF-8 with or without one, the byte order's for UTF-16); none
+    /// for the 8-bit encodings.
+    var familyBOM: [UInt8] {
+        switch base {
+        case .utf8: return TextEncoding.utf8BOM.bom
+        case .utf16LE, .utf16BE: return base.bom
+        default: return []
+        }
+    }
 
     var bom: [UInt8] {
         switch self {
         case .utf8BOM: return [0xEF, 0xBB, 0xBF]
         case .utf16LE: return [0xFF, 0xFE]
         case .utf16BE: return [0xFE, 0xFF]
-        case .utf8, .latin1, .windows1252, .macRoman: return []
+        case .utf8, .utf16LENoBOM, .utf16BENoBOM, .latin1, .windows1252, .macRoman: return []
         }
     }
 
     var foundation: String.Encoding {
         switch self {
         case .utf8, .utf8BOM: return .utf8
-        case .utf16LE: return .utf16LittleEndian
-        case .utf16BE: return .utf16BigEndian
+        case .utf16LE, .utf16LENoBOM: return .utf16LittleEndian
+        case .utf16BE, .utf16BENoBOM: return .utf16BigEndian
         case .latin1: return .isoLatin1
         case .windows1252: return .windowsCP1252
         case .macRoman: return .macOSRoman
@@ -181,8 +213,8 @@ public enum TextCodec {
             if k % 2 == 0 { evenZeros += 1 } else { oddZeros += 1 }
         }
         let half = sample.count / 2
-        if oddZeros * 10 > half * 6, evenZeros * 10 < half { return .utf16LE }
-        if evenZeros * 10 > half * 6, oddZeros * 10 < half { return .utf16BE }
+        if oddZeros * 10 > half * 6, evenZeros * 10 < half { return .utf16LENoBOM }
+        if evenZeros * 10 > half * 6, oddZeros * 10 < half { return .utf16BENoBOM }
         return nil
     }
 
@@ -478,6 +510,10 @@ public enum TextCodec {
             let scan = data.withUnsafeBytes { scanUTF8($0) }
             if scan.valid { enc = .utf8; scanned = scan } else { enc = guessEightBit(data); guessed = true }
         }
+        // UTF-16, asked for or found, with a BOM or without as the bytes
+        // have it (as UTF-8 below): a version written without one is saved
+        // without one, and its tab isn't the same format as one with.
+        if enc.isUTF16 { enc = data.starts(with: enc.familyBOM) ? enc.base : (enc.base == .utf16LE ? .utf16LENoBOM : .utf16BENoBOM) }
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
         if enc == .utf8 || enc == .utf8BOM {
@@ -494,7 +530,7 @@ public enum TextCodec {
             }
             return decodeUTF8(body, scan: scanned, encoding: enc, looksBinary: looksBinary(data), shareBytes: shareBytes)
         }
-        if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
+        if enc.isUTF16, body.count % 2 != 0 { return nil }
         var decoded = String(data: body, encoding: enc.foundation)
         // A guessed 8-bit encoding that can't decode a byte past the sample
         // (0x81 in Windows-1252): Latin-1 decodes any bytes.

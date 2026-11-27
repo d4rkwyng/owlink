@@ -369,8 +369,8 @@ public final class FileTail: @unchecked Sendable {
         case .utf8, .utf8BOM:
             guard TextCodec.isValidUTF8(bytes) else { return nil }
             return bytes.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
-        case .utf16LE: return TextCodec.decodeUTF16(bytes, bigEndian: false)
-        case .utf16BE: return TextCodec.decodeUTF16(bytes, bigEndian: true)
+        case .utf16LE, .utf16LENoBOM: return TextCodec.decodeUTF16(bytes, bigEndian: false)
+        case .utf16BE, .utf16BENoBOM: return TextCodec.decodeUTF16(bytes, bigEndian: true)
         case .latin1, .windows1252, .macRoman: return String(data: bytes, encoding: encoding.foundation)
         }
     }
@@ -380,7 +380,7 @@ public final class FileTail: @unchecked Sendable {
     /// byte (Foundation would decode it by dropping it, and the next
     /// append would start out of alignment).
     static func decodePrefix<T>(_ bytes: Data, _ encoding: TextEncoding, _ decode: (Data) -> T?) -> (T, Int)? {
-        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let utf16 = encoding.isUTF16
         let first = utf16 ? bytes.count % 2 : 0
         for cut in stride(from: first, through: min(first + 3, bytes.count), by: utf16 ? 2 : 1) {
             if let t = decode(bytes.prefix(bytes.count - cut)) { return (t, bytes.count - cut) }
@@ -414,7 +414,7 @@ public final class FileTail: @unchecked Sendable {
     /// such CR.
     static func heldCR(_ data: Data, _ encoding: TextEncoding) -> Int? {
         guard let cr = "\r".data(using: encoding.foundation), !cr.isEmpty else { return nil }
-        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let utf16 = encoding.isUTF16
         let end = data.count - (utf16 ? data.count % 2 : 0)
         guard end >= cr.count, data[data.startIndex + end - cr.count ..< data.startIndex + end].elementsEqual(cr) else { return nil }
         return end - cr.count

@@ -50,10 +50,12 @@ import Testing
 
     @Test func utf16WithoutBOMBySniffing() {
         let le = "plain ascii text\n".data(using: .utf16LittleEndian)!
-        #expect(TextCodec.detectEncoding(le) == .utf16LE)
+        #expect(TextCodec.detectEncoding(le) == .utf16LENoBOM, "no BOM: saved without one")
         let be = "plain ascii text\n".data(using: .utf16BigEndian)!
-        #expect(TextCodec.detectEncoding(be) == .utf16BE)
+        #expect(TextCodec.detectEncoding(be) == .utf16BENoBOM, "no BOM: saved without one")
         #expect(TextCodec.decode(be)?.text == "plain ascii text\n")
+        #expect(TextCodec.encode("plain ascii text\n", encoding: .utf16BENoBOM, lineEnding: .lf) == be)
+        #expect(TextCodec.encode("plain ascii text\n", encoding: .utf16LENoBOM, lineEnding: .lf) == le)
     }
 
     @Test func latin1Fallback() {

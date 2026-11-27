@@ -73,9 +73,15 @@ import Testing
 
         static func decode(_ data: Data, as encoding: TextEncoding? = nil) -> DecodedText? {
             var enc = encoding ?? detectEncoding(data)
+            // 0.6.1 (Astra): UTF-16, asked for or found, is with a BOM or
+            // without as the bytes have it, so a save writes them back.
+            if enc.isUTF16 {
+                let bomFirst = data.starts(with: enc.base.bom)
+                enc = enc.base == .utf16LE ? (bomFirst ? .utf16LE : .utf16LENoBOM) : (bomFirst ? .utf16BE : .utf16BENoBOM)
+            }
             var body = data
             if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
-            if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
+            if enc.isUTF16, body.count % 2 != 0 { return nil }
             var decoded = String(data: body, encoding: enc.foundation)
             if decoded == nil, encoding == nil, enc == .windows1252 || enc == .macRoman {
                 enc = .latin1
