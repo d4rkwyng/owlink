@@ -306,6 +306,59 @@ import Testing
         #expect(third.closedTabs?.map(\.id) == [closed.id] && third.heldBuffers == [closed.id], "unreadable: still held, still closed")
     }
 
+    /// The repeat reopen after an uncertain commit (Astra 20e #1): a
+    /// committed closed tab is reopened (journaled), the commit listing
+    /// it open fails before its rename, it is closed again and that
+    /// commit's rename lands but its folder flush fails, then it is
+    /// reopened again and edited. A kill there must bring it back open
+    /// with the edit, whichever commit is on disk: the reopen marker from
+    /// before the uncertain commit is spent by it, so the second reopen
+    /// (and the edit) must journal again, numbered above it.
+    @Test func aRepeatReopenAfterAnUnconfirmedCommitIsJournaledAgain() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "text when it first closed")
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let firstCommit = try Data(contentsOf: dir.appendingPathComponent("session.json"))
+
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        // ⇧⌘T: journaled; the commit listing it open fails before its rename.
+        try s1.noteReopened(closed.id)
+        var open = closed
+        open.closed = nil
+        s1.checkFailWrites = true
+        #expect(throws: (any Error).self) { try s1.save(Session(windows: [SessionWindow(tabs: [open])])) }
+        s1.checkFailWrites = false
+        // Closed again: its text written, then the commit listing it closed
+        // is renamed into place but its folder flush fails.
+        try s1.writeBuffer(closed.id, text: "text when it closed again")
+        var closedAgain = closed
+        closedAgain.closed = t1
+        s1.checkFailFolderSync = true
+        #expect(throws: (any Error).self) { try s1.save(Session(windows: [], closedTabs: [closedAgain])) }
+        s1.checkFailFolderSync = false
+        #expect(s1.load()?.closedTabs?.map(\.id) == [closed.id], "the unconfirmed commit lists it closed")
+        // ⇧⌘T again, and an edit; killed before any commit.
+        try s1.noteReopened(closed.id)
+        try s1.writeBuffer(closed.id, text: "edited after the second reopen")
+
+        let t2 = t1.addingTimeInterval(86_400)
+        guard case .session(let s, let recovered) = store(dir).loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(s.closedTabs == nil, "not on the closed list: \(s.closedTabs?.map(\.id) ?? [])")
+        #expect(s.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil }, "open again, with its buffer")
+        #expect(recovered.isEmpty)
+        // Or with the commit before it on disk (the flush lost the rename).
+        try firstCommit.write(to: dir.appendingPathComponent("session.json"))
+        guard case .session(let older, _) = store(dir).loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(older.closedTabs == nil && older.allTabs.contains { $0.id == closed.id && $0.hasBuffer }, "open over the older commit too")
+        #expect(store(dir).readBuffer(closed.id) == "edited after the second reopen")
+    }
+
     /// Reopened and not edited: journaled anyway, so it isn't expired
     /// either; once a commit lists it open, the journal is spent.
     @Test func aReopenedClosedTabIsJournaledBeforeAnyEdit() throws {

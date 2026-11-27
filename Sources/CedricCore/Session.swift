@@ -317,6 +317,13 @@ public final class SessionStore: @unchecked Sendable {
     /// The number of the last commit (`session.json`'s `generation`, or
     /// above any journal launch found); the next commit is this + 1.
     private var committedGeneration = 0
+    /// A commit was renamed into place without its folder flush
+    /// (`PrivateDirectory.Unconfirmed`): the journal on disk is numbered
+    /// for the commit before, so the commit now on disk may have spent it.
+    /// Its ids and reopens stay pending here, but none is relied on as
+    /// journaled: the next journal call (a write, a reopen) writes them
+    /// all again, numbered above the uncertain commit, first.
+    private var journalStale = false
     /// Buffers launch couldn't read: never pruned, saved in the session.
     private var held = Set<UUID>()
     /// Set when launch couldn't make the store safe to write (an unreadable
@@ -755,11 +762,13 @@ public final class SessionStore: @unchecked Sendable {
             committedGeneration = generation
             committed.formIntersection(s.bufferIDs)
             committedClosed.formUnion((s.closedTabs ?? []).map(\.id))
+            journalStale = true
             throw e
         }
         committedGeneration = generation
         committed = s.bufferIDs
         committedClosed = Set((s.closedTabs ?? []).map(\.id))
+        journalStale = false
         // Every buffer written before this session's snapshot is named in
         // it or was let go (writes are serialized with saves). If the app
         // dies before this, or it fails, the journal is spent anyway: it
@@ -800,7 +809,7 @@ public final class SessionStore: @unchecked Sendable {
     /// the next commit (its closing date could expire it meanwhile).
     public func noteReopened(_ id: UUID) throws {
         lock.lock(); defer { lock.unlock() }
-        guard committedClosed.contains(id), !pendingReopened.contains(id) else { return }
+        guard committedClosed.contains(id), journalStale || !pendingReopened.contains(id) else { return }
         try ensureDirectory()
         try injectedFailure()
         try journal(id, reopened: true)
@@ -809,7 +818,9 @@ public final class SessionStore: @unchecked Sendable {
     private func journal(_ id: UUID, reopened: Bool) throws {
         let fresh = !committed.contains(id) && !pending.contains(id)
         let reopening = reopened && committedClosed.contains(id) && !pendingReopened.contains(id)
-        guard fresh || reopening else { return }
+        // After an unconfirmed commit, nothing pending counts as journaled
+        // until the journal is written again above it (`journalStale`).
+        guard fresh || reopening || journalStale else { return }
         let ids = fresh ? pending + [id] : pending, again = reopening ? pendingReopened + [id] : pendingReopened
         // Held: never over the journal launch found (it may be all that
         // says which buffers are pending), but beside it. With none found,
@@ -818,6 +829,7 @@ public final class SessionStore: @unchecked Sendable {
         try writeDurably(encodeJournal(ids, reopened: again, numbered: hold == nil), to: main ? journalFile : heldJournalFile)
         pending = ids
         pendingReopened = again
+        journalStale = false
     }
 
     /// What reading a buffer found.
