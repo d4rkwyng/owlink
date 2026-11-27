@@ -9,6 +9,18 @@
 // the time, quit the app, wait for it to exit, pause. Prints each run and
 // the median. "Cold" here means the app isn't running; the file cache is
 // warm after the first run (purging it needs root).
+//
+// Owlink (bundle id net.mindtricks.cedric, or executable Cedric) is
+// launched only if it is a check build, decided from the bundle before
+// anything runs: Info.plist CedricCheckBuild = true and no embedded
+// Sparkle.framework (Scripts/check-env.sh, cedric_require_check_build).
+// Every Owlink launch gets a temp CEDRIC_SESSION_DIR and
+// CEDRIC_REPLACE_UNDO_DIR of its own, removed at the end, so the real
+// session, cli-token and Replace in Files undo copies in ~/Library/
+// Application Support/Cedric are never read or written. A release build
+// ignores both and is refused with exit 1; time one only in a disposable
+// macOS user account or VM. -ApplePersistenceIgnoreState only stops
+// AppKit's window restoration, not Owlink's own session.
 import AppKit
 import CoreGraphics
 
@@ -20,6 +32,44 @@ while let a = args.popFirst() {
 }
 
 func now() -> Double { Date().timeIntervalSince1970 }
+
+/// Owlink, by its bundle id or executable name.
+func isOwlink(_ path: String) -> Bool {
+    let info = NSDictionary(contentsOfFile: path + "/Contents/Info.plist")
+    return info?["CFBundleIdentifier"] as? String == "net.mindtricks.cedric" || info?["CFBundleExecutable"] as? String == "Cedric"
+        || FileManager.default.fileExists(atPath: path + "/Contents/MacOS/Cedric")
+}
+
+/// Why `path` (an Owlink bundle) is not a check build; nil if it is. Reads
+/// the bundle only; runs nothing.
+func checkBuildProblem(_ path: String) -> String? {
+    guard let info = NSDictionary(contentsOfFile: path + "/Contents/Info.plist") else { return "\(path) has no readable Contents/Info.plist" }
+    guard info["CedricCheckBuild"] as? Bool == true else {
+        return "\(path) is not marked a check build (Info.plist CedricCheckBuild: \(info["CedricCheckBuild"].map { "\($0)" } ?? "absent")); a release build ignores the test session and undo folders"
+    }
+    if FileManager.default.fileExists(atPath: path + "/Contents/Frameworks/Sparkle.framework") {
+        return "\(path) embeds Sparkle.framework, which only a release build does"
+    }
+    return nil
+}
+
+// Refuse before launching anything.
+for path in apps where isOwlink(path) {
+    if let why = checkBuildProblem(path) {
+        FileHandle.standardError.write(Data("launch-time: refusing to launch: \(why). Build a check build with Scripts/bundle-app.sh (no --release).\n".utf8))
+        exit(1)
+    }
+}
+
+/// A fresh temp folder for one Owlink launch (session and ReplaceUndo).
+func isolatedEnvironment() -> (URL, [String: String]) {
+    let w = FileManager.default.temporaryDirectory.appendingPathComponent("owlink-launch-time-\(UUID().uuidString)", isDirectory: true)
+    try? FileManager.default.createDirectory(at: w, withIntermediateDirectories: true)
+    var env = ProcessInfo.processInfo.environment
+    env["CEDRIC_SESSION_DIR"] = w.appendingPathComponent("session").path
+    env["CEDRIC_REPLACE_UNDO_DIR"] = w.appendingPathComponent("replace-undo").path
+    return (w, env)
+}
 
 func hasWindow(_ pid: pid_t) -> Bool {
     guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else { return false }
@@ -38,6 +88,13 @@ func launchOnce(_ path: String) -> Double? {
     if !FileManager.default.fileExists(atPath: path + "/Contents/Frameworks/Electron Framework.framework") {
         cfg.arguments = ["-ApplePersistenceIgnoreState", "YES"]
     }
+    var work: URL?
+    if isOwlink(path) {
+        let (w, env) = isolatedEnvironment()
+        work = w
+        cfg.environment = env
+    }
+    defer { if let work { try? FileManager.default.removeItem(at: work) } }
     var app: NSRunningApplication?
     let t0 = now()
     let done = DispatchSemaphore(value: 0)
