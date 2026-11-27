@@ -50,11 +50,11 @@ import CedricCore
         #expect(eightK - small.sizeBytes - 256 * 1_048_576 == 2 * (fourK - small.sizeBytes - 256 * 1_048_576))
         #expect(ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes, contextTokens: 1024) == fourK)
         #if os(iOS)
-        #expect(LlamaRuntime.contextTokens == 8192)
+        #expect(ModelMemoryGate.defaultContextTokens == 8192)
         #else
-        #expect(LlamaRuntime.contextTokens == 16384)
+        #expect(ModelMemoryGate.defaultContextTokens == 16384)
         #endif
-        let runtimeNeed = ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes, contextTokens: LlamaRuntime.contextTokens)
+        let runtimeNeed = ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes, contextTokens: ModelMemoryGate.defaultContextTokens)
         #expect(ModelMemoryGate.bytesNeeded(forModelOfSize: small.sizeBytes) == runtimeNeed)
         #expect(ModelMemoryGate.refusal(for: small, available: runtimeNeed - 1) != nil)
         #expect(ModelMemoryGate.refusal(for: small, available: runtimeNeed) == nil)
