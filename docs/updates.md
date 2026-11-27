@@ -76,6 +76,33 @@ offers nothing.
   (`--host-arch`: the appcast item is offered to every Mac). `Scripts/updates-check.sh` tests those
   refusals.
 
+## Signing in CI
+
+After the notarized zip passes the launch smoke test, release.yml:
+
+1. writes `SPARKLE_ED_PRIVATE_KEY` to `$RUNNER_TEMP/sparkle-key/ed25519.key`
+   (umask 077, folder 700, file 600; outside the checkout, never logged, no
+   `set -x`), and stops unless the key's public half
+   (`Scripts/sparkle-public-key.swift`, which prints only the public key) is
+   the committed `hrWeLLjfQFt7O50s1x4JepXV7dXLmpEztAuhe1XcsQs=`;
+2. signs `dist/Owlink-<version>.zip` with `sign_update --ed-key-file`,
+   checks the reported length against the zip's size and the signature with
+   `Scripts/ed-verify.swift` and the committed public key;
+3. writes `dist/appcast.xml` as a new feed with that one item
+   (`Scripts/appcast-item.sh`, which signs and verifies the feed). The
+   enclosure is the tag's release asset,
+   `https://github.com/d4rkwyng/owlink/releases/download/<tag>/Owlink-<version>.zip`
+   (`<version>` is the tag without `v` and any `-rcN` suffix, as for the zip);
+4. prints the zip's sha256 (also in the job summary), deletes the key
+   folder in an `if: always()` step, even when signing failed, and attaches
+   the zip and `appcast.xml` to the **draft** release. Nothing is published:
+   not the release, not `https://owlink.app/appcast.xml`.
+
+The appcast is a fresh one-item feed (no `--from`): once older versions are
+listed, merge by hand or add the published feed as `--from`.
+`.github/workflows/verify-sparkle-key.yml` (run by hand, `contents: read`)
+checks the secret the same way on a dummy file and prints only PASS or FAIL.
+
 ## Decided
 
 - **Signing key.** Derek created the EdDSA key pair. The private key is in
@@ -89,9 +116,13 @@ offers nothing.
   copy keeps it).
 - **Where they go:** committed as defaults in `Scripts/sparkle-defaults.sh`,
   read by bundle-app.sh and release.sh, so every release build, including
-  the GitHub release workflow's (`.github/workflows/release.yml`, which runs
-  release.sh without `--appcast`), carries them. The environment variables
-  remain as overrides.
+  the GitHub release workflow's (`.github/workflows/release.yml`), carries
+  them. The environment variables remain as overrides.
+- **CI signing.** `.github/workflows/release.yml` signs the update on a tag
+  (below, "Signing in CI"). The private key is the repository secret
+  `SPARKLE_ED_PRIVATE_KEY` (`generate_keys -x` output: base64 of the 32-byte
+  seed); only release.yml and the dispatch-only `verify-sparkle-key.yml` get
+  it, never `tests.yml` or anything run on a pull request.
 - **Automatic checks: on by default** (`SUEnableAutomaticChecks` = true).
   Sparkle checks about once a day and **still asks before installing**
   (`SUAutomaticallyUpdate` = false). The user can turn the daily check off
@@ -103,10 +134,11 @@ offers nothing.
   Pick where the zips live (the GitHub release, as now, is fine) and write
   it as `CEDRIC_SPARKLE_DOWNLOAD_URL` with `{version}` in it (`https://`).
   Until a signed feed is uploaded, a release build's check finds nothing.
-- **Signing the release and its feed** with the private key: Derek's job,
-  at release time (`release.sh --appcast`, below). For CI signing later:
-  store the exported key as a GitHub secret, write it to a `chmod 600` temp
-  file outside the checkout, and point `CEDRIC_SPARKLE_KEY_FILE` at it.
+- **Publishing the feed.** CI signs the zip and writes a signed
+  `appcast.xml` (below), but uploads nothing to owlink.app. After publishing
+  the draft release, Derek copies its `appcast.xml` to
+  `https://owlink.app/appcast.xml` by hand. Locally, `release.sh --appcast`
+  (below) still does the same signing from the Keychain key.
 - **Homebrew cask (`d4rkwyng/tap/owlink`).**
   - Sparkle replaces `/Applications/Owlink.app` in place. The cask's
     `binary` link to `Contents/Resources/cedric` keeps working, and `zap`
@@ -195,4 +227,5 @@ way for 0.6; nothing here touches the real key or the real data):
 - No release notes in the appcast item (Sparkle shows the item's title only).
   A `<sparkle:releaseNotesLink>` to the GitHub release could be added.
 - No delta updates.
-- release.yml doesn't run `--appcast`.
+- release.yml writes a one-item feed; it doesn't merge into the published
+  appcast (`--from`) or upload it.
