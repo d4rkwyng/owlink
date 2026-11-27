@@ -204,6 +204,8 @@ jobs:
       # then write, sign and verify dist/appcast.xml as a new feed with this
       # one item (Scripts/appcast-item.sh). The enclosure URL is this tag's
       # GitHub release asset; for an rc tag that is the rc's own release.
+      # sign_update's raw output (it can echo key text on a bad key) never
+      # reaches the log: stderr is dropped and failures print fixed text.
       - name: Sparkle-sign the zip and write appcast.xml
         run: |
           set -euo pipefail
@@ -215,11 +217,11 @@ jobs:
           SIGN_UPDATE=$(find .build/artifacts -maxdepth 5 -type f -path '*Sparkle*/bin/sign_update' 2>/dev/null | head -1)
           [ -n "$SIGN_UPDATE" ] && [ -x "$SIGN_UPDATE" ] || { echo "::error::no Sparkle sign_update under .build/artifacts"; exit 1; }
           ENCLOSURE="https://github.com/d4rkwyng/owlink/releases/download/${TAG}/Owlink-${VERSION}.zip"
-          ATTRS=$("$SIGN_UPDATE" --ed-key-file "$KEYFILE" "$ZIP") || { echo "::error::sign_update could not sign $ZIP"; exit 1; }
+          ATTRS=$("$SIGN_UPDATE" --ed-key-file "$KEYFILE" "$ZIP" 2>/dev/null) || { echo "::error::sign_update could not sign $ZIP"; exit 1; }
           ED_SIG=$(sed -n 's/.*sparkle:edSignature="\([A-Za-z0-9+/=]*\)".*/\1/p' <<<"$ATTRS")
           ED_LEN=$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<<"$ATTRS")
           if [ -z "$ED_SIG" ] || [ "$ED_LEN" != "$(stat -f '%z' "$ZIP")" ]; then
-            echo "::error::sign_update's output isn't a signature and length for $ZIP: $ATTRS"
+            echo "::error::sign_update's output isn't a signature and length for $ZIP"
             exit 1
           fi
           swift Scripts/ed-verify.swift "$OWLINK_SPARKLE_PUBLIC_KEY" "$ED_SIG" "$ZIP" || {

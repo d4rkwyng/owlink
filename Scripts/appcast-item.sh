@@ -76,9 +76,10 @@ xmllint --noout "$NEW" || fail "the new feed is not well-formed XML; $OUT is unc
 # Exactly one direct channel item has this version, or nothing is signed.
 one() { [ "$("$HERE/appcast-versions.sh" "$NEW" "$VERSION" 2>/dev/null)" = 1 ]; }
 one || fail "the new feed doesn't have exactly one channel item for $VERSION; $OUT is unchanged"
+# sign_update's own output is discarded: on a bad key it can echo key text.
 echo "+ $(printf '%q ' "$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW")"
-"$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" || fail "sign_update could not sign the new feed; $OUT is unchanged"
-"$SIGN_UPDATE" --verify ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" || fail "the new feed's signature doesn't verify; $OUT is unchanged"
+"$SIGN_UPDATE" ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" >/dev/null 2>&1 || fail "sign_update could not sign the new feed; $OUT is unchanged"
+"$SIGN_UPDATE" --verify ${KEY_ARGS[@]+"${KEY_ARGS[@]}"} "$NEW" >/dev/null 2>&1 || fail "the new feed's signature doesn't verify; $OUT is unchanged"
 xmllint --noout "$NEW" || fail "the signed feed is not well-formed XML; $OUT is unchanged"
 one || fail "the signed feed doesn't have exactly one channel item for $VERSION; $OUT is unchanged"
 # Same folder, so a rename: OUT is either the old feed or the new one.
