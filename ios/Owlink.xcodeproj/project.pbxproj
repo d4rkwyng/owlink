@@ -175,6 +175,7 @@
 				"ViewerFormatsTests.swift",
 				"ScriptTokenTests.swift",
 				"UICoverageTests.swift",
+				"CheckIsolationLintTests.swift",
 			);
 			target = 12A5C6FEED62ED5491A2F4D1;
 		};

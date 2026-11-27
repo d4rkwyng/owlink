@@ -419,7 +419,9 @@ import Testing
             #expect(grants.approve(req(3), in: doc, openedRoot: nil, scriptOn: true, walk: walk) == nil, "walk \(walk)")
             #expect(grants.approve(req(3), in: doc, openedRoot: nil, scriptOn: false, walk: walk) == nil, "walk \(walk)")
             #expect(grants.count == 3)
+#if os(macOS)
             #expect(openDescriptors(inside: t) == 3)
+#endif
             // The pinned ones: the same pins.
             let again = try #require(grants.approve(req(1), in: doc, openedRoot: nil, scriptOn: true, walk: walk))
             #expect(again.root === one.root)
@@ -469,6 +471,7 @@ import Testing
         }
     }
 
+#if os(macOS)
     /// How many descriptors this process has open on something inside
     /// `t` (by the kernel's path for each, against `t`'s real path): other
     /// suites running alongside open files too, but never in this test's
@@ -519,4 +522,5 @@ import Testing
         #expect(grants.count == 0)
         #expect(openDescriptors(inside: t) == 0)
     }
+#endif
 }

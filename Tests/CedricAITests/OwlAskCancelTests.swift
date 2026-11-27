@@ -111,6 +111,7 @@ import CedricCore
     }
 }
 
+#if CEDRIC_BUILTIN
 /// The built-in engine's cancel is per request: a request starting can no
 /// longer clear an earlier one's cancel (0.5.2 reset one shared flag on
 /// every generate, so a cancelled prefill ran on to its end once the owl
@@ -172,6 +173,8 @@ import CedricCore
         #expect(throws: BuiltInError.cancelled) { try firstResult.get() }
     }
 }
+
+#endif
 
 /// Cancel and a new question reach the whole-document combine step
 /// (every combine call, group merges included): it stops at once, and

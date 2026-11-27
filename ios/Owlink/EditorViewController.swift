@@ -3795,7 +3795,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         let directory = caches.appendingPathComponent("ShareCopy-\(UUID().uuidString)", isDirectory: true)
         do {
-            let data = try document.serialized(textView.text ?? "").data
+            let data = try document.serialized(textView.text ?? "")
             try manager.createDirectory(at: directory, withIntermediateDirectories: true)
             let copy = ShareCopy(directory: directory)
             let url = directory.appendingPathComponent(document.displayName)

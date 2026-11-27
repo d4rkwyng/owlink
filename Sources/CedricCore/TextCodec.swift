@@ -41,7 +41,7 @@ public enum TextEncoding: String, CaseIterable, Codable, Sendable {
     /// gives UTF-8 with BOM when the bytes start with one.
     public var base: TextEncoding { self == .utf8BOM ? .utf8 : self }
 
-    var bom: [UInt8] {
+    public var bom: [UInt8] {
         switch self {
         case .utf8BOM: return [0xEF, 0xBB, 0xBF]
         case .utf16LE: return [0xFF, 0xFE]

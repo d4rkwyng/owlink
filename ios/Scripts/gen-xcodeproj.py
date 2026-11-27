@@ -64,7 +64,8 @@ objs[core_t2] = ('XCSwiftPackageProductDependency', {'package': pkg, 'productNam
 # targets. They still run on the Mac (Scripts/test.sh).
 MAC_ONLY_TESTS = {
     'CedricCoreTests': ['CertificateTests.swift', 'GitSafetyTests.swift', 'SecurityReviewTests.swift',
-                        'ViewerFormatsTests.swift', 'ScriptTokenTests.swift', 'UICoverageTests.swift'],
+                        'ViewerFormatsTests.swift', 'ScriptTokenTests.swift', 'UICoverageTests.swift',
+                        'CheckIsolationLintTests.swift'],
     'CedricAITests': ['LiveBuiltInTests.swift', 'DescribeImageTests.swift',
                       'KVCacheTests.swift', 'LiveKVCacheTests.swift'],
 }

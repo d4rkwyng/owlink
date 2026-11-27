@@ -380,6 +380,7 @@ import Testing
         #expect(recoveryCopies(named: name) == [copy])
     }
 
+#if os(macOS)
     /// A file-size limit (RLIMIT_FSIZE) in a child process, since the
     /// limit and SIGXFSZ's disposition are process-wide. With the app's
     /// launch setup (`catchFileSizeSignal`), a save larger than the limit
@@ -573,6 +574,8 @@ import Testing
         print(failures.isEmpty ? "fsize child: ok" : "fsize child: \(failures)")
         exit(failures.isEmpty ? 0 : 1)
     }
+
+#endif
 
     /// The in-place save is refused, before anything is written, when the
     /// volume has less room than the whole new text (`f_bavail` blocks of

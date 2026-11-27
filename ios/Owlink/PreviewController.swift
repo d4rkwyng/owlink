@@ -670,7 +670,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// line, failing closed, as on the Mac).
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
-        let allowed = webView === web && PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame)
+        let allowed = webView === web && PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame, expectedPage: expectedPageURL)
         decisionHandler(allowed ? .allow : .cancel)
     }
 
