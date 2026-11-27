@@ -26,6 +26,7 @@ extension AppDelegate {
             keepClosedText(d.id, EditorDocument.bufferText(t.text, breaks: d.lineBreaks))
             return true
         }
+        noteStoreMoves()
         if d.sessionChangeCount == d.changeCount, FileManager.default.fileExists(atPath: store.bufferURL(d.id).path) { return true }
         let text = t.text, breaks = d.lineBreaks, id = d.id, store = self.store
         var failure: Error?
