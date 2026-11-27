@@ -1259,7 +1259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DevEnvironment.values["CEDRIC_RESTORE_DELAY"].flatMap(Double.init) ?? 0.25
 
     private func restoreSession() {
-        let session: Session
+        var session: Session
         var recovered: [UUID]
         let load = store.loadForLaunch()
         if let hold = store.hold {
@@ -1273,15 +1273,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return
         }
         // Buffers an earlier launch couldn't read: again. A closed tab's
-        // (Reopen Closed Tab couldn't read it) stays on the closed list.
-        let closedIDs = Set((session.closedTabs ?? []).map(\.id))
-        for id in session.heldBuffers ?? [] {
-            switch store.readBufferResult(id) {
-            case .text: store.releaseBuffer(id); if !closedIDs.contains(id) { recovered.append(id) }
-            case .missing: store.releaseBuffer(id)
-            case .unreadable(let why): noteUnreadableBuffer(id, why)
-            }
-        }
+        // (Reopen Closed Tab couldn't read it) stays on the closed list,
+        // unless its reopen is owed: then it opens (SessionStore.retryHeldBuffers).
+        let retry = store.retryHeldBuffers(session)
+        session = retry.session
+        recovered += retry.recovered
+        for (id, why) in retry.unreadable { noteUnreadableBuffer(id, why) }
         defer { if !recovered.isEmpty { recoverBuffers(recovered, setAside: nil, unreadableSession: false) } }
         // Closed tabs past ClosedTabs.keepDays go, with their unsaved text;
         // never a held one whose reopen is owed (its text is all that is

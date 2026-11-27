@@ -416,6 +416,90 @@ import Testing
         #expect(s3.readBuffer(closed.id) == "the only copy")
     }
 
+    /// An owed reopen whose first read at launch fails and whose second
+    /// read (restoreSession's) works (Astra 25e #1): the second read must
+    /// open the tab, not let the reopen go with the tab still closed. As
+    /// the app does: retry the held buffers, expire the closed list with
+    /// what is still owed, commit, prune; then a launch past the old
+    /// closing date's retention, after which the text must still be there
+    /// and the tab open.
+    @Test func anOwedReopenReadOnlyOnTheSecondTryOpensTheTab() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "the only copy", open: false)
+        s0.holdBuffer(closed.id)
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        // ⇧⌘T read it and journaled the reopen; killed before a commit.
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        #expect(s1.readBuffer(closed.id) == "the only copy")
+        s1.releaseBuffer(closed.id)
+        try s1.noteReopened(closed.id)
+
+        // The next launch: loadForLaunch's read fails (owed, held, closed) ...
+        let path = s1.bufferURL(closed.id).path
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
+        let t2 = t1.addingTimeInterval(60)
+        let s2 = store(dir)
+        guard case .session(let first, _) = s2.loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(first.heldReopened == [closed.id] && first.closedTabs?.map(\.id) == [closed.id])
+        // ... and restoreSession's works.
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        let retry = s2.retryHeldBuffers(first)
+        #expect(retry.unreadable.isEmpty && retry.recovered.isEmpty)
+        let second = retry.session
+        #expect(second.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil }, "opened by the second read")
+        #expect((second.closedTabs ?? []).isEmpty && second.heldBuffers == nil && second.heldReopened == nil)
+        let kept = ClosedTabs.expire(second.closedTabs ?? [], now: t2, keeping: Set(second.heldReopened ?? []))
+        for gone in kept.dropped where gone.hasBuffer { s2.removeBuffer(gone.id) }
+        var committed = second
+        committed.closedTabs = kept.list.isEmpty ? nil : kept.list
+        try s2.save(committed)
+        s2.pruneBuffers(keeping: committed.bufferIDs)
+        #expect(s2.readBuffer(closed.id) == "the only copy")
+
+        // Past the old closing date's retention.
+        let t3 = t1.addingTimeInterval(2 * 86_400)
+        let s3 = store(dir)
+        guard case .session(let third, let recovered) = s3.loadForLaunch(now: t3) else { Issue.record("readable"); return }
+        let expired = ClosedTabs.expire(third.closedTabs ?? [], now: t3, keeping: Set(third.heldReopened ?? []))
+        for gone in expired.dropped where gone.hasBuffer { s3.removeBuffer(gone.id) }
+        #expect(third.allTabs.contains { $0.id == closed.id && $0.hasBuffer }, "still open")
+        #expect(expired.dropped.isEmpty && recovered.isEmpty)
+        #expect(s3.readBuffer(closed.id) == "the only copy")
+    }
+
+    /// The same, the second read failing too: still held, still owed, still closed.
+    @Test func anOwedReopenUnreadableOnBothTriesStaysOwed() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "the only copy", open: false)
+        s0.holdBuffer(closed.id)
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        s1.releaseBuffer(closed.id)
+        try s1.noteReopened(closed.id)
+        let path = s1.bufferURL(closed.id).path
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
+        let s2 = store(dir)
+        guard case .session(let first, _) = s2.loadForLaunch(now: t1) else { Issue.record("readable"); return }
+        let retry = s2.retryHeldBuffers(first)
+        #expect(retry.unreadable.map(\.id) == [closed.id] && retry.recovered.isEmpty)
+        #expect(retry.session == first, "nothing changed")
+        #expect(s2.heldReopened == [closed.id] && s2.heldBuffers == [closed.id])
+    }
+
     /// The repeat reopen after an uncertain commit (Astra 20e #1): a
     /// committed closed tab is reopened (journaled), the commit listing
     /// it open fails before its rename, it is closed again and that

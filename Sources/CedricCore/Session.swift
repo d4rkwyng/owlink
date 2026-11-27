@@ -931,6 +931,54 @@ public final class SessionStore: @unchecked Sendable {
         heldReopen.remove(id)
     }
 
+    /// Launch's second try at the buffers `loadForLaunch` left held, on the
+    /// session it returned. One read now that is a closed tab whose reopen
+    /// is owed (`Session.heldReopened`) opens again, in a window of its own
+    /// with no closing date, as a reopen `loadForLaunch` could read does:
+    /// its reopen is never let go with the tab still closed (a later commit
+    /// would list it closed, unprotected, under the old date that expires
+    /// it). One read now that no tab lists is returned in `recovered`; one
+    /// that still can't be read in `unreadable` (the caller says so; it
+    /// stays held, and an owed reopen stays owed).
+    public struct HeldRetry {
+        public var session: Session
+        public var recovered: [UUID]
+        public var unreadable: [(id: UUID, why: String)]
+    }
+
+    public func retryHeldBuffers(_ session: Session) -> HeldRetry {
+        var s = session
+        var recovered: [UUID] = []
+        var unreadable: [(id: UUID, why: String)] = []
+        var promoted: [SessionTab] = []
+        let owed = Set(s.heldReopened ?? [])
+        for id in s.heldBuffers ?? [] {
+            switch readBufferResult(id) {
+            case .text:
+                if let c = s.closedTabs?.firstIndex(where: { $0.id == id }) {
+                    if owed.contains(id), var tab = s.closedTabs?.remove(at: c) {
+                        tab.hasBuffer = true
+                        tab.closed = nil
+                        promoted.append(tab)
+                    }
+                } else if !s.windows.contains(where: { $0.tabs.contains { $0.id == id } }) {
+                    recovered.append(id)
+                }
+                releaseBuffer(id)
+            case .missing: releaseBuffer(id)
+            case .unreadable(let why): unreadable.append((id, why))
+            }
+        }
+        let still = heldBuffers, stillOwed = heldReopened
+        s.heldBuffers = s.heldBuffers?.filter(still.contains)
+        if s.heldBuffers?.isEmpty == true { s.heldBuffers = nil }
+        s.heldReopened = s.heldReopened?.filter(stillOwed.contains)
+        if s.heldReopened?.isEmpty == true { s.heldReopened = nil }
+        if s.closedTabs?.isEmpty == true { s.closedTabs = nil }
+        if !promoted.isEmpty { s.windows.append(SessionWindow(tabs: promoted)) }
+        return HeldRetry(session: s, recovered: recovered, unreadable: unreadable)
+    }
+
     /// Held closed tabs whose reopen is still owed (`Session.heldReopened`):
     /// their closed entries must not expire or be dropped.
     public var heldReopened: Set<UUID> {
