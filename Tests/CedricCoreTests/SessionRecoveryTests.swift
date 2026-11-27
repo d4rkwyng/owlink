@@ -568,13 +568,56 @@ import Testing
         #expect(synced.contains(base.path), "Cedric's entry flushed in its parent: \(synced)")
         #expect(synced.contains(cedric.path), "Session's entry flushed in Cedric: \(synced)")
         #expect(s.readBuffer(first) == "kept")
-        // An existing store: its own entry once, and a failure there fails too.
+        // An existing store: its own entry and its parent's (Cedric's: made
+        // by another part of Owlink, maybe never flushed) once, and a
+        // failure there fails too.
         let again = store(dir)
         again.checkFailFolderSync = true
         #expect(throws: (any Error).self) { try again.writeBuffer(UUID(), text: "x") }
         again.checkFailFolderSync = false
         try again.writeBuffer(UUID(), text: "y")
-        #expect(again.checkSyncedFolders.first == cedric.path)
+        #expect(Array(again.checkSyncedFolders.prefix(2)) == [base.path, cedric.path], "\(again.checkSyncedFolders)")
+    }
+
+    /// Astra 20e #6: first use makes Cedric, and the flush of its entry in
+    /// the folder above fails. The retry finds Cedric there; it must not
+    /// stop at it, make Session, flush Cedric and acknowledge the write
+    /// with Cedric's own entry never confirmed. Only flushes that worked
+    /// count (`checkSyncedFolders` doesn't list failed ones), and only
+    /// those of the retry.
+    @Test func aRetryAfterAFailedFirstUseFlushConfirmsTheFolderItMade() throws {
+        let base = tempDir()
+        defer { try? fm.removeItem(at: base) }
+        // `base` stands for Application Support: there already.
+        try fm.createDirectory(at: base, withIntermediateDirectories: true)
+        let cedric = base.appendingPathComponent("Cedric"), dir = cedric.appendingPathComponent("Session")
+        let s = store(dir)
+        s.checkFailFolderSync = true
+        #expect(throws: (any Error).self) { try s.writeBuffer(UUID(), text: "not confirmed") }
+        s.checkFailFolderSync = false
+        #expect(fm.fileExists(atPath: cedric.path), "Cedric was made; its flush failed")
+        let before = s.checkSyncedFolders.count
+        let id = UUID()
+        try s.writeBuffer(id, text: "kept")
+        let retry = Array(s.checkSyncedFolders.dropFirst(before))
+        #expect(retry.contains(base.path), "Cedric's entry flushed in its parent on the retry: \(retry)")
+        #expect(retry.firstIndex(of: base.path) ?? .max < retry.firstIndex(of: cedric.path) ?? -1, "outermost first: \(retry)")
+        #expect(s.readBuffer(id) == "kept")
+    }
+
+    /// Another part of Owlink (the CLI token) made Cedric first, with no
+    /// flush. The store's first write must flush Cedric's entry in its
+    /// parent too, not only Session's in Cedric.
+    @Test func firstUseFlushesASupportFolderSomethingElseMade() throws {
+        let base = tempDir()
+        defer { try? fm.removeItem(at: base) }
+        let cedric = base.appendingPathComponent("Cedric"), dir = cedric.appendingPathComponent("Session")
+        try PrivateDirectory.make(cedric, root: cedric)
+        let s = store(dir)
+        try s.writeBuffer(UUID(), text: "kept")
+        let synced = s.checkSyncedFolders
+        #expect(synced.contains(base.path), "Cedric's entry flushed in its parent: \(synced)")
+        #expect(synced.contains(cedric.path), "Session's entry flushed in Cedric: \(synced)")
     }
 
     @Test func durableWritesReplaceAtomically() throws {

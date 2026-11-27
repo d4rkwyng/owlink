@@ -23,20 +23,32 @@ public enum PrivateDirectory {
     /// never through a symbolic link. Then each must be a real folder (not
     /// a link), owned by this user, exactly 0700, or this throws.
     ///
-    /// `syncParent` (the session store): each folder this makes is made
-    /// on its own (mkdir 0700, outermost first) and its new entry flushed
-    /// to the disk through its parent (`syncParent(parent)`) before the
-    /// next one is made inside it; `dir`'s own entry is flushed through
-    /// its parent even when it was there already. A flush that fails
-    /// throws, so nothing is written into a folder whose path to the disk
-    /// isn't confirmed.
-    public static func make(_ dir: URL, root: URL = supportRoot, syncParent: ((String) throws -> Void)? = nil) throws {
-        if let syncParent {
-            try makeDurably(dir.standardizedFileURL.path, syncParent: syncParent)
-        } else {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-        }
+    /// The session store's form: every folder on `dir`'s path whose entry
+    /// may not be on the disk is flushed through its parent
+    /// (`syncParent(parent)`), outermost first: those from `durableFrom`
+    /// (a folder that may have been made without a flush: Cedric, which
+    /// the CLI token makes too) and from any folder in `unconfirmed` (one
+    /// an earlier call made whose flush failed; the caller keeps the set
+    /// between calls) down to `dir`. Each missing folder is then made on
+    /// its own (mkdir 0700, outermost first) and its new entry flushed
+    /// before the next one is made inside it. A flush that fails throws,
+    /// so nothing is written into a folder whose path to the disk isn't
+    /// confirmed, and a retry never stops at a folder that is there but
+    /// not yet flushed.
+    public static func make(_ dir: URL, root: URL = supportRoot, durableFrom: URL? = nil, unconfirmed: inout Set<String>,
+                            syncParent: (String) throws -> Void) throws {
+        try makeDurably(dir.standardizedFileURL.path, from: durableFrom?.standardizedFileURL.path, unconfirmed: &unconfirmed,
+                        syncParent: syncParent)
+        try finish(dir, root: root)
+    }
+
+    public static func make(_ dir: URL, root: URL = supportRoot) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        try finish(dir, root: root)
+    }
+
+    private static func finish(_ dir: URL, root: URL) throws {
         tighten(dir.path)
         try verify(dir.path)
         let r = root.standardizedFileURL.path, d = dir.standardizedFileURL.path
@@ -46,23 +58,54 @@ public enum PrivateDirectory {
         }
     }
 
-    /// `path` and its missing parents, outermost first, each flushed
-    /// through its parent once made; then `path`'s own entry again (it may
-    /// have been made by an earlier run that never flushed it).
-    private static func makeDurably(_ path: String, syncParent: (String) throws -> Void) throws {
+    /// First the entry of every folder that is there, from the outermost
+    /// of `from` and `unconfirmed` (when on `path`'s way) down to the
+    /// innermost one there, each through its parent (made by an earlier
+    /// run, another part of Owlink, or an earlier call whose flush
+    /// failed); then `path`'s missing folders, outermost first, each
+    /// flushed through its parent once made. With none missing, `path`'s
+    /// own entry is the last one flushed.
+    private static func makeDurably(_ path: String, from: String?, unconfirmed: inout Set<String>,
+                                    syncParent: (String) throws -> Void) throws {
+        func parent(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
+        func onTheWay(_ a: String) -> Bool { a == path || path.hasPrefix(a.hasSuffix("/") ? a : a + "/") }
         var missing: [String] = []
         var p = path
         var st = stat()
         while p != "/", !p.isEmpty, lstat(p, &st) != 0 {
             guard errno == ENOENT else { throw failure(errno) }
             missing.append(p)
-            p = (p as NSString).deletingLastPathComponent
+            p = parent(p)
+        }
+        // `p`: the innermost folder there. Its entry and those above it up
+        // to the outermost that may not be on the disk yet.
+        var top = p
+        var doubt = false
+        for c in unconfirmed.union(from.map { [$0] } ?? []) where onTheWay(c) && c.count <= p.count {
+            doubt = true
+            if c.count < top.count { top = c }
+        }
+        var existing: [String] = []
+        // With folders to make and none there in doubt, the folder they go
+        // in counts as on the disk (Application Support, a temp folder).
+        if p != "/", !p.isEmpty, missing.isEmpty || doubt {
+            var q = p
+            while true {
+                existing.append(q)
+                if q == top || q == "/" || q.isEmpty { break }
+                q = parent(q)
+            }
+        }
+        for c in existing.reversed() {
+            try syncParent(parent(c))
+            unconfirmed.remove(c)
         }
         for m in missing.reversed() {
             if mkdir(m, 0o700) != 0, errno != EEXIST { throw failure(errno) }
-            try syncParent((m as NSString).deletingLastPathComponent)
+            unconfirmed.insert(m)
+            try syncParent(parent(m))
+            unconfirmed.remove(m)
         }
-        if missing.isEmpty { try syncParent((path as NSString).deletingLastPathComponent) }
     }
 
     /// Keeps `dir` out of Time Machine (and other backups that honour the

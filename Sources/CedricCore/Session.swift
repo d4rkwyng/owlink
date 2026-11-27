@@ -383,7 +383,8 @@ public final class SessionStore: @unchecked Sendable {
     /// Check builds only: every folder flush fails (a new folder's entry,
     /// and a replaced file's rename: the rename is done, its flush isn't).
     public var checkFailFolderSync = false
-    /// Check builds only: the folders flushed, in order.
+    /// Check builds only: the folders flushed successfully, in order (a
+    /// flush that failed, injected or not, isn't listed).
     public private(set) var checkSyncedFolders: [String] = []
 
     /// Every store file (buffers, the journals, session.json) is written
@@ -400,9 +401,17 @@ public final class SessionStore: @unchecked Sendable {
     /// the app there).
     public var checkBeforeCommit: (@Sendable () -> Void)?
 
-    public init(directory: URL) {
+    /// `durableFrom`: the outermost folder on the store's path whose entry
+    /// first use flushes even if it was there already (default: the
+    /// store's parent, Cedric, which the CLI token may have made first).
+    public init(directory: URL, durableFrom: URL? = nil) {
         self.directory = directory
+        self.durableFrom = durableFrom ?? directory.deletingLastPathComponent()
     }
+    private let durableFrom: URL
+    /// Folders on the store's path made here whose entry flush failed:
+    /// flushed again before anything counts as written (`ensureDirectory`).
+    private var unconfirmedFolders = Set<String>()
 
     /// ~/Library/Application Support/Cedric/Session (or `CEDRIC_SESSION_DIR`).
     public static func defaultDirectory(environment: [String: String] = DevEnvironment.values) -> URL {
@@ -426,7 +435,11 @@ public final class SessionStore: @unchecked Sendable {
         // and the store's own entry, flushed through its parent: a failed
         // flush fails the write, so quit never counts text as kept in a
         // folder whose path may not be on the disk.
-        try PrivateDirectory.make(directory, syncParent: { [unowned self] in try self.syncFolder($0) })
+        // A retry after a failed flush flushes again every folder from
+        // `durableFrom` down, so it never acknowledges a write in a
+        // folder whose own entry (or a parent's) isn't on the disk.
+        try PrivateDirectory.make(directory, durableFrom: durableFrom, unconfirmed: &unconfirmedFolders,
+                                  syncParent: { [unowned self] in try self.syncFolder($0) })
         // Unsaved tab text: recoverable state on this Mac, not backed up.
         PrivateDirectory.excludeFromBackup(directory)
         directoryReady = true
@@ -435,11 +448,9 @@ public final class SessionStore: @unchecked Sendable {
     /// A folder's entries on the disk (`PrivateDirectory.syncFolder`), or
     /// the failure check builds inject (`checkFailFolderSync`).
     private func syncFolder(_ path: String) throws {
-        if DevEnvironment.checksEnabled {
-            checkSyncedFolders.append(path)
-            if checkFailFolderSync { throw CocoaError(.fileWriteUnknown) }
-        }
+        if DevEnvironment.checksEnabled, checkFailFolderSync { throw CocoaError(.fileWriteUnknown) }
         try PrivateDirectory.syncFolder(path)
+        if DevEnvironment.checksEnabled { checkSyncedFolders.append(path) }
     }
 
     private func injectedFailure() throws {
