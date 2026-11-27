@@ -95,25 +95,10 @@ them; orphan buffers are pruned after each save.
   flush leaves the new file in place, and its error carries that file's
   stamp, so the next ⌘S calls it Owlink's own unfinished save.
   `CEDRIC_CHECK=saveasflushfail` checks it.
-- One Owlink per session folder (27e #6). At launch (`claimSessionStore`)
-  the store takes an exclusive `flock` on `session.lock` in the folder
-  (`SessionStore.claimWriter`), held for the life of the process. The
-  kernel releases it when the process ends, crash or kill -9 included.
-  Two writers would each commit and prune against their own snapshot,
-  so a second Owlink's save could delete the first's newest buffer. An
-  Owlink that can't take the lock (another one runs on the folder, for
-  instance after `open -n`), or can't open it, runs without a session.
-  It restores nothing, and writes, removes and prunes nothing there: the
-  store refuses (`notWriter`). It says so on the front tab, keeps its own
-  hot-closed text in memory, and its quit asks as a failed quit save does
-  (Save As, Keep Owlink Open, Try Again, Quit Anyway). It never claims
-  the lock later in the run, because a late writer would commit a
-  snapshot without the other's tabs. Handing the open request to the
-  running Owlink would need a channel both agree on. Staying open and
-  saying so is less surprising for a window the user asked for. A run
-  that neither restores nor saves (`CEDRIC_NO_RESTORE` and
-  `CEDRIC_NO_SESSION_SAVE`) doesn't take the lock. crash-check 13 runs
-  two processes on one folder.
+- Two Owlink processes on one session folder are not coordinated in 0.6
+  (as in 0.5.3): each prunes against its own snapshot, so a second
+  instance launched explicitly (open -n) can delete the first's newest
+  backup. Finder and `cedric` reuse the running app.
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
   saved places in the tab bar (AppKit spends ~10 ms adding a window to a
