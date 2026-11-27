@@ -224,7 +224,7 @@ final class MarkdownPDFExport: NSObject {
         job.preview.allowJavaScript = rich
         job.preview.onLoaded = { [weak job] in
             // Let images settle a moment (and diagrams draw) before printing.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { job?.waitForRich(until: Date().addingTimeInterval(15)) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { job?.waitForRich(until: Date().addingTimeInterval(richDeadline)) }
         }
         job.preview.show(text: markdown, language: .markdown, palette: EditorPalettes.light, baseURL: folder)
         // Never hang: give up after 30 s.
@@ -237,15 +237,29 @@ final class MarkdownPDFExport: NSObject {
     static let pageWidth: CGFloat = 760
     static var pageHeight: CGFloat { (pageWidth * 11 / 8.5).rounded() }
 
+    /// How long diagrams and math may take to draw (a check shortens it).
+    static var richDeadline: TimeInterval = 15
+
+    /// Why no PDF was made when the page's diagrams and math didn't finish.
+    /// (The save alert shows the failure reason: SaveFailure.)
+    static var richTimeoutError: NSError {
+        let why = String(localized: "The diagrams and math in this document didn’t finish drawing in time, so no PDF was saved. Try again, or turn off Allow JavaScript in the preview to export the diagram source and TeX as text.")
+        return NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey: why, NSLocalizedFailureReasonErrorKey: why])
+    }
+
     /// Prints once the page's diagrams and math are drawn (PreviewRich's
-    /// done mark), or at `deadline`; at once when it has none.
+    /// done mark); at once when it has none. At `deadline` with drawing
+    /// still outstanding, no PDF is written: the export fails with
+    /// `richTimeoutError` (Astra review, 0.6 batch 4), rather than saving
+    /// a page of half-drawn diagrams or raw source as a success.
     private func waitForRich(until deadline: Date) {
         guard !finished else { return }
-        guard !preview.lastNeeds.isEmpty, Date() < deadline else { print(); return }
+        guard !preview.lastNeeds.isEmpty else { print(); return }
         preview.webView.evaluateJavaScript("document.documentElement.getAttribute('\(PreviewRich.doneAttribute)')", in: nil, in: .defaultClient) { [weak self] result in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, !self.finished else { return }
                 if case .success(let v) = result, v as? String == "done" { self.print() }
+                else if Date() >= deadline { self.finish(Self.richTimeoutError) }
                 else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.waitForRich(until: deadline) } }
             }
         }

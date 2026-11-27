@@ -64,10 +64,40 @@ extension DevChecks {
         var side: BacklinksSidebar? { alphaTab?.wiki.backlinks }
         var created: [String] = []
         var failures: [Error] = []
+        var slashBefore: [String] = []
+        var offersBefore = 0
         var builds = 0
         var skipped = 0
         var oldNotes: WikiNotes?
         let outside = dir.appendingPathComponent("wl-outside", isDirectory: true)
+        /// The note offered from a link in a note at `rel`'s folder: offered
+        /// once by that path (compared as bytes). Where the kernel enforces
+        /// beneath, made there inside the open folder, not at its top, and
+        /// opened. On the fallback (macOS 14, or `walk` forced) a note in a
+        /// subfolder is refused as unsupported (FolderActions.createFile):
+        /// nothing is made beside the note or at the folder's top, and
+        /// nothing opens.
+        func besideChecks(_ rel: String, _ what: String, walk: Bool = !Beneath.kernelEnforced) {
+            let fm = FileManager.default
+            let file = (rel as NSString).lastPathComponent
+            let want = root.appendingPathComponent(rel)
+            expect(created.count == offersBefore + 1 && created.last.map { Array($0.utf8) } == Array(rel.utf8),
+                   "\(what): the offer names the note beside it", "\(created.dropFirst(offersBefore))")
+            expect(!fm.fileExists(atPath: root.appendingPathComponent(file).path), "\(what): not at the folder's top")
+            if walk {
+                let codes = failures.map { (($0 as NSError).domain, ($0 as NSError).code) }
+                expect(codes.count == 1 && codes.first.map { $0 == NSCocoaErrorDomain && $1 == NSFeatureUnsupportedError } == true,
+                       "\(what), fallback: the create is refused as unsupported", "\(failures)")
+                expect(!fm.fileExists(atPath: want.path), "\(what), fallback: nothing is made beside the note")
+                expect(tab(file) == nil, "\(what), fallback: nothing opens")
+                return
+            }
+            expect(failures.isEmpty, "\(what): the create isn't refused", "\(failures)")
+            expect(fm.fileExists(atPath: want.path), "\(what): the note is made in that folder")
+            let opened = tab(file)?.doc.fileURL.map { FolderSidebar.realPath($0.path) }
+            expect(opened.map { Array($0.utf8) } == Array(FolderSidebar.realPath(want.path).utf8),
+                   "\(what): the new note opens from inside the open folder", opened ?? "-")
+        }
         let movedRoot = dir.appendingPathComponent("wl-moved", isDirectory: true)
 
         run([
@@ -218,9 +248,75 @@ extension DevChecks {
                 expect(((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty,
                        "confirming leaves the outside folder untouched", "\((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])")
                 expect(!failures.isEmpty && tab("Escape.md") == nil, "the create is refused and nothing opens", "\(failures)")
+                // A slash followed by a combining mark: one Swift character, but the
+                // kernel splits the name there. It names no single note, so nothing is made.
+                failures = []
+                offersBefore = created.count
+                slashBefore = FileManager.default.subpaths(atPath: root.path)?.sorted() ?? ["?"]
+                setText(draft, "Draft [[sub/\u{301}Slash]]\n")
+                commandClick(draft, "[[sub/\u{301}Slash]]")
+            },
+            wait("⌘-click on a link with a slash before a combining mark is answered") {
+                !failures.isEmpty || tab("\u{301}Slash.md") != nil
+            },
+            sync {
+                let fm = FileManager.default
+                expect(!failures.isEmpty && tab("\u{301}Slash.md") == nil,
+                       "a slash before a combining mark: the create is refused and nothing opens", "\(failures)")
+                expect(failures.first.map { ($0 as NSError).code } == NSFileWriteInvalidFileNameError, "refused as a bad name",
+                       "\(failures)")
+                expect(created.count == offersBefore, "refused before the offer is shown", "\(created.dropFirst(offersBefore))")
+                let after = fm.subpaths(atPath: root.path)?.sorted() ?? ["?"]
+                expect(after == slashBefore, "nothing made on disk", "\(Set(after).symmetricDifference(slashBefore))")
+                // A note in a folder whose name starts with a combining mark, first
+                // under the root: a missing link is offered and made beside it, not
+                // at the folder's top (Astra batch 7b). Written here, after the list
+                // of the folder's notes was checked above.
+                failures = []
+                offersBefore = created.count
+                let here = app.open(write("wl/\u{301}m/Here.md", "Here [[Beside one]]\n"))!
+                sized(here)
+                focus(here)
+                commandClick(here, "[[Beside one]]")
+            },
+            wait("⌘-click on a missing note beside a note in a combining-mark folder is answered") {
+                !failures.isEmpty || tab("Beside one.md") != nil
+            },
+            sync {
+                besideChecks("\u{301}m/Beside one.md", "a first-level combining-mark folder")
+                // The same one level down.
+                failures = []
+                offersBefore = created.count
+                let there = app.open(write("wl/sub/\u{301}n/There.md", "There [[Beside two]]\n"))!
+                sized(there)
+                focus(there)
+                commandClick(there, "[[Beside two]]")
+            },
+            wait("⌘-click on a missing note beside a note in a nested combining-mark folder is answered") {
+                !failures.isEmpty || tab("Beside two.md") != nil
+            },
+            sync {
+                besideChecks("sub/\u{301}n/Beside two.md", "a nested combining-mark folder")
+                // The first-level case again with the fallback forced (macOS 14's
+                // component walk), so its refusal is checked on any kernel.
+                failures = []
+                offersBefore = created.count
+                WikiTabState.forceWalk = true
+                guard let here = tab("Here.md") else { expect(false, "Here tab"); return }
+                setText(here, "Here [[Beside three]]\n")
+                focus(here)
+                commandClick(here, "[[Beside three]]")
+            },
+            wait("⌘-click on a missing note beside a note in a combining-mark folder, fallback forced, is answered") {
+                !failures.isEmpty || tab("Beside three.md") != nil
+            },
+            sync {
+                WikiTabState.forceWalk = false
+                besideChecks("\u{301}m/Beside three.md", "a first-level combining-mark folder", walk: true)
                 // The open folder replaced at its path between opening it and confirming:
                 // the note goes in the folder that was opened, and nothing opens.
                 failures = []
+                focus(draft)
                 WikiTabState.confirmCreate = { shown in
                     created.append(shown)
                     try? FileManager.default.moveItem(at: root, to: movedRoot)

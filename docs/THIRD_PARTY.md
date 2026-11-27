@@ -6,6 +6,17 @@ Owlink is BSD-2-Clause ([LICENSE](../LICENSE)). The manual's
 records the files copied into the repository as they were published, so
 each can be checked against its source.
 
+## Updates: Sparkle 2
+
+Not copied into the repository: SwiftPM fetches it as a binary target
+(Package.swift), like llama.cpp. Release 2.10.1's
+`Sparkle-for-Swift-Package-Manager.zip`, SHA-256
+`4c2e48a3e50ebcc2c88a58a4c7264a1a99c3c31857ce754357afb9cdb323022a` (the
+checksum in that release's own Package.swift; SwiftPM checks it on every
+fetch). MIT. A release build embeds `Sparkle.framework` and its `LICENSE` as
+`Contents/Resources/Sparkle-LICENSE.txt` (Scripts/bundle-app.sh --release).
+How updates are turned on: [updates.md](updates.md).
+
 ## Markdown preview: Mermaid and KaTeX
 
 Used only by the Markdown preview, only while its **Allow JavaScript** is on,

@@ -224,6 +224,7 @@ enum DevChecks {
         case "compare": compare(app)
         case "follow": follow(app)
         case "recent": recent(app)
+        case "recentrestore": run([sync { _ = restoreRecentSnapshot() ; expect(!FileManager.default.fileExists(atPath: recentSnapshot.path), "no recent-documents snapshot left over") }])
         case "large": largeDocument(app)
         case "git": gitCheck(app)
         case "replaceinfiles": replaceInFilesCheck(app)
@@ -970,9 +971,63 @@ enum DevChecks {
 
     // MARK: Open Recent
 
+    /// Where the recent check keeps the system list while it has it
+    /// cleared: CEDRIC_RECENT_SNAPSHOT (tools-check.sh passes a fixed file
+    /// in the user's temp folder, so the next run finds what a killed run
+    /// left), else the same file name in NSTemporaryDirectory().
+    static var recentSnapshot: URL {
+        if let p = DevEnvironment.values["CEDRIC_RECENT_SNAPSHOT"], !p.isEmpty { return URL(fileURLWithPath: p) }
+        return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cedric-tools-check-recent-snapshot.json")
+    }
+
+    /// Puts back a list a previous recent check saved and did not get to
+    /// replay (it was killed between Clear Menu and the replay); deletes
+    /// the file once replayed. False if there was nothing to restore.
+    @discardableResult
+    static func restoreRecentSnapshot() -> Bool {
+        let f = recentSnapshot
+        guard let data = try? Data(contentsOf: f) else { return false }
+        guard let strings = try? JSONDecoder().decode([String].self, from: data) else {
+            expect(false, "the left-over recent-documents snapshot reads", f.path); return false
+        }
+        let urls = strings.compactMap(URL.init(string:))
+        let dc = NSDocumentController.shared
+        // Newest first in the file: noted oldest first so the newest ends on top.
+        for u in urls.reversed() where !dc.recentDocumentURLs.contains(u) { dc.noteNewRecentDocumentURL(u) }
+        (NSApp.delegate as? AppDelegate)?.rebuildRecentMenu()
+        let back = recentListHolds(urls)
+        expect(back, "a previous run's recent-documents snapshot (\(urls.count)) is back in the list", f.path)
+        if back { try? FileManager.default.removeItem(at: f) }
+        return true
+    }
+
+    /// Every URL in `urls` whose file still exists is in the system list
+    /// (AppKit may drop a recent entry for a file that is gone).
+    static func recentListHolds(_ urls: [URL]) -> Bool {
+        let now = NSDocumentController.shared.recentDocumentURLs
+        return urls.filter { FileManager.default.fileExists(atPath: $0.path) }.allSatisfy { now.contains($0) }
+    }
+
+    /// Open Recent, on the real per-user list (NSDocumentController keeps
+    /// one per bundle id; a check build shares the user's Owlink's). Run
+    /// only on request (tools-check.sh --with-recent). The list is written
+    /// to recentSnapshot before the check adds or clears anything, and the
+    /// file is deleted only after the list is replayed, so a run killed in
+    /// between leaves it for the next run (or tools-check.sh's
+    /// recentrestore) to put back. A snapshot that can't be written stops
+    /// the check before it touches the list.
     static func recent(_ app: AppDelegate) {
         let dc = NSDocumentController.shared
+        if restoreRecentSnapshot() { print("check: restored the recent list a killed run had cleared") }
         let saved = dc.recentDocumentURLs
+        do {
+            try FileManager.default.createDirectory(at: recentSnapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(saved.map(\.absoluteString)).write(to: recentSnapshot, options: .atomic)
+        } catch {
+            expect(false, "the recent-documents snapshot is saved before the list is touched (else the check stops)", "\(error)")
+            finish(); return
+        }
+        expect(true, "the recent-documents list (\(saved.count)) is saved to \(recentSnapshot.lastPathComponent) first")
         let f1 = write("recent-one.txt", "one\n"), f2 = write("recent-two.md", "# two\n")
         run([
             sync {
@@ -997,9 +1052,12 @@ enum DevChecks {
                 m.performActionForItem(at: i)
                 expect(dc.recentDocumentURLs.isEmpty, "Clear Menu empties the system list")
                 expect(app.recentMenu?.items.map(\.title) == ["Clear Menu"], "…and the menu")
-                // Put the machine's list back as it was.
+                // Put the machine's list back as it was, then drop the snapshot.
                 for u in saved.reversed() { dc.noteNewRecentDocumentURL(u) }
                 app.rebuildRecentMenu()
+                let back = recentListHolds(saved)
+                expect(back, "the recent list is back as it was", "\(dc.recentDocumentURLs.count) now, \(saved.count) saved")
+                if back { try? FileManager.default.removeItem(at: recentSnapshot) }
             },
         ])
     }

@@ -2325,6 +2325,24 @@ no new crash report. Owlink has no SwiftPM resource bundles today, so the First 
 1.0.1 `Bundle.module` crash (d4rkwyng/first-light#22) can't happen as such; the smoke
 catches the same class of bug for what Owlink does ship.
 
+**Release gates belong in a disposable macOS user account or VM.** Both
+`launch-check.sh --release` and `smoke-launch.sh` launch the release binary as
+shipped, and a release binary ignores `CEDRIC_SESSION_DIR` and
+`CEDRIC_REPLACE_UNDO_DIR` (`DevEnvironment.releaseAllowed`). Every such launch
+therefore rotates `cli-token` and prunes the older Replace in Files copies in
+`ReplaceUndo` under that account's `~/Library/Application Support/Cedric`. The
+gates pass `CEDRIC_NO_RESTORE` and `CEDRIC_NO_SESSION_SAVE`, which a release
+honours, so `Session` is left alone. A temp extraction folder isolates nothing.
+Both scripts exit, having launched nothing, unless `OWLINK_RELEASE_GATE=1`.
+`release.sh` sets it only on its own `launch-check.sh --release` call, and the
+release workflow sets it for the smoke on its throwaway runner. Running
+`release.sh` without `--skip-launch-check` on a maintainer's own account
+touches that account's real data. Whatever the flags, `release.sh` refuses a
+built bundle whose Info.plist carries `CedricCheckBuild` before it signs or
+launches it. `Scripts/check-isolation-lint.sh` fails if any other script sets
+`OWLINK_RELEASE_GATE`, or if a release gate launches before
+`cedric_require_release_gate`.
+
 **Entitlements: none.** Checked 2026-11-17 on the M4 Pro:
 
 - *Library validation* (part of the hardened runtime) only loads code signed by Apple or

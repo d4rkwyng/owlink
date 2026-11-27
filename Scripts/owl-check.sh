@@ -26,6 +26,8 @@ BIN=$(swift build --show-bin-path)/CedricApp
 OUT=${1:-$(mktemp -d -t cedric-owl-check)}
 WORK=$(mktemp -d -t cedric-owl-work)
 trap 'rm -rf "$WORK"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$WORK"
 status=0
 for theme in light dark; do
     printf '{"name":"Cedric","kind":"owl","monocle":true,"hints":["json","tabs",{"crlf":null}],"empty":{},"list":[],"n":42}\n' > "$WORK/sample-$theme.json"

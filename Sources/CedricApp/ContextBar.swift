@@ -195,9 +195,19 @@ final class ContextBarView: NSView {
     }
 
     /// Enabled and on/off states, read from the menu items' validation
-    /// (when shown, and after each command: never per keystroke).
+    /// (when shown, after each command, and on each selection change: the
+    /// Explain and Rewrite buttons follow the selection, so this runs once
+    /// per keystroke). One validation pass: the current tab is worked out
+    /// once for all the buttons, not several times per button. Without a
+    /// key window each lookup is a window-server round trip, about 55 of
+    /// them per refresh, which made typing with the bar shown 1.2 ms
+    /// slower per key than with it hidden.
     func refreshStates() {
         guard let window else { return }
+        if let app = NSApp.delegate as? AppDelegate { app.withValidationPass { applyStates(in: window) } } else { applyStates(in: window) }
+    }
+
+    private func applyStates(in window: NSWindow) {
         for item in items {
             guard let b = buttons[item.id] else { continue }
             let commands = item.command.map { [$0] } ?? item.choices.map(\.command)

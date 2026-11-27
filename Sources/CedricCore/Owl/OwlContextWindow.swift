@@ -155,7 +155,6 @@ public struct OwlFileProbe: Sendable, Equatable {
         let base = folder.standardizedFileURL.resolvingSymlinksInPath()
         guard let walker = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.isDirectoryKey],
                                                           options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
-        let prefix = base.path.hasSuffix("/") ? base.path : base.path + "/"
         var out: [String] = [], seen = 0
         for case let url as URL in walker {
             seen += 1
@@ -167,9 +166,14 @@ public struct OwlFileProbe: Sendable, Equatable {
             }
             let ext = (name as NSString).pathExtension.lowercased()
             guard markdownExtensions.contains(ext) || imageExtensions.contains(ext) else { continue }
-            var path = url.path
-            if !path.hasPrefix(prefix) { path = url.resolvingSymlinksInPath().path }
-            if path.hasPrefix(prefix) { out.append(String(path.dropFirst(prefix.count))) }
+            // Its place under `base` by the path bytes (FolderTree.relativePath):
+            // a text prefix test fused "base/" with a folder name starting
+            // with a combining mark and dropped its files. As enumerated;
+            // only if that's missing or empty, resolved (resolving every
+            // entry costs a symlink walk per file).
+            var rel = FolderTree.relativePath(of: url, in: base)
+            if rel?.isEmpty ?? true { rel = FolderTree.relativePath(of: url.resolvingSymlinksInPath(), in: base) }
+            if let rel, !rel.isEmpty { out.append(rel) }
         }
         return out
     }

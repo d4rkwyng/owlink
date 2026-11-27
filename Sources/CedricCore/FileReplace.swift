@@ -508,7 +508,10 @@ enum TreeWrite {
     /// since the earlier checks throws `ReadOnly` and is left alone
     /// (release review 0.2.1 M2).
     static func replace(_ data: Data, name: String, in dirfd: Int32, mode: mode_t) throws {
-        guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else { throw CocoaError(.fileWriteInvalidFileName) }
+        // One name, by the bytes openat and renameat get: a NUL would cut it
+        // short and a slash before a combining mark would make it a path
+        // (Astra batch 6 must-fix 1).
+        guard Beneath.isName(name) else { throw CocoaError(.fileWriteInvalidFileName) }
         var st = stat()
         guard fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0, st.st_mode & S_IFMT == S_IFREG, st.st_nlink == 1 else {
             throw CocoaError(.fileWriteNoPermission)

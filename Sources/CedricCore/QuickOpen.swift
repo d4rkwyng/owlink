@@ -136,10 +136,17 @@ public struct FileIndex: Sendable {
         }
     }
 
-    /// Forgets `rel` and every folder below it.
+    /// Forgets `rel` and every folder below it: by the path bytes, `rel`
+    /// itself or `rel` then a "/" byte (a text prefix test fused "rel/"
+    /// with a child whose name starts with a combining mark, and kept it).
     private mutating func dropSubtree(_ rel: String) {
-        let prefix = rel.isEmpty ? "" : rel + "/"
-        for k in Array(dirs.keys) where k == rel || (prefix.isEmpty || k.hasPrefix(prefix)) {
+        let r = Array(rel.utf8)
+        func inside(_ k: String) -> Bool {
+            if r.isEmpty { return true }
+            let b = Array(k.utf8)
+            return b == r || (b.count > r.count && b.starts(with: r) && b[r.count] == 0x2f)
+        }
+        for k in Array(dirs.keys) where inside(k) {
             fileCount -= dirs[k]?.files.count ?? 0
             dirs[k] = nil
         }

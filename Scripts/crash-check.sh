@@ -204,6 +204,9 @@ fi
 
 APP="${1:-dist/Owlink.app}"
 [ -x "$APP/Contents/MacOS/Cedric" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+# Refused from the bundle alone, before anything runs (check-env.sh).
+cedric_require_check_build "$APP"
 PIDS=()
 W0=$(mktemp -d)
 # Verified before anything else: the preflight's own folder goes in it.
@@ -238,7 +241,14 @@ unset CEDRIC_OPEN CEDRIC_TEST_TYPE CEDRIC_TEST_TYPE_UNTITLED CEDRIC_NO_RESTORE C
 # The bundle, cloned into the root (APFS clone: no copy of the bytes):
 # what is probed is what runs, whatever happens to $APP meanwhile.
 root_ok || exit 2
+cedric_isolate "$W"
+# A 30-day-old Replace in Files undo operation in this run's ReplaceUndo:
+# the launches' prune must take it (checked at the end), which shows they
+# pruned this folder and not the real one.
+CANARY="$CEDRIC_REPLACE_UNDO_DIR/$(uuidgen)"
+mkdir -p "$CANARY"; touch -t "$(date -v-30d +%Y%m%d%H%M)" "$CANARY"
 mkdir -m 700 "$W/app" && cp -cR "$APP" "$W/app/Owlink.app" 2>/dev/null || cp -R "$APP" "$W/app/Owlink.app"
+cedric_require_check_build "$W/app/Owlink.app"
 BIN="$W/app/Owlink.app/Contents/MacOS/Cedric"
 BIN_SHA=$(shasum -a 256 "$BIN" | cut -d' ' -f1)
 bin_ok() { [ "$(shasum -a 256 "$BIN" | cut -d' ' -f1)" = "$BIN_SHA" ] || { echo "crash-check: REFUSED: the probed binary changed" >&2; return 2; }; }
@@ -711,6 +721,9 @@ dump "$S"
 expect_tab "12: past its closing date's retention: back open, exact text, caret" - "$T12"
 expect_count "12" 1
 grep -q '^closed:' "$W/dump.txt" && bad "12: still on the closed list" || ok "12: no longer on the closed list"
+
+[ ! -e "$CANARY" ] && ok "the launches pruned this run's ReplaceUndo (its 30-day-old operation is gone), not the real one" \
+    || bad "the 30-day-old operation in this run's ReplaceUndo is still there: the launches pruned some other folder"
 
 [ $fail = 0 ] && echo "crash-check: all OK ($oks checks)" || echo "crash-check: FAILED ($oks OK)" >&2
 exit $fail

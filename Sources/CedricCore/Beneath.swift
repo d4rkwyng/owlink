@@ -14,6 +14,12 @@ public enum Beneath {
     /// SDKs (Swift 6.1's) may not name it.
     static let resolveBeneath: Int32 = 0x0000_1000
 
+    /// `ENOTCAPABLE` from sys/errno.h (Darwin 107), written as its value:
+    /// the macOS 15 SDK (Swift 6.1's) doesn't name it. What a lookup or
+    /// rename the kernel keeps beneath a folder fails with when it would
+    /// leave it.
+    public static let notCapable: Int32 = 107
+
     /// Whether this kernel enforces `O_RESOLVE_BENEATH`: `..` beneath
     /// /usr must be refused while `bin` opens. A kernel that ignored the
     /// flag would open `..`, and the component walk is used instead.
@@ -58,8 +64,14 @@ public enum Beneath {
     }
 
     /// One file or folder name: not empty, not `.` or `..`, no `/` or NUL.
+    /// Checked as the UTF-8 bytes the kernel gets, not as Swift text: a
+    /// slash followed by a combining mark is one Swift character, so a text
+    /// search misses it, but Darwin still splits the name at that byte
+    /// (Astra batch 4 A, batch 5 must-fix 1).
     public static func isName(_ s: String) -> Bool {
-        !s.isEmpty && s != "." && s != ".." && !s.contains("/") && !s.contains("\0")
+        let b = s.utf8
+        return !b.isEmpty && !b.elementsEqual(".".utf8) && !b.elementsEqual("..".utf8)
+            && !b.contains(0x2f) && !b.contains(0)
     }
 
     /// Opens `components` beneath the folder `root` has open, with `flags`
@@ -67,13 +79,16 @@ public enum Beneath {
     /// Returns the descriptor, or -1 with `errno` set (`EINVAL` for an
     /// empty list or a component that isn't one name). `walk` forces the
     /// component walk (tests; it is the default where the kernel doesn't
-    /// enforce beneath lookups).
+    /// enforce beneath lookups). `followLast`: a final symbolic link is
+    /// followed too, only where the kernel keeps that inside the folder;
+    /// the component walk still refuses it.
     public static func open(_ components: [String], beneath root: Int32, flags: Int32, mode: mode_t = 0o666,
-                            walk: Bool = !kernelEnforced) -> Int32 {
+                            followLast: Bool = false, walk: Bool = !kernelEnforced) -> Int32 {
         guard let last = components.last, components.allSatisfy(isName) else { errno = EINVAL; return -1 }
         let lastFlags = flags | O_NOFOLLOW | O_CLOEXEC
         if !walk {
-            return openat(root, components.joined(separator: "/"), lastFlags | resolveBeneath, mode)
+            let beneathFlags = (followLast ? lastFlags & ~O_NOFOLLOW : lastFlags) | resolveBeneath
+            return openat(root, components.joined(separator: "/"), beneathFlags, mode)
         }
         var dir = root
         for c in components.dropLast() {

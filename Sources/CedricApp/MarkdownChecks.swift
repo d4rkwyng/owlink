@@ -343,8 +343,8 @@ extension DevChecks {
                 expect(shot != nil && tab.text.hasSuffix("![](images/\(shot ?? "?"))"), "a pasted bitmap is saved as images/image-….png and linked", "\(names) \(tab.text)")
             },
             sync {
-                // "images" swapped for a link out after it was opened: the copy lands in the
-                // folder that was checked, and no link goes in (it would lead elsewhere).
+                // "images" swapped for a link out after it was opened: nothing is written
+                // (images/<name> no longer leads into the folder that was checked), and no link goes in.
                 let fm = FileManager.default
                 let images = notes.appendingPathComponent("images"), was = notes.appendingPathComponent("was-images")
                 let away = dir.appendingPathComponent("mdpaste-away")
@@ -353,19 +353,39 @@ extension DevChecks {
                     try? fm.moveItem(at: images, to: was)
                     try? fm.createSymbolicLink(at: images, withDestinationURL: away)
                 }
+                func listing(_ u: URL) -> [String] { ((try? fm.contentsOfDirectory(atPath: u.path)) ?? ["?"]).sorted() }
+                func staged(_ u: URL) -> Bool { listing(u).contains { $0.hasPrefix(".cedric-image-") } }
+                let imagesBefore = listing(images)
                 let before = tab.text
                 general.clearContents()
                 general.writeObjects([pic as NSURL])
                 key("v", [.command])
                 ImageStore.afterOpen = nil
                 expect(tab.text == before, "a swapped images folder: no link is inserted", tab.text)
-                expect(((try? fm.contentsOfDirectory(atPath: away.path)) ?? ["?"]).isEmpty, "nothing is written where the swapped link leads")
-                expect(fm.fileExists(atPath: was.appendingPathComponent("my pic-2.png").path), "the copy is in the folder that was checked")
-                let sheet = tab.window?.attachedSheet
+                expect(listing(away).isEmpty, "nothing is written where the swapped link leads")
+                expect(listing(was) == imagesBefore, "the folder that was checked gets neither staged bytes nor a file", "\(listing(was))")
+                expect(!staged(notes), "no staging file is left in the document's folder", "\(listing(notes))")
+                var sheet = tab.window?.attachedSheet
                 expect(sheet != nil, "and the user is told")
                 if let sheet { tab.window?.endSheet(sheet) }
                 try? fm.removeItem(at: images)
                 try? fm.moveItem(at: was, to: images)
+                // Must-fix 1 (Astra, batch 3): "images" moved out of the document's folder after
+                // it was opened. The moved-out folder gets neither staged bytes nor a file.
+                let moved = dir.appendingPathComponent("mdpaste-moved")
+                ImageStore.afterOpen = { try? fm.moveItem(at: images, to: moved) }
+                general.clearContents()
+                general.writeObjects([pic as NSURL])
+                key("v", [.command])
+                ImageStore.afterOpen = nil
+                expect(fm.fileExists(atPath: moved.path) && !fm.fileExists(atPath: images.path), "the images folder was moved out")
+                expect(tab.text == before, "a moved-out images folder: no link is inserted", tab.text)
+                expect(listing(moved) == imagesBefore, "the moved-out folder gets neither staged bytes nor a file", "\(listing(moved))")
+                expect(!staged(notes), "no staging file is left in the document's folder", "\(listing(notes))")
+                sheet = tab.window?.attachedSheet
+                expect(sheet != nil, "and the user is told")
+                if let sheet { tab.window?.endSheet(sheet) }
+                try? fm.moveItem(at: moved, to: images)
                 // A folder named like an image, inside the document's folder: not linked.
                 let folderPNG = notes.appendingPathComponent("shots.png")
                 try? fm.createDirectory(at: folderPNG, withIntermediateDirectories: true)

@@ -63,8 +63,8 @@ extension DevChecks {
         let tv = md.textView
         var s: SpellStepController? { md.spellStep }
         var guess = ""
-        var learned: [String] = []
-        var learnedThen = false
+        let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
+        var learnedBefore: [String] = []
         func now() -> String { s?.current?.word ?? "-" }
         func progress() -> String { s?.progressLabel.stringValue ?? "-" }
         var steps: [Step] = []
@@ -119,19 +119,22 @@ extension DevChecks {
                 press(b)
                 expect(now() == "zqxlearnwrd", "Ignore All passes the rest of that word", now())
                 expect(md.text.contains("verry good, verry nice"), "and changes nothing")
-                // Learn Word goes to the user's dictionary: learned, checked, and forgotten again.
-                s?.onLearn = { w in
-                    NSSpellChecker.shared.learnWord(w)
-                    learnedThen = NSSpellChecker.shared.hasLearnedWord(w)
-                    NSSpellChecker.shared.unlearnWord(w)
-                    learned.append(w)
-                }
+                expect(dictionary?.ignoreCalls.last == "verry", "Ignore All ignores it in the document", "\(dictionary?.ignoreCalls ?? [])")
+                // Learn Word goes to the spelling dictionary: in a check, the
+                // check's own (RecordingSpellDictionary), never the user's.
+                learnedBefore = dictionary?.learnCalls ?? []
             },
             sync {
+                // Never pressed with the user's dictionary in use.
+                guard dictionary != nil else {
+                    expect(false, "the check's own spelling dictionary is in use", "\(Swift.type(of: EditorTextView.spellDictionary))")
+                    return
+                }
                 guard let b = s?.learnButton else { return }
                 press(b)
-                expect(learned == ["zqxlearnwrd"] && learnedThen, "Learn Word learns it", "\(learned)")
-                expect(!NSSpellChecker.shared.hasLearnedWord("zqxlearnwrd"), "(and the check forgot it again)")
+                let learned = Array((dictionary?.learnCalls ?? []).dropFirst(learnedBefore.count))
+                expect(learned == ["zqxlearnwrd"] && dictionary?.learned.contains("zqxlearnwrd") == true, "Learn Word learns it", "\(learned)")
+                expect(!NSSpellChecker.shared.hasLearnedWord("zqxlearnwrd"), "(and the user's own dictionary doesn't have it)")
                 expect(now() == "beleive", "then wraps round to the top", now())
                 expect(progress() == "7 of 7", "7 of 7", progress())
                 expect(!md.text.contains("codde") || now() != "codde", "code spans and links are never stepped into")

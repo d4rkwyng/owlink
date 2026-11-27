@@ -51,6 +51,37 @@ extension DevChecks {
                        "missing \(missing.map(\.0)) in \(lines.filter { $0.contains("Caret") || $0.contains("Folder") || $0.contains("Occurrence") })")
             },
             { next in snapshot("keyboard-shortcuts.png", window: ShortcutsWindow.shared)(next) },
+            // Updates (Updater.swift): Owlink › Check for Updates… right after About, disabled with a
+            // tooltip; the Info.plist placeholders empty; no Sparkle in a check build; Settings'
+            // Automatically check for updates off and disabled.
+            sync {
+                ShortcutsWindow.shared?.close()
+                let appMenu = NSApp.mainMenu?.items.first?.submenu
+                let update = appMenu?.items.first { $0.action == #selector(AppDelegate.checkForUpdates(_:)) }
+                expect(update?.title == "Check for Updates…" && update.flatMap { appMenu?.index(of: $0) } == 1,
+                       "Owlink › Check for Updates… follows About Owlink", "\(appMenu?.items.map(\.title) ?? [])")
+                appMenu?.update()
+                expect(update?.isEnabled == false && update?.toolTip == UpdateConfig.disabled(.checkBuild).tooltip,
+                       "Check for Updates… is disabled in a check build, with a tooltip", "\(update?.isEnabled == true) \(update?.toolTip ?? "nil")")
+                expect(Updater.shared.config == .disabled(.checkBuild) && !Updater.shared.canCheck, "the updater is off in a check build")
+                let info = Bundle.main.infoDictionary ?? [:]
+                expect(info["SUFeedURL"] as? String == "" && info["SUPublicEDKey"] as? String == ""
+                       && info["SURequireSignedFeed"] as? Bool == true && info["SUEnableAutomaticChecks"] as? Bool == false,
+                       "Info.plist: empty feed and key placeholders, signed feed required, automatic checks off")
+                expect(UpdateConfig.from(info: info, checksEnabled: false) == .disabled(.notConfigured),
+                       "the same Info.plist in a release build leaves the updater off (not configured)")
+                let sparkle = Bundle.main.privateFrameworksURL?.appendingPathComponent("Sparkle.framework").path ?? "/"
+                expect(!FileManager.default.fileExists(atPath: sparkle), "a check build has no Sparkle.framework", sparkle)
+                SettingsWindowController.show(pane: .general)
+                let box = SettingsWindowController.shared?.autoUpdates
+                expect(box?.title == "Automatically check for updates" && box?.state == .off && box?.isEnabled == false
+                       && box?.toolTip == UpdateConfig.disabled(.checkBuild).tooltip,
+                       "Settings: Automatically check for updates is off and disabled, with the same tooltip")
+                expect(UserDefaults.standard.object(forKey: UpdateConfig.automaticChecksKey) == nil
+                       || UserDefaults.standard.bool(forKey: UpdateConfig.automaticChecksKey) == false,
+                       "and nothing turned automatic checks on")
+                SettingsWindowController.shared?.window?.close()
+            },
         ])
     }
 }

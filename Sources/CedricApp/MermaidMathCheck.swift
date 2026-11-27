@@ -242,6 +242,28 @@ extension DevChecks {
                     }
                 }
             },
+            // Drawing that never finishes (the bundled scripts refused, as
+            // in a build missing them): at the deadline the export fails
+            // with its reason, and no PDF is written over what was there.
+            { next in
+                let u = dir.appendingPathComponent("out/stuck.pdf")
+                try? Data("OLD".utf8).write(to: u)
+                let deadline = MarkdownPDFExport.richDeadline
+                MarkdownPDFExport.richDeadline = 1.5
+                PreviewAssets.refuseAllForCheck = true
+                let started = Date()
+                MarkdownPDFExport.run(markdown: md, folder: tab.doc.fileURL?.deletingLastPathComponent(), title: "stuck", rich: true, to: u) { e in
+                    MarkdownPDFExport.richDeadline = deadline
+                    PreviewAssets.refuseAllForCheck = false
+                    let why = (e as NSError?)?.localizedFailureReason ?? ""
+                    expect(e != nil && why.contains("didn’t finish drawing") && why.contains("Allow JavaScript"),
+                           "PDF with drawing unfinished at the deadline: an export error saying why", why)
+                    expect((try? Data(contentsOf: u)) == Data("OLD".utf8), "and the file there is left as it was")
+                    expect(Date().timeIntervalSince(started) < 20, "within the deadline, not the 30 s give-up",
+                           String(format: "%.1f s", Date().timeIntervalSince(started)))
+                    next()
+                }
+            },
             sync {
                 // Exported HTML never carries script: the diagram stays code.
                 let html = EditorWindowController.exportPage(markdown: md, title: "rich")

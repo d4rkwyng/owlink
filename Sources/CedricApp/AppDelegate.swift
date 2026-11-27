@@ -135,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Replace in Files' undo copies past 7 days (or the newest 5) go
         // even when no replace follows: after the first frame, off the
         // main thread, on the queue the replaces use.
+        // Sparkle, only in a release build set up for updates (Updater.swift):
+        // otherwise nothing is loaded and nothing goes to the network.
+        AfterFirstFrame.run { Updater.shared.startIfConfigured() }
         AfterFirstFrame.run {
             let store = ReplaceInFiles.store
             ReplaceInFiles.queue.async { store.pruneAtLaunch() }
@@ -577,13 +580,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.urls.forEach { open($0, background: true) }
     }
 
-    /// Set while the command palette validates the whole menu in one go
-    /// (nothing changes windows in between): the current tab and viewer
-    /// tab are worked out once, not once per menu item. Without a key
+    /// Set while the command palette validates the whole menu, or the
+    /// Context Bar its buttons, in one go (nothing changes windows in
+    /// between): the current tab and viewer tab are worked out once, not
+    /// once per menu item. Without a key
     /// window that is a window-server round trip (orderedWindows) each.
     var validationPass: (tab: EditorWindowController?, viewer: (any ViewerTab)?)?
 
+    /// Inside a pass already: that one stands (its end clears it).
     func withValidationPass<T>(_ body: () -> T) -> T {
+        guard validationPass == nil else { return body() }
         let viewer = currentViewerTab
         let tab = currentTab
         validationPass = (tab, viewer)
@@ -1649,6 +1655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             setShowHide(item, shown: s.showLineNumbers, show: String(localized: "Show Line Numbers"), hide: String(localized: "Hide Line Numbers"))
         case #selector(toggleSpellingWhileTyping(_:)): item.state = s.checkSpellingWhileTyping ? .on : .off
         case #selector(checkDocumentNow(_:)): return tab != nil
+        // Disabled, with a tooltip saying why, until the build is set up for updates (Updater.swift).
+        case #selector(checkForUpdates(_:)): return Updater.shared.validate(item)
         case #selector(showStatisticsMenu(_:)): return tab?.statusBar.counts.onClick != nil && tab?.statusBar.counts.isHidden == false
         // Explain & tidy (OwlTools.swift): on a selection that is one.
         case #selector(explainRegexMenu(_:)): return tab?.canExplainRegex == true
