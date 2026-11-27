@@ -1621,13 +1621,24 @@ Tests (Swift Testing; the script adds the paths the Command Line Tools need):
 Scripts/test.sh                     # unit tests: tokenizers, Markdown, codecs, find, session store, themes
 Scripts/session-check.sh            # end to end: unsaved tabs survive a kill -9, a normal quit and a last-window close
 Scripts/typing-check.sh             # real key events in every theme; typed glyphs' pixels must be visible
-Scripts/launch-check.sh             # real launches: stays up, quits cleanly, no crash report
-Scripts/launch-check.sh --release   # the same for a build to ship: fails unless it reports "dev hooks: off"
+Scripts/launch-check.sh             # real launches of a check build, in temp session/undo folders: stays up, quits cleanly, no crash report
 Scripts/pdf-check.sh                # PDF tabs in the running app: find, copy, zoom, Open as Text, session
 Scripts/image-check.sh              # image and Office tabs: zoom, copy, GIFs, docx/xlsx text, session, a 12000² PNG vs typing
 Scripts/launch-speed-check.sh       # launch phase medians: empty, 8-tab session, 500 KB file
-swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app
+Scripts/tools-check.sh              # in-app tool checks; --with-recent (the real Open Recent list) and --with-spellstep opt in
+swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app   # check build only; temp session/undo folders
 ```
+
+Every check script, and `launch-time.swift`, launches only a check build
+(the `CedricCheckBuild` Info.plist key, read before anything runs) and gives
+it a temp session folder and ReplaceUndo folder, so the real data in
+`~/Library/Application Support/Cedric` is left alone. The release gates,
+`Scripts/launch-check.sh --release` and `Scripts/smoke-launch.sh`, launch a
+release build, which ignores those folders: it rotates `cli-token` and
+prunes `ReplaceUndo` in the account it runs in. Run them only in a
+disposable macOS user account or VM, with `OWLINK_RELEASE_GATE=1`. Without
+it they refuse to start. `Scripts/release.sh` sets it for its own launch
+check (*Signing a release* in `docs/architecture.md`).
 
 `bundle-app.sh` makes a check build by default: the check scripts drive it
 with `CEDRIC_*` switches (open files, take snapshots), so don't use it as

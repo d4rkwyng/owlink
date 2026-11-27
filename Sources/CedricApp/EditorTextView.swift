@@ -20,6 +20,8 @@ final class EditorTextView: NSTextView {
     /// What the first-frame spell check covered, so AppKit's own first
     /// pass over the same text is skipped (EditorSpelling.checkVisibleNow).
     var spellCoverage = SpellCheckCoverage()
+    /// Set by `watchSpellDictionary`: a word learned in Owlink clears `spellCoverage`.
+    var spellLearnedWatch: SpellLearnedWatch?
     /// The first-frame check is calling `checkText` (not AppKit).
     var checkingVisibleNow = false
     /// AppKit passes skipped because the first-frame check had done them (checks).

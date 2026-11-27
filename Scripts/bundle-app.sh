@@ -372,6 +372,9 @@ $IMPORTED_TYPES    </array>
 </dict>
 </plist>
 PLIST
+# A check build says so in its Info.plist, so the check scripts can refuse a
+# release build without running it (Scripts/check-env.sh).
+if [ $CHECKS = 1 ]; then plutil -insert CedricCheckBuild -bool YES "$APP/Contents/Info.plist"; fi
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 SHORT=$(plutil -extract CFBundleShortVersionString raw "$APP/Contents/Info.plist")
 LONG=$(plutil -extract CFBundleVersion raw "$APP/Contents/Info.plist")

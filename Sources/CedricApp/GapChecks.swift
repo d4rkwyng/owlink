@@ -709,6 +709,17 @@ extension DevChecks {
     /// records the URL, which is then handed to the app as Launch Services
     /// would; HOME is the check's folder, so the script makes the check's
     /// token, not the user's.
+    ///
+    /// The script must never reach the system `open`: it would start or
+    /// message the registered Owlink (maybe an installed release, with the
+    /// user's data). So its PATH is only the check's own bin folder: the
+    /// recorder as `open`, plus links to the few tools the script runs,
+    /// with neither /usr/bin nor /bin on it. Every setup step is checked,
+    /// and a probe must resolve `open` to the recorder and see it record
+    /// before the script runs. If any of that fails, the check fails
+    /// without running the script. Not a dry run: the check needs the real
+    /// hand-off file (the shell-level CLI checks in tools-check.sh are the
+    /// dry runs).
     static func cliScriptWithCustomTMPDIR(_ app: AppDelegate) {
         guard let script = Bundle.main.url(forResource: "cedric", withExtension: nil) else {
             expect(false, "the cedric script is in the app's Resources"); return
@@ -718,24 +729,62 @@ extension DevChecks {
         let custom = "/tmp/custom.cedric-check\(getpid())"
         let log = dir.appendingPathComponent("cli-open.log")
         let fm = FileManager.default
-        try? fm.createDirectory(at: bin, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: home, withIntermediateDirectories: true)
-        try? fm.createDirectory(atPath: custom, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(atPath: custom) }
         let fakeOpen = bin.appendingPathComponent("open")
-        try? "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$CEDRIC_CHECK_OPEN_LOG\"\n".write(to: fakeOpen, atomically: true, encoding: .utf8)
-        chmod(fakeOpen.path, 0o755)
+        // What Scripts/cedric runs besides bash builtins, linked in by absolute path.
+        let tools = ["dirname", "readlink", "getconf", "mkdir", "stat", "chmod", "date", "mktemp", "head", "xxd",
+                     "tr", "ln", "rm", "sleep", "python3", "cat", "sed"]
+        do {
+            if fm.fileExists(atPath: bin.path) { try fm.removeItem(at: bin) }
+            try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+            try fm.createDirectory(at: home, withIntermediateDirectories: true)
+            try fm.createDirectory(atPath: custom, withIntermediateDirectories: true)
+            try "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$CEDRIC_CHECK_OPEN_LOG\"\n"
+                .write(to: fakeOpen, atomically: true, encoding: .utf8)
+            guard chmod(fakeOpen.path, 0o755) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EPERM) }
+            for t in tools {
+                guard let src = ["/usr/bin/\(t)", "/bin/\(t)"].first(where: { fm.isExecutableFile(atPath: $0) }) else {
+                    throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: t])
+                }
+                try fm.createSymbolicLink(atPath: bin.appendingPathComponent(t).path, withDestinationPath: src)
+            }
+        } catch {
+            expect(false, "the cli check's recorder and bin folder are set up (else the script is not run)", "\(error)")
+            try? fm.removeItem(atPath: custom)
+            return
+        }
+        defer { try? fm.removeItem(atPath: custom) }
+        try? fm.removeItem(at: log)
+        var env = ProcessInfo.processInfo.environment
+        env["TMPDIR"] = custom + "/"
+        env["HOME"] = home.path
+        env["PATH"] = bin.path  // only the check's folder: no /usr/bin (the system open), no /bin
+        env["CEDRIC_CHECK_OPEN_LOG"] = log.path
+        env.removeValue(forKey: "CEDRIC_DRY_RUN")
+        // The probe: with this environment `open` is the recorder, and it records.
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/bash")
+        probe.arguments = ["-c", "command -v open; open cedric-check-probe"]
+        probe.environment = env
+        let probeOut = Pipe()
+        probe.standardOutput = probeOut
+        do { try probe.run() } catch {
+            expect(false, "the cli check's probe runs (else the script is not run)", "\(error)"); return
+        }
+        let resolved = String(decoding: probeOut.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        probe.waitUntilExit()
+        let recorded = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+        guard probe.terminationStatus == 0, resolved == fakeOpen.path, recorded == "cedric-check-probe\n" else {
+            expect(false, "with the check's PATH, open is the recorder and records (else the script is not run)",
+                   "status \(probe.terminationStatus), open: \(resolved), log: \(recorded.debugDescription)")
+            return
+        }
+        expect(true, "the cli check's open is its recorder (PATH has no /usr/bin)", resolved)
         try? fm.removeItem(at: log)
         let victim = write("cli-custom-tmp.txt", "from a custom TMPDIR\n")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [script.path, victim.path]
-        var env = ProcessInfo.processInfo.environment
-        env["TMPDIR"] = custom + "/"
-        env["HOME"] = home.path
-        env["PATH"] = bin.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
-        env["CEDRIC_CHECK_OPEN_LOG"] = log.path
-        env.removeValue(forKey: "CEDRIC_DRY_RUN")
         p.environment = env
         do { try p.run() } catch { expect(false, "the cedric script runs", "\(error)"); return }
         p.waitUntilExit()

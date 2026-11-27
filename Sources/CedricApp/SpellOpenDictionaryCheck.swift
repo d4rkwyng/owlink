@@ -7,9 +7,29 @@ import CedricCore
 /// - Fix Typos' Ignore All, between the first-frame check's reply and
 ///   AppKit's first pass (it toggles continuous checking off and on): the
 ///   ignored word's mark goes, the other word's stays.
-/// - A word ignored straight through the spell checker (as the spelling
-///   panel does) in the same interval: AppKit's pass runs and rebuilds the
-///   marks.
+/// - A word ignored straight through the spelling dictionary (as the
+///   spelling panel does) in the same interval: AppKit's pass runs and
+///   rebuilds the marks.
+/// - A word learned straight through it in Owlink (the spelling panel's
+///   Learn): its notice clears the record, and the same.
+/// - A word learned in Owlink through the spelling panel with no notice
+///   (AppKit's Learn need not post one), the panel shown after the early
+///   check and closed again before AppKit's pass, Owlink (or the lock
+///   screen) in front throughout: AppKit's pass asks about the marked
+///   words, and the same. Last of the dictionary steps: once loaded, the
+///   panel makes every later first pass ask.
+/// - The same learned from a menu (its Learn Spelling, no notice), the
+///   panel never loaded: the menu's tracking notice alone makes AppKit's
+///   pass ask, and the same. Just before the panel step.
+/// - A word learned in another app after another app came to the front
+///   (no notice): AppKit's pass asks, and the same. The lock screen coming
+///   to the front doesn't count as another app.
+///
+/// The dictionary is the check's own (RecordingSpellDictionary): nothing
+/// here learns or ignores a word in the user's real one. The view drops
+/// the real spell checker's marks on that dictionary's words, as the real
+/// one would never have made them, so the underlines still show whether
+/// AppKit's pass ran.
 /// - An edit, and an input method's composition, before the queued
 ///   first-frame check runs: it doesn't run, and AppKit's pass marks.
 extension DevChecks {
@@ -20,6 +40,23 @@ extension DevChecks {
                                          drawn: @escaping (EditorTextView, String) -> (marked: Int, of: Int)) -> [Step] {
         var panelTab: EditorWindowController?
         var directTab: EditorWindowController?
+        var learnTab: EditorWindowController?
+        var elsewhereTab: EditorWindowController?
+        var lockTab: EditorWindowController?
+        var silentTab: EditorWindowController?
+        var menuTab: EditorWindowController?
+        // Made up, and learned only in the check's own dictionary.
+        let learnedWord = "zqxfakelrn", elsewhereWord = "zqxfakeelse"
+        let silentWord = "zqxfakesil", menuWord = "zqxfakemnu"
+        let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
+        /// Another app (or the lock screen) activated, as NSWorkspace says
+        /// it: only Owlink's own observer hears this in-process notice.
+        func activated(_ bundleID: String) -> Bool {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first else { return false }
+            NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didActivateApplicationNotification, object: NSWorkspace.shared,
+                                                       userInfo: [NSWorkspace.applicationUserInfoKey: app])
+            return true
+        }
         var typedTab: EditorWindowController?
         var imeTab: EditorWindowController?
 
@@ -35,9 +72,9 @@ extension DevChecks {
             }
         }
         func pause(_ s: Double) -> Step { { next in DispatchQueue.main.asyncAfter(deadline: .now() + s) { next() } } }
-        func early(_ t: EditorWindowController?) -> Bool {
+        func early(_ t: EditorWindowController?, _ word: String = "tpyo") -> Bool {
             guard let v = t?.primaryTextView else { return true }
-            return marked(v, "tpyo") && marked(v, "wrnog")
+            return marked(v, word) && marked(v, "wrnog")
         }
         /// The early reply is in and AppKit's first pass hasn't come yet.
         func inTheInterval(_ t: EditorWindowController?, _ what: String) {
@@ -51,11 +88,11 @@ extension DevChecks {
             let d = drawn(v, word)
             return d.of > 0 && d.marked == 0
         }
-        func rebuilt(_ t: EditorWindowController?, _ what: String) {
+        func rebuilt(_ t: EditorWindowController?, _ what: String, _ word: String = "tpyo") {
             guard let v = t?.primaryTextView else { return }
             expect(v.skippedTextChecks == 0, "\(what): AppKit's pass is not skipped", "\(v.skippedTextChecks)")
-            let ignored = drawn(v, "tpyo"), other = drawn(v, "wrnog")
-            expect(ignored.of > 0 && ignored.marked == 0, "\(what): AppKit's underline on the ignored word goes",
+            let ignored = drawn(v, word), other = drawn(v, "wrnog")
+            expect(ignored.of > 0 && ignored.marked == 0, "\(what): AppKit's underline on the \(word == "tpyo" ? "ignored" : "learned") word goes",
                    "\(ignored.marked) of \(ignored.of) drawn")
             expect(other.of > 0 && other.marked == other.of, "\(what): AppKit still draws the other misspelling",
                    "\(other.marked) of \(other.of) drawn")
@@ -66,6 +103,9 @@ extension DevChecks {
             t?.window?.close()
         }
 
+        guard let dictionary else {
+            return [sync { expect(false, "spellopen uses the check's own spelling dictionary", "\(Swift.type(of: EditorTextView.spellDictionary))") }]
+        }
         var steps: [Step] = [
             sync {
                 panelTab = app.open(write("ignore-panel.txt", "A tpyo and a wrnog here.\n"))
@@ -81,6 +121,7 @@ extension DevChecks {
                 expect(t.spellStep?.current?.word == "tpyo", "Fix Typos is on the first misspelling", t.spellStep?.current?.word ?? "-")
                 if let b = t.spellStep?.ignoreButton { press(b) }
             },
+            sync { expect(dictionary.ignoreCalls.last == "tpyo", "Ignore All: ignored in the check's dictionary", "\(dictionary.ignoreCalls)") },
             wait("Ignore All's mark removed", 4) { panelTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
             sync {
@@ -100,13 +141,171 @@ extension DevChecks {
                 inTheInterval(directTab, "ignored directly")
                 guard let v = directTab?.primaryTextView else { return }
                 // The spelling panel's Ignore: the dictionary changes, nothing toggles.
-                NSSpellChecker.shared.ignoreWord("tpyo", inSpellDocumentWithTag: v.spellCheckerDocumentTag)
+                dictionary.ignoreWord("tpyo", inSpellDocumentWithTag: v.spellCheckerDocumentTag)
             },
             wait("AppKit's pass after the word was ignored", 4) { directTab.map { undrawn($0.primaryTextView, "tpyo") } ?? true },
             pause(1.5),
             sync {
                 rebuilt(directTab, "ignored directly")
                 close(directTab)
+            },
+        ]
+        steps += [
+            sync {
+                learnTab = app.open(write("learn-direct.txt", "A \(learnedWord) and a wrnog there.\n"))
+                sized(learnTab)
+                if let learnTab { focus(learnTab) }
+            },
+            wait("the first-frame marks (learned directly)", 4) { early(learnTab, learnedWord) },
+            sync {
+                inTheInterval(learnTab, "learned directly")
+                guard let v = learnTab?.primaryTextView else { return }
+                // The spelling panel's Learn: the dictionary's notice clears the
+                // record whether or not Owlink is the active app (inactive, AppKit's
+                // pass would ask about the marked words anyway).
+                dictionary.learnWord(learnedWord)
+                expect(v.spellCoverage.isEmpty, "learned directly: the spell checker's notice clears the record",
+                       "app active=\(NSApp.isActive) asksLearned=\(v.spellCoverage.asksLearned)")
+            },
+            wait("AppKit's pass after the word was learned", 4) { learnTab.map { undrawn($0.primaryTextView, learnedWord) } ?? true },
+            pause(1.5),
+            sync {
+                expect(!NSSpellChecker.shared.hasLearnedWord(learnedWord), "(and the user's own dictionary doesn't have it)")
+                rebuilt(learnTab, "learned directly", learnedWord)
+                close(learnTab)
+            },
+        ]
+        steps += [
+            sync {
+                elsewhereTab = app.open(write("learn-elsewhere.txt", "A \(elsewhereWord) and a wrnog there.\n"))
+                sized(elsewhereTab)
+                if let elsewhereTab { focus(elsewhereTab) }
+            },
+            wait("the first-frame marks (learned in another app)", 4) { early(elsewhereTab, elsewhereWord) },
+            sync {
+                inTheInterval(elsewhereTab, "learned in another app")
+                guard let v = elsewhereTab?.primaryTextView else { return }
+                expect(activated("com.apple.dock"), "(the Dock is running)")
+                expect(v.spellCoverage.asksLearned, "another app in front: AppKit's pass will ask about the marked words")
+                // Learned over there: nothing in Owlink hears of it.
+                dictionary.learnElsewhere(elsewhereWord)
+                expect(!v.spellCoverage.isEmpty, "learned in another app: no notice, the record stays")
+            },
+            wait("AppKit's pass after the word was learned in another app", 4) {
+                elsewhereTab.map { undrawn($0.primaryTextView, elsewhereWord) } ?? true
+            },
+            pause(1.5),
+            sync {
+                expect(dictionary.asked.contains(elsewhereWord), "AppKit's pass asked about it", "\(dictionary.asked)")
+                rebuilt(elsewhereTab, "learned in another app", elsewhereWord)
+                close(elsewhereTab)
+            },
+        ]
+        steps += [
+            sync {
+                lockTab = app.open(write("lock-screen.txt", "A tpyo and a wrnog there.\n"))
+                sized(lockTab)
+                if let lockTab { focus(lockTab) }
+            },
+            wait("the first-frame marks (lock screen)", 4) { early(lockTab) },
+            sync {
+                inTheInterval(lockTab, "lock screen")
+                guard let v = lockTab?.primaryTextView else { return }
+                if v.spellCoverage.asksLearned {
+                    // Owlink wasn't in front at the early check: it asks anyway.
+                    print("check: note: lock screen: Owlink not in front at the early check, the pass asks regardless")
+                } else {
+                    expect(activated(SpellFrontApp.lockScreen), "(the lock screen's process is running)")
+                    expect(!v.spellCoverage.asksLearned, "the lock screen in front: not another app")
+                }
+                expect(activated("com.apple.dock"), "(the Dock is running)")
+                expect(v.spellCoverage.asksLearned, "then another app: it asks")
+            },
+            wait("AppKit's pass (lock screen)", 4) { lockTab.map { $0.primaryTextView.spellCoverage.isEmpty } ?? true },
+            pause(1.5),
+            sync {
+                guard let v = lockTab?.primaryTextView else { return }
+                expect(v.skippedTextChecks == 1, "nothing learned or ignored: AppKit's pass is still skipped", "\(v.skippedTextChecks)")
+                close(lockTab)
+            },
+        ]
+        /// Owlink in front at the early check, as spellopen needs it for the
+        /// silent-learn steps: otherwise the pass asks regardless.
+        func inFrontWithNoUI(_ v: EditorTextView, _ what: String) {
+            guard !v.spellCoverage.asksLearned else {
+                print("check: note: \(what): Owlink not in front at the early check (active=\(NSApp.isActive)), the pass asks regardless")
+                return
+            }
+            expect(!SpellingPanel.inUse, "\(what): AppKit's spelling panel not loaded at the early check")
+        }
+        steps += [
+            sync {
+                menuTab = app.open(write("learn-menu.txt", "A \(menuWord) and a wrnog there.\n"))
+                sized(menuTab)
+                if let menuTab { focus(menuTab) }
+            },
+            wait("the first-frame marks (learned silently from a menu)", 4) { early(menuTab, menuWord) },
+            sync {
+                inTheInterval(menuTab, "learned silently from a menu")
+                guard let v = menuTab?.primaryTextView else { return }
+                // Only the menu can flag it here: Owlink in front, the panel never loaded.
+                expect(!v.spellCoverage.asksLearned, "learned silently from a menu: Owlink in front at the early check, nothing asked yet",
+                       "active=\(NSApp.isActive)")
+                expect(!SpellingPanel.inUse, "learned silently from a menu: AppKit's spelling panel not loaded")
+                // A menu begins tracking (the context menu's or Edit's
+                // Learn Spelling), as AppKit says it in-process; no menu
+                // opens and nothing is chosen.
+                NotificationCenter.default.post(name: NSMenu.didBeginTrackingNotification, object: NSMenu(title: "spellopen"))
+                expect(v.spellCoverage.asksLearned, "a menu opened: AppKit's pass will ask about the marked words")
+                // Its Learn Spelling, with no notice: nothing in Owlink hears of it.
+                dictionary.learnSilently(menuWord)
+                expect(!v.spellCoverage.isEmpty, "learned silently from a menu: no notice, the record stays")
+            },
+            wait("AppKit's pass after the word was learned silently from a menu", 4) {
+                menuTab.map { undrawn($0.primaryTextView, menuWord) } ?? true
+            },
+            pause(1.5),
+            sync {
+                expect(dictionary.asked.contains(menuWord), "AppKit's pass asked about the word learned from a menu", "\(dictionary.asked)")
+                expect(!SpellingPanel.inUse, "(the spelling panel is still not loaded)")
+                expect(!NSSpellChecker.shared.hasLearnedWord(menuWord), "(and the user's own dictionary doesn't have it)")
+                rebuilt(menuTab, "learned silently from a menu", menuWord)
+                close(menuTab)
+            },
+        ]
+        steps += [
+            sync {
+                silentTab = app.open(write("learn-silent.txt", "A \(silentWord) and a wrnog there.\n"))
+                sized(silentTab)
+                if let silentTab { focus(silentTab) }
+            },
+            wait("the first-frame marks (learned silently in the spelling panel)", 4) { early(silentTab, silentWord) },
+            sync {
+                inTheInterval(silentTab, "learned silently in the spelling panel")
+                guard let v = silentTab?.primaryTextView else { return }
+                inFrontWithNoUI(v, "learned silently in the spelling panel")
+                // Edit › Show Spelling and Grammar, on the view (AppKit's
+                // panel: shows it, reads only).
+                v.showGuessPanel(nil)
+                expect(SpellingPanel.inUse, "the spelling panel is loaded")
+                expect(v.spellCoverage.asksLearned, "spelling panel shown: AppKit's pass will ask about the marked words")
+                // Its Learn, with no notice: nothing in Owlink hears of it.
+                dictionary.learnSilently(silentWord)
+                expect(!v.spellCoverage.isEmpty, "learned silently: no notice, the record stays")
+                // Closed again before the pass.
+                NSSpellChecker.shared.spellingPanel.orderOut(nil)
+                expect(!NSSpellChecker.shared.spellingPanel.isVisible, "(the panel is closed again)")
+                if let t = silentTab { focus(t) }
+            },
+            wait("AppKit's pass after the word was learned silently in the spelling panel", 4) {
+                silentTab.map { undrawn($0.primaryTextView, silentWord) } ?? true
+            },
+            pause(1.5),
+            sync {
+                expect(dictionary.asked.contains(silentWord), "AppKit's pass asked about the silently learned word", "\(dictionary.asked)")
+                expect(!NSSpellChecker.shared.hasLearnedWord(silentWord), "(and the user's own dictionary doesn't have it)")
+                rebuilt(silentTab, "learned silently in the spelling panel", silentWord)
+                close(silentTab)
             },
         ]
         steps += [
