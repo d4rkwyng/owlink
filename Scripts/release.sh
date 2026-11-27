@@ -14,6 +14,15 @@
 #   --skip-launch-check
 #                    don't real-launch the signed app (Scripts/launch-check.sh);
 #                    only for a Mac with no logged-in GUI session
+#
+# The launch check (4b) is a release gate: it launches the release binary,
+# which ignores the test folder overrides, so it rotates the cli-token and
+# prunes the ReplaceUndo copies in this account's ~/Library/Application
+# Support/Cedric. Run a release without --skip-launch-check only in a
+# disposable macOS user account or VM (the release workflow's runner).
+# This script passes OWLINK_RELEASE_GATE=1 to that one launch-check call
+# and nowhere else. Whatever the flags, a built bundle carrying the
+# CedricCheckBuild marker is refused before it is signed or launched (3c).
 #   --appcast        also sign the zip for Sparkle (EdDSA) and add its item
 #                    to a local appcast, dist/appcast.xml (see below and
 #                    docs/updates.md). Off by default. Uploads nothing.
@@ -89,7 +98,7 @@ for a in "$@"; do
         --skip-notarize) NOTARIZE=0 ;;
         --skip-launch-check) LAUNCH_CHECK=0 ;;
         --appcast) APPCAST=1 ;;
-        -h|--help) sed -n '2,77p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,85p' "$0"; exit 0 ;;
         *) echo "release.sh: unknown option $a" >&2; exit 2 ;;
     esac
 done
@@ -276,6 +285,17 @@ if [ $DRY = 0 ]; then
 else
     echo "+ plutil -extract CFBundleShortVersionString raw $APP/Contents/Info.plist  # must equal $SOURCE_VERSION${TAG:+ and tag $TAG}"
 fi
+# 3c. Not a check build: bundle-app.sh marks one with CedricCheckBuild in
+#     its Info.plist. Refused here, before anything is signed or launched,
+#     with or without --skip-launch-check (launch-check's "dev hooks: off"
+#     tests the executable; this tests the bundle that ships).
+if [ $DRY = 0 ]; then
+    MARKER=$(plutil -extract CedricCheckBuild raw -o - "$APP/Contents/Info.plist" 2>/dev/null || true)
+    [ -z "$MARKER" ] || fail "$APP carries CedricCheckBuild=$MARKER in its Info.plist: a check build must not ship (bundle-app.sh --release)"
+    echo "Build kind: no CedricCheckBuild marker (a release build)"
+else
+    echo "+ plutil -extract CedricCheckBuild raw $APP/Contents/Info.plist  # must be absent"
+fi
 
 # 4. Sign inside out: nested code first (llama.framework, and any other
 #    framework/dylib/XPC a later version adds), then the app. No --deep:
@@ -366,7 +386,8 @@ fi
 #     if it crashes or quits. Tankard 0.3.0 shipped a launch crash only the
 #     signed release build showed, and only on a real launch.
 if [ $LAUNCH_CHECK = 1 ]; then
-    run Scripts/launch-check.sh --release "$APP" --runs 5 --seconds 10
+    # A release gate (see the top): the one place OWLINK_RELEASE_GATE is set.
+    run env OWLINK_RELEASE_GATE=1 Scripts/launch-check.sh --release "$APP" --runs 5 --seconds 10
 else
     echo "NOTE: --skip-launch-check: the signed app was not launched. Run Scripts/launch-check.sh $APP before publishing." >&2
 fi

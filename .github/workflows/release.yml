@@ -149,7 +149,10 @@ jobs:
             ls -la dist || true
             exit 1
           fi
-          Scripts/smoke-launch.sh --seconds 10 "$ZIP"
+          # A release gate (it launches the release binary as shipped, which
+          # uses this account's real Application Support): allowed here
+          # because the runner is a disposable VM.
+          OWLINK_RELEASE_GATE=1 Scripts/smoke-launch.sh --seconds 10 "$ZIP"
 
       - name: Upload to the release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3
