@@ -71,6 +71,86 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var lastAnchor: (fragment: String, found: Bool)?
     /// Bumped by each render; a result for an older one is dropped.
     private var generation = 0
+
+    /// The page loaded now (counted per load) and its front matter block's
+    /// state as the app last left it (nil: no block). A state read from the
+    /// page counts only for that page, and only a change from this one is
+    /// the reader's (FrontMatterDisclosure.change).
+    private var pageCount = 0
+    private var pageFrontMatterOpen: Bool?
+    /// The page loaded now: the document it shows (`pageKey`: the live
+    /// document's `documentKey`, or a linked document's path) and the
+    /// reader's clicks on its block the app has seen (frontMatterRead).
+    private var pageKey: String?
+    private var pageClicksSeen = 0
+
+    /// Whether the preview opens the front matter block, as the reader
+    /// last left it (a click on its summary), across documents and
+    /// launches. Off: one collapsed line.
+    static var frontMatterExpanded: Bool {
+        get { UserDefaults.standard.bool(forKey: FrontMatterDisclosure.preferenceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: FrontMatterDisclosure.preferenceKey) }
+    }
+    /// The front matter block as the reader leaves it, one model for every
+    /// read (an edit's body swap, a reload, the preview closing):
+    /// - A read is the reader's change when they clicked the block's summary
+    ///   since the last read of that page (an app-world listener counts the
+    ///   clicks and stamps the last, so two clicks count too) or the block
+    ///   isn't as the app left it. The change is stamped with the time of
+    ///   the reader's click (else the time the read started).
+    /// - The preference takes the newest change of any page (`preferenceAt`).
+    /// - A close-time read may come back after the preview was reopened at
+    ///   once (nothing waits for it): it is then set on the live previews
+    ///   showing the same page (`pageKey`), if it is the newest change kept
+    ///   for that page (`pageChangeAt`) and the reader hasn't clicked that
+    ///   page's block since (adoptScript). A close that saw no change
+    ///   stamps nothing, so it drops no earlier read.
+    private static var preferenceAt: Double = 0
+    private static var pageChangeAt: [String: Double] = [:]
+    /// Close-time reads still out, per page key.
+    private static var readsOut: [String: Int] = [:]
+    /// Drops the change times of pages no live preview shows (or holds a
+    /// late read for) and no close-time read is out for (a page closed
+    /// for good keeps nothing).
+    private static func dropUnusedPageChanges() {
+        var used = Set(readsOut.keys)
+        for p in alive.allObjects where !p.closed {
+            if let k = p.pageKey { used.insert(k) }
+            used.formUnion(p.adoptedFrontMatter.keys)
+        }
+        pageChangeAt = pageChangeAt.filter { used.contains($0.key) }
+    }
+    /// Every preview alive (weakly), for close-time reads that come back late.
+    private static let alive = NSHashTable<PreviewController>.weakObjects()
+    /// The live document (set by its tab on each render): its page's key.
+    var documentKey: String?
+    /// This preview has been closed (its close-time read may still be out).
+    private var closed = false
+    /// Checks only: how long a close-time read's answer is held back
+    /// (a WebKit callback that comes back late). 0 in the app.
+    static var closeReadDelayForChecks: TimeInterval = 0
+    /// Checks only: page loads that finish are held (still loading, as far
+    /// as the preview knows) until `releaseFinishesForChecks`.
+    static var holdFinishForChecks = false
+    private static var heldFinishes: [() -> Void] = []
+    /// Checks only: the pages a change time is kept for.
+    static var pageChangeKeysForChecks: [String] { Array(pageChangeAt.keys) }
+    /// Checks only: run once a linked document has been resolved and read,
+    /// before its page renders (a symlink retargeted in between).
+    static var afterLinkedReadForChecks: (() -> Void)?
+    /// Checks only: the page loaded now.
+    var pageKeyForChecks: String? { pageKey }
+    static func releaseFinishesForChecks() {
+        holdFinishForChecks = false
+        let held = heldFinishes
+        heldFinishes = []
+        held.forEach { $0() }
+    }
+    /// Late close-time reads that came back while a page was loading (or
+    /// none was loaded yet), one per page key, so another page's read
+    /// can't displace this page's: the page that loads takes its own
+    /// (load, didFinish).
+    private var adoptedFrontMatter: [String: FrontMatterChange] = [:]
     private let latest = RenderTicket()
     /// Called after a whole page load (the tab scrolls it in step).
     var onLoaded: (() -> Void)?
@@ -153,6 +233,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         config.setURLSchemeHandler(assets, forURLScheme: PreviewRich.scheme)
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
+        Self.alive.add(self)
         let ucc = config.userContentController
         ucc.addUserScript(WKUserScript(source: Self.appScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         ucc.add(ScrollMessages(self), contentWorld: .defaultClient, name: "cedricScroll")
@@ -251,8 +332,12 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             let language = LanguageDetector.language(forFileName: target.lastPathComponent) ?? .markdown
             // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
             pendingAnchor = fragment
+            if let hook = Self.afterLinkedReadForChecks { Self.afterLinkedReadForChecks = nil; hook() }
+            // The page is keyed by the file just read (`target`, already
+            // resolved), never by resolving the entry's URL again: a symlink
+            // retargeted before the page loads must not give it another key.
             show(text: text, language: language, palette: home.2, baseURL: target.deletingLastPathComponent(),
-                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL))
+                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL), pageKey: target.standardizedFileURL.path)
         }
         onNavigationChange?()
     }
@@ -281,7 +366,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Renders the document. `baseURL` is the file's folder, for relative
     /// images (the page may read files in that folder only).
-    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil) {
+    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil,
+              pageKey: String? = nil) {
         folderFiles.folder = folder
         // The folder open in the sidebar, when the document is inside it:
         // the last place a site-root path (`/images/x.webp`) is looked for.
@@ -310,17 +396,21 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         guard language == .markdown else {
             shellKey = nil
             lastNeeds = []
-            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
+            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL, pageKey: pageKey)
             return
         }
         let ticket = latest
         // An immutable copy, whatever `text` is backed by (the storage keeps changing).
         let text = (text as NSString).copy() as! NSString as String
+        // The preference as it is now: a close-time read still out
+        // corrects the page when it comes back (adoptFrontMatter).
+        let frontMatterExpanded = Self.frontMatterExpanded
         Self.queue.async {
             // Skip a render a newer one has already replaced.
             guard ticket.value == gen else { return }
             let t0 = DispatchTime.now()
-            var options: Markdown.Options = exportLinks ? .export(vault: vault) : .preview(vault: vault)
+            var options: Markdown.Options = exportLinks ? .export(vault: vault)
+                : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded)
             options.math = js
             let body = Markdown.render(text, options: options)
             let needs = js ? PreviewRich.needs(body: body) : []
@@ -331,7 +421,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
                     guard gen == self.generation else { return }
                     let applyStart = DispatchTime.now()
                     self.lastRenderMs = ms
-                    self.apply(body: body, key: key, palette: palette, csp: pageCSP, baseURL: baseURL, needs: needs)
+                    self.apply(body: body, key: key, palette: palette, csp: pageCSP, baseURL: baseURL, needs: needs, pageKey: pageKey)
                     self.noteMainThread(applyStart)
                 }
             }
@@ -356,21 +446,184 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// Swaps the body into the loaded page, or loads the page.
-    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, needs: PreviewRich.Needs) {
+    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, needs: PreviewRich.Needs,
+                       pageKey: String?) {
         lastNeeds = needs
         if key == shellKey, !allowJavaScript {
             if loadingShell { pendingBody = body; return }
-            bodySwaps += 1
-            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
-                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
+            swapBody(body)
             return
         }
-        load(Self.page(body: body, palette: palette, csp: csp, head: PreviewRich.headTags(needs),
-                       tail: PreviewRich.tailTags(needs, dark: palette.isDark)), key: key, baseURL: baseURL)
+        // A whole new page (Refresh, a theme change…): the front matter
+        // block as the reader has it on the page now goes into the new one.
+        let gen = generation
+        readFrontMatter { [weak self] open in
+            guard let self, self.generation == gen else { return }
+            let body = open.map { FrontMatterDisclosure.setting(open: $0, in: body) } ?? body
+            self.load(Self.page(body: body, palette: palette, csp: csp, head: PreviewRich.headTags(needs),
+                                tail: PreviewRich.tailTags(needs, dark: palette.isDark)), key: key, baseURL: baseURL, pageKey: pageKey)
+        }
     }
 
-    private func load(_ html: String, key: String?, baseURL: URL?) {
+    /// The patch in the app's content world, keeping the front matter
+    /// block as the reader has it: `__cedricPatch` compares whole blocks,
+    /// `open` included, so a block the reader had opened was replaced by
+    /// the render's collapsed one on the next keystroke. Returns [the state
+    /// before, the state after] (null: no block).
+    static let swapScript = """
+    const d = document.querySelector('details.frontmatter');
+    const was = d ? d.open : null;
+    const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
+    if (was !== null) html = html.replace(/<details class="frontmatter"([^>]*?)( open)?>/, (m, a) => '<details class="frontmatter"' + a + (was ? ' open' : '') + '>');
+    window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html);
+    const n = document.querySelector('details.frontmatter');
+    return [was, c.count, c.at, n ? n.open : null];
+    """
+
+    private func swapBody(_ body: String) {
+        bodySwaps += 1
+        let page = pageCount
+        let started = Self.now
+        webView.callAsyncJavaScript(Self.swapScript, arguments: ["html": body], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, case .success(let value) = result, let states = value as? [Any], states.count == 4 else { return }
+            self.recordFrontMatter(Self.frontMatterRead(states), page: page, started: started)
+            if page == self.pageCount { self.pageFrontMatterOpen = states[3] as? Bool }
+        }
+    }
+
+    /// The page's front matter block state now (nil: no block, or no
+    /// page), kept as the preference when the reader changed it.
+    private func readFrontMatter(_ then: @escaping (Bool?) -> Void) {
+        guard pageFrontMatterOpen != nil, !loadingShell else { then(nil); return }
+        let page = pageCount
+        let started = Self.now
+        webView.callAsyncJavaScript(Self.readScript,
+                                    arguments: [:], in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, page == self.pageCount, case .success(let value) = result,
+                  let read = Self.frontMatterRead(value as? [Any]) else { then(nil); return }
+            self.recordFrontMatter(read, page: page, started: started)
+            then(read.open)
+        }
+    }
+
+    /// The preview is closing: the front matter block as the reader left
+    /// it is kept. The same read in the app's own world; the read holds this
+    /// controller (and its web view) until it comes back, then sets the block
+    /// on the live previews showing the same page. Nothing waits.
+    func keepFrontMatterState() {
+        closed = true
+        guard pageFrontMatterOpen != nil, !loadingShell else { Self.dropUnusedPageChanges(); return }
+        let key = pageKey
+        if let key { Self.readsOut[key, default: 0] += 1 }
+        let page = pageCount
+        let started = Self.now
+        let delay = Self.closeReadDelayForChecks
+        webView.callAsyncJavaScript(Self.readScript, arguments: [:], in: nil, in: .defaultClient) { [self] result in
+            let land = { [self] in
+                defer {
+                    if let key { Self.readsOut[key] = Self.readsOut[key].flatMap { $0 > 1 ? $0 - 1 : nil } }
+                    Self.dropUnusedPageChanges()
+                }
+                guard case .success(let value) = result,
+                      let change = recordFrontMatter(Self.frontMatterRead(value as? [Any]), page: page, started: started) else { return }
+                for other in Self.alive.allObjects where other !== self && !other.closed {
+                    other.adoptFrontMatter(change)
+                }
+            }
+            if delay > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { land() } }
+            } else {
+                land()
+            }
+        }
+    }
+
+    /// The block's state and the reader's clicks on it so far (their
+    /// count and the time of the last): [open, count, at], null without one.
+    static let readScript = """
+    const d = document.querySelector('details.frontmatter');
+    const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
+    return d ? [d.open, c.count, c.at] : null;
+    """
+
+    /// Sets the block (in the app's world) as a late close-time read left
+    /// it, unless the reader has changed it on this page since: clicked it
+    /// after the read's change, or left it other than the app gave it.
+    static let adoptScript = """
+    const d = document.querySelector('details.frontmatter');
+    const c = window.__cedricFrontMatterClicks;
+    if (!d || d.open !== applied || (c && c.at >= at)) return null;
+    d.open = want;
+    return d.open;
+    """
+
+    /// A reader's change kept from one page: the page, the state, and when.
+    struct FrontMatterChange {
+        let key: String
+        let open: Bool
+        let at: Double
+    }
+
+    /// A read's answer: [open, clicks, last click time] (readScript).
+    private static func frontMatterRead(_ value: [Any]?) -> (open: Bool, clicks: Int, at: Double)? {
+        guard let value, value.count >= 3, let open = value[0] as? Bool else { return nil }
+        return (open, (value[1] as? NSNumber)?.intValue ?? 0, (value[2] as? NSNumber)?.doubleValue ?? 0)
+    }
+
+    /// Milliseconds since 1970, as the page's Date.now().
+    private static var now: Double { Date().timeIntervalSince1970 * 1000 }
+
+    /// Sets a late close-time read's change on this preview, if it shows
+    /// (or is loading) that page.
+    private func adoptFrontMatter(_ change: FrontMatterChange) {
+        // No page yet, or one loading (built before this came back): the
+        // next page loaded takes it if it's the read's page (load), and is
+        // checked when it's in (didFinish).
+        if pageCount == 0 || loadingShell { adoptedFrontMatter[change.key] = change; return }
+        guard pageKey == change.key, !allowJavaScript, let applied = pageFrontMatterOpen, applied != change.open else { return }
+        let page = pageCount
+        webView.callAsyncJavaScript(Self.adoptScript, arguments: ["want": change.open, "applied": applied, "at": change.at],
+                                    in: nil, in: .defaultClient) { [weak self] result in
+            guard let self, page == self.pageCount, case .success(let value) = result, let now = value as? Bool else { return }
+            self.pageFrontMatterOpen = now
+        }
+    }
+
+    /// Keeps a read of the page still shown as the preference when it is
+    /// the reader's change and the newest one (with page JavaScript off:
+    /// with it on, the page's own script could have changed it). Returns
+    /// the change when it is also the newest kept for its page.
+    @discardableResult
+    private func recordFrontMatter(_ read: (open: Bool, clicks: Int, at: Double)?, page: Int, started: Double) -> FrontMatterChange? {
+        guard !allowJavaScript, let read, page == pageCount else { return nil }
+        let clicked = read.clicks > pageClicksSeen
+        guard clicked || FrontMatterDisclosure.change(read: read.open, applied: pageFrontMatterOpen, readFor: page, shown: pageCount) != nil
+        else { return nil }
+        pageClicksSeen = read.clicks
+        pageFrontMatterOpen = read.open
+        let at = clicked ? read.at : started
+        if at > Self.preferenceAt {
+            Self.preferenceAt = at
+            Self.frontMatterExpanded = read.open
+        }
+        guard let key = pageKey, at > Self.pageChangeAt[key, default: 0] else { return nil }
+        Self.pageChangeAt[key] = at
+        return FrontMatterChange(key: key, open: read.open, at: at)
+    }
+
+    /// A file's page key: the file it resolves to, standardized.
+    static func pageKey(for url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
+
+    /// `linkedKey`: the linked document's key, from the file displayEntry
+    /// read (nil: the live document).
+    private func load(_ html: String, key: String?, baseURL: URL?, pageKey linkedKey: String?) {
         pendingBody = nil
+        // The document the page shows: the live one, or the linked file
+        // read, by the file it really is (symlinks resolved, as
+        // `documentKey`), so a page reached through a link and one opened
+        // on its target match. A late close-time read's state, for it.
+        let pageKey = linkedKey ?? (isHome ? documentKey : nil)
+        let html = pageKey.flatMap { adoptedFrontMatter[$0] }.flatMap { FrontMatterDisclosure.setting(open: $0.open, in: html) } ?? html
         let gen = generation
         let go = { [weak self] in
             guard let self, self.generation == gen else { return }
@@ -384,6 +637,11 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             self.loadingShell = true
             self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
+            self.pageCount += 1
+            self.pageFrontMatterOpen = FrontMatterDisclosure.isOpen(in: html)
+            self.pageKey = pageKey
+            self.pageClicksSeen = 0
+            Self.dropUnusedPageChanges()
             if DevEnvironment.checksEnabled { self.lastPageHTML = html }
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
@@ -481,6 +739,14 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         for (let i = 0; i < a.length && i < b.length; i++) a[i].setAttribute('data-line', b[i].getAttribute('data-line'));
       };
       const quiet = () => { window.__cedricQuietUntil = Date.now() + 250; };
+      // The reader's clicks on the front matter block's summary (mouse or
+      // keyboard), counted with the time of the last: reads tell the
+      // reader's change from the app's (frontMatterRead).
+      document.addEventListener('click', e => {
+        if (!(e.target instanceof Element) || !e.target.closest('details.frontmatter > summary')) return;
+        const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
+        window.__cedricFrontMatterClicks = {count: c.count + 1, at: Date.now()};
+      }, true);
       const pin = () => { window.__cedricSetY = window.scrollY; };
       window.__cedricPatch = function(html) {
         const b = document.body; if (!b) return -1;
@@ -586,16 +852,24 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard navigation === shellNavigation else { return }
+        if Self.holdFinishForChecks {
+            Self.heldFinishes.append { [weak self, weak webView] in
+                if let self, let webView { self.webView(webView, didFinish: navigation) }
+            }
+            return
+        }
         shellNavigation = nil
         loadingShell = false
         expectedPageURL = nil
         let anchor = pendingAnchor
         pendingAnchor = nil
+        // A late close-time read that came back while this page loaded.
+        let adopted = pageKey.flatMap { adoptedFrontMatter[$0] }
+        adoptedFrontMatter = [:]
+        if let adopted { adoptFrontMatter(adopted) }
         if let body = pendingBody {
             pendingBody = nil
-            bodySwaps += 1
-            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
-                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
+            swapBody(body)
         }
         // (Evaluated after the patch above: one content world, in order.)
         if let anchor { scroll(toAnchor: anchor, follow: false) }
