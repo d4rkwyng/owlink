@@ -42,8 +42,11 @@ brew install --cask d4rkwyng/tap/owlink
 
 This also puts the `cedric` command on your PATH. Or download
 `Owlink-<version>.zip` from [Releases](https://github.com/d4rkwyng/owlink/releases),
-open it, and move Owlink to Applications. Owlink doesn't update itself:
-`brew upgrade` (or a new download) brings a new version.
+open it, and move Owlink to Applications. Owlink checks for a new version
+about once a day and asks before installing it (Owlink › Check for
+Updates… checks now; Settings › General › Automatically check for updates
+turns the daily check off). Only updates signed with Owlink's key are
+accepted. `brew upgrade` (or a new download) works too.
 
 ## Tabs, files and sessions
 
@@ -1565,7 +1568,11 @@ folder and passes it along; Owlink deletes it when that file's tab closes
 ## Privacy and what stays on this Mac
 
 The AI engines run on this Mac or a server on your own network, never
-the cloud. What Owlink keeps on this Mac, all under
+the cloud. Owlink has no accounts or analytics. About once a day it asks
+`https://owlink.app/appcast.xml` whether there is a new version (turn that
+off in Settings › General › Automatically check for updates); it accepts
+only an update signed with Owlink's key, and asks before installing it.
+What Owlink keeps on this Mac, all under
 `~/Library/Application Support/Cedric/` (owner-only, 0700; files 0600):
 
 - **`Session/`**: the open tabs and the **unsaved text** of open and
@@ -1686,7 +1693,7 @@ More in [docs/architecture.md](architecture.md).
 
 ## Not built yet
 
-Macros and automatic updates; folding HTML and XML tags; per-pane folds in split view. See
+Macros; folding HTML and XML tags; per-pane folds in split view. See
 `docs/architecture.md` for where they plug in.
 
 ## Built with Claude

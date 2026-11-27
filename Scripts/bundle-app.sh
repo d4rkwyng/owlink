@@ -38,12 +38,15 @@
 # its new name) the first time it is opened.
 #
 # Updates (Sparkle 2, docs/updates.md): Info.plist's SUFeedURL and
-# SUPublicEDKey come from CEDRIC_SPARKLE_FEED_URL and
-# CEDRIC_SPARKLE_PUBLIC_KEY (the EdDSA PUBLIC key, base64; never the
-# private one) and are empty unless those are set. With either empty the
-# app's updater is off: Check for Updates… is disabled and Sparkle is
-# never loaded. A --release build embeds Sparkle.framework (signed inside
-# out, below); a check build doesn't and never updates.
+# SUPublicEDKey are Owlink's committed ones (Scripts/sparkle-defaults.sh:
+# https://owlink.app/appcast.xml and the EdDSA PUBLIC key, base64; never
+# the private one), unless CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY
+# are set to something else (a test build, a key rotation). Automatic checks
+# are on (SUEnableAutomaticChecks, about once a day); installing always
+# asks (SUAutomaticallyUpdate false). A --release build embeds
+# Sparkle.framework (signed inside out, below) and its updater is on; a
+# check build doesn't embed it, and its app never loads Sparkle or updates
+# (UpdateConfig: .checkBuild), whatever its Info.plist says.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -59,7 +62,7 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift ;;
         --no-sign) SIGN=none ;;
         --release) CHECKS=0 ;;
-        -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,49p' "$0"; exit 0 ;;
         *) echo "bundle-app.sh: unknown option $1" >&2; exit 2 ;;
     esac
     shift
@@ -70,17 +73,25 @@ SOURCE_VERSION=$(sed -n 's/.*static let source = "\([^"]*\)".*/\1/p' Sources/Ced
 VERSION=${CEDRIC_VERSION:-$SOURCE_VERSION}
 BUILD=$VERSION
 
-# The update feed and public key (see the top): placeholders, empty by
-# default. A value with XML-special characters or whitespace can't be
-# either; refuse it rather than write a broken or misleading plist.
-SPARKLE_FEED=${CEDRIC_SPARKLE_FEED_URL:-}
-SPARKLE_KEY=${CEDRIC_SPARKLE_PUBLIC_KEY:-}
+# The update feed and public key (see the top): the committed defaults
+# unless overridden. A value with XML-special characters or whitespace
+# can't be either; refuse it rather than write a broken or misleading
+# plist. The feed must be https://, except a loopback http:// feed
+# (http://127.0.0.1 or http://localhost, any port, no user or password) for
+# a local update test; the app allows the same (UpdateConfig), and
+# release.sh refuses anything but https://.
+. Scripts/sparkle-defaults.sh
+SPARKLE_FEED=${CEDRIC_SPARKLE_FEED_URL:-$OWLINK_SPARKLE_FEED_URL}
+SPARKLE_KEY=${CEDRIC_SPARKLE_PUBLIC_KEY:-$OWLINK_SPARKLE_PUBLIC_KEY}
 case "$SPARKLE_FEED$SPARKLE_KEY" in
     *[\<\>\&\"\'[:space:]]*) echo "bundle-app.sh: CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY may not hold spaces or < > & quotes" >&2; exit 1 ;;
 esac
-if [ -n "$SPARKLE_FEED" ] && [ "${SPARKLE_FEED#https://}" = "$SPARKLE_FEED" ]; then
-    echo "bundle-app.sh: CEDRIC_SPARKLE_FEED_URL must be an https:// URL" >&2; exit 1
-fi
+LOOPBACK_FEED='^http://(127\.0\.0\.1|localhost)(:[0-9]{1,5})?(/[^@]*)?$'
+case "$SPARKLE_FEED" in
+    https://?*) ;;
+    *) [[ $SPARKLE_FEED =~ $LOOPBACK_FEED ]] \
+           || { echo "bundle-app.sh: CEDRIC_SPARKLE_FEED_URL must be an https:// URL (or a loopback http:// one for a local test)" >&2; exit 1; } ;;
+esac
 
 # The dev switches: compiled in for a check build only (see the top).
 SWIFTC_FLAGS=()
@@ -274,9 +285,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <false/>
     <key>NSSupportsSuddenTermination</key>
     <false/>
-    <!-- Updates (Sparkle 2, docs/updates.md). Feed and EdDSA public key are
-         empty unless set at build time; with either empty the updater is off.
-         Signed feed and signed updates only; automatic checks off by default. -->
+    <!-- Updates (Sparkle 2, docs/updates.md). Feed and EdDSA public key:
+         Owlink's committed ones (Scripts/sparkle-defaults.sh) unless overridden
+         at build time. Signed feed and signed updates only; automatic checks on
+         (about once a day), never installs without asking. -->
     <key>SUFeedURL</key>
     <string>$SPARKLE_FEED</string>
     <key>SUPublicEDKey</key>
@@ -286,7 +298,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>SUVerifyUpdateBeforeExtraction</key>
     <true/>
     <key>SUEnableAutomaticChecks</key>
-    <false/>
+    <true/>
     <key>SUAutomaticallyUpdate</key>
     <false/>
     <key>CFBundleURLTypes</key>
@@ -392,4 +404,4 @@ if [ "$SIGN" = adhoc ]; then
     Scripts/sign-adhoc.sh "$APP"
 fi
 
-echo "==> $APP ($VERSION): $(lipo -archs "$APP/Contents/MacOS/Cedric"), signing: $SIGN, $([ $CHECKS = 1 ] && echo "CHECK build (dev switches on; don't ship)" || echo "release build (dev switches off)"), updates: $([ -d "$SPARKLE_FW" ] && echo "Sparkle embedded, " || echo "no Sparkle, ")$([ -n "$SPARKLE_FEED" ] && [ -n "$SPARKLE_KEY" ] && echo "feed and key set" || echo "off (no feed/key)")"
+echo "==> $APP ($VERSION): $(lipo -archs "$APP/Contents/MacOS/Cedric"), signing: $SIGN, $([ $CHECKS = 1 ] && echo "CHECK build (dev switches on; don't ship)" || echo "release build (dev switches off)"), updates: $([ -d "$SPARKLE_FW" ] && echo "Sparkle embedded, " || echo "no Sparkle, ")$([ $CHECKS = 1 ] && echo "off (check build)" || echo "on, feed $SPARKLE_FEED$([ "$SPARKLE_FEED$SPARKLE_KEY" = "$OWLINK_SPARKLE_FEED_URL$OWLINK_SPARKLE_PUBLIC_KEY" ] || echo " (overridden)")")"

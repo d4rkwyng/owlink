@@ -171,7 +171,7 @@ func buildMainMenu() -> NSMenu {
     let services = submenu(String(localized: "Services"), [])
     main.addItem(submenu(app, [
         item(String(localized: "About Owlink"), #selector(AppDelegate.showAbout(_:)), ""),
-        // Sparkle 2 (Updater.swift): disabled until the build has an update feed and key.
+        // Sparkle 2 (Updater.swift): on in a release build, disabled in a check build.
         item(String(localized: "Check for Updates…"), #selector(AppDelegate.checkForUpdates(_:)), ""),
         .separator(),
         item(String(localized: "Settings…"), #selector(AppDelegate.showSettings(_:)), ","),

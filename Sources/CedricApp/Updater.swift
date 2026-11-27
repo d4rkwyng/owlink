@@ -7,11 +7,14 @@ import CedricCore
 ///
 /// Sparkle.framework sits in Contents/Frameworks of a release build only
 /// (Scripts/bundle-app.sh --release) and, like llama.framework, is loaded
-/// with dlopen, never linked: an app whose Info.plist has no feed or key
-/// (the default, `UpdateConfig`) never loads it, sends nothing over the
-/// network and pays nothing at launch. Sparkle itself checks the EdDSA
-/// signatures (SUPublicEDKey) on the feed (SURequireSignedFeed) and on
-/// every update before it installs anything.
+/// with dlopen after the first frame, never linked. A release build carries
+/// Owlink's feed and public key (`UpdateConfig`), so it loads Sparkle and,
+/// with automatic checks on (Info.plist's SUEnableAutomaticChecks, until the
+/// user turns them off), checks about once a day; it always asks before
+/// installing (SUAutomaticallyUpdate false). A check build never loads it
+/// and sends nothing. Sparkle itself checks the EdDSA signatures
+/// (SUPublicEDKey) on the feed (SURequireSignedFeed) and on every update
+/// before it installs anything.
 @MainActor
 final class Updater: NSObject {
     static let shared = Updater()
@@ -29,8 +32,8 @@ final class Updater: NSObject {
 
     /// After the first frame: loads Sparkle and creates the controller,
     /// which starts the updater, only when the build is set up for updates.
-    /// Starting is quiet: with automatic checks off (the default) Sparkle
-    /// checks only when asked.
+    /// Sparkle then schedules its automatic check (about once a day) unless
+    /// the user turned automatic checks off.
     func startIfConfigured() {
         guard config.isEnabled, controller == nil else { return }
         guard let c = Self.makeController() else {
@@ -51,15 +54,17 @@ final class Updater: NSObject {
     }
 
     /// Automatically check for updates: Sparkle's own setting (its user
-    /// default, SUEnableAutomaticChecks; false in Info.plist). Off and
-    /// unchangeable while the updater is.
+    /// default, SUEnableAutomaticChecks, which falls back to Info.plist's
+    /// true). Shown off and unchangeable while the updater is off (a check
+    /// build), and nothing is written to the user's defaults then.
     var automaticallyChecks: Bool {
         get {
             guard config.isEnabled else { return false }
             if let updater = controller?.value(forKey: "updater") as? NSObject {
                 return updater.value(forKey: "automaticallyChecksForUpdates") as? Bool ?? false
             }
-            return UserDefaults.standard.bool(forKey: UpdateConfig.automaticChecksKey)
+            if let chosen = UserDefaults.standard.object(forKey: UpdateConfig.automaticChecksKey) as? Bool { return chosen }
+            return Bundle.main.object(forInfoDictionaryKey: UpdateConfig.automaticChecksKey) as? Bool ?? false
         }
         set {
             guard config.isEnabled, let updater = controller?.value(forKey: "updater") as? NSObject else { return }

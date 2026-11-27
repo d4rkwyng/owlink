@@ -43,11 +43,15 @@
 #   TAG                     the release tag (CI); the built version must be
 #                           the tag's without "v" and any "-suffix"
 #
-# Updates (--appcast only; every one is checked before anything is built,
-# and the script refuses to start if one is missing or wrong):
+# Updates. Every release build carries Owlink's committed feed URL and
+# EdDSA public key (Scripts/sparkle-defaults.sh), or these overrides; both
+# are checked before anything is built, with or without --appcast:
 #   CEDRIC_SPARKLE_FEED_URL     the appcast's https:// URL (baked into the
-#                               app's Info.plist as SUFeedURL)
-#   CEDRIC_SPARKLE_PUBLIC_KEY   the EdDSA public key, base64 (SUPublicEDKey)
+#                               app's Info.plist as SUFeedURL; default
+#                               https://owlink.app/appcast.xml)
+#   CEDRIC_SPARKLE_PUBLIC_KEY   the EdDSA public key, base64 (SUPublicEDKey;
+#                               default: the committed one)
+# --appcast only (the script refuses to start if one is missing or wrong):
 #   CEDRIC_SPARKLE_DOWNLOAD_URL the zip's https:// URL once published, with
 #                               {version} for the version, e.g.
 #                               https://host/v{version}/Owlink-{version}.zip
@@ -98,7 +102,7 @@ for a in "$@"; do
         --skip-notarize) NOTARIZE=0 ;;
         --skip-launch-check) LAUNCH_CHECK=0 ;;
         --appcast) APPCAST=1 ;;
-        -h|--help) sed -n '2,85p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,89p' "$0"; exit 0 ;;
         *) echo "release.sh: unknown option $a" >&2; exit 2 ;;
     esac
 done
@@ -117,22 +121,33 @@ run() {
 
 fail() { echo "release.sh: $*" >&2; exit 1; }
 
-# Updates: --appcast refuses to start (even as a dry run) unless the feed,
-# the public key, the download URL and one private-key source are all
-# given and sane. Nothing here reads or prints the private key.
+# Updates: the feed and public key every release build carries, the
+# committed ones unless overridden; bundle-app.sh bakes these two into
+# Info.plist, and the --appcast step checks the built app against them.
+# A release feed must be https:// (bundle-app.sh also takes a loopback
+# http:// one, for a local test only).
+. Scripts/sparkle-defaults.sh
+CEDRIC_SPARKLE_FEED_URL=${CEDRIC_SPARKLE_FEED_URL:-$OWLINK_SPARKLE_FEED_URL}
+CEDRIC_SPARKLE_PUBLIC_KEY=${CEDRIC_SPARKLE_PUBLIC_KEY:-$OWLINK_SPARKLE_PUBLIC_KEY}
+export CEDRIC_SPARKLE_FEED_URL CEDRIC_SPARKLE_PUBLIC_KEY
+feed=$CEDRIC_SPARKLE_FEED_URL
+pub=$CEDRIC_SPARKLE_PUBLIC_KEY
+case "$feed" in https://?*) ;; *) fail "CEDRIC_SPARKLE_FEED_URL must be an https:// URL" ;; esac
+publen=$(printf '%s' "$pub" | base64 -D 2>/dev/null | wc -c | tr -d ' ')
+[ "$publen" = 32 ] || fail "CEDRIC_SPARKLE_PUBLIC_KEY is not a base64 EdDSA public key (32 bytes)"
+if [ "$feed$pub" != "$OWLINK_SPARKLE_FEED_URL$OWLINK_SPARKLE_PUBLIC_KEY" ]; then
+    echo "NOTE: this build's update feed or public key is overridden (CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY), not the committed one in Scripts/sparkle-defaults.sh." >&2
+fi
+
+# --appcast refuses to start (even as a dry run) unless the download URL
+# and one private-key source are given and sane. Nothing here reads or
+# prints the private key.
 SPARKLE_SIGN_ARGS=()
 SPARKLE_SIGN_UPDATE=""
 if [ $APPCAST = 1 ]; then
-    feed=${CEDRIC_SPARKLE_FEED_URL:-}
-    pub=${CEDRIC_SPARKLE_PUBLIC_KEY:-}
     dl=${CEDRIC_SPARKLE_DOWNLOAD_URL:-}
     keyfile=${CEDRIC_SPARKLE_KEY_FILE:-}
     account=${CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT:-}
-    [ -n "$feed" ] || fail "--appcast: CEDRIC_SPARKLE_FEED_URL is not set (the appcast's https:// URL; docs/updates.md)"
-    case "$feed" in https://?*) ;; *) fail "--appcast: CEDRIC_SPARKLE_FEED_URL must be an https:// URL" ;; esac
-    [ -n "$pub" ] || fail "--appcast: CEDRIC_SPARKLE_PUBLIC_KEY is not set (the EdDSA public key, base64; docs/updates.md)"
-    publen=$(printf '%s' "$pub" | base64 -D 2>/dev/null | wc -c | tr -d ' ')
-    [ "$publen" = 32 ] || fail "--appcast: CEDRIC_SPARKLE_PUBLIC_KEY is not a base64 EdDSA public key (32 bytes)"
     [ -n "$dl" ] || fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL is not set (where the zip will be published, with {version})"
     case "$dl" in https://?*) ;; *) fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL must be an https:// URL" ;; esac
     case "$dl" in *'{version}'*) ;; *) fail "--appcast: CEDRIC_SPARKLE_DOWNLOAD_URL needs {version} in it" ;; esac
@@ -167,11 +182,7 @@ if [ $APPCAST = 1 ]; then
         Scripts/appcast-versions.sh "$CEDRIC_SPARKLE_APPCAST" 0 >/dev/null \
             || fail "--appcast: CEDRIC_SPARKLE_APPCAST is not an appcast (well-formed XML with one /rss/channel)"
     fi
-    # bundle-app.sh bakes these two into Info.plist.
-    export CEDRIC_SPARKLE_FEED_URL CEDRIC_SPARKLE_PUBLIC_KEY
     echo "Updates: feed $feed, key from $([ -n "$keyfile" ] && echo "file (outside the repo)" || echo "Keychain account $account"), sign_update $SPARKLE_SIGN_UPDATE"
-elif [ -n "${CEDRIC_SPARKLE_FEED_URL:-}" ] || [ -n "${CEDRIC_SPARKLE_PUBLIC_KEY:-}" ]; then
-    echo "NOTE: CEDRIC_SPARKLE_FEED_URL / CEDRIC_SPARKLE_PUBLIC_KEY are set but --appcast isn't: the app gets them, no appcast item is made." >&2
 fi
 
 APP="dist/Owlink.app"

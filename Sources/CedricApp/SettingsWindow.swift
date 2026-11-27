@@ -83,8 +83,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     let fontStepper = NSStepper()
     let quitOnLastClose = NSButton(checkboxWithTitle: String(localized: "Quit when the last window closes"), target: nil, action: nil)
     let reopenLastSession = NSButton(checkboxWithTitle: String(localized: "Reopen files from last session"), target: nil, action: nil)
-    /// Sparkle's automatic checks (Updater.swift): off by default, and
-    /// disabled until the build is set up for updates.
+    /// Sparkle's automatic checks (Updater.swift): on by default in a
+    /// release build; off and disabled in a check build.
     let autoUpdates = NSButton(checkboxWithTitle: String(localized: "Automatically check for updates"), target: nil, action: nil)
     /// Default editor for… (0.3.0), built with the General tab.
     private(set) var defaultEditor: DefaultEditorPane?
@@ -469,7 +469,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         autoUpdates.state = updater.automaticallyChecks ? .on : .off
         autoUpdates.isEnabled = updater.config.isEnabled
         autoUpdates.toolTip = updater.config.tooltip
-            ?? String(localized: "Owlink looks for a new signed version about once a day and asks before installing it. Off by default; Owlink › Check for Updates… checks now.")
+            ?? String(localized: "Owlink looks for a new signed version about once a day and asks before installing it. On by default; Owlink › Check for Updates… checks now.")
         for (k, b) in toggles { b.state = s[toggle: k] ? .on : .off }
         showOwl.state = s.showOwl ? .on : .off
         showOwl.toolTip = String(localized: "Cedric the owl in the corner of the editor, with one hint at a time. Also Cedric › Show Cedric.")

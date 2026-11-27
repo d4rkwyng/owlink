@@ -1,21 +1,24 @@
 #!/bin/bash
-# Checks the update plumbing (Sparkle 2, docs/updates.md) without a key,
-# a feed or the network:
-#  - release.sh --appcast refuses to start, before it builds or reads the
-#    keychain, whenever the feed URL, the public key, the download URL or a
-#    private-key source is missing or wrong (always also --dry-run, so even
-#    a broken guard couldn't sign or upload anything; the script has no
-#    upload code at all);
+# Checks the update plumbing (Sparkle 2, docs/updates.md) without a
+# private key, a published feed or the network:
+#  - release.sh uses the committed feed URL and public key
+#    (Scripts/sparkle-defaults.sh) when CEDRIC_SPARKLE_FEED_URL /
+#    CEDRIC_SPARKLE_PUBLIC_KEY are unset, and refuses to start, before it
+#    builds or reads the keychain, whenever the feed URL, the public key,
+#    the download URL or a private-key source is wrong or missing (always
+#    also --dry-run, so even a broken guard couldn't sign or upload
+#    anything; the script has no upload code at all);
 #  - release.sh --appcast refuses a version a feed already lists before it
 #    builds or touches the zip (dry run, from a temp copy of the scripts);
-#  - bundle-app.sh refuses a non-HTTPS feed;
+#  - bundle-app.sh refuses a non-HTTPS feed (bar a loopback http:// one);
 #  - sign-sparkle.sh signs in Sparkle's order and refuses --deep;
 #  - ed-verify.swift refuses malformed input;
 #  - appcast-item.sh (the feed step) keeps the last signed feed when
 #    signing or verifying fails, with a stub sign_update; finds duplicates
 #    by XML value and adds the item inside the channel whatever the layout;
-#  - with an APP: its Info.plist has the empty placeholders, a required
-#    signed feed and automatic checks off, and bundle-app.sh's ad-hoc
+#  - with an APP (built without overrides): its Info.plist has the
+#    committed feed and public key, a required signed feed, automatic
+#    checks on and no silent installs, and bundle-app.sh's ad-hoc
 #    signing (sign-adhoc.sh) keeps Downloader.xpc's entitlements on a temp
 #    copy with Sparkle.framework added.
 # No key of any kind is generated or read: the "key file" below is an
@@ -56,11 +59,13 @@ refuses() { # name want [VAR=value…] [-- extra release.sh args]
     ok "release.sh refuses: $name"
 }
 
-refuses "no feed URL" "CEDRIC_SPARKLE_FEED_URL is not set"
-refuses "no feed URL, even with everything else" "CEDRIC_SPARKLE_FEED_URL is not set" \
-    CEDRIC_SPARKLE_PUBLIC_KEY="$PUB" CEDRIC_SPARKLE_DOWNLOAD_URL="$DL" CEDRIC_SPARKLE_KEYCHAIN_ACCOUNT=ed25519
+# With no feed or key set, the committed ones are used: the first thing
+# missing is then the download URL.
+. Scripts/sparkle-defaults.sh
+refuses "nothing set: the committed feed and key pass, the download URL is missing" "CEDRIC_SPARKLE_DOWNLOAD_URL is not set"
 refuses "an http:// feed" "must be an https:// URL" CEDRIC_SPARKLE_FEED_URL=http://updates.example.invalid/appcast.xml
-refuses "no public key" "CEDRIC_SPARKLE_PUBLIC_KEY is not set" CEDRIC_SPARKLE_FEED_URL=$FEED
+refuses "a loopback http:// feed (a local test's, never a release's)" "must be an https:// URL" \
+    CEDRIC_SPARKLE_FEED_URL=http://127.0.0.1:8765/appcast.xml CEDRIC_SPARKLE_PUBLIC_KEY="$PUB" CEDRIC_SPARKLE_DOWNLOAD_URL="$DL"
 refuses "a public key that isn't 32 bytes" "not a base64 EdDSA public key" \
     CEDRIC_SPARKLE_FEED_URL=$FEED CEDRIC_SPARKLE_PUBLIC_KEY=PUBLIC_KEY_HERE
 refuses "no download URL" "CEDRIC_SPARKLE_DOWNLOAD_URL is not set" CEDRIC_SPARKLE_FEED_URL=$FEED CEDRIC_SPARKLE_PUBLIC_KEY="$PUB"
@@ -99,23 +104,36 @@ else
     echo "note: no Sparkle tools in .build/artifacts (run swift build); appcast-copy refusal not checked"
 fi
 
-# Without --appcast the release flow is unchanged: the dry run starts.
+# Without --appcast the release flow is unchanged: the dry run starts, with
+# the committed feed and key (no override note).
 out=$(env -u CEDRIC_SPARKLE_FEED_URL -u CEDRIC_SPARKLE_PUBLIC_KEY CEDRIC_SIGN_ID=- Scripts/release.sh --dry-run --skip-notarize --skip-launch-check 2>&1); rc=$?
-if [ $rc = 0 ] && grep -q '^+ Scripts/bundle-app.sh' <<<"$out" && grep -q 'Sparkle.framework/Versions/B/Autoupdate$' <<<"$out" && ! grep -q 'sign_update' <<<"$out"; then
-    ok "release.sh without --appcast: dry run as before, Sparkle signed in its order, no sign_update"
+if [ $rc = 0 ] && grep -q '^+ Scripts/bundle-app.sh' <<<"$out" && grep -q 'Sparkle.framework/Versions/B/Autoupdate$' <<<"$out" && ! grep -q 'sign_update' <<<"$out" \
+    && ! grep -q 'is overridden' <<<"$out"; then
+    ok "release.sh without --appcast: dry run as before, committed feed and key, Sparkle signed in its order, no sign_update"
 else
     bad "release.sh without --appcast (exit $rc): $(tail -3 <<<"$out")"
 fi
+out=$(env CEDRIC_SPARKLE_FEED_URL=$FEED CEDRIC_SPARKLE_PUBLIC_KEY="$PUB" CEDRIC_SIGN_ID=- Scripts/release.sh --dry-run --skip-notarize --skip-launch-check 2>&1); rc=$?
+[ $rc = 0 ] && grep -q 'is overridden' <<<"$out" && ok "release.sh notes an overridden feed or key" \
+    || bad "release.sh with an overridden feed and key (exit $rc): $(tail -2 <<<"$out")"
+[ "$OWLINK_SPARKLE_FEED_URL" = https://owlink.app/appcast.xml ] \
+    && [ "$(printf '%s' "$OWLINK_SPARKLE_PUBLIC_KEY" | base64 -D 2>/dev/null | wc -c | tr -d ' ')" = 32 ] \
+    && ok "sparkle-defaults.sh: the committed feed is https://owlink.app/appcast.xml and the key is 32 bytes of base64" \
+    || bad "sparkle-defaults.sh: feed '$OWLINK_SPARKLE_FEED_URL', key '$OWLINK_SPARKLE_PUBLIC_KEY'"
 grep -nE 'curl|scp |rsync|gh release|aws |gsutil|sftp|ftp ' Scripts/release.sh >/dev/null \
     && bad "release.sh has upload code" || ok "release.sh has no upload code (curl, scp, rsync, gh release, aws, gsutil, sftp)"
 
-# bundle-app.sh: a non-HTTPS feed is refused before anything is built.
-out=$(CEDRIC_SPARKLE_FEED_URL=http://updates.example.invalid/appcast.xml Scripts/bundle-app.sh --out "$W/out" 2>&1); rc=$?
-if [ $rc != 0 ] && grep -q "must be an https:// URL" <<<"$out" && ! grep -q '==> swift build' <<<"$out"; then
-    ok "bundle-app.sh refuses an http:// feed before building"
-else
-    bad "bundle-app.sh with an http:// feed (exit $rc): $(tail -2 <<<"$out")"
-fi
+# bundle-app.sh: a non-HTTPS feed is refused before anything is built
+# (only a loopback http:// one, for a local test, is taken).
+for f in http://updates.example.invalid/appcast.xml http://localhost.example.invalid/a.xml \
+         http://localhost:1@updates.example.invalid/a.xml http://127.0.0.2/a.xml; do
+    out=$(CEDRIC_SPARKLE_FEED_URL=$f Scripts/bundle-app.sh --out "$W/out" 2>&1); rc=$?
+    if [ $rc != 0 ] && grep -q "must be an https:// URL" <<<"$out" && ! grep -q '==> swift build' <<<"$out"; then
+        ok "bundle-app.sh refuses the feed $f before building"
+    else
+        bad "bundle-app.sh with the feed $f (exit $rc): $(tail -2 <<<"$out")"
+    fi
+done
 
 # sign-sparkle.sh: Sparkle's order, Downloader keeps its entitlements, no --deep.
 order=$(Scripts/sign-sparkle.sh --dry-run X.framework codesign -s - --force 2>&1 | sed 's/^+ codesign -s - --force //')
@@ -348,7 +366,7 @@ fi
 # always --dry-run; the existing zip and feed must stay byte-identical.
 R="$W/repo"
 mkdir -p "$R/Scripts" "$R/Sources/CedricCore" "$R/dist"
-cp Scripts/release.sh Scripts/appcast-versions.sh Scripts/sign-sparkle.sh "$R/Scripts/"
+cp Scripts/release.sh Scripts/sparkle-defaults.sh Scripts/appcast-versions.sh Scripts/sign-sparkle.sh "$R/Scripts/"
 cp Sources/CedricCore/Version.swift "$R/Sources/CedricCore/"
 printf '#!/bin/bash\ntouch "$(dirname "$0")/../bundle-app-ran"\n' > "$R/Scripts/bundle-app.sh"
 chmod +x "$R/Scripts/bundle-app.sh"
@@ -450,7 +468,7 @@ fi
 # is built, signed, notarized or launched.
 R2="$W/repo2"
 mkdir -p "$R2/Scripts" "$R2/Sources/CedricCore" "$W/relstub"
-cp Scripts/release.sh "$R2/Scripts/"
+cp Scripts/release.sh Scripts/sparkle-defaults.sh "$R2/Scripts/"
 cp Sources/CedricCore/Version.swift "$R2/Sources/CedricCore/"
 cat > "$R2/Scripts/bundle-app.sh" <<STUB
 #!/bin/bash
@@ -487,16 +505,16 @@ fi
 if [ -n "$APP" ]; then
     P="$APP/Contents/Info.plist"
     v() { plutil -extract "$1" raw "$P" 2>/dev/null; }
-    [ "$(v SUFeedURL)" = "" ] && plutil -extract SUFeedURL raw "$P" >/dev/null 2>&1 \
-        && ok "$APP: SUFeedURL is an empty placeholder" || bad "$APP: SUFeedURL is '$(v SUFeedURL)'"
-    [ "$(v SUPublicEDKey)" = "" ] && plutil -extract SUPublicEDKey raw "$P" >/dev/null 2>&1 \
-        && ok "$APP: SUPublicEDKey is an empty placeholder" || bad "$APP: SUPublicEDKey is '$(v SUPublicEDKey)'"
+    [ "$(v SUFeedURL)" = "$OWLINK_SPARKLE_FEED_URL" ] \
+        && ok "$APP: SUFeedURL is the committed $OWLINK_SPARKLE_FEED_URL" || bad "$APP: SUFeedURL is '$(v SUFeedURL)'"
+    [ "$(v SUPublicEDKey)" = "$OWLINK_SPARKLE_PUBLIC_KEY" ] \
+        && ok "$APP: SUPublicEDKey is the committed public key" || bad "$APP: SUPublicEDKey is '$(v SUPublicEDKey)'"
     [ "$(v SURequireSignedFeed)" = true ] && ok "$APP: SURequireSignedFeed" || bad "$APP: SURequireSignedFeed is '$(v SURequireSignedFeed)'"
     [ "$(v SUVerifyUpdateBeforeExtraction)" = true ] && ok "$APP: SUVerifyUpdateBeforeExtraction" || bad "$APP: SUVerifyUpdateBeforeExtraction"
-    [ "$(v SUEnableAutomaticChecks)" = false ] && ok "$APP: automatic checks off by default" || bad "$APP: SUEnableAutomaticChecks is '$(v SUEnableAutomaticChecks)'"
+    [ "$(v SUEnableAutomaticChecks)" = true ] && ok "$APP: automatic checks on by default" || bad "$APP: SUEnableAutomaticChecks is '$(v SUEnableAutomaticChecks)'"
     [ "$(v SUAutomaticallyUpdate)" = false ] && ok "$APP: no silent installs" || bad "$APP: SUAutomaticallyUpdate"
-    # Nothing of Sparkle's is linked: the app loads it only when set up.
-    otool -L "$APP/Contents/MacOS/Cedric" | grep -q Sparkle && bad "$APP links Sparkle at launch" || ok "$APP doesn't link Sparkle (dlopen only when set up)"
+    # Nothing of Sparkle's is linked: a release build loads it after the first frame.
+    otool -L "$APP/Contents/MacOS/Cedric" | grep -q Sparkle && bad "$APP links Sparkle at launch" || ok "$APP doesn't link Sparkle (a release build dlopens it after the first frame)"
 
     # bundle-app.sh's ad-hoc signing (Scripts/sign-adhoc.sh) on a temp copy
     # of APP with the pinned Sparkle.framework added, as a --release build
