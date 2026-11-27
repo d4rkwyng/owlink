@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitjournalfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitjournalfail|saveasflushfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -19,6 +19,7 @@ extension DevChecks {
         case "quitfail": quitAfterFailedSave(app)
         case "quitsyncfail": quitAfterFailedFlush(app)
         case "quitjournalfail": quitAfterFailedJournal(app)
+        case "saveasflushfail": saveAsAfterFailedFlush(app)
         case "backupfail": backupFailureNotice(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedmemory": closedTextOnlyInMemory(app)
@@ -569,6 +570,82 @@ extension DevChecks {
                 expect(app.applicationShouldTerminate(NSApp) == .terminateNow && asked.count == 1, "Quit Anyway, asked: the quit goes on")
                 AppDelegate.checkQuitSaveChoice = nil
                 app.store.checkFailJournal = false
+            },
+        ])
+    }
+
+    /// Save As whose new file, or whose folder after the rename, couldn't
+    /// be flushed to the disk (DocumentWrite.Faults failFileFlush /
+    /// failFolderFlush, Astra 27e #5): the save fails, the tab stays
+    /// untitled with its text unsaved, and its session buffer stays, past
+    /// a session save and prune, a close (kept for ⇧⌘T), quit's Save As
+    /// on the closed tab (failing the same way) and the quit itself.
+    /// Needs session saving on (run like closefail).
+    static func saveAsAfterFailedFlush(_ app: AppDelegate) {
+        app.newTab(nil)
+        let tab = app.tabs.last!
+        let id = tab.doc.id
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        let dests = (1...3).map { tmp.appendingPathComponent("saveas-flush-\(getpid())-\($0).txt") }
+        for d in dests { try? FileManager.default.removeItem(at: d) }
+        func buffer() -> String? { app.store.readBuffer(id) }
+        func dismissSheets() { for w in NSApp.windows { if let s = w.attachedSheet { w.endSheet(s) } } }
+        func named() -> Bool {
+            guard let s = app.store.load() else { return false }
+            return (s.allTabs + (s.closedTabs ?? [])).contains { $0.id == id && $0.hasBuffer }
+        }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(tab)
+                type("flush me")
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me", "backed up first", buffer() ?? "-")
+                // The new file's flush fails: nothing renamed into place.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFileFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[0]
+                expect(tab.saveAs() == false, "Save As whose file flush fails fails")
+                expect(EditorDocument.checkWriteFaults == nil, "the fault was hit")
+                expect(tab.doc.fileURL == nil, "the tab is still untitled")
+                expect(!FileManager.default.fileExists(atPath: dests[0].path), "nothing at the destination")
+            },
+            sync {
+                dismissSheets()
+                // The folder's flush after the rename fails.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFolderFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[1]
+                expect(tab.saveAs() == false, "Save As whose folder flush fails fails")
+                expect(tab.doc.fileURL == nil && tab.text == "flush me", "the tab is still untitled, its text unsaved")
+            },
+            sync {
+                dismissSheets()
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me", "its buffer survives a session save and prune", buffer() ?? "-")
+                expect(named(), "the session still names it")
+                tab.window?.close()
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "closed: kept for ⇧⌘T with its text")
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me" && named(), "its buffer survives the close", buffer() ?? "-")
+                // Quit's Save As route on the closed tab, failing the same way.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFolderFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[2]
+                app.saveAsClosedTab(id)
+            },
+            sync {
+                expect(EditorWindowController.checkSaveAsURL == nil && EditorDocument.checkWriteFaults == nil, "quit's Save As ran and hit the fault")
+                let back = app.tabs.first { $0.doc.id == id }
+                expect(back?.doc.fileURL == nil && back?.text == "flush me", "reopened, still untitled and unsaved", back?.text ?? "-")
+                dismissSheets()
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me" && named(), "its buffer survives", buffer() ?? "-")
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow && asked.isEmpty, "the quit goes on, its text backed up")
+                AppDelegate.checkQuitSaveChoice = nil
+                expect(buffer() == "flush me" && named(), "the quit's session keeps the buffer", buffer() ?? "-")
+                for d in dests { try? FileManager.default.removeItem(at: d) }
             },
         ])
     }

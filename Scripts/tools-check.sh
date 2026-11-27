@@ -131,6 +131,11 @@ echo "== quitjournalfail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitjournalfail" CEDRIC_CHECK=quitjournalfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/quitjournalfail.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/quitjournalfail.txt" || { echo "tools-check: quitjournalfail FAILED" >&2; fail=1; }
+# Save As whose flush to the disk fails: the tab stays unsaved, its buffer kept.
+echo "== saveasflushfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-saveasflushfail" CEDRIC_CHECK=saveasflushfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/saveasflushfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/saveasflushfail.txt" || { echo "tools-check: saveasflushfail FAILED" >&2; fail=1; }
 chmod -R u+w "$W" 2>/dev/null || true
 echo "== cedric script (dry run: the URLs it would send)"
 cli=$(cd "$W" && CEDRIC_DRY_RUN=1 "$OLDPWD/Scripts/cedric" -w a.txt src/x.c:12:5 +3 b.md 'c.py:9:' 2>&1) || fail=1

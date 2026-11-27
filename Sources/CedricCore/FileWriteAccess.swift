@@ -169,14 +169,23 @@ public enum DocumentWrite {
         /// crash check holds a save part way through and kills the app.
         public var pauseAfter: Int?
         public var paused: (@Sendable (Int) -> Void)?
+        /// The atomic save's flush of its new file fails with EIO (before
+        /// the rename: the old file stays).
+        public var failFileFlush = false
+        /// The atomic save's flush of the folder after the rename fails
+        /// with EIO (the new file is in place, maybe not on the disk).
+        public var failFolderFlush = false
         public init(failWriteAfter: Int? = nil, failRestore: Bool = false, skipSizeLimit: Bool = false,
-                    preRenameStatErrors: [Int32] = [], pauseAfter: Int? = nil, paused: (@Sendable (Int) -> Void)? = nil) {
+                    preRenameStatErrors: [Int32] = [], pauseAfter: Int? = nil, paused: (@Sendable (Int) -> Void)? = nil,
+                    failFileFlush: Bool = false, failFolderFlush: Bool = false) {
             self.failWriteAfter = failWriteAfter
             self.failRestore = failRestore
             self.skipSizeLimit = skipSizeLimit
             self.preRenameStatErrors = preRenameStatErrors
             self.pauseAfter = pauseAfter
             self.paused = paused
+            self.failFileFlush = failFileFlush
+            self.failFolderFlush = failFolderFlush
         }
     }
 
@@ -278,6 +287,12 @@ public enum DocumentWrite {
                 try writeAll(data, to: fd, at: 0, url: url)
             }
             guard fstat(fd, &written) == 0 else { throw writeError(errno, url) }
+            // On the disk itself before it replaces anything (F_FULLFSYNC,
+            // else fsync): a save counts as done, and the tab's session
+            // buffer as removable, only once the text is durable. A failed
+            // flush fails the save, leaving the old file.
+            let flushed = faults?.failFileFlush == true ? EIO : PrivateDirectory.flush(fd)
+            guard flushed == 0 else { throw writeError(flushed, url) }
         } catch {
             close(fd)
             throw error
@@ -289,6 +304,15 @@ public enum DocumentWrite {
         else { throw writeError(EBUSY, url) }
         guard renameat(dir, temp, dir, name) == 0 else { throw writeError(errno, url) }
         renamed = true
+        // The new name on the disk too (the folder flushed after the
+        // rename, through the same open folder, even one opened for search
+        // only). A failure fails the save: the new file is in place, but
+        // a power loss could still bring back the old one or none, so the
+        // tab stays unsaved and keeps its session buffer.
+        let flushed = faults?.failFolderFlush == true ? EIO : PrivateDirectory.flush(dir)
+        // The error carries the new file's stamp (`fileLeft(by:)`): the
+        // next ⌘S says Owlink's own save didn't finish, not another app.
+        guard flushed == 0 else { throw leftFile(DiskStamp(written), writeError(flushed, url)) }
         return DiskStamp(written)
     }
 
@@ -539,9 +563,14 @@ public enum DocumentWrite {
     private static func leftFile(_ fd: Int32, _ error: Error) -> Error {
         var st = stat()
         guard fstat(fd, &st) == 0 else { return error }
+        return leftFile(DiskStamp(st), error)
+    }
+
+    /// `error`, carrying `stamp` (`fileLeft(by:)`).
+    private static func leftFile(_ stamp: DiskStamp, _ error: Error) -> Error {
         let ns = error as NSError
         var info = ns.userInfo
-        info[leftStampKey] = DiskStamp(st)
+        info[leftStampKey] = stamp
         return CocoaError(CocoaError.Code(rawValue: ns.domain == NSCocoaErrorDomain ? ns.code : CocoaError.fileWriteUnknown.rawValue),
                           userInfo: info)
     }
