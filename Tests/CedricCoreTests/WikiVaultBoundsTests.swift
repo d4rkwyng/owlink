@@ -71,10 +71,19 @@ import Testing
         defer { try? FileManager.default.removeItem(at: t) }
         let fm = FileManager.default
         let home = URL(fileURLWithPath: NSHomeDirectory())
-        var targets = ["/System/Volumes/Data"].filter { fm.fileExists(atPath: $0) }
-        // Every mounted volume, including /Volumes/<disk> ones and deeper mount points.
+        // Fixed targets present on every macOS runner: the root volume and
+        // (when the system is split) the data volume.
+        var targets = ["/", "/System/Volumes/Data"].filter { fm.fileExists(atPath: $0) }
+        // Other mounted volumes (/Volumes/<disk> ones and deeper mount
+        // points) only when the volume itself is refused: a network or
+        // Time Machine mount (e.g. /Volumes/.timemachine/<host>/<id>/backups)
+        // may refuse to report `isVolume` (permission denied), so what it
+        // reads as depends on the machine. The point here is that the link
+        // gets the same answer as its target, not how each mount reads.
         let mounted = fm.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []
-        targets += mounted.map(\.path).filter { $0 != "/" }
+        targets += mounted.map(\.path).filter { path in
+            !targets.contains(path) && !WikiVault.mayBeVaultRoot(URL(fileURLWithPath: path), home: home)
+        }
         #expect(!targets.isEmpty)
         for (n, target) in targets.enumerated() {
             let link = t.appendingPathComponent("link\(n)")
