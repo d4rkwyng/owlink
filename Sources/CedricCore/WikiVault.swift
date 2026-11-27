@@ -95,13 +95,21 @@ public final class WikiVault: @unchecked Sendable {
             guard let v = try URL(fileURLWithPath: url.path).resourceValues(forKeys: [.isVolumeKey]).isVolume else { return .unreadable }
             return v ? .volume : .notVolume
         } catch {
-            let ns = error as NSError
-            let posix = (ns.userInfo[NSUnderlyingErrorKey] as? NSError).flatMap { $0.domain == NSPOSIXErrorDomain ? $0.code : nil }
-            if let posix { return posix == Int(ENOENT) || posix == Int(ENOTDIR) ? .missing : .unreadable }
-            let missing = ns.domain == NSCocoaErrorDomain
-                && (ns.code == CocoaError.fileReadNoSuchFile.rawValue || ns.code == CocoaError.fileNoSuchFile.rawValue)
-            return missing ? .missing : .unreadable
+            return volumeRead(failing: error)
         }
+    }
+
+    /// What a failed `isVolume` read means: missing for ENOENT or ENOTDIR,
+    /// as the error itself (NSPOSIXErrorDomain) or its underlying error,
+    /// or Cocoa's no-such-file codes; unreadable for anything else.
+    static func volumeRead(failing error: Error) -> VolumeRead {
+        let ns = error as NSError
+        let posixError = ns.domain == NSPOSIXErrorDomain ? ns : ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        let posix = posixError.flatMap { $0.domain == NSPOSIXErrorDomain ? $0.code : nil }
+        if let posix { return posix == Int(ENOENT) || posix == Int(ENOTDIR) ? .missing : .unreadable }
+        let missing = ns.domain == NSCocoaErrorDomain
+            && (ns.code == CocoaError.fileReadNoSuchFile.rawValue || ns.code == CocoaError.fileNoSuchFile.rawValue)
+        return missing ? .missing : .unreadable
     }
 
     static func mayBeVaultRoot(_ dir: URL, home: URL, volume: (URL) -> VolumeRead) -> Bool {

@@ -150,4 +150,23 @@ import Testing
         // A missing answer is not a refusal: the path rules decide.
         #expect(WikiVault.mayBeVaultRoot(share, home: home, volume: { _ in .missing }))
     }
+
+    /// The error as Foundation may give it: POSIX at the top level, POSIX
+    /// underneath a Cocoa error, or Cocoa's own no-such-file code (Sol,
+    /// 0.6.1 review: a top-level ENOENT was unreadable, so a missing
+    /// folder stopped discovery instead of falling through to the path
+    /// rules).
+    @Test func failedVolumeReadsAreClassifiedByTheirError() {
+        func posix(_ c: Int32) -> NSError { NSError(domain: NSPOSIXErrorDomain, code: Int(c)) }
+        func cocoa(_ code: Int, under: NSError? = nil) -> NSError {
+            NSError(domain: NSCocoaErrorDomain, code: code, userInfo: under.map { [NSUnderlyingErrorKey: $0] } ?? [:])
+        }
+        #expect(WikiVault.volumeRead(failing: posix(ENOENT)) == .missing)
+        #expect(WikiVault.volumeRead(failing: posix(ENOTDIR)) == .missing)
+        #expect(WikiVault.volumeRead(failing: posix(EACCES)) == .unreadable)
+        #expect(WikiVault.volumeRead(failing: cocoa(CocoaError.fileReadUnknown.rawValue, under: posix(ENOENT))) == .missing)
+        #expect(WikiVault.volumeRead(failing: cocoa(CocoaError.fileReadNoSuchFile.rawValue, under: posix(EPERM))) == .unreadable)
+        #expect(WikiVault.volumeRead(failing: cocoa(CocoaError.fileReadNoSuchFile.rawValue)) == .missing)
+        #expect(WikiVault.volumeRead(failing: cocoa(CocoaError.fileReadUnknown.rawValue)) == .unreadable)
+    }
 }
