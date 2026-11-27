@@ -310,18 +310,7 @@ public struct SessionFolder: Codable, Equatable, Sendable {
 /// writes there itself (unnumbered) rather than beside it. A closed tab
 /// reopened since the commit can still stay closed in those builds.
 public final class SessionStore: @unchecked Sendable {
-    /// The session folder this store was made for (`instances/` is in it).
-    public let mainDirectory: URL
-    /// Where the store reads and writes now: the session folder, or this
-    /// run's own instance store in it (`instanceDirectory`).
-    public var directory: URL {
-        directoryLock.lock(); defer { directoryLock.unlock() }
-        return currentDirectory
-    }
-    private var currentDirectory: URL
-    /// Guards `currentDirectory` alone: it is read off the store's lock
-    /// (`bufferURL` on the main thread) and changed under it.
-    private let directoryLock = NSLock()
+    public let directory: URL
     private let fm = FileManager.default
     private let lock = NSLock()
 
@@ -346,36 +335,11 @@ public final class SessionStore: @unchecked Sendable {
     /// The single-writer lock (`claimWriter`): an open `session.lock`
     /// with an exclusive flock, held for the life of the process (the
     /// kernel lets it go when the process ends, crash or kill included).
-    /// In an instance store, that store's own `session.lock`.
     private var writerFD: Int32 = -1
-    /// `claimWriter` was asked: from then on every write, removal and
-    /// prune first checks that `writerFD` is still the file at the lock's
-    /// path (`lockStillHeld`). A store never asked writes as before.
-    private var claimed = false
-    /// This run's own store, `instances/<uuid>/` in the session folder,
-    /// once the session folder's lock is another Owlink's (taken at
-    /// launch, or the lock file replaced since: `moveToInstance`).
-    private var instanceDir: URL?
-    /// Dead Owlinks' instance stores launch adopted (their locks held):
-    /// removed once a commit here has named what was taken from them.
-    private var orphansToRemove: [(dir: URL, fd: Int32)] = []
-    private var adoptedCount = 0
-    private var movedCount = 0
-    /// Whether launch adopts dead instance stores (off for a run that
-    /// saves no session: it would write their text here and never commit it).
-    public var adoptsInstances = true
-    /// Called (on the store's queue) when the store moves to an instance
-    /// store after it had the session folder: the folder's lock file was
-    /// replaced, so another Owlink may be writing there now.
-    public var onMovedToInstance: (@Sendable (URL) -> Void)?
     /// Why this store may not write (`claimWriter` failed: another Owlink
     /// holds the lock, or the lock couldn't be taken). Then nothing is
     /// read for launch, written, removed or pruned for the rest of the run.
-    public var notWriter: String? {
-        lock.lock(); defer { lock.unlock() }
-        return notWriterReason
-    }
-    private var notWriterReason: String?
+    public private(set) var notWriter: String?
     /// Buffers launch couldn't read: never pruned, saved in the session.
     private var held = Set<UUID>()
     /// Held closed tabs whose reopen is still owed (`Session.heldReopened`):
@@ -452,14 +416,10 @@ public final class SessionStore: @unchecked Sendable {
     /// first use flushes even if it was there already (default: the
     /// store's parent, Cedric, which the CLI token may have made first).
     public init(directory: URL, durableFrom: URL? = nil) {
-        self.mainDirectory = directory
-        self.currentDirectory = directory
+        self.directory = directory
         self.durableFrom = durableFrom ?? directory.deletingLastPathComponent()
     }
-    deinit {
-        if writerFD >= 0 { close(writerFD) }
-        for o in orphansToRemove { close(o.fd) }
-    }
+    deinit { if writerFD >= 0 { close(writerFD) } }
     private let durableFrom: URL
     /// Folders on the store's path made here whose entry flush failed:
     /// flushed again before anything counts as written (`ensureDirectory`).
@@ -478,14 +438,8 @@ public final class SessionStore: @unchecked Sendable {
 
     /// What `claimWriter` found.
     public enum WriterClaim: Equatable, Sendable {
-        /// This store is the session folder's only writer.
         case claimed
-        /// Another process (another Owlink) holds the session folder's
-        /// lock: this store reads nothing for launch and writes its own
-        /// recoverable store, this folder (`instances/<uuid>` in it).
-        case instance(URL)
-        /// Another Owlink holds the lock and no instance store could be
-        /// made: nothing is written this run.
+        /// Another process (another Owlink) holds the lock.
         case inUse
         /// The lock couldn't be taken (the folder or the lock file
         /// couldn't be made or opened): why.
@@ -496,195 +450,42 @@ public final class SessionStore: @unchecked Sendable {
     /// session folder would each commit and prune against their own
     /// snapshot, and one could delete the other's newest buffers. Takes
     /// an exclusive advisory lock (flock, LOCK_NB) on `session.lock` in
-    /// the folder, kept until the process ends, and checks that the file
-    /// it locked is still the one at that path. If another process holds
-    /// it, the store moves to an instance store of its own
-    /// (`instances/<uuid>/`, owner-only, its own lock held the same way):
-    /// it restores nothing and writes, removes and prunes only there, so
-    /// its text survives its crash, and the session folder's next writer
-    /// adopts it (`loadForLaunch`). Only if that can't be made either is
-    /// `notWriter` set and nothing written for the rest of the run.
-    /// Asked again, it checks the lock again (never `.claimed` on the
-    /// descriptor alone). A store never asked (tests, tools) writes as before.
+    /// the folder, kept until the process ends. Unless it is `.claimed`,
+    /// `notWriter` is set and the store is read-only for the rest of the
+    /// run: `loadForLaunch` returns `.none`, `save`, `writeBuffer` and
+    /// `noteReopened` throw, `removeBuffer` and `pruneBuffers` do nothing.
+    /// A store never asked (tests, tools) writes as before.
     public func claimWriter() -> WriterClaim {
         lock.lock(); defer { lock.unlock() }
-        claimed = true
-        if writerFD >= 0 {
-            if lockStillHeld() { return instanceDir.map { .instance($0) } ?? .claimed }
-            return moveToInstance(lost: true)
-        }
-        if let notWriterReason { return notWriterReason == Self.inUseReason ? .inUse : .failed(notWriterReason) }
+        if writerFD >= 0 { return .claimed }
+        if let notWriter { return notWriter == Self.inUseReason ? .inUse : .failed(notWriter) }
         // The folder, if new: plain here (owner-only); the first write
         // still flushes it and its parents (`ensureDirectory`).
         var isDir: ObjCBool = false
         if !fm.fileExists(atPath: directory.path, isDirectory: &isDir) {
             try? fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
-        // Replaced between the open and the lock: the lock is on a file
-        // no one else will open. Tried again; then counted as lost.
-        for _ in 0..<3 {
-            let fd = open(lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else {
-                let why = "its lock file couldn’t be opened: \(String(cString: strerror(errno)))"
-                notWriterReason = why
-                return .failed(why)
-            }
-            while flock(fd, LOCK_EX | LOCK_NB) != 0 {
-                let e = errno
-                if e == EINTR { continue }
-                close(fd)
-                if e == EWOULDBLOCK { return moveToInstance(lost: false) }
-                let why = "its lock file couldn’t be locked: \(String(cString: strerror(e)))"
-                notWriterReason = why
-                return .failed(why)
-            }
-            if Self.sameFile(fd, lockFile.path) {
-                writerFD = fd
-                return .claimed
-            }
-            close(fd)
+        let fd = open(lockFile.path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            let why = "its lock file couldn’t be opened: \(String(cString: strerror(errno)))"
+            notWriter = why
+            return .failed(why)
         }
-        return moveToInstance(lost: false)
-    }
-
-    /// The instance store, if this store writes one (`claimWriter`).
-    public var instanceDirectory: URL? {
-        lock.lock(); defer { lock.unlock() }
-        return instanceDir
-    }
-    /// Unsaved texts launch adopted from dead Owlinks' instance stores.
-    public var adoptedFromInstances: Int {
-        lock.lock(); defer { lock.unlock() }
-        return adoptedCount
-    }
-    /// Goes up each time the store moves to an instance store after it
-    /// had the session folder: the caller writes every buffer again.
-    public var moves: Int {
-        lock.lock(); defer { lock.unlock() }
-        return movedCount
-    }
-
-    static let instancesFolder = "instances"
-    var instancesRoot: URL { mainDirectory.appendingPathComponent(Self.instancesFolder, isDirectory: true) }
-
-    /// Whether `fd` is the file at `path` now (fstat against lstat, no
-    /// link followed): device and inode.
-    static func sameFile(_ fd: Int32, _ path: String) -> Bool {
-        var a = stat(), b = stat()
-        guard fd >= 0, fstat(fd, &a) == 0, lstat(path, &b) == 0 else { return false }
-        return a.st_dev == b.st_dev && a.st_ino == b.st_ino
-    }
-
-    /// The lock this store took is still the file at the lock's path:
-    /// not replaced (a restore, a sync) or removed since.
-    private func lockStillHeld() -> Bool { Self.sameFile(writerFD, lockFile.path) }
-
-    /// Before anything that writes, removes or prunes: with the lock
-    /// lost, the store moves to an instance store first (or, if it
-    /// can't, refuses). Never a write to a folder whose lock isn't ours.
-    private func ensureWriter() throws {
-        if let notWriterReason { throw SessionStoreError.held(notWriterReason) }
-        guard claimed, !lockStillHeld() else { return }
-        if case .instance = moveToInstance(lost: true) { return }
-        throw SessionStoreError.held(notWriterReason ?? Self.lostReason)
-    }
-
-    /// Starts this run's own instance store and writes there from now on.
-    /// `lost`: the store had a lock (the session folder's, or an instance
-    /// store's) that is no longer the file at its path. The buffers it had
-    /// committed or journaled are copied there and journaled, so a crash
-    /// keeps them; `moves` goes up so the caller writes every open tab's
-    /// text again from memory. Held buffers stay where they are (named as
-    /// held, never pruned). If the store can't be made: `notWriter`.
-    private func moveToInstance(lost: Bool) -> WriterClaim {
-        let old = directory
-        if writerFD >= 0 { close(writerFD); writerFD = -1 }
-        for o in orphansToRemove { close(o.fd) }
-        orphansToRemove = []
-        let made: (dir: URL, fd: Int32)
-        do {
-            made = try makeInstance()
-        } catch {
-            let why = lost ? "\(Self.lostReason), and no store of its own could be made: \(error.localizedDescription)" : Self.inUseReason
-            notWriterReason = why
-            return lost ? .failed(why) : .inUse
-        }
-        var carry: [(UUID, Data)] = []
-        var seen = Set<UUID>()
-        for id in committed.sorted(by: { $0.uuidString < $1.uuidString }) + pending where !held.contains(id) && seen.insert(id).inserted {
-            if let data = Self.readRegularFile(old.appendingPathComponent("\(id.uuidString).txt").path) { carry.append((id, data)) }
-        }
-        directoryLock.lock(); currentDirectory = made.dir; directoryLock.unlock()
-        instanceDir = made.dir
-        writerFD = made.fd
-        directoryReady = false
-        committed = []
-        pending = []
-        committedClosed = []
-        pendingReopened = []
-        committedGeneration = 0
-        journalStale = false
-        hold = nil
-        heldJournalsSeen = []
-        adoptedLeft = []
-        journalAbsentAtLaunch = false
-        var kept = [UUID: Int]()
-        for (id, data) in carry {
-            do {
-                try ensureDirectory()
-                try journal(id, reopened: false)
-                try writeDurably(data, to: bufferURL(id))
-                if let n = writtenSequence[id] { kept[id] = n }
-            } catch {
-                FileHandle.standardError.write(Data("session: copying \(id) to the instance store failed: \(error)\n".utf8))
-            }
-        }
-        writtenSequence = kept
-        if lost {
-            movedCount += 1
-            onMovedToInstance?(made.dir)
-        }
-        return .instance(made.dir)
-    }
-
-    /// `instances/<uuid>/`, owner-only, with its `session.lock` made and
-    /// locked before it gets its name (made as `.new-<uuid>`, then
-    /// renamed), so a launch scanning for dead ones never takes a new one
-    /// for dead.
-    private func makeInstance() throws -> (dir: URL, fd: Int32) {
-        let name = UUID().uuidString
-        let making = instancesRoot.appendingPathComponent(".new-\(name)", isDirectory: true)
-        let dir = instancesRoot.appendingPathComponent(name, isDirectory: true)
-        try PrivateDirectory.make(making, durableFrom: durableFrom, unconfirmed: &unconfirmedFolders,
-                                  syncParent: { [unowned self] in try self.syncFolder($0) })
-        let lockPath = making.appendingPathComponent("session.lock").path
-        let fd = open(lockPath, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         while flock(fd, LOCK_EX | LOCK_NB) != 0 {
             let e = errno
             if e == EINTR { continue }
             close(fd)
-            throw POSIXError(POSIXErrorCode(rawValue: e) ?? .EIO)
+            if e == EWOULDBLOCK {
+                notWriter = Self.inUseReason
+                return .inUse
+            }
+            let why = "its lock file couldn’t be locked: \(String(cString: strerror(e)))"
+            notWriter = why
+            return .failed(why)
         }
-        guard rename(making.path, dir.path) == 0 else {
-            let e = errno
-            close(fd)
-            throw POSIXError(POSIXErrorCode(rawValue: e) ?? .EIO)
-        }
-        return (dir, fd)
+        writerFD = fd
+        return .claimed
     }
-
-    /// A regular file's bytes (no link followed, never blocking), or nil.
-    static func readRegularFile(_ path: String) -> Data? {
-        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard fd >= 0 else { return nil }
-        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-        var st = stat()
-        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
-        return try? handle.readToEnd() ?? Data()
-    }
-
-    public static let lostReason = "its lock file was replaced, so another Owlink may be using it"
     public static let inUseReason = "another Owlink is using it"
     var journalFile: URL { directory.appendingPathComponent("pending-buffers.json") }
 
@@ -814,30 +615,10 @@ public final class SessionStore: @unchecked Sendable {
     /// returned for the caller to reopen. When neither works, or the
     /// folder can't be listed, `hold` says why and the store neither
     /// replaces the session file nor prunes until the next launch.
-    ///
-    /// The session folder's writer then adopts dead Owlinks' instance
-    /// stores (`instances/*` whose lock it can take), before the caller
-    /// expires or prunes anything: their unsaved texts are written here,
-    /// journaled, and returned with the rest (their tabs in a window of
-    /// their own, their closed tabs on the closed list, loose texts in
-    /// `recovered`). Each is removed only after a commit here (`save`);
-    /// one that couldn't be read whole is kept. A live one (its lock
-    /// held) is left alone.
     public func loadForLaunch(now: Date = Date()) -> LaunchLoad {
         lock.lock(); defer { lock.unlock() }
         // Not the writer: the other Owlink's session is its own to restore.
-        if notWriterReason != nil || instanceDir != nil { return .none }
-        // Lost since the claim: no session folder of ours to read or adopt into.
-        if claimed, !lockStillHeld() {
-            _ = try? ensureWriter()
-            return .none
-        }
-        let load = loadForLaunchUnlocked(now: now)
-        guard claimed, writerFD >= 0, instanceDir == nil, adoptsInstances, hold == nil else { return load }
-        return adoptInstances(into: load)
-    }
-
-    private func loadForLaunchUnlocked(now: Date) -> LaunchLoad {
+        if notWriter != nil { return .none }
         var journal = readJournal(journalFile)
         var st = stat()
         journalAbsentAtLaunch = lstat(journalFile.path, &st) != 0 && errno == ENOENT
@@ -1061,7 +842,7 @@ public final class SessionStore: @unchecked Sendable {
     /// and the caller prunes nothing).
     public func save(_ session: Session, requiring needs: [UUID: BufferNeed] = [:]) throws {
         lock.lock(); defer { lock.unlock() }
-        try ensureWriter()
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         if let hold { throw SessionStoreError.held(hold) }
         let missing = needs.filter { id, need in
             if held.contains(id) { return false }
@@ -1125,15 +906,6 @@ public final class SessionStore: @unchecked Sendable {
             var st = stat()
             return lstat(directory.appendingPathComponent(name).path, &st) == 0 || errno != ENOENT
         })
-        // Dead Owlinks' instance stores launch adopted: what was taken
-        // from them is named in this commit (or the user let it go since),
-        // and on the disk, so they can go. Only while their lock is still
-        // the file at its path (else left for the next launch).
-        for o in orphansToRemove {
-            if Self.sameFile(o.fd, o.dir.appendingPathComponent("session.lock").path) { try? fm.removeItem(at: o.dir) }
-            close(o.fd)
-        }
-        orphansToRemove = []
     }
 
     /// Writes tab `id`'s unsaved text. `open`: the tab is open (false: a
@@ -1142,19 +914,15 @@ public final class SessionStore: @unchecked Sendable {
     /// succeeded (`BufferNeed.written`).
     public func writeBuffer(_ id: UUID, text: String, open: Bool = true, sequence: Int? = nil) throws {
         lock.lock(); defer { lock.unlock() }
-        try ensureWriter()
-        try writeBufferUnlocked(id, data: Data(text.utf8), open: open)
-        if let sequence { writtenSequence[id] = max(writtenSequence[id] ?? Int.min, sequence) }
-    }
-
-    private func writeBufferUnlocked(_ id: UUID, data: Data, open: Bool) throws {
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         try ensureDirectory()
         try injectedFailure()
         // Journaled before the buffer exists, so a buffer is never on
         // disk unnamed by both the session and the journal, nor written
         // for a reopened tab the session still lists as closed.
         try journal(id, reopened: open)
-        try writeDurably(data, to: bufferURL(id))
+        try writeDurably(Data(text.utf8), to: bufferURL(id))
+        if let sequence { writtenSequence[id] = max(writtenSequence[id] ?? Int.min, sequence) }
     }
 
     /// File › Reopen Closed Tab brought `id` back: journaled at once, so
@@ -1162,7 +930,7 @@ public final class SessionStore: @unchecked Sendable {
     /// the next commit (its closing date could expire it meanwhile).
     public func noteReopened(_ id: UUID) throws {
         lock.lock(); defer { lock.unlock() }
-        try ensureWriter()
+        if let notWriter { throw SessionStoreError.held(notWriter) }
         guard committedClosed.contains(id), journalStale || !pendingReopened.contains(id) else { return }
         try ensureDirectory()
         try injectedFailure()
@@ -1317,7 +1085,7 @@ public final class SessionStore: @unchecked Sendable {
     /// set: launch couldn't tell which buffers are pending then.
     public func removeBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
-        guard (try? ensureWriter()) != nil, hold == nil, !held.contains(id) else { return }
+        guard notWriter == nil, hold == nil, !held.contains(id) else { return }
         try? fm.removeItem(at: bufferURL(id))
     }
 
@@ -1325,8 +1093,7 @@ public final class SessionStore: @unchecked Sendable {
     /// commit). Never held ones, and nothing at all while `hold` is set.
     public func pruneBuffers(keeping ids: Set<UUID>) {
         lock.lock(); defer { lock.unlock() }
-        // Never the session folder without its lock verified just now.
-        guard (try? ensureWriter()) != nil, hold == nil else { return }
+        guard notWriter == nil, hold == nil else { return }
         let keep = ids.union(held)
         guard let files = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else { return }
         for f in files where f.pathExtension == "txt" {
@@ -1334,112 +1101,6 @@ public final class SessionStore: @unchecked Sendable {
                 try? fm.removeItem(at: f)
             }
         }
-    }
-
-    /// What launch took from dead Owlinks' instance stores.
-    private struct Adopted {
-        var open: [SessionTab] = []
-        var closed: [SessionTab] = []
-        var loose: [UUID] = []
-        var isEmpty: Bool { open.isEmpty && closed.isEmpty && loose.isEmpty }
-    }
-
-    /// `load` with the dead instance stores' unsaved texts added
-    /// (`loadForLaunch`).
-    private func adoptInstances(into load: LaunchLoad) -> LaunchLoad {
-        var taken = Set(pending).union(held)
-        switch load {
-        case .none: break
-        case .session(let s, let r):
-            taken.formUnion(s.allTabs.map(\.id) + (s.closedTabs ?? []).map(\.id) + (s.heldBuffers ?? []) + r)
-        case .recover(_, let b): taken.formUnion(b)
-        }
-        let found = adoptOrphans(taken: &taken)
-        guard !found.isEmpty else { return load }
-        switch load {
-        case .none:
-            return .session(Session(windows: found.open.isEmpty ? [] : [SessionWindow(tabs: found.open)],
-                                    closedTabs: found.closed.isEmpty ? nil : found.closed), recovered: found.loose)
-        case .session(var s, let r):
-            if !found.open.isEmpty { s.windows.append(SessionWindow(tabs: found.open)) }
-            if !found.closed.isEmpty { s.closedTabs = (s.closedTabs ?? []) + found.closed }
-            return .session(s, recovered: r + found.loose)
-        case .recover(let aside, let b):
-            return .recover(setAside: aside, buffers: b + found.open.map(\.id) + found.closed.map(\.id) + found.loose)
-        }
-    }
-
-    /// Every instance store in `instances/` whose lock this store can take
-    /// (its Owlink has ended): its session read as a launch would (its
-    /// journal applied), and each unsaved text in it written here,
-    /// journaled, under its own id (a new one if that id is taken here by
-    /// other text; skipped if the same text is here already). A store
-    /// whose texts were all taken is kept locked for removal after the
-    /// next commit; one with a text that couldn't be read or written, or
-    /// a session that couldn't be read, is left as it is.
-    private func adoptOrphans(taken: inout Set<UUID>) -> Adopted {
-        var out = Adopted()
-        guard let names = try? fm.contentsOfDirectory(atPath: instancesRoot.path) else { return out }
-        for name in names.sorted() where UUID(uuidString: name) != nil {
-            let dir = instancesRoot.appendingPathComponent(name, isDirectory: true)
-            var st = stat()
-            guard lstat(dir.path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR else { continue }
-            let lockPath = dir.appendingPathComponent("session.lock").path
-            let fd = open(lockPath, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else { continue }
-            var r: Int32
-            repeat { r = flock(fd, LOCK_EX | LOCK_NB) } while r != 0 && errno == EINTR
-            // Held: that Owlink is running. Left alone.
-            guard r == 0, Self.sameFile(fd, lockPath) else { close(fd); continue }
-            let orphan = SessionStore(directory: dir, durableFrom: durableFrom)
-            var whole = true
-            var items: [(tab: SessionTab?, id: UUID, closed: Bool)] = []
-            switch orphan.loadForLaunch() {
-            case .none: break
-            case .session(let s, let rec):
-                items = s.allTabs.filter(\.hasBuffer).map { ($0, $0.id, false) }
-                    + (s.closedTabs ?? []).filter(\.hasBuffer).map { ($0, $0.id, true) } + rec.map { (nil, $0, false) }
-                let named = Set(items.map(\.id))
-                // Its held ids: text it couldn't read (kept there), or the
-                // session folder's own held buffers it carried the names of.
-                items += (s.heldBuffers ?? []).filter { !named.contains($0) && orphan.bufferExists($0) }.map { (nil, $0, false) }
-            case .recover(let aside, let bufs):
-                // Its session couldn't be read: its texts are taken, it stays.
-                if aside != nil { whole = false }
-                items = bufs.map { (nil, $0, false) }
-            }
-            if orphan.hold != nil { whole = false }
-            for item in items {
-                switch orphan.readBufferResult(item.id) {
-                case .text(let text):
-                    var id = item.id
-                    if taken.contains(id) || bufferExists(id) {
-                        if taken.contains(id), case .text(let mine) = readBufferResult(id), mine == text { continue }
-                        id = UUID()
-                    }
-                    do {
-                        try writeBufferUnlocked(id, data: Data(text.utf8), open: !item.closed)
-                    } catch {
-                        FileHandle.standardError.write(Data("session: adopting \(item.id) from \(dir.path) failed: \(error)\n".utf8))
-                        whole = false
-                        continue
-                    }
-                    taken.insert(id)
-                    adoptedCount += 1
-                    if var tab = item.tab {
-                        tab.id = id
-                        tab.hasBuffer = true
-                        if item.closed { out.closed.append(tab) } else { out.open.append(tab) }
-                    } else {
-                        out.loose.append(id)
-                    }
-                case .missing: continue
-                case .unreadable: whole = false
-                }
-            }
-            if whole { orphansToRemove.append((dir, fd)) } else { close(fd) }
-        }
-        return out
     }
 }
 

@@ -40,10 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var recoveryProblems: [String] = []
     /// When the last session save started (system uptime).
     private var lastSessionSave: TimeInterval = -.infinity
-    /// `SessionStore.moves` last seen: when it goes up, the store writes
-    /// somewhere else now (its own instance store), so every open tab's
-    /// text is written there again from memory (`noteStoreMoves`).
-    private var seenStoreMoves = 0
     /// A first save after a quiet spell is waiting for the first frame.
     private var leadingSaveAfterFirstFrame = false
     private var appearanceObservation: NSKeyValueObservation?
@@ -116,35 +112,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// each commit and prune against their own snapshot, and one could
     /// delete the other's newest unsaved text. An Owlink that can't claim
     /// it (another one, launched first, is running on it: `open -n`, a
-    /// second copy of the app) gets a store of its own in the session
-    /// folder (`instances/<uuid>/`): it restores nothing and leaves the
-    /// other Owlink's work alone, but backs up its own unsaved text there
-    /// as usual (timed saves, hot close, quit), so a crash keeps it, and
-    /// the next Owlink that opens the session folder as its writer brings
-    /// it back. It says so at launch. Only if even that store can't be
-    /// made does it run without a session: then its text is only in
-    /// memory, and its quit asks first (Save As, Keep Owlink Open, Quit
-    /// Anyway). The session folder is never claimed later in the run: a
-    /// store claimed late would commit a snapshot without the other's tabs.
-    /// The same move happens later if the folder's lock file is replaced
-    /// under this Owlink (a restore from a backup): another Owlink may be
-    /// its writer now (`noteStoreMovedToInstance`).
+    /// second copy of the app) runs without a session: it restores
+    /// nothing, and backs up, saves and prunes nothing in that folder, so
+    /// the other Owlink's work is left alone. It says so at launch; its
+    /// own unsaved text is kept only in memory, so its quit asks first
+    /// (as when the session can't be written: Save As, Keep Owlink Open,
+    /// Quit Anyway). The claim is never retried in the same run: a store
+    /// claimed late would commit a snapshot without the other's tabs.
+    /// Handing the open request to the running Owlink instead would need
+    /// both to agree on a channel; staying open and saying so is the
+    /// least surprising for a window the user already asked for.
     private func claimSessionStore() {
         // A run that neither restores nor saves the session touches nothing there.
         guard env["CEDRIC_NO_SESSION_SAVE"] != "1" || env["CEDRIC_NO_RESTORE"] != "1" else { return }
-        // A run that saves nothing would write dead Owlinks' text here and never commit it.
-        store.adoptsInstances = env["CEDRIC_NO_SESSION_SAVE"] != "1"
-        store.onMovedToInstance = { [weak self] dir in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.noteStoreMovedToInstance(dir) } }
-        }
         let why: String
         switch store.claimWriter() {
         case .claimed: return
-        case .instance(let dir):
-            print("session: own instance store: \(dir.path)")
-            fflush(stdout)
-            noteRecoveryProblem(String(localized: "Another Owlink is already running with the session in \(store.mainDirectory.path), so this one doesn’t restore it. This Owlink’s unsaved text is backed up in \(dir.path), and the next Owlink to open that session brings it back."))
-            return
         case .inUse:
             why = String(localized: "Another Owlink is already running with the session in \(store.directory.path), so this one doesn’t restore it or back up its unsaved text there. Save your tabs here with File › Save As…, or work in the other Owlink.")
         case .failed(let reason):
@@ -153,26 +136,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         print("session: not the writer: \(store.notWriter ?? "-")")
         fflush(stdout)
         noteRecoveryProblem(why)
-    }
-
-    /// The session folder's lock file was replaced while this Owlink ran
-    /// (SessionStore.ensureWriter): its text goes to its own instance
-    /// store from now on.
-    private func noteStoreMovedToInstance(_ dir: URL) {
-        print("session: lock lost, own instance store: \(dir.path)")
-        fflush(stdout)
-        noteStoreMoves()
-        noteRecoveryProblem(String(localized: "The session in \(store.mainDirectory.path) was replaced while Owlink was running (another Owlink may be using it now). This Owlink’s unsaved text is backed up in \(dir.path) from now on, and the next Owlink to open that session brings it back."))
-        scheduleSessionSave()
-    }
-
-    /// After the store moved (`SessionStore.moves`): every open tab's
-    /// text counts as not written, so the next save writes it there.
-    func noteStoreMoves() {
-        let n = store.moves
-        guard n != seenStoreMoves else { return }
-        seenStoreMoves = n
-        for t in tabs { t.doc.sessionChangeCount = -1 }
     }
 
     /// A fresh `cedric` script token every launch (the old one counts for
@@ -1048,7 +1011,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let why = store.notWriter {
             return quitting && (firstUnsavedTab() != nil || !closedTexts.isEmpty) ? why : nil
         }
-        noteStoreMoves()
         lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()
@@ -1351,9 +1313,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         var session: Session
         var recovered: [UUID]
         let load = store.loadForLaunch()
-        if store.adoptedFromInstances > 0 {
-            noteRecoveryProblem(String(localized: "Owlink brought back \(store.adoptedFromInstances) unsaved text(s) from another Owlink that stopped while this one’s session was in use."))
-        }
         if let hold = store.hold {
             noteRecoveryProblem(String(localized: "Owlink isn’t saving its session this run, and keeps everything in \(store.directory.path) as it is: \(hold). Save your unsaved tabs with File › Save As…."))
         }
