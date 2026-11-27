@@ -1,8 +1,10 @@
 # Owlink 0.6.0: known limits
 
-These are review findings that 0.6.0 does not fix. Each was weighed against
-0.5.3, and none is new in 0.6. Session reliability (e) is otherwise covered in
-architecture.md (held buffers, the reopen journal, durable saves).
+These are review findings that 0.6.0 does not fix. The session and same-file
+items were weighed against 0.5.3; the last section records leftovers already
+known in 0.5.4. None of these is new in 0.6. Session reliability (e) is
+otherwise covered in architecture.md (held buffers, the reopen journal,
+durable saves).
 
 ## Session recovery (review 27e musts 2-4, review 30e/31e)
 
@@ -73,3 +75,34 @@ race. None writes user text to the wrong file.
   maintainer's own account (no temp session).
 - The `recent` check can add entries to the maintainer's Open Recent list and
   replay a snapshot. It is now opt-in and not run by default.
+
+## Leftovers from 0.5.4 (still open, not worse)
+
+These shipped as known leftovers in 0.5.4. They were checked against the 0.5.4
+release notes and history, and against `feat/0.6-speed` at the time of writing:
+no fix landed in 0.6.
+
+1. **Undo after Revert keeps the new encoding.** After Revert to Saved or a
+   reload, ⌘Z brings the old text back but keeps the new version's encoding
+   and BOM. A later save writes those characters with the new encoding. This
+   was left open during the 0.5.4 BOM-per-version work (the encoding does not
+   follow undo the way line breaks do). No fix commit is in 0.6;
+   `FileCommands.swift` and `FileTail.swift` are unchanged vs 0.5.4 / main
+   for this path.
+
+2. **UTF-16 Follow appends still go through Foundation.** UTF-8 Follow
+   appends at a nonzero offset use `TextCodec.isValidUTF8` and
+   `String(decoding:)`, which keep U+FEFF on every macOS. Other encodings,
+   including UTF-16, still use `String(data:encoding:)` in
+   `FileTail.decodeAppended`. U+FEFF was kept on the machines tried for
+   0.5.4; that UTF-16 path is unverified on other macOS versions.
+   `Sources/CedricCore/FileTail.swift` is unchanged vs 0.5.4 / main.
+
+3. **Inline prediction is still unverified.** After the 0.5.4 spelling-off
+   change, a manual check on an unlocked Apple Intelligence Mac was left
+   open: grey inline predictions should still appear and be accepted, and
+   Writing Tools should still rewrite a selection, with spelling off. An
+   automated probe was inconclusive because the screen was locked. The
+   in-app `SpellTypesCheck` still compares property values and menu
+   validation, which can pass if the feature itself has stopped working.
+   That manual check was not run for 0.5.4 and has not been run for 0.6.
