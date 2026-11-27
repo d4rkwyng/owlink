@@ -27,7 +27,6 @@ import WebKit
 ///   CEDRIC_TEST_ZOOM_MENU=3       open the front tab's status-bar zoom pop-up after 3 s (screenshots)
 ///   CEDRIC_TEST_TYPE=text         type this at the end of the frontmost tab (session tests)
 ///   CEDRIC_TEST_TYPE_UNTITLED=t   open a new untitled tab and type this
-///   CEDRIC_TEST_TYPE_UNTITLED_DELAY=s  ... that many seconds after launch
 ///   CEDRIC_TEST_DETACH_PREVIEW=x,y,w,h  detach the front tab's preview to this frame (session tests)
 ///   CEDRIC_TEST_DOCK_PREVIEW=width  dock the front tab's Markdown preview at this width (session tests)
 ///   CEDRIC_TEST_CLOSE_LAST=1      then close the newest tab (as ⌘W does; session tests)
@@ -198,23 +197,9 @@ enum DevHooks {
             tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
             tab.textView.insertText(t, replacementRange: tab.textView.selectedRange())
         }
-        // CEDRIC_TEST_TYPE_UNTITLED_DELAY=s: that many seconds after launch
-        // (crash-check 13: a second Owlink is running by then).
-        let untitledDelay = env["CEDRIC_TEST_TYPE_UNTITLED_DELAY"].flatMap(Double.init)
         if let t = env["CEDRIC_TEST_TYPE_UNTITLED"] {
-            let typeUntitled = {
-                app.newTab(nil)
-                if let tab = app.tabs.last { tab.textView.insertText(t, replacementRange: NSRange(location: 0, length: 0)) }
-            }
-            if let untitledDelay {
-                DispatchQueue.main.asyncAfter(deadline: .now() + untitledDelay) {
-                    typeUntitled()
-                    print(String(format: "typed: t=%.3f", now()))
-                    fflush(stdout)
-                }
-            } else {
-                typeUntitled()
-            }
+            app.newTab(nil)
+            if let tab = app.tabs.last { tab.textView.insertText(t, replacementRange: NSRange(location: 0, length: 0)) }
         }
         // Crash check: two changes in one turn, then steady typing (the
         // leading save must not be put off by it).
@@ -232,7 +217,7 @@ enum DevHooks {
                 }
             } }
         }
-        if env["CEDRIC_TEST_TYPE"] != nil || env["CEDRIC_TEST_TYPE_UNTITLED"] != nil && untitledDelay == nil {
+        if env["CEDRIC_TEST_TYPE"] != nil || env["CEDRIC_TEST_TYPE_UNTITLED"] != nil {
             // When the typing happened, for crash-check's "killed at once".
             print(String(format: "typed: t=%.3f", now()))
             fflush(stdout)

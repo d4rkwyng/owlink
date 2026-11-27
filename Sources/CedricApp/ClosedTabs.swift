@@ -9,7 +9,7 @@ import CedricCore
 /// changes and all. The list keeps `ClosedTabs.limit` tabs, dropping ones
 /// without unsaved text first.
 extension AppDelegate {
-    private var sessionSaving: Bool { DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1" && store.notWriter == nil }
+    private var sessionSaving: Bool { DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1" }
 
     /// Whether this tab's text must be kept to reopen it (unsaved edits,
     /// or an untitled tab with text).
