@@ -86,9 +86,14 @@ extension AppDelegate {
     }
 
     @objc func reopenClosedTab(_ sender: Any?) {
-        guard let st = closedTabs.last else { NSSound.beep(); return }
-        if st.pdf != nil { closedTabs.removeLast(); reopenClosedPDF(st); return }
-        if st.image != nil || st.office != nil || st.certificate != nil { closedTabs.removeLast(); reopenClosedViewer(st); return }
+        // The newest entry not passed over (an unreadable one, this run);
+        // when all were, from the newest again.
+        closedTabsPassedOver.formIntersection(closedTabs.map(\.id))
+        if closedTabs.allSatisfy({ closedTabsPassedOver.contains($0.id) }) { closedTabsPassedOver = [] }
+        guard let st = closedTabs.last(where: { !closedTabsPassedOver.contains($0.id) }) else { NSSound.beep(); return }
+        closedTabsPassedOver.remove(st.id)
+        if st.pdf != nil { closedTabs.removeAll { $0.id == st.id }; reopenClosedPDF(st); return }
+        if st.image != nil || st.office != nil || st.certificate != nil { closedTabs.removeAll { $0.id == st.id }; reopenClosedViewer(st); return }
         // A restored tab for the same file may not be built yet: build them
         // all first, so the check below sees it and it isn't opened twice.
         finishRestore()
@@ -109,8 +114,11 @@ extension AppDelegate {
             case .missing: store.releaseBuffer(st.id)
             case .unreadable(let why):
                 store.holdBuffer(st.id)
+                closedTabsPassedOver.insert(st.id)
                 let name = st.untitledName ?? st.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
-                noteRecoveryProblem(String(localized: "Owlink couldn’t read the unsaved text of “\(name)” (\(why)), so it didn’t reopen it. It is kept as \(store.bufferURL(st.id).path) and stays in File › Reopen Closed Tab."))
+                let older = closedTabs.contains { !closedTabsPassedOver.contains($0.id) }
+                    ? " " + String(localized: "Reopen Closed Tab again brings back the tab closed before it.") : ""
+                noteRecoveryProblem(String(localized: "Owlink couldn’t read the unsaved text of “\(name)” (\(why)), so it didn’t reopen it. It is kept as \(store.bufferURL(st.id).path) and stays in File › Reopen Closed Tab.") + older)
                 NSSound.beep()
                 return
             }

@@ -592,6 +592,53 @@ extension DevChecks {
                 var isDir: ObjCBool = false
                 expect(fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue, "and its place is left as it is")
                 try? fm.removeItem(atPath: path)
+                // An older closed tab, then a newer one whose buffer stays
+                // unreadable: ⇧⌘T must get past the newer one.
+                if let older = app.open(write("reopen-older.txt", "older\n")) {
+                    sized(older)
+                    focus(older)
+                    older.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                    type(" edited")
+                    key("w", [.command])
+                }
+            },
+            sync {
+                if let newer = app.open(write("reopen-newer.txt", "newer\n")) {
+                    sized(newer)
+                    focus(newer)
+                    newer.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                    type(" edited")
+                    key("w", [.command])
+                }
+            },
+            sync {
+                guard let newer = app.closedTabs.last, newer.path?.hasSuffix("reopen-newer.txt") == true,
+                      let older = app.closedTabs.dropLast().last, older.path?.hasSuffix("reopen-older.txt") == true else {
+                    expect(false, "two closed tabs, newer last", app.closedTabs.compactMap(\.path).joined(separator: ","))
+                    return
+                }
+                expect(app.store.readBuffer(newer.id) == "newer edited\n", "the newer one's edit is in its buffer")
+                try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: app.store.bufferURL(newer.id).path)
+                key("t", [.command, .shift])
+                expect(!app.tabs.contains { $0.doc.id == newer.id }, "⇧⌘T: the unreadable newest isn't reopened")
+                expect(app.store.heldBuffers.contains(newer.id), "and is held")
+                key("t", [.command, .shift])
+                let back = app.tabs.first { $0.doc.id == older.id }
+                expect(back?.text == "older edited\n" && back?.doc.isDirty == true, "⇧⌘T again: the tab closed before it comes back",
+                       back?.text ?? "-")
+                expect(app.closedTabs.last?.id == newer.id && app.closedTabs.last?.hasBuffer == true,
+                       "the unreadable one stays on the closed list")
+                app.saveSession(sync: true)
+                expect(app.store.load()?.heldBuffers?.contains(newer.id) == true, "held in the session")
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: app.store.bufferURL(newer.id).path)
+                expect(app.store.readBuffer(newer.id) == "newer edited\n", "its bytes are kept",
+                       app.store.readBuffer(newer.id) ?? "-")
+                // Once every other entry has been tried, ⇧⌘T tries it again (readable now).
+                for _ in 0..<app.closedTabs.count where !app.tabs.contains(where: { $0.doc.id == newer.id }) {
+                    key("t", [.command, .shift])
+                }
+                let again = app.tabs.first { $0.doc.id == newer.id }
+                expect(again?.text == "newer edited\n", "readable again: ⇧⌘T brings it back", again?.text ?? "-")
             },
         ])
     }

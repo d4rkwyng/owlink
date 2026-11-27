@@ -55,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// buffer files. `closedTexts` holds the text in memory instead when
     /// session saving is off (the checks).
     var closedTabs: [SessionTab] = []
+    /// Closed tabs ⇧⌘T couldn't read this run: passed over by the next
+    /// ⇧⌘T (so one that stays unreadable doesn't block every older one),
+    /// kept on the list with their buffers held. Once every entry has
+    /// been passed over, ⇧⌘T tries them again from the newest.
+    var closedTabsPassedOver = Set<UUID>()
     /// Files' word goals (the stats popover), from and to the session.
     var fileWordGoals: [FileWordGoal] = []
     /// Words written today, across documents (the stats popover's second ring).
