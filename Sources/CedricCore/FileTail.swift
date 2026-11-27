@@ -308,13 +308,18 @@ public final class FileTail: @unchecked Sendable {
             // Shorter than what was read (cut since the fstat): the next
             // check resets.
             guard let bytes = try fh.read(upToCount: Int(size - start)), UInt64(bytes.count) > heldCount else { return }
-            // A UTF-8 BOM written to a file of which nothing is shown yet
+            // A BOM written to a file of which nothing is shown yet
             // (followed empty, or a reset to nothing): that version's own
             // BOM, so the whole file is read as a reset, which decodes it
             // and carries its encoding, rather than appended as text
             // (U+FEFF on one macOS, dropped on another, and the tab kept
-            // the encoding it had: a save lost the BOM).
-            if start == 0, encoding.base == .utf8, bytes.starts(with: TextEncoding.utf8BOM.bom) {
+            // the encoding it had: a save lost the BOM). UTF-8's, or the
+            // UTF-16 byte order's: 0.6.1 before Astra's review checked
+            // UTF-8's only, so a UTF-16 log truncated before its writer
+            // wrote the new BOM showed it as U+FEFF, stamped as the file,
+            // and an unedited save wrote two BOMs. A BOM split across
+            // writes is held (half a character) until it is whole.
+            if start == 0, !encoding.familyBOM.isEmpty, bytes.starts(with: encoding.familyBOM) {
                 resetPending = true
                 check()
                 return

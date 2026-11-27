@@ -73,6 +73,28 @@ import Testing
         return (text, encoding, ending, events.all.last?.1, try [UInt8](Data(contentsOf: url)), resets)
     }
 
+    @Test(arguments: [TextEncoding.utf16LE, .utf16BE])
+    func aNewBOMAfterATruncationIsTheNewVersionsNotText(enc: TextEncoding) throws {
+        let be = enc == .utf16BE
+        func u(_ s: String) -> [UInt8] { Self.units(s, bigEndian: be) }
+        let bom = u("\u{FEFF}")
+        let cases: [(String, [[UInt8]])] = [
+            ("BOM and text in one write", [bom + u("new\n")]),
+            ("the BOM alone, then text", [bom, u("new\n")]),
+            ("the BOM split 1+1, text with the second byte", [Array(bom.prefix(1)), Array(bom.suffix(1)) + u("new\n")]),
+            ("the BOM split 1+1, then text", [Array(bom.prefix(1)), Array(bom.suffix(1)), u("new\n")]),
+        ]
+        for (note, writes) in cases {
+            let r = try Self.followTruncated(bom + u("old line\n"), as: enc, writes: writes)
+            #expect(Self.scalars(r.text) == Self.scalars("new\n"), "\(note) [\(enc)]: the BOM isn't shown as text")
+            #expect(r.encoding == enc, "\(note) [\(enc)]: the new version's BOM is its encoding's")
+            #expect(r.disk == bom + u("new\n"))
+            #expect(r.last?.bytes == UInt64(r.disk.count), "\(note) [\(enc)]: every byte shown")
+            let saved = try #require(DocumentFormat(encoding: r.encoding, lineEnding: r.ending).encoded(r.text))
+            #expect([UInt8](saved) == r.disk, "\(note) [\(enc)]: an unedited save writes the file back, one BOM")
+        }
+    }
+
     /// Truncated, then written again without a BOM: appended as text, and
     /// saved without one (the empty reset is UTF-16 without a BOM).
     @Test(arguments: [TextEncoding.utf16LE, .utf16BE])
