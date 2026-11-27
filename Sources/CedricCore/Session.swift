@@ -377,6 +377,9 @@ public final class SessionStore: @unchecked Sendable {
     /// Check builds only (inert otherwise): every write fails, as on a
     /// full disk (`CEDRIC_TEST_SESSION_WRITE_FAIL`, the quitfail check).
     public var checkFailWrites = false
+    /// Check builds only: every journal write fails, nothing else (the
+    /// quitjournalfail check: a quit whose final save needs a journal entry).
+    public var checkFailJournal = false
     /// Check builds only: every write's flush to disk fails (the bytes
     /// were written, the disk didn't confirm them; quitsyncfail).
     public var checkFailSync = false
@@ -878,6 +881,7 @@ public final class SessionStore: @unchecked Sendable {
         // says which buffers are pending), but beside it. With none found,
         // in the main journal, unnumbered (`journalAbsentAtLaunch`).
         let main = hold == nil || journalAbsentAtLaunch
+        if DevEnvironment.checksEnabled, checkFailJournal { throw CocoaError(.fileWriteNoPermission) }
         try writeDurably(encodeJournal(ids, reopened: again, numbered: hold == nil), to: main ? journalFile : heldJournalFile)
         pending = ids
         pendingReopened = again

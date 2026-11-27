@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitjournalfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -18,6 +18,7 @@ extension DevChecks {
         case "closefail": closeAfterFailedSave(app)
         case "quitfail": quitAfterFailedSave(app)
         case "quitsyncfail": quitAfterFailedFlush(app)
+        case "quitjournalfail": quitAfterFailedJournal(app)
         case "backupfail": backupFailureNotice(app)
         case "reopenfail": reopenUnreadableClosedTab(app)
         case "closedmemory": closedTextOnlyInMemory(app)
@@ -508,6 +509,66 @@ extension DevChecks {
                 expect(buffer() == "on disk one two\n", "the latest text is in its buffer", buffer() ?? "-")
                 expect(app.store.load()?.allTabs.contains { $0.id == file.doc.id && $0.hasBuffer } == true, "and the session names it")
                 AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// Quit while only the journal can't be written (SessionStore.checkFailJournal):
+    /// a new untitled tab's text needs a journal entry before its buffer,
+    /// so the final save fails. Keep Owlink Open and Save As cancel the
+    /// quit, Try Again asks again while it still fails, and only Quit
+    /// Anyway lets it go on. Then, with only a closed tab's text at risk
+    /// (kept in memory, its close couldn't write it), Save As reopens that
+    /// tab and saves it. Needs session saving on (run like closefail).
+    static func quitAfterFailedJournal(_ app: AppDelegate) {
+        app.newTab(nil)
+        let fresh = app.tabs.last!
+        let savedAs = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("quit-journal-saved-\(getpid()).txt")
+        try? FileManager.default.removeItem(at: savedAs)
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(fresh)
+                type("never journaled")
+                app.store.checkFailJournal = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "a journal failure at quit: Keep Owlink Open cancels it")
+                expect(asked.count == 1 && !app.terminating, "asked once, not quitting", "\(asked)")
+                expect(app.store.readBuffer(fresh.doc.id) == nil, "no buffer without its journal entry")
+                // Try Again while it still fails: asked again, never quits on its own.
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return asked.count < 3 ? .retry : .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "Try Again while it fails: still not quitting")
+                expect(asked.count == 3 && !app.terminating, "asked after every try", "\(asked.count)")
+                // Closed now, its write failing: the text is only in memory.
+                fresh.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[fresh.doc.id] == "never journaled", "closed: its text kept in memory",
+                       app.closedTexts[fresh.doc.id] ?? "-")
+                expect(!app.tabs.contains { $0.doc.isDirty || $0.doc.fileURL == nil && !$0.text.isEmpty },
+                       "no open tab has unsaved text")
+                asked = []
+                EditorWindowController.checkSaveAsURL = savedAs
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .saveAs }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel && asked.count == 1, "Save As cancels the quit")
+                let back = app.tabs.first { $0.doc.id == fresh.doc.id }
+                expect(back?.text == "never journaled", "and reopens the closed tab from memory", back?.text ?? "-")
+            },
+            sync {
+                expect(EditorWindowController.checkSaveAsURL == nil, "Save As… ran on it")
+                expect((try? String(contentsOf: savedAs, encoding: .utf8)) == "never journaled", "and wrote its text",
+                       (try? String(contentsOf: savedAs, encoding: .utf8)) ?? "-")
+                try? FileManager.default.removeItem(at: savedAs)
+                // Unsaved text again, the journal still failing: only Quit Anyway quits.
+                app.newTab(nil)
+                if let another = app.tabs.last { focus(another); type("left by Quit Anyway") }
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .quitAnyway }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow && asked.count == 1, "Quit Anyway, asked: the quit goes on")
+                AppDelegate.checkQuitSaveChoice = nil
+                app.store.checkFailJournal = false
             },
         ])
     }

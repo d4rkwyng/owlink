@@ -220,6 +220,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if let t = firstUnsavedTab() {
                     t.window?.makeKeyAndOrderFront(nil)
                     DispatchQueue.main.async { _ = t.saveAs() }
+                } else if let c = closedTabs.last(where: { closedTexts[$0.id] != nil }) {
+                    // Only a closed tab's text kept in memory is at risk:
+                    // reopen it (from memory) and Save As that.
+                    saveAsClosedTab(c.id)
                 }
                 return false
             }
