@@ -7,8 +7,8 @@ import CedricCore
 /// app from any of those. Move copies the app into Applications
 /// (AppMover: the copy's signature is checked and only the copy loses its
 /// quarantine), then quits and reopens from there. Not Now asks again next
-/// launch; "Don't ask again" stops asking (a user default, also used by a
-/// test harness that launches a release copy from a temp folder).
+/// launch; "Don't ask again" with Not Now stops asking (the
+/// OwlinkMoveToApplicationsSuppressed user default).
 ///
 /// Not in a check build (it runs from .build or dist/ by design), and only
 /// once launch is done (after the first frame): the app is running, so
@@ -47,7 +47,7 @@ enum MoveToApplications {
         alert.suppressionButton?.title = String(localized: "Don’t ask again")
         NSApp.activate(ignoringOtherApps: true)
         let answer = alert.runModal()
-        if alert.suppressionButton?.state == .on {
+        if alert.suppressionButton?.state == .on && answer != .alertFirstButtonReturn {
             UserDefaults.standard.set(true, forKey: suppressKey)
         }
         guard answer == .alertFirstButtonReturn else { return }
@@ -125,5 +125,8 @@ enum MoveToApplications {
             return
         }
         NSApp.terminate(nil)
+        // Still here: the quit was cancelled (a save failed, Save As…).
+        // The helper reopens the new copy if Owlink quits within a minute.
+        report(String(localized: "Owlink is now in \(app.deletingLastPathComponent().path), but this window didn’t close. Quit Owlink and open it from there."))
     }
 }

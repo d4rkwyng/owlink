@@ -88,8 +88,9 @@ The release job makes two artifacts from the same notarized, stapled
   signed with the Developer ID, notarized and stapled
   (`Scripts/release-dmg.sh`), Gatekeeper assesses it and the app on it, and
   `Scripts/smoke-launch.sh` launches the app copied out of it. The release
-  notes, the README and the manual lead with it; the Homebrew cask points at
-  it from 0.6.1 on.
+  notes, the README and the manual lead with it, and the Homebrew cask is to
+  point at it from 0.6.1 on (changed at release time, with the published
+  DMG's sha256).
 - **`Owlink-<version>.zip`, the Sparkle enclosure**, signed with
   `sign_update` as in 0.6.0, and still attached to the release.
 
@@ -150,7 +151,7 @@ A failure in 1–4 removes the staging copy and leaves everything else as it
 was. This is not a Gatekeeper bypass: it only runs in an app Gatekeeper has
 already let run (the user said Open on the first launch), and it never
 changes the download's, the disk image's or the translocated original's
-quarantine, or any Gatekeeper setting. "Don't ask again" stops the question
+quarantine, or any Gatekeeper setting. "Don't ask again", ticked with Not Now, stops the question
 (the `OwlinkMoveToApplicationsSuppressed` user default).
 
 ## Signing in CI

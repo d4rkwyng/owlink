@@ -131,6 +131,10 @@ if [ $DRY = 0 ]; then
     hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$MNT" "$DMG"
     spctl -a -vv -t exec "$MNT/Owlink.app"
     xcrun stapler validate "$MNT/Owlink.app"
+    # Detached before the check below mounts the image again.
+    hdiutil detach -quiet "$MNT" || hdiutil detach -quiet -force "$MNT"
+    rmdir "$MNT" 2>/dev/null || true
+    trap - EXIT
 fi
 # The checks again on the final, stapled image (stapling writes into it).
 run Scripts/make-dmg.sh --check "$DMG" "$APP"

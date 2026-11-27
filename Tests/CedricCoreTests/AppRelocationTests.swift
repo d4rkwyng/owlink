@@ -68,7 +68,7 @@ import Testing
 
     @Test func theRunningTestBundleIsNotTranslocated() {
         // Security.framework's answer for a real, non-translocated path.
-        #expect(Translocation.isTranslocated(Bundle.main.bundleURL) != true)
+        #expect(Translocation.isTranslocated(Bundle.main.bundleURL) == false)
     }
 
     @Test func theRelaunchCommandPassesThePathAsAnArgument() {
@@ -111,14 +111,17 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
     }
     func rename(_ from: URL, to: URL) throws {
         log.append("rename \(from.path) -> \(to.path)")
-        if fail.contains("rename") { throw Boom() }
+        if fail.contains("rename") && from.lastPathComponent.hasPrefix(".Owlink-moving") { throw Boom() }
         items.remove(from.path); items.insert(to.path)
     }
     func remove(_ url: URL) throws { log.append("rm \(url.path)"); items.remove(url.path) }
-    func trash(_ url: URL) throws {
+    func trash(_ url: URL) throws -> URL? {
         log.append("trash \(url.path)")
         if fail.contains("trash:\(url.path)") { throw Boom() }
         items.remove(url.path); trashed.append(url.path)
+        let t = "/Users/tester/.Trash/\(url.lastPathComponent)"
+        items.insert(t)
+        return URL(fileURLWithPath: t)
     }
     func removeQuarantine(under url: URL) throws {
         log.append("unquarantine \(url.path)")
@@ -266,6 +269,31 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: false) }
         #expect(fs.items == [Self.apps, Self.download])
+    }
+
+    @Test func aFailedRenameAfterReplacingPutsTheOldAppBackFromTheTrash() throws {
+        // The translocated-from-Applications case: the user's only copy must survive.
+        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.translocated], writable: [Self.apps])
+        fs.fail = ["rename"]
+        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.dest)), source: Self.translocated, fs: fs)
+        #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: false) }
+        #expect(fs.log.suffix(3) == [
+            "rename \(Self.staging) -> \(Self.dest)",
+            "rm \(Self.staging)",
+            "rename /Users/tester/.Trash/Owlink.app -> \(Self.dest)",
+        ])
+    }
+
+    @Test func aDestinationThatAppearedAfterThePlanIsNotReplacedWithoutAsking() throws {
+        let fs = FakeInstallFS(items: [Self.apps, Self.download], writable: [Self.apps])
+        let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
+        #expect(!p.destinationExists)
+        fs.items.insert(Self.dest)   // dropped in while the question was up
+        #expect(throws: AppMoveError.destinationExists(URL(fileURLWithPath: Self.dest))) {
+            try Self.mover(fs).install(p, replaceExisting: false)
+        }
+        #expect(fs.trashed.isEmpty)
+        #expect(!fs.items.contains(Self.staging))
     }
 
     @Test func anOriginalThatWontGoToTheTrashIsReportedButTheInstallStands() throws {

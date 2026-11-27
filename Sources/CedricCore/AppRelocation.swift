@@ -164,7 +164,8 @@ public protocol AppInstallFileSystem {
     func copy(_ from: URL, to: URL) throws
     func rename(_ from: URL, to: URL) throws
     func remove(_ url: URL) throws
-    func trash(_ url: URL) throws
+    /// Moves `url` to the Trash; where it went (nil if unknown).
+    @discardableResult func trash(_ url: URL) throws -> URL?
     /// Removes com.apple.quarantine under `url`. The mover only ever
     /// passes the staging copy it wrote.
     func removeQuarantine(under url: URL) throws
@@ -246,7 +247,7 @@ public struct AppMovePlan: Equatable, Sendable {
 ///  5. the original goes to the Trash when `plan.trashOriginal`. A
 ///     failure here is reported but the install stands.
 /// Any failure in 1–4 removes the staging copy and leaves everything else
-/// as it was (step 4 puts a trashed destination back when it can).
+/// as it was (step 4 puts a trashed destination back from the Trash).
 public struct AppMover {
     public var fs: AppInstallFileSystem
     public var makeStagingName: () -> String
@@ -284,14 +285,25 @@ public struct AppMover {
             dropStaging()
             throw AppMoveError.quarantineRemovalFailed(String(describing: error))
         }
+        var trashedDestination: URL?
         if fs.exists(plan.destination) {
-            do { try fs.trash(plan.destination) } catch {
+            // Something there the plan didn't expect (it appeared while the
+            // question was up): never replaced without the user's yes.
+            if !plan.destinationIsOriginal && !replaceExisting {
+                dropStaging()
+                throw AppMoveError.destinationExists(plan.destination)
+            }
+            do { trashedDestination = try fs.trash(plan.destination) } catch {
                 dropStaging()
                 throw AppMoveError.replaceFailed(String(describing: error))
             }
         }
         do { try fs.rename(staging, to: plan.destination) } catch {
             dropStaging()
+            // Put the replaced app back from the Trash.
+            if let t = trashedDestination, !fs.exists(plan.destination) {
+                try? fs.rename(t, to: plan.destination)
+            }
             throw AppMoveError.replaceFailed(String(describing: error))
         }
         var left: URL?
@@ -324,7 +336,11 @@ public struct LiveAppInstallFileSystem: AppInstallFileSystem {
     public func copy(_ from: URL, to: URL) throws { try fm.copyItem(at: from, to: to) }
     public func rename(_ from: URL, to: URL) throws { try fm.moveItem(at: from, to: to) }
     public func remove(_ url: URL) throws { try fm.removeItem(at: url) }
-    public func trash(_ url: URL) throws { try fm.trashItem(at: url, resultingItemURL: nil) }
+    @discardableResult public func trash(_ url: URL) throws -> URL? {
+        var out: NSURL?
+        try fm.trashItem(at: url, resultingItemURL: &out)
+        return out as URL?
+    }
     public func removeQuarantine(under url: URL) throws { try Quarantine.removeRecursively(under: url) }
     public func signatureIsValid(_ url: URL) -> Bool { CodeSignature.isValid(url) }
     public func isReadOnlyVolume(_ url: URL) -> Bool {

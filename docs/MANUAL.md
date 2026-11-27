@@ -53,8 +53,10 @@ If Owlink finds itself running from somewhere it can't update from (the
 disk image, Downloads, or a temporary copy macOS made because it wasn't
 moved with Finder, called App Translocation), it asks to **Move to
 Applications**. It copies itself there, takes the download marking off that
-new copy only, and reopens from Applications; **Not Now** asks again next
-time, **Don't ask again** stops asking.
+new copy only, moves the download to the Trash (a disk image is left
+alone; an Owlink already in Applications goes to the Trash only if you
+say Replace), and reopens from Applications; **Not Now** asks again next
+time; tick **Don't ask again** with Not Now to stop asking.
 
 Owlink checks for a new version
 about once a day and asks before installing it (Owlink › Check for
