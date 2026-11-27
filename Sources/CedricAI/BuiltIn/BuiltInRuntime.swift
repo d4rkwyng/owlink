@@ -488,13 +488,23 @@ public enum LlamaRuntime {
 public enum ModelMemoryGate {
     /// Weights, plus KV/compute buffers estimated for a 4K context (at least
     /// 400 MB), scaled with contextTokens, plus 256 MB slack.
-    public static func bytesNeeded(forModelOfSize size: Int64, contextTokens: Int32 = LlamaRuntime.contextTokens) -> Int64 {
+    /// A conservative default when the caller has no model window yet:
+    /// 8K on iOS (jetsam), else the largest 0.6.0 built-in step (16K).
+    public static var defaultContextTokens: Int32 {
+        #if os(iOS)
+        8192
+        #else
+        Int32(ContextWindow.builtInSteps[0])
+        #endif
+    }
+
+    public static func bytesNeeded(forModelOfSize size: Int64, contextTokens: Int32 = defaultContextTokens) -> Int64 {
         let contextScale = max(1, Int64(contextTokens) / 4096)
         return size + max(400 * 1_048_576, size / 4) * contextScale + 256 * 1_048_576
     }
 
     /// Nil when `available` bytes are enough for `model`, else why not.
-    public static func refusal(for model: BuiltInModel, available: Int64, contextTokens: Int32 = LlamaRuntime.contextTokens) -> String? {
+    public static func refusal(for model: BuiltInModel, available: Int64, contextTokens: Int32 = defaultContextTokens) -> String? {
         let need = bytesNeeded(forModelOfSize: model.sizeBytes, contextTokens: contextTokens)
         guard available < need else { return nil }
         let gb = { (b: Int64) in String(format: "%.1f GB", Double(b) / 1_073_741_824) }
