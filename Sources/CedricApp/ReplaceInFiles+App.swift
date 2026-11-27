@@ -104,11 +104,13 @@ extension AppDelegate {
     /// The open text tab at `url`'s file, if any (see `tabFinder`).
     func tab(showing url: URL) -> EditorWindowController? { tabFinder()(url)?.tab }
 
-    /// An open tab found for a planned file, and the identity of the file
-    /// at that path when it was looked up.
+    /// An open tab found for a planned file, the identity of the file at
+    /// that path when it was looked up, and the identity of the file the
+    /// tab's own URL led to then.
     struct OpenTab {
         let tab: EditorWindowController
         let fileIDNow: DiskStamp.FileID?
+        let tabURLFileIDNow: DiskStamp.FileID?
     }
 
     /// Finds the open text tab for a file, for many files in a row (the
@@ -123,20 +125,34 @@ extension AppDelegate {
     /// tab to try first; a tab at the same path whose recorded file isn't
     /// the one there now (or none is) is still returned, not current, so
     /// that file is refused rather than written behind it.
+    ///
+    /// A tab found through another name (an alias hit) is taken only when
+    /// three agree: the file at the asked URL now, the file the tab's own
+    /// URL leads to now, and the file the tab recorded. Hard links A and B,
+    /// a dirty tab on A, then a sync client replaces A: B still names the
+    /// file the tab recorded, but the tab is A's, and A is another file
+    /// now. That tab is not B's (Astra batch 23v), so B has no open tab: a
+    /// plan made from the tab's text is skipped, and a new preview reads B
+    /// from disk.
     func tabFinder() -> (URL) -> OpenTab? {
-        let open: [(tab: EditorWindowController, path: String, id: DiskStamp.FileID?)] = tabs.compactMap { t in
-            t.doc.fileURL.map { (t, $0.standardizedFileURL.resolvingSymlinksInPath().path, t.doc.diskStamp.identity) }
+        let open: [(tab: EditorWindowController, url: URL, path: String, id: DiskStamp.FileID?)] = tabs.compactMap { t in
+            t.doc.fileURL.map { (t, $0, $0.standardizedFileURL.resolvingSymlinksInPath().path, t.doc.diskStamp.identity) }
         }
         return { url in
             guard !open.isEmpty else { return nil }
             let want = url.standardizedFileURL.resolvingSymlinksInPath().path
             let now = DiskStamp.of(url)?.identity
             let byBytes = open.first { FolderTree.sameBytes($0.path, want) }
+            // At the same path, the tab's URL leads where `url` does.
             if let now {
-                if let b = byBytes, b.id == now { return OpenTab(tab: b.tab, fileIDNow: now) }
-                if let hit = open.first(where: { $0.id == now }) { return OpenTab(tab: hit.tab, fileIDNow: now) }
+                if let b = byBytes, b.id == now { return OpenTab(tab: b.tab, fileIDNow: now, tabURLFileIDNow: now) }
+                for t in open where t.id == now && !FolderTree.sameBytes(t.path, want) {
+                    // The tab's own URL must still lead to the file it recorded.
+                    let tabNow = DiskStamp.of(t.url)?.identity
+                    if tabNow == now { return OpenTab(tab: t.tab, fileIDNow: now, tabURLFileIDNow: tabNow) }
+                }
             }
-            return byBytes.map { OpenTab(tab: $0.tab, fileIDNow: now) }
+            return byBytes.map { OpenTab(tab: $0.tab, fileIDNow: now, tabURLFileIDNow: now) }
         }
     }
 
@@ -182,7 +198,8 @@ extension AppDelegate {
             // text (UTF-16 units, not Swift's canonical equality), so the
             // planned ranges land on the planned characters.
             let tab = open.tab, before = tab.text
-            if let refusal = FileReplace.tabRefusal(f, tabText: before, tabFileID: tab.doc.diskStamp.identity, fileIDNow: open.fileIDNow) {
+            if let refusal = FileReplace.tabRefusal(f, tabText: before, tabFileID: tab.doc.diskStamp.identity,
+                                                           tabURLFileIDNow: open.tabURLFileIDNow, fileIDNow: open.fileIDNow) {
                 skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: refusal)); continue
             }
             guard tab.textView.isEditable, tab.tail == nil, let (span, new) = FileReplace.span(f.edits, in: before) else {

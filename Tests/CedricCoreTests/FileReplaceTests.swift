@@ -270,15 +270,42 @@ import Testing
         let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
                                         buffers: [f.standardizedFileURL.path: OpenBuffer(text: "owl tab\n", fileID: old)])
         let file = try #require(plan.files.first)
-        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: old) == nil)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, tabURLFileIDNow: old, fileIDNow: old) == nil)
         try replaceAtSamePath(f, Data("owl synced\n".utf8))
         let new = try #require(DiskStamp.of(f)?.identity)
         try #require(new != old)
-        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: new) == .tabOutOfDate)
-        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: new, fileIDNow: new) == .changedSincePreview)
-        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: nil, fileIDNow: new) == .tabOutOfDate)
-        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: nil) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, tabURLFileIDNow: new, fileIDNow: new) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: new, tabURLFileIDNow: new, fileIDNow: new) == .changedSincePreview)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: nil, tabURLFileIDNow: new, fileIDNow: new) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, tabURLFileIDNow: nil, fileIDNow: nil) == .tabOutOfDate)
         #expect(try Data(contentsOf: f) == Data("owl synced\n".utf8))
+    }
+
+    /// Astra batch 23v (class i): hard links A and B, a tab on A with
+    /// unsaved text, a preview for B from that tab; then a sync client
+    /// replaces A. B, the plan and the tab still agree on the file, but the
+    /// tab's own URL (A) leads to another file now: the tab is out of date,
+    /// never edited for B.
+    @Test func aliasTabRefusedWhenItsOwnURLLeadsElsewhere() throws {
+        let root = try dir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let a = try put(root, "a.txt", Data("owl\n".utf8))
+        let b = root.appendingPathComponent("b.txt")
+        try #require(link(a.path, b.path) == 0)
+        let id = try #require(DiskStamp.of(a)?.identity)
+        try #require(DiskStamp.of(b)?.identity == id)
+        let q = ReplaceQuery(query: "owl", template: "cat")
+        let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [b]),
+                                        buffers: [b.standardizedFileURL.path: OpenBuffer(text: "owl tab\n", fileID: id)])
+        let file = try #require(plan.files.first)
+        #expect(file.disk == nil && file.fileID == id)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: id, tabURLFileIDNow: id, fileIDNow: id) == nil)
+        try replaceAtSamePath(a, Data("owl synced\n".utf8))
+        let aNow = try #require(DiskStamp.of(a)?.identity)
+        try #require(aNow != id && DiskStamp.of(b)?.identity == id)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: id, tabURLFileIDNow: aNow, fileIDNow: id) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: id, tabURLFileIDNow: nil, fileIDNow: id) == .tabOutOfDate)
+        #expect(try Data(contentsOf: b) == Data("owl\n".utf8))
     }
 
     /// Sol 21v-3 (class i): a preview replacing "b" in "\u{E9}ab", then the
@@ -300,10 +327,10 @@ import Testing
         #expect(changed == planned && (changed as NSString).length == 4)
         #expect(FileReplace.span(file.edits, in: changed).map { (changed as NSString).replacingCharacters(in: $0.0, with: $0.1) } == "e\u{301}Xb")
         #expect(!FileReplace.sameSource(changed, planned))
-        #expect(FileReplace.tabRefusal(file, tabText: changed, tabFileID: id, fileIDNow: id) == .changedSincePreview)
+        #expect(FileReplace.tabRefusal(file, tabText: changed, tabFileID: id, tabURLFileIDNow: id, fileIDNow: id) == .changedSincePreview)
         // The exact text it was planned against is taken.
         #expect(FileReplace.sameSource(planned, "\u{E9}ab"))
-        #expect(FileReplace.tabRefusal(file, tabText: planned, tabFileID: id, fileIDNow: id) == nil)
+        #expect(FileReplace.tabRefusal(file, tabText: planned, tabFileID: id, tabURLFileIDNow: id, fileIDNow: id) == nil)
     }
 
     @Test func unencodableReplacementSkipped() throws {

@@ -249,11 +249,14 @@ public enum FileReplace {
     /// of date with it (a sync client or a restore replaced the file at
     /// the same spelling, or it is gone; Sol 21v-3); and the one the plan
     /// was made for (`file.fileID`), else the file changed since the
-    /// preview. Then its text must be exactly the text the edits were
-    /// planned against (`sameSource`).
+    /// preview. The file the tab's own URL leads to now
+    /// (`tabURLFileIDNow`) must be that same file too: a tab found through
+    /// a hard link whose own name now leads to another file is out of date
+    /// (Astra batch 23v). Then its text must be exactly the text the edits
+    /// were planned against (`sameSource`).
     public static func tabRefusal(_ file: ReplaceFile, tabText: String, tabFileID: DiskStamp.FileID?,
-                                  fileIDNow: DiskStamp.FileID?) -> ReplaceSkip? {
-        guard let now = fileIDNow, let tabID = tabFileID, tabID == now else { return .tabOutOfDate }
+                                  tabURLFileIDNow: DiskStamp.FileID?, fileIDNow: DiskStamp.FileID?) -> ReplaceSkip? {
+        guard let now = fileIDNow, let tabID = tabFileID, tabID == now, tabURLFileIDNow == now else { return .tabOutOfDate }
         guard file.fileID == now else { return .changedSincePreview }
         return sameSource(tabText, file.sourceText) ? nil : .changedSincePreview
     }

@@ -319,6 +319,7 @@ extension DevChecks {
         steps += replaceAliasSteps(app, root: root)
         steps += replaceExactTextSteps(app, root: root)
         steps += replaceStaleTabSteps(app, root: root)
+        steps += replaceStaleAliasSteps(app, root: root)
         run(steps)
     }
 
@@ -523,6 +524,70 @@ extension DevChecks {
                 expect(again.files.isEmpty && again.skipped.map(\.reason) == [.tabOutOfDate],
                        "stale tab: a new preview plans neither the stale tab nor the file behind it",
                        "files=\(again.files.count) skipped=\(again.skipped.map(\.reason.rawValue))")
+            },
+        ]
+    }
+
+    /// Astra batch 23v (class i): hard links A and B, a tab on A with
+    /// unsaved text, a preview for B (planned from that tab's text, the
+    /// same file); then a sync client replaces A (a new file at A's
+    /// spelling) before Replace All. B, the plan and the tab's recorded
+    /// identity still agree, but the tab is A's and A is another file now:
+    /// Replace All leaves the tab alone and writes neither file (B is
+    /// never written from the stale buffer). A new preview no longer takes
+    /// the tab's text for B: it plans B from disk.
+    static func replaceStaleAliasSteps(_ app: AppDelegate, root: URL) -> [Step] {
+        let a = root.appendingPathComponent("stale-alias-a.txt"), b = root.appendingPathComponent("stale-alias-b.txt")
+        let disk = Data("owl linked\n".utf8), synced = Data("owl synced\n".utf8)
+        let typed = "owl unsaved owl linked\n"
+        var tab: EditorWindowController?
+        var message = ""
+        let q = ReplaceQuery(query: "owl", template: "hoot")
+        func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
+        func cands(_ u: URL) -> [FileReplace.Candidate] { [.init(url: u, relativePath: u.lastPathComponent, searchStamp: DiskStamp.of(u))] }
+        return [
+            sync {
+                try? disk.write(to: a)
+                link(a.path, b.path)
+                expect(DiskStamp.of(a)?.identity != nil && DiskStamp.of(a)?.identity == DiskStamp.of(b)?.identity,
+                       "stale alias: A and B are hard links to one file")
+                tab = app.open(a)
+                expect(tab != nil, "stale alias: the tab on A opens")
+            },
+            until("stale alias: the tab is read", timeout: 10) { tab?.text == "owl linked\n" },
+            sync {
+                guard let tab else { return }
+                tab.textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0))
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: cands(b), buffers: app.openBuffers(for: [b])),
+                      plan.files.count == 1, plan.files[0].disk == nil, plan.files[0].sourceText == typed else {
+                    expect(false, "stale alias: B planned from A's tab (unsaved text)"); return
+                }
+                // The sync client replaces A: B still names the file the tab read.
+                let before = DiskStamp.of(b)?.identity
+                let tmp = root.appendingPathComponent(".stale-alias.sync")
+                try? synced.write(to: tmp)
+                rename(tmp.path, a.path)
+                expect(DiskStamp.of(a)?.identity != before && DiskStamp.of(b)?.identity == before
+                       && before == tab.doc.diskStamp.identity && read(a) == synced && read(b) == disk,
+                       "stale alias: A is another file now; B and the tab's recorded identity still the old one")
+                app.applyReplace(plan) { message = $0 }
+            },
+            until("stale alias: the replace lands", timeout: 10) { !ReplaceInFiles.writing && !message.isEmpty },
+            sync {
+                guard let tab else { return }
+                expect(tab.text == typed && tab.doc.isDirty, "stale alias: Replace All leaves the tab on A alone", tab.text.debugDescription)
+                expect(message.contains("stale-alias-b.txt (\(ReplaceSkip.changedSincePreview.summary))") && !message.contains("In open tabs"),
+                       "stale alias: …says B was skipped, with no tab edited", message)
+                expect(read(b) == disk && read(a) == synced, "stale alias: …and writes neither A nor B",
+                       "A=\(String(decoding: read(a) ?? Data(), as: UTF8.self).debugDescription) B=\(String(decoding: read(b) ?? Data(), as: UTF8.self).debugDescription)")
+                // A new preview: the tab is not B's any more; B comes from disk.
+                expect(app.openBuffers(for: [b]).isEmpty, "stale alias: a new preview takes no tab's text for B")
+                guard let again = try? FileReplace.plan(q, root: root, candidates: cands(b), buffers: app.openBuffers(for: [b])) else {
+                    expect(false, "stale alias: second plan"); return
+                }
+                expect(again.files.count == 1 && again.files[0].disk != nil && again.files[0].sourceText == "owl linked\n",
+                       "stale alias: …it plans B from B's file on disk",
+                       again.files.map { "disk=\($0.disk != nil) \($0.sourceText.debugDescription)" }.joined())
             },
         ]
     }
