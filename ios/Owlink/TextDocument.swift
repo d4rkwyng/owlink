@@ -107,9 +107,18 @@ final class TextDocument: UIDocument {
     }
 
     /// Keep mixed endings lined up with an edit (`LineBreaks.replace`).
-    func noteTextReplacement(_ old: NSRange, newLength: Int) {
-        guard lineBreaks != nil else { return }
-        _ = lineBreaks?.replace(old, newLength: newLength)
+    /// Returns the breaks the edit took out of `old` (empty with no mixed
+    /// endings), for Undo and Redo to put back (`restoreLineBreaks`).
+    @discardableResult
+    func noteTextReplacement(_ old: NSRange, newLength: Int) -> [Int] {
+        lineBreaks?.replace(old, newLength: newLength) ?? []
+    }
+
+    /// Undo or Redo put text back at `location` (now `within`, in `text`):
+    /// the breaks an edit took from it come back (`LineBreaks.restore`).
+    func restoreLineBreaks(_ removed: [Int], at location: Int, within: NSRange, in text: NSString) {
+        guard !removed.isEmpty else { return }
+        _ = lineBreaks?.restore(removed, at: location, within: within, in: text)
     }
 
     override func contents(forType typeName: String) throws -> Any {

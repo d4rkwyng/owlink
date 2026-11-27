@@ -1115,7 +1115,23 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
+    /// Every edit the system is let make is noted for the mixed line
+    /// endings here, exactly once (IME composition too: marked text
+    /// changes the UTF-16 offsets after it). An edit applied through
+    /// applyTextEdit is noted there and returns false; one it declines is
+    /// left to the system and noted here.
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
+        let allowed = systemAppliesTextChange(textView, range: range, replacement: replacement)
+        if allowed, textView === self.textView, range.location != NSNotFound,
+           NSMaxRange(range) <= textView.textStorage.length {
+            document.noteTextReplacement(range, newLength: (replacement as NSString).length)
+        }
+        return allowed
+    }
+
+    /// True: the system makes the edit as typed. False: it was applied
+    /// here (applyTextEdit) or isn't made.
+    private func systemAppliesTextChange(_ textView: UITextView, range: NSRange, replacement: String) -> Bool {
         guard textView === self.textView, textView.isEditable, editGate.isEditable,
               textView.markedTextRange == nil else { return true }
         let text = textView.textStorage.string as NSString
@@ -1166,7 +1182,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             // Plain newline (no indent to keep): let the system insert it, as the Mac
             // falls back to insertNewline, so it stays in the current typing undo group.
             if edit.replacement == "\n", edit.selection == NSRange(location: range.location + 1, length: 0) {
-                document.noteTextReplacement(range, newLength: 1)
                 return true
             }
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
@@ -1186,7 +1201,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
 
         guard !self.textView.isPasting, replacement.utf16.count == 1, let raw = replacement.utf16.first else {
-            document.noteTextReplacement(range, newLength: (replacement as NSString).length)
             return true
         }
         let typed = straightenedTyping(replacement) ?? replacement
@@ -1209,10 +1223,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             case .pair(let pair)?:
                 let edit = TextEdit(range: range, replacement: pair,
                                     selection: NSRange(location: range.location + 1, length: 0))
-                guard applyTextEdit(edit, actionName: String(localized: "Typing")) else {
-                    document.noteTextReplacement(range, newLength: (replacement as NSString).length)
-                    return true
-                }
+                guard applyTextEdit(edit, actionName: String(localized: "Typing")) else { return true }
                 autoClosers.append(range.location + 1)
                 if autoClosers.count > 16 { autoClosers.removeFirst(autoClosers.count - 16) }
                 return false
@@ -1232,7 +1243,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                 selection: NSRange(location: range.location + (typed as NSString).length, length: 0))
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
-        document.noteTextReplacement(range, newLength: (replacement as NSString).length)
         return true
     }
 

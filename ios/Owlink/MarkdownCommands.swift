@@ -50,8 +50,12 @@ extension EditorViewController {
     /// multi-line replacement onto its first line. Undo and redo put the
     /// set back as it was.
     @discardableResult
+    /// `restoringBreaks` (Undo and Redo only): for each edit, the mixed
+    /// line-ending entries the edit it undoes took out of this text, put
+    /// back once the text is (so a CRLF among LFs is still one on save).
     func applyTextEdits(_ edits: [(range: NSRange, replacement: String)], selection: NSRange, actionName: String,
-                        indentation: IndentationChange? = nil, bookmarks explicitMarks: Bookmarks? = nil) -> Bool {
+                        indentation: IndentationChange? = nil, bookmarks explicitMarks: Bookmarks? = nil,
+                        restoringBreaks: [[Int]]? = nil) -> Bool {
         let storage = textView.textStorage
         let length = storage.length
         var floor = 0
@@ -118,11 +122,19 @@ extension EditorViewController {
         defer { isApplyingTextEdits = wasApplyingTextEdits }
         if grouping { undo?.beginUndoGrouping() }
         undo?.disableUndoRegistration()
+        // The line-ending entries each edit takes out, kept with the inverse.
+        var removedBreaks = [[Int]](repeating: [], count: edits.count)
         if changesText {
             if edits.count > 1 { storage.beginEditing() }
-            for edit in edits.reversed() {
-                document.noteTextReplacement(edit.range, newLength: (edit.replacement as NSString).length)
+            for (i, edit) in edits.enumerated().reversed() {
+                let newLength = (edit.replacement as NSString).length
+                removedBreaks[i] = document.noteTextReplacement(edit.range, newLength: newLength)
                 storage.replaceCharacters(in: edit.range, with: edit.replacement)
+                if let restoringBreaks, i < restoringBreaks.count, !restoringBreaks[i].isEmpty {
+                    document.restoreLineBreaks(restoringBreaks[i], at: edit.range.location,
+                                               within: NSRange(location: edit.range.location, length: newLength),
+                                               in: storage.string as NSString)
+                }
             }
             if edits.count > 1 { storage.endEditing() }
         }
@@ -137,7 +149,8 @@ extension EditorViewController {
         undo?.registerUndo(withTarget: self) { target in
             _ = target.applyTextEdits(inverse, selection: previousSelection, actionName: actionName,
                                       indentation: indentation == nil ? nil : IndentationChange(value: previousIndentation),
-                                      bookmarks: bookmarksMoved ? previousBookmarks : nil)
+                                      bookmarks: bookmarksMoved ? previousBookmarks : nil,
+                                      restoringBreaks: removedBreaks)
         }
         if grouping, let undo, undo.groupingLevel > 0 {
             undo.setActionName(actionName)

@@ -99,19 +99,32 @@ extension TextDocument {
     private var lastWrite: Date?
     private var bookmark: Data?
     private var stopped = false
+    private let now: () -> Date
+    private let store: (RecoveryRecord) -> Void
 
-    init(document: TextDocument, snapshot: @escaping () -> String) {
+    /// `now` and `write` are for tests (a fixed clock, a record kept in
+    /// memory); by default the store writes on the recovery queue.
+    init(document: TextDocument, snapshot: @escaping () -> String, now: @escaping () -> Date = Date.init,
+         write: ((RecoveryRecord) -> Void)? = nil) {
         self.document = document
         self.path = document.recoveryPath
         self.snapshot = snapshot
+        self.now = now
+        self.store = write ?? { record in
+            let store = SaveSafetyStores.recovery
+            SaveSafetyStores.queue.async { try? store.write(record) }
+        }
     }
+
+    /// A later write is waiting for its timer.
+    var isWaiting: Bool { timer != nil }
 
     /// The text changed: the first unsaved edit writes at once (a 0-delay
     /// timer would still wait for the run loop); later ones wait until 3 s
     /// have passed since the last write.
     func textChanged() {
         guard !stopped, timer == nil, document?.hasUnsavedChanges == true else { return }
-        let delay = RecoveryThrottle.delay(sinceLastWrite: lastWrite.map { Date().timeIntervalSince($0) })
+        let delay = RecoveryThrottle.delay(sinceLastWrite: lastWrite.map { now().timeIntervalSince($0) })
         if delay == 0 {
             writeNow()
             return
@@ -127,11 +140,10 @@ extension TextDocument {
         timer = nil
         guard !stopped, let doc = document, doc.hasUnsavedChanges else { return }
         if bookmark == nil { bookmark = try? doc.fileURL.bookmarkData(options: .minimalBookmark) }
-        lastWrite = Date()
-        let record = RecoveryRecord(documentPath: path, displayName: doc.displayName, bookmark: bookmark, savedAt: Date(),
+        lastWrite = now()
+        let record = RecoveryRecord(documentPath: path, displayName: doc.displayName, bookmark: bookmark, savedAt: now(),
                                     text: snapshot(), encoding: doc.encoding, lineEnding: doc.lineEnding)
-        let store = SaveSafetyStores.recovery
-        SaveSafetyStores.queue.async { try? store.write(record) }
+        store(record)
     }
 
     /// Saved (or closed cleanly): the copy goes. Later edits write again.
