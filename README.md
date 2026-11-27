@@ -22,9 +22,11 @@ brew trust --tap d4rkwyng/tap      # once: newer Homebrew asks you to trust a th
 brew install --cask d4rkwyng/tap/owlink
 ```
 
-Or download `Owlink-<version>.zip` from
-[Releases](https://github.com/d4rkwyng/owlink/releases), open it, and move
-Owlink to Applications.
+Or download `Owlink-<version>.dmg` from
+[Releases](https://github.com/d4rkwyng/owlink/releases), open it, and drag
+Owlink onto Applications. Both ways, Owlink updates itself (Owlink › Check
+for Updates…). Opened from anywhere else, it offers to move itself to
+Applications.
 
 Needs macOS 14 or later, on Apple silicon or Intel.
 

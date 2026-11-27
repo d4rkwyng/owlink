@@ -6,7 +6,12 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [0.6.1] - Unreleased
 
+### Added
+- **A disk image to install from.** Each release now has `Owlink-<version>.dmg`: open it and drag Owlink onto the Applications folder beside it. The disk image and the app in it are signed and notarized. The `.zip` is still there, for the updater. Homebrew (`brew install --cask d4rkwyng/tap/owlink`) installs it too and can check for updates.
+- **Move to Applications.** When Owlink runs from somewhere it can't update itself (the disk image, Downloads, or a temporary copy macOS makes when an app wasn't moved into Applications with Finder), it offers to move itself to Applications and reopen from there. It copies itself, checks the copy's signature, and removes the download marking from that copy only; the download and Gatekeeper are left as they were.
+
 ### Fixed
+- **Check for Updates works after a scripted install.** Owlink moved into Applications by a script (a Finder `move` in AppleScript, or `mv`) kept running from App Translocation, and Check for Updates said Owlink “can't be updated if it's running from the location it was downloaded to”, though it was already in Applications. Owlink now offers Move to Applications in that case, and updates work after it reopens.
 - **Undo after Revert to Saved keeps the file's encoding.** After Revert to Saved or Reload, ⌘Z now brings back the earlier text with its own encoding, including whether it had a byte order mark (BOM), as it already did for line endings. Before, a save after ⌘Z could add a BOM the file never had, or drop one it had. If the encoding is the only difference, the tab shows as unsaved.
 - **UTF-16 files without a BOM are saved without one.** Owlink recognized UTF-16 without a byte order mark but always wrote one when saving. The encoding menus now list UTF-16 LE and BE without BOM, and a file opened, reloaded or followed in that form is saved as it was. A Revert to Saved between versions with and without a BOM, followed by ⌘Z, leaves the tab unsaved.
 - Follow File decodes added UTF-16 text with Owlink's own decoder, so a U+FEFF character in it is shown and saved the same way on every macOS version. A UTF-16 log that is truncated and then rewritten with a new BOM is read as a new version. Before, the BOM appeared as a character, and an unedited save wrote two.

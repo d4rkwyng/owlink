@@ -40,9 +40,23 @@ brew trust --tap d4rkwyng/tap      # once: newer Homebrew asks you to trust a th
 brew install --cask d4rkwyng/tap/owlink
 ```
 
-This also puts the `cedric` command on your PATH. Or download
-`Owlink-<version>.zip` from [Releases](https://github.com/d4rkwyng/owlink/releases),
-open it, and move Owlink to Applications. Owlink checks for a new version
+This also puts the `cedric` command on your PATH, and Owlink can update
+itself from there.
+
+Or download **`Owlink-<version>.dmg`** from
+[Releases](https://github.com/d4rkwyng/owlink/releases), open it, drag
+Owlink onto the Applications folder in its window, eject it, and open
+Owlink from Applications. (The release also has a `.zip` of the same app;
+that one is for the updater.)
+
+If Owlink finds itself running from somewhere it can't update from (the
+disk image, Downloads, or a temporary copy macOS made because it wasn't
+moved with Finder, called App Translocation), it asks to **Move to
+Applications**. It copies itself there, takes the download marking off that
+new copy only, and reopens from Applications; **Not Now** asks again next
+time, **Don't ask again** stops asking.
+
+Owlink checks for a new version
 about once a day and asks before installing it (Owlink › Check for
 Updates… checks now; Settings › General › Automatically check for updates
 turns the daily check off). Only updates signed with Owlink's key are
