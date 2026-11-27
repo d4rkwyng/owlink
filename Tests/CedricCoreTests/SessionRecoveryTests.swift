@@ -306,6 +306,54 @@ import Testing
         #expect(third.closedTabs?.map(\.id) == [closed.id] && third.heldBuffers == [closed.id], "unreadable: still held, still closed")
     }
 
+    /// A held closed tab reopened (journaled), then unreadable at the next
+    /// launch, which saves successfully (clearing the journal), then
+    /// readable again at a launch past its old closing date's retention
+    /// (Astra 20e #4): the reopen must survive the save, the tab must come
+    /// back open with its text, and nothing may expire it meanwhile.
+    @Test func aHeldReopenSurvivesASaveWhileUnreadable() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "the only copy", open: false)
+        s0.holdBuffer(closed.id)
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+
+        // Readable again: ⇧⌘T reads it, releases the hold and journals
+        // the reopen; killed before the next commit.
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        #expect(s1.readBuffer(closed.id) == "the only copy")
+        s1.releaseBuffer(closed.id)
+        try s1.noteReopened(closed.id)
+
+        // Unreadable at the next launch, inside retention: held, closed.
+        let path = s1.bufferURL(closed.id).path
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
+        let t2 = t1.addingTimeInterval(60)
+        let s2 = store(dir)
+        guard case .session(let second, _) = s2.loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(second.closedTabs?.map(\.id) == [closed.id] && second.heldBuffers == [closed.id], "unreadable: held, closed")
+        // That run saves what it has (as the app does: its closed list).
+        try s2.save(Session(windows: [], closedTabs: second.closedTabs))
+        s2.pruneBuffers(keeping: [closed.id])
+        #expect(!fm.fileExists(atPath: dir.appendingPathComponent("pending-buffers.json").path), "the save cleared the journal")
+
+        // Readable at a launch past the old closing date's retention.
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        let t3 = t1.addingTimeInterval(2 * 86_400)
+        let s3 = store(dir)
+        guard case .session(let third, let recovered) = s3.loadForLaunch(now: t3) else { Issue.record("readable"); return }
+        #expect(third.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil }, "open again: \(third.closedTabs?.map(\.id) ?? [])")
+        #expect((third.closedTabs ?? []).isEmpty && recovered.isEmpty)
+        #expect(third.heldBuffers == nil && !s3.heldBuffers.contains(closed.id), "no longer held")
+        #expect(s3.readBuffer(closed.id) == "the only copy")
+    }
+
     /// The repeat reopen after an uncertain commit (Astra 20e #1): a
     /// committed closed tab is reopened (journaled), the commit listing
     /// it open fails before its rename, it is closed again and that

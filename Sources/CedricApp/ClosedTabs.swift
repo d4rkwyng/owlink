@@ -74,7 +74,7 @@ extension AppDelegate {
                                indentation: d.indentation, folds: t.sessionFolds, split: t.sessionSplit,
                                writing: t.sessionWriting, wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil)
         d.noteFormat(in: &entry)
-        let r = ClosedTabs.push(entry, onto: closedTabs)
+        let r = ClosedTabs.push(entry, onto: closedTabs, keeping: store.heldReopened)
         closedTabs = r.list
         for gone in r.dropped {
             dropClosedText(gone.id)

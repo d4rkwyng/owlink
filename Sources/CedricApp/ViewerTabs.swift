@@ -123,7 +123,7 @@ extension AppDelegate {
     /// A closed viewer tab, for File › Reopen Closed Tab (no text to keep).
     func rememberClosedViewer(_ t: any ViewerTab, persist: Bool = true) {
         finishRestore()
-        let r = ClosedTabs.push(t.sessionTab, onto: closedTabs)
+        let r = ClosedTabs.push(t.sessionTab, onto: closedTabs, keeping: store.heldReopened)
         closedTabs = r.list
         for gone in r.dropped {
             dropClosedText(gone.id)

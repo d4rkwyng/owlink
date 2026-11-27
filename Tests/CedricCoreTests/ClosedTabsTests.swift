@@ -47,6 +47,23 @@ import Testing
         #expect(list.count == 60)
     }
 
+    /// A held tab whose reopen is owed (`Session.heldReopened`) never
+    /// expires and is never dropped by the unsaved cap.
+    @Test func anOwedReopenNeverExpiresOrIsDropped() {
+        let now = Date()
+        var owed = tab("owed", dirty: true)
+        owed.closed = now.addingTimeInterval(-Double(ClosedTabs.keepDays + 5) * 86_400)
+        var old = tab("old", dirty: true)
+        old.closed = owed.closed
+        let e = ClosedTabs.expire([owed, old], now: now, keeping: [owed.id])
+        #expect(e.list.map(\.untitledName) == ["owed"] && e.dropped.map(\.untitledName) == ["old"])
+        // Past the unsaved cap the oldest tab not owed goes, not the owed one.
+        var mid = tab("mid", dirty: true)
+        mid.closed = now
+        let p = ClosedTabs.push(tab("new", dirty: true), onto: [owed, mid], unsavedLimit: 2, now: now, keeping: [owed.id])
+        #expect(p.list.map(\.untitledName) == ["owed", "new"] && p.dropped.map(\.untitledName) == ["mid"])
+    }
+
     @Test func savedWithTheSession() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("cedric-closed-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

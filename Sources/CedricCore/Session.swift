@@ -163,6 +163,14 @@ public struct Session: Codable, Equatable, Sendable {
     /// error): kept, never pruned, and tried again at the next launch
     /// (`SessionStore.holdBuffer`). Nil with none and in older sessions.
     public var heldBuffers: [UUID]?
+    /// Held closed tabs that were reopened (⇧⌘T read the buffer and
+    /// journaled it) but whose buffer the next launch couldn't read: the
+    /// reopen is still owed. Each launch that can read the buffer opens
+    /// the tab (`SessionStore.applyJournal`); until then its closed entry
+    /// never expires (`ClosedTabs.expire(keeping:)`) and its buffer stays
+    /// held, across any number of commits. Nil with none and in older
+    /// sessions (which then keep it held and closed, as before).
+    public var heldReopened: [UUID]?
 
     public init(windows: [SessionWindow], untitledCounter: Int = 0, closedTabs: [SessionTab]? = nil, folder: SessionFolder? = nil,
                 wordGoals: [FileWordGoal]? = nil) {
@@ -326,6 +334,9 @@ public final class SessionStore: @unchecked Sendable {
     private var journalStale = false
     /// Buffers launch couldn't read: never pruned, saved in the session.
     private var held = Set<UUID>()
+    /// Held closed tabs whose reopen is still owed (`Session.heldReopened`):
+    /// saved in every commit while they stay held.
+    private var heldReopen = Set<UUID>()
     /// Set when launch couldn't make the store safe to write (an unreadable
     /// session it couldn't keep a copy of, a folder it couldn't list):
     /// for the rest of the run `save` refuses to replace `session.json`,
@@ -546,6 +557,9 @@ public final class SessionStore: @unchecked Sendable {
             held = Set(s.heldBuffers ?? [])
             var candidates = journal.ids
             var reopened = Set(journal.reopened)
+            // Reopens of held tabs an earlier launch couldn't apply: owed
+            // whatever the journal says (a commit since may have cleared it).
+            let owed = Set(s.heldReopened ?? [])
             var damaged = journal.damaged
             // A held run's journal is applied whatever its number: that run
             // couldn't read the commit it would have waited for, so its
@@ -564,6 +578,7 @@ public final class SessionStore: @unchecked Sendable {
                 do { candidates = try bufferFiles() } catch { hold = "the session folder couldn’t be listed: \(error.localizedDescription)" }
                 reopened = Set(candidates)
             }
+            reopened.formUnion(owed)
             // What launch replays is what the journal says from now on: a
             // journal written before the next commit (a new tab's first
             // text) carries every id and reopen this launch found, from a
@@ -576,7 +591,14 @@ public final class SessionStore: @unchecked Sendable {
                 fm.fileExists(atPath: bufferURL($0).path)
             }
             held = Set(r.session.heldBuffers ?? [])
-            return .session(r.session, recovered: r.recovered)
+            // A reopen of a held tab that stays held and closed (its buffer
+            // still unreadable): recorded in the session from now on, so a
+            // commit that clears the journal doesn't lose it.
+            let closedNow = Set((r.session.closedTabs ?? []).map(\.id))
+            heldReopen = reopened.filter { held.contains($0) && closedNow.contains($0) }
+            var out = r.session
+            out.heldReopened = heldReopen.isEmpty ? nil : heldReopen.sorted { $0.uuidString < $1.uuidString }
+            return .session(out, recovered: r.recovered)
         }
         pending = journal.ids
         let listed: [UUID]
@@ -741,6 +763,8 @@ public final class SessionStore: @unchecked Sendable {
         try injectedFailure()
         var s = session
         s.heldBuffers = held.isEmpty ? nil : held.sorted { $0.uuidString < $1.uuidString }
+        let owed = heldReopen.intersection(held)
+        s.heldReopened = owed.isEmpty ? nil : owed.sorted { $0.uuidString < $1.uuidString }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         if DevEnvironment.checksEnabled, !pending.isEmpty || !pendingReopened.isEmpty, let hook = checkBeforeCommit { hook() }
@@ -867,6 +891,14 @@ public final class SessionStore: @unchecked Sendable {
     public func releaseBuffer(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
         held.remove(id)
+        heldReopen.remove(id)
+    }
+
+    /// Held closed tabs whose reopen is still owed (`Session.heldReopened`):
+    /// their closed entries must not expire or be dropped.
+    public var heldReopened: Set<UUID> {
+        lock.lock(); defer { lock.unlock() }
+        return heldReopen.intersection(held)
     }
 
     public var heldBuffers: Set<UUID> {
@@ -924,13 +956,14 @@ public enum ClosedTabs {
     /// `list` without the tabs closed more than `keepDays` before `now`
     /// (and their unsaved text, which the caller deletes). A tab with no
     /// closing date (saved by 0.2.0 or older) gets `now`, so it goes
-    /// `keepDays` after this version first sees it.
-    public static func expire(_ list: [SessionTab], now: Date = Date()) -> (list: [SessionTab], dropped: [SessionTab]) {
+    /// `keepDays` after this version first sees it. A tab in `keeping` (a
+    /// held tab whose reopen is owed, `Session.heldReopened`) never goes.
+    public static func expire(_ list: [SessionTab], now: Date = Date(), keeping: Set<UUID> = []) -> (list: [SessionTab], dropped: [SessionTab]) {
         var kept: [SessionTab] = []
         var dropped: [SessionTab] = []
         for var t in list {
             let closed = t.closed ?? now
-            if now.timeIntervalSince(closed) > Double(keepDays) * 86_400 { dropped.append(t); continue }
+            if now.timeIntervalSince(closed) > Double(keepDays) * 86_400, !keeping.contains(t.id) { dropped.append(t); continue }
             t.closed = closed
             kept.append(t)
         }
@@ -942,17 +975,18 @@ public enum ClosedTabs {
     /// (its buffer would be deleted, and that text is nowhere else): when
     /// they alone pass the limit, the list grows past it. Returns the new
     /// list and what was dropped (whose buffers the caller deletes).
-    public static func push(_ tab: SessionTab, onto list: [SessionTab], limit: Int = ClosedTabs.limit)
+    /// Tabs in `keeping` (`expire`) are never dropped, by date or count.
+    public static func push(_ tab: SessionTab, onto list: [SessionTab], limit: Int = ClosedTabs.limit, keeping: Set<UUID> = [])
         -> (list: [SessionTab], dropped: [SessionTab]) {
-        push(tab, onto: list, limit: limit, now: Date())
+        push(tab, onto: list, limit: limit, now: Date(), keeping: keeping)
     }
 
     public static func push(_ tab: SessionTab, onto list: [SessionTab], limit: Int = ClosedTabs.limit, unsavedLimit: Int = ClosedTabs.unsavedLimit,
-                            now: Date) -> (list: [SessionTab], dropped: [SessionTab]) {
+                            now: Date, keeping: Set<UUID> = []) -> (list: [SessionTab], dropped: [SessionTab]) {
         // Reopening and closing the same tab again: one entry.
         // Tabs past `keepDays` go now too, as at launch, so a session that
         // runs for weeks doesn't keep them until the next launch.
-        let fresh = expire(list.filter { $0.id != tab.id }, now: now)
+        let fresh = expire(list.filter { $0.id != tab.id }, now: now, keeping: keeping)
         var out = fresh.list
         var tab = tab
         tab.closed = now
@@ -964,7 +998,7 @@ public enum ClosedTabs {
         // Unsaved text is kept, but not without end: past `unsavedLimit`
         // the oldest goes (and then `keepDays`, see `expire`).
         var unsaved = out.filter(\.hasBuffer).count
-        while unsaved > max(1, unsavedLimit), let i = out.firstIndex(where: { $0.hasBuffer }) {
+        while unsaved > max(1, unsavedLimit), let i = out.firstIndex(where: { $0.hasBuffer && !keeping.contains($0.id) }) {
             dropped.append(out.remove(at: i))
             unsaved -= 1
         }

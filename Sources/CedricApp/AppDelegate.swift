@@ -1282,8 +1282,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             }
         }
         defer { if !recovered.isEmpty { recoverBuffers(recovered, setAside: nil, unreadableSession: false) } }
-        // Closed tabs past ClosedTabs.keepDays go, with their unsaved text.
-        let kept = ClosedTabs.expire(session.closedTabs ?? [])
+        // Closed tabs past ClosedTabs.keepDays go, with their unsaved text;
+        // never a held one whose reopen is owed (its text is all that is
+        // left of an edit made after the reopen, under the old date).
+        let owed = Set(session.heldReopened ?? [])
+        let kept = ClosedTabs.expire(session.closedTabs ?? [], keeping: owed)
         closedTabs = kept.list
         fileWordGoals = session.wordGoals ?? []
         for gone in kept.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
@@ -1297,7 +1300,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if !plan.park.isEmpty {
             var closed = closedTabs
             for tab in plan.park {
-                let r = ClosedTabs.push(tab, onto: closed)
+                let r = ClosedTabs.push(tab, onto: closed, keeping: owed)
                 closed = r.list
                 for gone in r.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
             }
