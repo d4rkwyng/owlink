@@ -208,12 +208,77 @@ import Testing
         let f = try put(root, "open.txt", Data("owl on disk\n".utf8))
         let q = ReplaceQuery(query: "owl", template: "cat")
         let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
-                                        buffers: [f.standardizedFileURL.path: "owl owl unsaved"])
+                                        buffers: [f.standardizedFileURL.path: OpenBuffer(text: "owl owl unsaved", fileID: DiskStamp.of(f)?.identity)])
         #expect(plan.files.count == 1 && plan.files[0].disk == nil && plan.files[0].edits.count == 2)
         // apply never writes a buffer-planned file.
         let r = FileReplace.apply(plan.files, query: q, root: root, store: store)
         #expect(r.written.isEmpty)
         #expect(try Data(contentsOf: f) == Data("owl on disk\n".utf8))
+    }
+
+    /// Another file put at `url`'s spelling, as a sync client or a restore
+    /// does: written next to it, then renamed over it (a new inode).
+    func replaceAtSamePath(_ url: URL, _ data: Data) throws {
+        let tmp = url.deletingLastPathComponent().appendingPathComponent(".sync-\(UUID().uuidString)")
+        try data.write(to: tmp)
+        #expect(rename(tmp.path, url.path) == 0)
+    }
+
+    /// Sol 21v-3 (class i), planning: a tab's text is planned only when the
+    /// file the tab recorded (read or saved) is the file at the path now.
+    /// A file replaced at the same spelling since, or a buffer with no
+    /// recorded identity, is refused as out of date: neither the tab's
+    /// text nor the disk's is planned, and nothing is written.
+    @Test func staleTabBufferNotPlanned() throws {
+        let root = try dir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try put(root, "s.txt", Data("owl old\n".utf8))
+        let recorded = try #require(DiskStamp.of(f)?.identity)
+        let q = ReplaceQuery(query: "owl", template: "cat")
+        // Same path, same file: planned from the tab.
+        let fresh = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
+                                         buffers: [f.standardizedFileURL.path: OpenBuffer(text: "owl tab\n", fileID: recorded)])
+        #expect(fresh.files.count == 1 && fresh.files[0].disk == nil && fresh.files[0].fileID == recorded)
+        try replaceAtSamePath(f, Data("owl synced\n".utf8))
+        let now = try #require(DiskStamp.of(f)?.identity)
+        try #require(now != recorded, "the rename put another inode at the path")
+        for id in [recorded, nil] as [DiskStamp.FileID?] {
+            let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
+                                            buffers: [f.standardizedFileURL.path: OpenBuffer(text: "owl tab\n", fileID: id)])
+            #expect(plan.files.isEmpty && plan.skipped.map(\.reason) == [.tabOutOfDate])
+        }
+        #expect(try Data(contentsOf: f) == Data("owl synced\n".utf8))
+        // A disk plan records the file it read.
+        let disk = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]))
+        #expect(disk.files.count == 1 && disk.files[0].fileID == now && disk.files[0].disk?.stamp.identity == now)
+    }
+
+    /// Sol 21v-3 (class i), apply: the tab decision uses the identity the
+    /// tab recorded and the one the plan recorded, against the file at
+    /// the path now, never the path alone. A tab still holding the old
+    /// file's text after the file was replaced at the same spelling is
+    /// out of date; a tab that read the new file is current but the plan
+    /// was for the old one (changed since the preview); a file gone since
+    /// is out of date too. Only all three agreeing, with the exact
+    /// planned text, lets the edits in.
+    @Test func tabDecisionByRecordedIdentity() throws {
+        let root = try dir()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try put(root, "t.txt", Data("owl\n".utf8))
+        let old = try #require(DiskStamp.of(f)?.identity)
+        let q = ReplaceQuery(query: "owl", template: "cat")
+        let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]),
+                                        buffers: [f.standardizedFileURL.path: OpenBuffer(text: "owl tab\n", fileID: old)])
+        let file = try #require(plan.files.first)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: old) == nil)
+        try replaceAtSamePath(f, Data("owl synced\n".utf8))
+        let new = try #require(DiskStamp.of(f)?.identity)
+        try #require(new != old)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: new) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: new, fileIDNow: new) == .changedSincePreview)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: nil, fileIDNow: new) == .tabOutOfDate)
+        #expect(FileReplace.tabRefusal(file, tabText: "owl tab\n", tabFileID: old, fileIDNow: nil) == .tabOutOfDate)
+        #expect(try Data(contentsOf: f) == Data("owl synced\n".utf8))
     }
 
     /// Sol 21v-3 (class i): a preview replacing "b" in "\u{E9}ab", then the
@@ -226,7 +291,8 @@ import Testing
         let f = try put(root, "e.txt", Data("x\n".utf8))
         let q = ReplaceQuery(query: "b", template: "X", caseSensitive: true)
         let planned = "\u{E9}ab", changed = "e\u{301}ab"
-        let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]), buffers: [f.standardizedFileURL.path: planned])
+        let id = DiskStamp.of(f)?.identity
+        let plan = try FileReplace.plan(q, root: root, candidates: candidates(root, [f]), buffers: [f.standardizedFileURL.path: OpenBuffer(text: planned, fileID: id)])
         try #require(plan.files.count == 1 && plan.files[0].edits.count == 1)
         let file = plan.files[0]
         #expect(file.edits[0].range == NSRange(location: 2, length: 1))
@@ -234,10 +300,10 @@ import Testing
         #expect(changed == planned && (changed as NSString).length == 4)
         #expect(FileReplace.span(file.edits, in: changed).map { (changed as NSString).replacingCharacters(in: $0.0, with: $0.1) } == "e\u{301}Xb")
         #expect(!FileReplace.sameSource(changed, planned))
-        #expect(FileReplace.tabRefusal(file, tabText: changed) == .changedSincePreview)
+        #expect(FileReplace.tabRefusal(file, tabText: changed, tabFileID: id, fileIDNow: id) == .changedSincePreview)
         // The exact text it was planned against is taken.
         #expect(FileReplace.sameSource(planned, "\u{E9}ab"))
-        #expect(FileReplace.tabRefusal(file, tabText: planned) == nil)
+        #expect(FileReplace.tabRefusal(file, tabText: planned, tabFileID: id, fileIDNow: id) == nil)
     }
 
     @Test func unencodableReplacementSkipped() throws {

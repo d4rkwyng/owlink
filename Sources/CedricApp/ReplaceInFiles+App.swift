@@ -101,43 +101,54 @@ extension AppDelegate {
         }
     }
 
-    /// The open text tab showing `url` (symbolic links resolved on both sides).
-    func tab(showing url: URL) -> EditorWindowController? { tabFinder()(url) }
+    /// The open text tab at `url`'s file, if any (see `tabFinder`).
+    func tab(showing url: URL) -> EditorWindowController? { tabFinder()(url)?.tab }
 
-    /// Finds the open text tab showing a file, for many files in a row
-    /// (the tabs as they are now). The same file is decided by file-system
-    /// identity: the resolved paths' exact bytes are a fast yes, but a
-    /// miss isn't "no tab". The file the URL leads to (device and inode)
-    /// is compared with each tab's file, so a tab opened under another
-    /// spelling of the same file (case or normalization, one name to
-    /// APFS) is found and its unsaved text is used, never the disk's
-    /// (Astra batch 17v). A file that doesn't exist matches only by bytes.
-    func tabFinder() -> (URL) -> EditorWindowController? {
-        let open: [(tab: EditorWindowController, path: String)] = tabs.compactMap { t in
-            t.doc.fileURL.map { (t, $0.standardizedFileURL.resolvingSymlinksInPath().path) }
+    /// An open tab found for a planned file, and the identity of the file
+    /// at that path when it was looked up.
+    struct OpenTab {
+        let tab: EditorWindowController
+        let fileIDNow: DiskStamp.FileID?
+    }
+
+    /// Finds the open text tab for a file, for many files in a row (the
+    /// tabs as they are now). The same file is decided only by file-system
+    /// identity: the file the URL leads to now (device and inode) against
+    /// the identity each tab recorded when it read or saved its file (its
+    /// DiskStamp), never a fresh look at the tab's path. So a tab opened
+    /// under another spelling of the file, or a hard link to it, is found
+    /// (Astra batch 17v), and a tab at the same path that holds the text of
+    /// a file replaced there since (a sync client, a restore) is not taken
+    /// for it (Sol 21v-3). The resolved paths' exact bytes only pick which
+    /// tab to try first; a tab at the same path whose recorded file isn't
+    /// the one there now (or none is) is still returned, not current, so
+    /// that file is refused rather than written behind it.
+    func tabFinder() -> (URL) -> OpenTab? {
+        let open: [(tab: EditorWindowController, path: String, id: DiskStamp.FileID?)] = tabs.compactMap { t in
+            t.doc.fileURL.map { (t, $0.standardizedFileURL.resolvingSymlinksInPath().path, t.doc.diskStamp.identity) }
         }
-        var byID: [Beneath.FileID: EditorWindowController]?
         return { url in
+            guard !open.isEmpty else { return nil }
             let want = url.standardizedFileURL.resolvingSymlinksInPath().path
-            if let hit = open.first(where: { FolderTree.sameBytes($0.path, want) }) { return hit.tab }
-            guard !open.isEmpty, let id = Beneath.FileID(path: want, followLast: true) else { return nil }
-            if byID == nil {
-                var m: [Beneath.FileID: EditorWindowController] = [:]
-                for o in open { if let i = Beneath.FileID(path: o.path, followLast: true), m[i] == nil { m[i] = o.tab } }
-                byID = m
+            let now = DiskStamp.of(url)?.identity
+            let byBytes = open.first { FolderTree.sameBytes($0.path, want) }
+            if let now {
+                if let b = byBytes, b.id == now { return OpenTab(tab: b.tab, fileIDNow: now) }
+                if let hit = open.first(where: { $0.id == now }) { return OpenTab(tab: hit.tab, fileIDNow: now) }
             }
-            return byID?[id]
+            return byBytes.map { OpenTab(tab: $0.tab, fileIDNow: now) }
         }
     }
 
-    /// The text of the files in `urls` that are open in a tab, by standardized path.
-    func openBuffers(for urls: [URL]) -> [String: String] {
+    /// The text of the files in `urls` that are open in a tab, by
+    /// standardized path, with the identity of the file each tab recorded.
+    func openBuffers(for urls: [URL]) -> [String: OpenBuffer] {
         // Tabs restored lazily from the session are built first, so none is missed.
         finishRestore()
         let find = tabFinder()
-        var out: [String: String] = [:]
+        var out: [String: OpenBuffer] = [:]
         for u in urls {
-            if let t = find(u) { out[u.standardizedFileURL.path] = t.text }
+            if let o = find(u) { out[u.standardizedFileURL.path] = OpenBuffer(text: o.tab.text, fileID: o.tab.doc.diskStamp.identity) }
         }
         return out
     }
@@ -158,7 +169,7 @@ extension AppDelegate {
         let find = tabFinder()
         for f in plan.files where !f.edits.isEmpty {
             // No tab by bytes or by identity: only then is the file closed.
-            guard let tab = find(f.url) else {
+            guard let open = find(f.url) else {
                 if f.disk != nil { diskFiles.append(f) } else {
                     // Planned from a tab that has closed since: its file wasn't checked on disk.
                     skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: .changedSincePreview))
@@ -166,10 +177,12 @@ extension AppDelegate {
                 continue
             }
             // Open now (or opened since the preview): edit the buffer, never the file behind it.
-            // Exactly the planned text (UTF-16 units, not Swift's canonical
-            // equality), so the planned ranges land on the planned characters.
-            let before = tab.text
-            if let refusal = FileReplace.tabRefusal(f, tabText: before) {
+            // Only a tab that read or saved the file there now, the file
+            // the plan was made for (by identity), with exactly the planned
+            // text (UTF-16 units, not Swift's canonical equality), so the
+            // planned ranges land on the planned characters.
+            let tab = open.tab, before = tab.text
+            if let refusal = FileReplace.tabRefusal(f, tabText: before, tabFileID: tab.doc.diskStamp.identity, fileIDNow: open.fileIDNow) {
                 skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: refusal)); continue
             }
             guard tab.textView.isEditable, tab.tail == nil, let (span, new) = FileReplace.span(f.edits, in: before) else {

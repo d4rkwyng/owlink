@@ -318,6 +318,7 @@ extension DevChecks {
         steps += steps4
         steps += replaceAliasSteps(app, root: root)
         steps += replaceExactTextSteps(app, root: root)
+        steps += replaceStaleTabSteps(app, root: root)
         run(steps)
     }
 
@@ -402,7 +403,7 @@ extension DevChecks {
                 // Apply on its own: a plan from the tab's text for the listed path, the tab open as a hard link.
                 tabs[6].textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0))
                 let c = FileReplace.Candidate(url: onlyDisk, relativePath: onlyDisk.lastPathComponent, searchStamp: DiskStamp.of(onlyDisk))
-                guard let plan = try? FileReplace.plan(q, root: root, candidates: [c], buffers: [onlyDisk.standardizedFileURL.path: tabs[6].text]),
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: [c], buffers: [onlyDisk.standardizedFileURL.path: OpenBuffer(text: tabs[6].text, fileID: tabs[6].doc.diskStamp.identity)]),
                       plan.files.first?.disk == nil else { expect(false, "alias: tab plan for apply"); return }
                 app.applyReplace(plan) { _ in }
             },
@@ -456,6 +457,72 @@ extension DevChecks {
                 expect(message.contains("exact-text.txt (\(ReplaceSkip.changedSincePreview.summary))"),
                        "exact text: …and says it changed since the preview", message)
                 expect((try? Data(contentsOf: file)) == disk, "exact text: …and its file is not written")
+            },
+        ]
+    }
+
+    /// Sol 21v-3 (class i): a tab with unsaved text, previewed from its
+    /// buffer; then a sync client (or a restore) puts another file at the
+    /// same spelling (written beside it, renamed over it: a new inode)
+    /// before Replace All. The tab holds the old file's text, so it isn't
+    /// that file's tab any more: Replace All skips it (out of date), its
+    /// text kept and the new file not written; a new preview with the
+    /// stale tab still open plans neither the tab nor the disk. Same for
+    /// a file deleted between the preview and Replace All.
+    static func replaceStaleTabSteps(_ app: AppDelegate, root: URL) -> [Step] {
+        let staleFile = root.appendingPathComponent("stale-tab.txt"), goneFile = root.appendingPathComponent("gone-tab.txt")
+        let disk = Data("owl stale\n".utf8), synced = Data("owl synced\n".utf8)
+        let typed = "owl unsaved owl stale\n"
+        var stale: EditorWindowController?, gone: EditorWindowController?
+        var message = ""
+        let q = ReplaceQuery(query: "owl", template: "hoot")
+        let outOfDate = ReplaceSkip.tabOutOfDate.summary
+        func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
+        func cands(_ u: URL) -> [FileReplace.Candidate] { [.init(url: u, relativePath: u.lastPathComponent, searchStamp: DiskStamp.of(u))] }
+        return [
+            sync {
+                for u in [staleFile, goneFile] { try? disk.write(to: u) }
+                stale = app.open(staleFile)
+                gone = app.open(goneFile)
+                expect(stale != nil && gone != nil, "stale tab: the tabs open")
+            },
+            until("stale tab: the tabs are read", timeout: 10) { stale?.text == "owl stale\n" && gone?.text == "owl stale\n" },
+            sync {
+                guard let stale, let gone else { return }
+                for t in [stale, gone] { t.textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0)) }
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: cands(staleFile) + cands(goneFile),
+                                                       buffers: app.openBuffers(for: [staleFile, goneFile])),
+                      plan.files.count == 2, plan.files.allSatisfy({ $0.disk == nil && $0.sourceText == typed }) else {
+                    expect(false, "stale tab: planned from both tabs' unsaved text"); return
+                }
+                // The sync client: another file at the same spelling. And the other file deleted.
+                let before = DiskStamp.of(staleFile)?.identity
+                let tmp = root.appendingPathComponent(".stale-tab.sync")
+                try? synced.write(to: tmp)
+                rename(tmp.path, staleFile.path)
+                unlink(goneFile.path)
+                expect(before != nil && DiskStamp.of(staleFile)?.identity != before && read(staleFile) == synced && read(goneFile) == nil,
+                       "stale tab: the file at the tab's path is another file now, the other one gone")
+                expect(stale.text == typed && stale.doc.isDirty && FolderTree.sameBytes(stale.doc.fileURL?.path ?? "", staleFile.path),
+                       "stale tab: …while the tab, at that same path, holds the old file's text")
+                app.applyReplace(plan) { message = $0 }
+            },
+            until("stale tab: the replace lands", timeout: 10) { !ReplaceInFiles.writing && !message.isEmpty },
+            sync {
+                guard let stale, let gone else { return }
+                expect(stale.text == typed && gone.text == typed, "stale tab: Replace All edits neither tab",
+                       "\(stale.text.debugDescription) \(gone.text.debugDescription)")
+                expect(message.contains("stale-tab.txt (\(outOfDate))") && message.contains("gone-tab.txt (\(outOfDate))"),
+                       "stale tab: …and says each is out of date with its file", message)
+                expect(read(staleFile) == synced && read(goneFile) == nil, "stale tab: …and writes no file",
+                       String(decoding: read(staleFile) ?? Data(), as: UTF8.self).debugDescription)
+                // A new preview with the stale tab open: no plan from the tab or from the disk behind it.
+                guard let again = try? FileReplace.plan(q, root: root, candidates: cands(staleFile), buffers: app.openBuffers(for: [staleFile])) else {
+                    expect(false, "stale tab: second plan"); return
+                }
+                expect(again.files.isEmpty && again.skipped.map(\.reason) == [.tabOutOfDate],
+                       "stale tab: a new preview plans neither the stale tab nor the file behind it",
+                       "files=\(again.files.count) skipped=\(again.skipped.map(\.reason.rawValue))")
             },
         ]
     }
