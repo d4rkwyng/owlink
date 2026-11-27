@@ -1,21 +1,46 @@
 #!/bin/bash
-# In-process checks of the editor tools: Open Recent, Text Tools, Find in
-# Files, Compare With…, Follow File, Fix Typos… and the rest. Each check launches Cedric with
-# CEDRIC_CHECK=<name> (DevChecks.swift): it builds its own files in a temp
-# folder, drives the app with real key and mouse NSEvents, prints
-# PASS/FAIL lines and writes PNG snapshots. Also lists every menu
-# shortcut and fails on a clash. Never touches the real session; the
-# recent check puts the recent-documents list back as it found it.
-# Needs a GUI session (works with the screen locked).
+# In-process checks of the editor tools: Text Tools, Find in Files,
+# Compare With…, Follow File, Fix Typos… and the rest. Each check launches
+# Cedric with CEDRIC_CHECK=<name> (DevChecks.swift): it builds its own
+# files in a temp folder, drives the app with real key and mouse NSEvents,
+# prints PASS/FAIL lines and writes PNG snapshots. Also lists every menu
+# shortcut and fails on a clash. Never touches the real session. Needs a
+# GUI session (works with the screen locked).
 #
-#   Scripts/tools-check.sh [--out DIR] [APP]     default "dist/Owlink.app"
+#   Scripts/tools-check.sh [--out DIR] [--with-recent] [--with-spellstep] [--skip a,b] [APP]
+#                                                   default "dist/Owlink.app"
+#
+#   --with-recent     also run the Open Recent check. Off by default: it
+#                     works on the real per-user recent-documents list (a
+#                     check build shares it with the user's Owlink): it
+#                     clears it with Clear Menu and replays it. The list is
+#                     first saved to cedric-tools-check-recent-snapshot.json
+#                     in the user's temp folder (getconf
+#                     DARWIN_USER_TEMP_DIR); the file goes
+#                     only once the list is back, so a run killed in
+#                     between is repaired: every tools-check run that finds
+#                     the file puts that list back first (the recentrestore
+#                     launch), and again right after a recent check that
+#                     died.
+#   --with-spellstep  also run spellstep (the spelling panel's Learn Word
+#                     and Ignore, on a dictionary of the check's own). Off
+#                     by default.
+#   --skip a,b        leave out these checks of the default set
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${TMPDIR:-/tmp}/cedric-tools-check
 APP="dist/Owlink.app"
+WITH_RECENT=0
+WITH_SPELLSTEP=0
+SKIP=,
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) OUT=$2; shift ;;
+        --with-recent) WITH_RECENT=1 ;;
+        --with-spellstep) WITH_SPELLSTEP=1 ;;
+        --skip) SKIP=",$2,"; shift ;;
+        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        -*) echo "tools-check.sh: unknown option $1" >&2; exit 2 ;;
         *) APP=$1 ;;
     esac
     shift
@@ -29,7 +54,23 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$OUT"
+# The recent check's snapshot of the recent-documents list: a fixed file in
+# the user's temp folder (not this run's $W, which the trap removes), so
+# the next run finds what a killed run left.
+RECENT_SNAP="$(getconf DARWIN_USER_TEMP_DIR)cedric-tools-check-recent-snapshot.json"
+export CEDRIC_RECENT_SNAPSHOT="$RECENT_SNAP"
 fail=0
+recent_restore() {
+    [ -f "$RECENT_SNAP" ] || return 0
+    echo "== recentrestore (a recent check died with the list cleared: $RECENT_SNAP)"
+    env CEDRIC_CHECK=recentrestore perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+        | grep -E "^check:" | tee "$OUT/recentrestore.txt" || true
+    grep -q "check: done .* 0 failed" "$OUT/recentrestore.txt" && [ ! -f "$RECENT_SNAP" ] \
+        || { echo "tools-check: recentrestore FAILED: the saved list is still in $RECENT_SNAP" >&2; fail=1; }
+}
+recent_restore
+CHECKS=""
+[ $WITH_RECENT = 1 ] && CHECKS="recent"
 echo "== shortcuts"
 env CEDRIC_DUMP_SHORTCUTS=1 "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null | tee "$OUT/shortcuts.txt" | grep -E "CONFLICT|shortcuts:" || fail=1
 grep -q "no conflicts" "$OUT/shortcuts.txt" || fail=1
@@ -37,12 +78,21 @@ grep -q "no conflicts" "$OUT/shortcuts.txt" || fail=1
 # unbundled binary, Cedric the app).
 crash_reports() { ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -E '^Cedric(App)?-.*\.ips$' | sort; }
 crash_reports > "$W/crashes-before.txt"
-for c in recent texttool findinfiles compare follow large highlight lineops bookmarks closedtab editedtitle closedraw jsonwhole colours autoedit counts indent print macbasics filterlines encodings cli dropfile spellstep spellopen grammar detachpreview csvpreview csvrownumber git mdlists mdformat mdtable mdpaste langindent mdpreview previewanchor mdsite previewbar outline mdexport mermaidmath cert binary readonly filenotices diskconflict help closenotice menus replaceinfiles folder multicaret statuszoom folding split splittyping defaulteditor settings palette quickopen wikilinks tags contextbar terminalhere perfsafe; do
+DEFAULT="texttool findinfiles compare follow large highlight lineops bookmarks closedtab editedtitle closedraw jsonwhole colours autoedit counts indent print macbasics filterlines encodings cli dropfile spellopen grammar detachpreview csvpreview csvrownumber git mdlists mdformat mdtable mdpaste langindent mdpreview previewanchor mdsite previewbar outline mdexport mermaidmath cert binary readonly filenotices diskconflict help closenotice menus replaceinfiles folder multicaret statuszoom folding split splittyping defaulteditor settings palette quickopen wikilinks tags contextbar terminalhere perfsafe"
+for c in $DEFAULT; do
+    if [ $c = spellopen ] && [ $WITH_SPELLSTEP = 1 ]; then CHECKS="$CHECKS spellstep"; fi
+    case "$SKIP" in *",$c,"*) echo "== $c (skipped: --skip)"; continue ;; esac
+    CHECKS="$CHECKS $c"
+done
+for c in $CHECKS; do
     echo "== $c"
     if ! env CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
         | grep -E "^check:" | tee "$OUT/$c.txt"; then fail=1; fi
     grep -q "check: done .* 0 failed" "$OUT/$c.txt" || { echo "tools-check: $c FAILED" >&2; fail=1; }
+    [ $c != recent ] || recent_restore
 done
+[ $WITH_RECENT = 1 ] || echo "== recent (not run: --with-recent)"
+[ $WITH_SPELLSTEP = 1 ] || echo "== spellstep (not run: --with-spellstep)"
 # Writing Mode and the stats popover: two launches on one session (a goal kept across a quit).
 echo "== writing"
 Scripts/writing-check.sh --out "$OUT" "$APP" || { echo "tools-check: writing FAILED" >&2; fail=1; }

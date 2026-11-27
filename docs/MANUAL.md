@@ -1625,6 +1625,7 @@ Scripts/launch-check.sh             # real launches of a check build, in temp se
 Scripts/pdf-check.sh                # PDF tabs in the running app: find, copy, zoom, Open as Text, session
 Scripts/image-check.sh              # image and Office tabs: zoom, copy, GIFs, docx/xlsx text, session, a 12000² PNG vs typing
 Scripts/launch-speed-check.sh       # launch phase medians: empty, 8-tab session, 500 KB file
+Scripts/tools-check.sh              # in-app tool checks; --with-recent (the real Open Recent list) and --with-spellstep opt in
 swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app   # check build only; temp session/undo folders
 ```
 
