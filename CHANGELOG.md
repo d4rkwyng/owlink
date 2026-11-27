@@ -8,8 +8,9 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Fixed
 - **Undo after Revert to Saved keeps the file's encoding.** After Revert to Saved or Reload, ⌘Z now brings back the earlier text with its own encoding, including whether it had a byte order mark (BOM), as it already did for line endings. Before, a save after ⌘Z could add a BOM the file never had, or drop one it had. If the encoding is the only difference, the tab shows as unsaved.
-- Follow File decodes added UTF-16 text with Owlink's own decoder, so a U+FEFF character in it is shown and saved the same way on every macOS version.
-- Wiki links: a folder whose disk information can't be read, as on some network or Time Machine mounts, is no longer used as an Obsidian vault root, so links in a note there don't search the whole mount.
+- **UTF-16 files without a BOM are saved without one.** Owlink recognized UTF-16 without a byte order mark but always wrote one when saving. The encoding menus now list UTF-16 LE and BE without BOM, and a file opened, reloaded or followed in that form is saved as it was. A Revert to Saved between versions with and without a BOM, followed by ⌘Z, leaves the tab unsaved.
+- Follow File decodes added UTF-16 text with Owlink's own decoder, so a U+FEFF character in it is shown and saved the same way on every macOS version. A UTF-16 log that is truncated and then rewritten with a new BOM is read as a new version. Before, the BOM appeared as a character, and an unedited save wrote two.
+- Wiki links: when a folder's disk information can't be read, as on some network or Time Machine mounts, automatic vault discovery stops there, so links in a note don't search the whole mount. A folder you opened yourself still takes precedence. The same check stops the preview's search upward for links that start with `/`.
 
 ## [0.6.0] - 2026-11-27
 

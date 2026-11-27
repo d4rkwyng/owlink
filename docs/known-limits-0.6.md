@@ -90,7 +90,14 @@ first two are fixed for 0.6.1; the third is still open.
    own encoding, and a tab whose only difference is the encoding is
    unsaved. Covered by `ReloadUndoFormatTests` (including a save after ⌘Z
    that fails part way) and a FileNoticesCheck step, which needs a GUI
-   session and was not run for this change.
+   session and was not run for this change. UTF-16 without a BOM is now
+   its own encoding (`utf16LENoBOM`, `utf16BENoBOM`; the bytes decide on
+   every read, as for UTF-8), so the BOM goes through the snapshot, the
+   dirty comparison and the save too (`UTF16BOMPresenceTests`). Still
+   open: the failed-save test retries precomputed bytes and marks its
+   model tab saved by hand. A failed save and its retry through the real
+   tab (FileNoticesCheck with `checkWriteFaults`) needs a GUI session and
+   was not added.
 
 2. **UTF-16 Follow appends still go through Foundation.** Fixed for 0.6.1.
    `FileTail.decodeAppended` decodes UTF-16 with `TextCodec.decodeUTF16`
@@ -99,7 +106,11 @@ first two are fixed for 0.6.1; the third is still open.
    by `UTF16FollowTests`. The 8-bit encodings still use Foundation; they
    have no BOM. Opening a UTF-16 file (`TextCodec.decode`, also Follow's
    first read and resets) still decodes with Foundation after dropping the
-   one BOM; a U+FEFF after it was kept on the macOS tried (27.2).
+   one BOM; a U+FEFF after it was kept on the macOS tried (27.2). A
+   UTF-16 BOM written at offset zero (after a truncation to nothing, or
+   into a file followed empty) is read as the new version's, as a UTF-8
+   one already was, including a BOM split across writes
+   (`UTF16BOMPresenceTests`).
 
 3. **Inline prediction is still unverified.** After the 0.5.4 spelling-off
    change, a manual check on an unlocked Apple Intelligence Mac was left
