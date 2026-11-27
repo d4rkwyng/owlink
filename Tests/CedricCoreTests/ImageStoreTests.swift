@@ -403,6 +403,53 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: second) }
     }
 
+    /// A published name looked up in another spelling of the same name
+    /// (case, normalization) is the same file on APFS: the link is given
+    /// (identity), where a `String`-keyed record missed it and refused. A
+    /// file that isn't the one published under any spelling still gets no
+    /// link (Astra batch 17v).
+    @Test(arguments: storeModes) func aPublishedNameInAnotherSpellingOfItIsTheSameFile(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false }
+        let (d, doc, _) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let store = try ImageStore.open(in: doc)
+        let name = try store.write(Data([7]), name: "Caf\u{E9}.png")
+        let images = doc.appendingPathComponent("images")
+        let other = "CAFE\u{301}.PNG"
+        guard Beneath.FileID(path: images.appendingPathComponent(other).path, followLast: false)
+                == Beneath.FileID(path: images.appendingPathComponent(name).path, followLast: false) else { return }  // a sensitive volume
+        #expect(try store.link(for: name) == MarkdownPaste.imagesPath(name))
+        #expect(try store.link(for: other) == MarkdownPaste.imagesPath(other))
+        // Replaced by another file: no spelling of it gives a link.
+        try fm.removeItem(at: images.appendingPathComponent(name))
+        try Data([8]).write(to: images.appendingPathComponent(name))
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: name) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: other) }
+    }
+
+    /// The publication record keeps two canonically equivalent names (two
+    /// files on a volume that keeps names as bytes) as two records: the
+    /// second never replaces the first's file, so the first, unchanged, is
+    /// still linked, and the second's file under the first's name is not
+    /// (Astra batch 17v must 3; APFS can't hold the pair, so the record is
+    /// tested on its own).
+    @Test func twinNamesKeepTheirOwnPublishedFiles() {
+        let nfc = "caf\u{E9}.png", nfd = "cafe\u{301}.png"
+        let first = Beneath.FileID(dev: 1, ino: 10), second = Beneath.FileID(dev: 1, ino: 20)
+        var p = ImageStore.Publications()
+        p.record(nfc, first)
+        p.record(nfd, second)
+        // Two separate files: each name leads to its own.
+        let disk: [FolderTree.PathKey: Beneath.FileID] = [FolderTree.PathKey(nfc): first, FolderTree.PathKey(nfd): second]
+        let lookup = { (n: String) in disk[FolderTree.PathKey(n)] }
+        #expect(p.isPublished(nfc, here: first, lookup: lookup), "the first, unchanged, under its own name")
+        #expect(p.isPublished(nfd, here: second, lookup: lookup))
+        #expect(!p.isPublished(nfc, here: second, lookup: lookup), "the second's file moved onto the first's name")
+        #expect(!p.isPublished(nfd, here: first, lookup: lookup))
+        #expect(!p.isPublished("other.png", here: Beneath.FileID(dev: 1, ino: 30), lookup: lookup))
+    }
+
     /// The document's folder replaced at its path after "images" was pinned.
     @Test(arguments: storeModes) func aReplacedDocumentFolderGivesNoLink(mode: StoreMode) throws {
         use(mode)

@@ -614,11 +614,22 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         // as each folder is listed again.
         ignore.invalidate()
         var toList: [FolderNode] = []
+        // The event's folder as the tree lists it: by the bytes, else by
+        // identity from the root down (a case or normalization variant of
+        // a listed name, or of the root, is that folder); one gone under
+        // another spelling lists its nearest listed ancestor again. A miss
+        // alone never leaves a loaded folder stale.
+        let root = root, rootURL = rootURL
         func node(for path: String) -> FolderNode? {
-            let u = URL(fileURLWithPath: path)
-            guard let rel = FolderTree.relativePath(of: u, in: URL(fileURLWithPath: realRoot))
-                ?? FolderTree.relativePath(of: u, in: rootURL) else { return nil }
-            return root.descendant(rel)
+            guard let e = FolderTree.eventRelativePath(path, roots: [URL(fileURLWithPath: realRoot), rootURL]) else { return nil }
+            if let n = root.listedDescendant(e.rel) { return n }
+            let found = FolderTree.listedFolder(e.rel, base: e.base, root: rootURL) { key in
+                root.listedDescendant(key)?.children?.filter(\.isDirectory).map(\.name)
+            }
+            switch found {
+            case .listed(let k), .ancestor(let k): return root.listedDescendant(k)
+            case .unlisted: return nil
+            }
         }
         for c in changes {
             switch c {

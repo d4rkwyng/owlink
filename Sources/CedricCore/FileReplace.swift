@@ -57,6 +57,10 @@ public enum ReplaceSkip: String, Sendable, Codable, CaseIterable {
     case changedSinceSearch, changedSincePreview, changedSinceReplace
     case unreadable, unwritable, outsideFolder, symbolicLink, hardLinked, readOnlyTab
     case readOnly, encodingUncertain, insideGit
+    /// An open tab at the file's path holds another file's text: the file
+    /// there now isn't the one the tab read or saved (a sync client or a
+    /// restore put another in its place), or it is gone.
+    case tabOutOfDate
     /// Undo: the backup copy of the original couldn't be read, or isn't
     /// what was backed up. The operation stays open for another try.
     case backupUnreadable
@@ -80,6 +84,7 @@ public enum ReplaceSkip: String, Sendable, Codable, CaseIterable {
         case .readOnly: return String(localized: "read-only")
         case .encodingUncertain: return String(localized: "encoding uncertain")
         case .insideGit: return String(localized: "inside .git")
+        case .tabOutOfDate: return String(localized: "open tab out of date with the file")
         case .backupUnreadable: return String(localized: "backup copy unreadable")
         }
     }
@@ -120,6 +125,21 @@ public struct ReplaceFile: Sendable {
     public var edits: [ReplaceEdit]
     /// Nil when planned against an open tab's text.
     public var disk: DiskSource?
+    /// Which file the edits were planned for (device and inode): the
+    /// file the open tab read or saved, or the file read from disk.
+    public var fileID: DiskStamp.FileID? = nil
+}
+
+/// An open tab's text, for planning, and the identity of the file the tab
+/// last read or saved (its DiskStamp), not a fresh look at its path.
+public struct OpenBuffer: Sendable, Equatable {
+    public var text: String
+    public var fileID: DiskStamp.FileID?
+
+    public init(text: String, fileID: DiskStamp.FileID?) {
+        self.text = text
+        self.fileID = fileID
+    }
 }
 
 public struct ReplacePlan: Sendable {
@@ -213,6 +233,34 @@ public enum FileReplace {
         return (span, applying(shifted, to: ns.substring(with: span)))
     }
 
+    /// Whether `text` is exactly `source`, UTF-16 unit for UTF-16 unit.
+    /// The planned ranges are UTF-16 offsets into `source`, so only the
+    /// same units make them land on the same characters. Swift's `==` is
+    /// canonical equivalence: "\u{E9}ab" equals "e\u{301}ab", one unit
+    /// longer, where the range planned for "b" covers "a" (Sol's 21v-3).
+    public static func sameSource(_ text: String, _ source: String) -> Bool {
+        text.utf16.count == source.utf16.count && text.utf16.elementsEqual(source.utf16)
+    }
+
+    /// Why an open tab's buffer may not take `file`'s planned edits now,
+    /// or nil. Same file only by identity, never by path alone: the file
+    /// at the planned path now (`fileIDNow`) must be the one the tab read
+    /// or saved (`tabFileID`, its recorded DiskStamp), else the tab is out
+    /// of date with it (a sync client or a restore replaced the file at
+    /// the same spelling, or it is gone; Sol 21v-3); and the one the plan
+    /// was made for (`file.fileID`), else the file changed since the
+    /// preview. The file the tab's own URL leads to now
+    /// (`tabURLFileIDNow`) must be that same file too: a tab found through
+    /// a hard link whose own name now leads to another file is out of date
+    /// (Astra batch 23v). Then its text must be exactly the text the edits
+    /// were planned against (`sameSource`).
+    public static func tabRefusal(_ file: ReplaceFile, tabText: String, tabFileID: DiskStamp.FileID?,
+                                  tabURLFileIDNow: DiskStamp.FileID?, fileIDNow: DiskStamp.FileID?) -> ReplaceSkip? {
+        guard let now = fileIDNow, let tabID = tabFileID, tabID == now, tabURLFileIDNow == now else { return .tabOutOfDate }
+        guard file.fileID == now else { return .changedSincePreview }
+        return sameSource(tabText, file.sourceText) ? nil : .changedSincePreview
+    }
+
     public static func sha256(_ data: Data) -> Data { Data(SHA256.hash(data: data)) }
 
     /// Same date (within DiskStamp's tolerance) and same size.
@@ -237,9 +285,11 @@ public enum FileReplace {
     }
 
     /// Plans the replace. `buffers`: the text of files open in a tab, by
-    /// standardized path; those are planned against that text, not disk.
+    /// standardized path; those are planned against that text, not disk,
+    /// when the tab's recorded file is the file at that path now (else
+    /// skipped as `tabOutOfDate`, neither the tab nor the disk planned).
     /// Reads files; call it off the main thread.
-    public static func plan(_ query: ReplaceQuery, root: URL, candidates: [Candidate], buffers: [String: String] = [:],
+    public static func plan(_ query: ReplaceQuery, root: URL, candidates: [Candidate], buffers: [String: OpenBuffer] = [:],
                             maxFileSize: Int = 20 * 1024 * 1024, isCancelled: () -> Bool = { false }) throws -> ReplacePlan {
         let re = try FindEngine.regex(query.query, query.findOptions)
         var plan = ReplacePlan(query: query, root: root, files: [], skipped: [])
@@ -247,9 +297,14 @@ public enum FileReplace {
             if isCancelled() { plan.cancelled = true; break }
             func skip(_ r: ReplaceSkip) { plan.skipped.append(SkippedFile(url: c.url, relativePath: c.relativePath, reason: r)) }
             let key = c.url.standardizedFileURL.path
-            if let text = buffers[key] {
+            if let buffer = buffers[key] {
+                // The tab's text is this file's only if the tab read or saved the file there now.
+                guard let id = buffer.fileID, DiskStamp.of(c.url)?.identity == id else { skip(.tabOutOfDate); continue }
+                let text = buffer.text
                 let edits = edits(in: text, regex: re, query: query)
-                if !edits.isEmpty { plan.files.append(ReplaceFile(url: c.url, relativePath: c.relativePath, sourceText: text, edits: edits, disk: nil)) }
+                if !edits.isEmpty {
+                    plan.files.append(ReplaceFile(url: c.url, relativePath: c.relativePath, sourceText: text, edits: edits, disk: nil, fileID: id))
+                }
                 continue
             }
             if let refusal = refusal(c.url, root: root) { skip(refusal); continue }
@@ -272,7 +327,8 @@ public enum FileReplace {
             if encodingUncertain(decoded.encoding, data: data, replacements: replacements) { skip(.encodingUncertain); continue }
             plan.files.append(ReplaceFile(url: c.url, relativePath: c.relativePath, sourceText: decoded.text, edits: edits,
                                           disk: DiskSource(stamp: stamp, sha256: sha256(data), encoding: decoded.encoding,
-                                                           lineEnding: decoded.lineEnding)))
+                                                           lineEnding: decoded.lineEnding),
+                                          fileID: stamp.identity))
         }
         return plan
     }

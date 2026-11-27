@@ -31,7 +31,8 @@ final class WikiNotes {
     private(set) var notes: NoteIndex?
     private(set) var scan: BacklinkScan
     /// Folders changed since the last scan (relative); nil: all of them.
-    private var dirty: Set<String>?
+    /// By the event spelling's bytes; matched to the notes' folders in the scan.
+    private var dirty: Set<FolderTree.PathKey>?
     private var scanning = false, rescan = false
     private var building = false, rebuild = false
     /// Some Backlinks pane shows: the notes' links are kept read.
@@ -134,14 +135,15 @@ final class WikiNotes {
 
     /// FolderWatcher events (FolderSidebar.handle), before Open Quickly's index sees them.
     func handle(_ changes: [FolderWatcher.Change]) {
+        // By bytes, else by the root's identity (another spelling of it);
+        // the scan matches the folder to the notes' own spelling.
         func rel(_ p: String) -> String? {
-            let u = URL(fileURLWithPath: p)
-            return FolderTree.relativePath(of: u, in: URL(fileURLWithPath: realRoot)) ?? FolderTree.relativePath(of: u, in: root)
+            FolderTree.eventRelativePath(p, roots: [URL(fileURLWithPath: realRoot), root])?.rel
         }
         for c in changes {
             switch c {
             case .folder(let p):
-                if let r = rel(p) { dirty?.insert(r) }
+                if let r = rel(p) { dirty?.insert(FolderTree.PathKey(r)) }
             case .subtree, .rootChanged:
                 dirty = nil
             }
@@ -666,11 +668,16 @@ extension EditorWindowController {
     /// A link to no note: create it (as the sidebar's New File does) beside
     /// this note when it is in the folder, else at the folder's top.
     private func offerToCreate(_ target: String, notes: WikiNotes) {
-        var name = target.trimmingCharacters(in: .whitespaces)
-        if name.hasPrefix("/") { name.removeFirst() }
-        let parts = name.split(separator: "/").map(String.init)
-        guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
-        let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
+        // Leading "/" bytes dropped and the rest split at each "/" byte
+        // (FolderTree.components): "/" then a combining mark is one Swift
+        // character, so a text split kept it inside a name and refused a
+        // valid nested target (Astra batch 17v).
+        let name = target.trimmingCharacters(in: .whitespaces)
+        let parts = FolderTree.components(name)
+        guard !parts.isEmpty, !parts.contains(where: { FolderTree.sameBytes($0, "..") || FolderTree.sameBytes($0, ".") }) else {
+            NSSound.beep(); return
+        }
+        let file = WikiLinks.isNote(parts.last!) ? parts.last! : parts.last! + ".md"
         // The note's path in the folder, as names: beside this note when it is
         // in the folder and the link names no folder, else from the top. Its
         // folders split at the "/" bytes (FolderTree.components): a text

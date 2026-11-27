@@ -154,4 +154,50 @@ import Testing
         }
         #expect(CLIToken.redacted(url).contains("token=•••&wait=/tmp/y"))
     }
+
+    /// The temp folder is matched by device and inode, not by the text of
+    /// its resolved path (Astra batch 17v): a case or normalization variant
+    /// of the folder's own name is the same folder on APFS and is taken; a
+    /// different folder is refused however its path reads.
+    @Test func theTempFolderIsMatchedByIdentityNotSpelling() throws {
+        let base = NSTemporaryDirectory() + "cedric-handoff-id-\(UUID().uuidString)"
+        defer { try? fm.removeItem(atPath: base) }
+        let nfc = "Caf\u{E9}T", nfd = "cafe\u{301}t"   // one folder on APFS: case and normalization differ
+        try fm.createDirectory(atPath: base + "/" + nfc, withIntermediateDirectories: true)
+        let other = base + "/Other"
+        try fm.createDirectory(atPath: other, withIntermediateDirectories: true)
+        try "piped".write(toFile: base + "/" + nfc + "/cedric-stdin.Ab12Cd", atomically: false, encoding: .utf8)
+        try "elsewhere".write(toFile: other + "/cedric-stdin.Ab12Cd", atomically: false, encoding: .utf8)
+        guard Beneath.FileID(path: base + "/" + nfd, followLast: true) == Beneath.FileID(path: base + "/" + nfc, followLast: true) else {
+            return   // a case- and normalization-sensitive TMPDIR: nothing to alias
+        }
+        // The file named through the variant spelling, the temp folder given in the original.
+        let h = CLIHandoff.inspect(base + "/" + nfd + "/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [base + "/" + nfc], read: true)
+        #expect(h.map { String(decoding: $0.data ?? Data(), as: UTF8.self) } == "piped")
+        // And the other way round.
+        #expect(CLIHandoff.accept(base + "/" + nfc + "/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [base + "/" + nfd]) != nil)
+        // A different folder isn't the temp folder.
+        #expect(CLIHandoff.accept(other + "/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [base + "/" + nfc]) == nil)
+        // A slash followed by a combining mark starts an absolute path (its first byte).
+        #expect(CLIHandoff.accept("/\u{301}nowhere/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [base + "/" + nfc]) == nil)
+    }
+
+    /// The temp folder given through another path to the same folder (the
+    /// Data volume's firmlinked spelling, which realpath keeps as written):
+    /// the same device and inode, so the script's file is taken; the text
+    /// of the two resolved paths differs.
+    @Test func theTempFolderByAnotherPathToItIsTheSameFolder() throws {
+        let d = try dirs(); defer { cleanup(d) }
+        guard let real = CLIHandoff.realpath(d.temp) else { Issue.record("no temp"); return }
+        let alias = "/System/Volumes/Data" + real
+        guard Beneath.FileID(path: alias, followLast: true) == Beneath.FileID(path: real, followLast: true),
+              CLIHandoff.realpath(alias) != real else { return }   // no firmlinked Data volume here
+        try "piped".write(toFile: d.temp + "/cedric-stdin.Ab12Cd", atomically: false, encoding: .utf8)
+        #expect(CLIHandoff.accept(d.temp + "/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [alias]) != nil)
+        #expect(CLIHandoff.accept(alias + "/cedric-stdin.Ab12Cd", kind: .stdin, tempDirs: [d.temp]) != nil)
+        // Still never a folder that isn't it.
+        try "x".write(toFile: d.home + "/cedric-stdin.Ab12Cd", atomically: false, encoding: .utf8)
+        #expect(CLIHandoff.accept("/System/Volumes/Data" + (CLIHandoff.realpath(d.home) ?? d.home) + "/cedric-stdin.Ab12Cd",
+                                  kind: .stdin, tempDirs: [alias]) == nil)
+    }
 }

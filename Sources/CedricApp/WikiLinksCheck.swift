@@ -249,7 +249,9 @@ extension DevChecks {
                        "confirming leaves the outside folder untouched", "\((try? FileManager.default.contentsOfDirectory(atPath: outside.path)) ?? [])")
                 expect(!failures.isEmpty && tab("Escape.md") == nil, "the create is refused and nothing opens", "\(failures)")
                 // A slash followed by a combining mark: one Swift character, but the
-                // kernel splits the name there. It names no single note, so nothing is made.
+                // kernel splits the name there, so it is a nested target: the note
+                // "\u{301}Slash.md" in sub/ (Astra batch 17v must 6; round 4 and
+                // before refused it as a bad name).
                 failures = []
                 offersBefore = created.count
                 slashBefore = FileManager.default.subpaths(atPath: root.path)?.sorted() ?? ["?"]
@@ -261,13 +263,14 @@ extension DevChecks {
             },
             sync {
                 let fm = FileManager.default
-                expect(!failures.isEmpty && tab("\u{301}Slash.md") == nil,
-                       "a slash before a combining mark: the create is refused and nothing opens", "\(failures)")
-                expect(failures.first.map { ($0 as NSError).code } == NSFileWriteInvalidFileNameError, "refused as a bad name",
-                       "\(failures)")
-                expect(created.count == offersBefore, "refused before the offer is shown", "\(created.dropFirst(offersBefore))")
+                expect(failures.isEmpty && tab("\u{301}Slash.md") != nil,
+                       "a slash before a combining mark: a nested target, created and opened", "\(failures)")
+                expect(created.dropFirst(offersBefore).map { Array($0.utf8) } == [Array("sub/\u{301}Slash.md".utf8)],
+                       "the offer names the note in sub/, split at the slash byte", "\(created.dropFirst(offersBefore))")
                 let after = fm.subpaths(atPath: root.path)?.sorted() ?? ["?"]
-                expect(after == slashBefore, "nothing made on disk", "\(Set(after).symmetricDifference(slashBefore))")
+                let made = Set(after).subtracting(slashBefore)
+                expect(made.map { Array($0.utf8) } == [Array("sub/\u{301}Slash.md".utf8)], "only that note made on disk", "\(made)")
+                tab("\u{301}Slash.md")?.window?.performClose(nil)
                 // A note in a folder whose name starts with a combining mark, first
                 // under the root: a missing link is offered and made beside it, not
                 // at the folder's top (Astra batch 7b). Written here, after the list

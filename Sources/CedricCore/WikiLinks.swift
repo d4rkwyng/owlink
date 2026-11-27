@@ -409,7 +409,17 @@ public struct BacklinkScan: Sendable {
     /// update; nil looks at every note's date and size. `tags`: read each
     /// note's tags too (a note cached without them is read again); the
     /// links are always read, in the same pass.
-    public mutating func update(notes: [String], dirty: Set<String>?, tags: Bool = false, cancelled: () -> Bool = { false }) {
+    ///
+    /// `dirty` (by the bytes: two canonically equivalent folders stay two)
+    /// comes from watcher events, in their spelling; `notes` from
+    /// the listing, in its own. A folder is matched by its bytes first; a
+    /// changed folder no note's folder matches by bytes is matched by
+    /// identity (device and inode, `identity` a seam for tests), so a case
+    /// or normalization variant of a note folder still rescans it, and of
+    /// two canonically equivalent folders only the one that changed. A
+    /// miss alone never leaves a changed folder's notes unread.
+    public mutating func update(notes: [String], dirty: Set<FolderTree.PathKey>?, tags: Bool = false, cancelled: () -> Bool = { false },
+                                identity: (String) -> Beneath.FileID? = FolderTree.identity) {
         let list = notes.sorted()
         skipped = max(0, list.count - Self.maxFiles)
         lastRead = 0
@@ -417,10 +427,33 @@ public struct BacklinkScan: Sendable {
         let keep = Set(kept)
         for k in files.keys where !keep.contains(k) { files[k] = nil }
         let fm = FileManager.default
+        // The note's folder, split at its last "/" byte.
+        func folder(_ rel: String) -> FolderTree.PathKey {
+            let b = Array(rel.utf8)
+            return FolderTree.PathKey(b.lastIndex(of: 0x2f).map { String(decoding: b[..<$0], as: UTF8.self) } ?? "")
+        }
+        // Built as bytes: a file URL decomposes an NFC name (to NFD), which would probe the other twin.
+        let rootPath = root.path
+        func path(_ k: FolderTree.PathKey) -> String { k.bytes.isEmpty ? rootPath : (rootPath == "/" ? "/" : rootPath + "/") + k.string }
+        var changed: Set<FolderTree.PathKey>?
+        if let dirty {
+            var c = dirty
+            let folders = Set(kept.map(folder))
+            let unmatched = c.subtracting(folders)
+            if !unmatched.isEmpty {
+                let ids = Set(unmatched.compactMap { identity(path($0)) })
+                if !ids.isEmpty {
+                    for f in folders where !c.contains(f) {
+                        if let id = identity(path(f)), ids.contains(id) { c.insert(f) }
+                    }
+                }
+            }
+            changed = c
+        }
         for rel in kept {
             if cancelled() { return }
             let complete = files[rel].map { !tags || $0.tags != nil } ?? false
-            if let dirty, complete, !dirty.contains((rel as NSString).deletingLastPathComponent) { continue }
+            if let changed, complete, !changed.contains(folder(rel)) { continue }
             let url = root.appendingPathComponent(rel)
             guard let a = try? fm.attributesOfItem(atPath: url.path), let size = (a[.size] as? NSNumber)?.intValue,
                   let date = a[.modificationDate] as? Date else { files[rel] = nil; continue }

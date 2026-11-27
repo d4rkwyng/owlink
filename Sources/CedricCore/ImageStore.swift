@@ -85,8 +85,8 @@ public final class ImageStore {
     /// The pinned document folder, and the path the links are relative to.
     private let root: Int32
     private let folder: URL
-    /// Each published name and the file it was given.
-    private var published: [String: Beneath.FileID] = [:]
+    /// Each published name (by its bytes) and the file it was given.
+    private var published = Publications()
     /// Called after "images" is opened and checked (tests swap folders here).
     nonisolated(unsafe) public static var afterOpen: (() -> Void)?
     /// Called after the bytes are staged, just before they are published
@@ -228,15 +228,15 @@ public final class ImageStore {
     /// "images/<name>", encoded, once it is checked to lead to the file
     /// written. Throws `Failure.destinationChanged` when it doesn't.
     public func link(for name: String) throws -> String {
-        guard let want = published[name],
-              // The document's folder, looked up by its path again, is the pinned one.
+        guard // The document's folder, looked up by its path again, is the pinned one.
               Beneath.FileID(path: folder.path, followLast: true) == Beneath.FileID(fd: root),
               // "images" in it, by the same rules as at open, is the pinned folder.
               let again = try? Self.openImages(in: root, folder: folder, create: false, kernel: kernel)
         else { throw Failure.destinationChanged }
         defer { close(again) }
-        guard Beneath.FileID(fd: again) == Beneath.FileID(fd: fd),
-              Beneath.FileID(at: again, name) == want else { throw Failure.destinationChanged }
+        guard Beneath.FileID(fd: again) == Beneath.FileID(fd: fd), let here = Beneath.FileID(at: again, name),
+              published.isPublished(name, here: here, lookup: { Beneath.FileID(at: again, $0) })
+        else { throw Failure.destinationChanged }
         return MarkdownPaste.imagesPath(name)
     }
 
@@ -307,7 +307,7 @@ public final class ImageStore {
         Self.beforePublish?()
         let out = try kernel ? publish(tmp, as: name, hint: images) : publishInHeld(tmp, as: name)
         published = true
-        self.published[out] = id
+        self.published.record(out, id)
         return out
     }
 
@@ -359,6 +359,29 @@ public final class ImageStore {
             guard err == EEXIST else { throw Self.posix(candidate, err) }
         }
         throw Self.posix(name, EEXIST)
+    }
+
+    /// What this store published: each name by its UTF-8 bytes, with the
+    /// file (device and inode) it was given. Byte keys keep two
+    /// canonically equivalent names two records, so one never takes the
+    /// other's file (a `String` key folded them: the second publication
+    /// replaced the first's record, and an unchanged first file was then
+    /// refused). Whether `name` still leads to a published file is decided
+    /// by identity: under the exact bytes it must be that record's file;
+    /// a name with no record of its own bytes counts only if it is the
+    /// same file as a recorded name now is (one name to APFS spelled
+    /// another way), never by its text.
+    struct Publications {
+        private var byName: [FolderTree.PathKey: Beneath.FileID] = [:]
+
+        mutating func record(_ name: String, _ id: Beneath.FileID) { byName[FolderTree.PathKey(name)] = id }
+
+        /// `here`: the file `name` leads to now. `lookup`: the file a
+        /// recorded name leads to now.
+        func isPublished(_ name: String, here: Beneath.FileID, lookup: (String) -> Beneath.FileID?) -> Bool {
+            if let want = byName[FolderTree.PathKey(name)] { return want == here }
+            return byName.contains { $0.value == here && lookup($0.key.string) == here }
+        }
     }
 
     static func posix(_ path: String, _ code: Int32 = errno) -> NSError {
