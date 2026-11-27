@@ -137,7 +137,6 @@ extension PreviewFolder {
         for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
             if let f = file(for: url, in: root, scriptOn: scriptOn), isExistingFile(f, .default) { return (root, f) }
         }
-        }
         guard siteRoots, let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
               let page = pageURL(forFile: hit.file),
