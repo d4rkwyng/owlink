@@ -89,20 +89,113 @@ import Testing
         #expect(store.all().count == 1)
     }
 
-    @Test func recoveryIgnoresJunkAndMissingFolder() throws {
+    func setAside(in dir: URL) throws -> [URL] {
+        try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.contains("unreadable-") }
+    }
+
+    @Test func recoveryIgnoresMissingFolder() {
+        let t = URL(fileURLWithPath: NSTemporaryDirectory() + "owlink-save-safety-none-\(UUID().uuidString)")
+        #expect(RecoveryStore(directory: t).all().isEmpty)
+        #expect(RecoveryStore(directory: t).read(documentPath: "/docs/a.txt") == nil)
+    }
+
+    @Test func readSetsJunkAside() throws {
         let t = try temp(); defer { try? fm.removeItem(at: t) }
-        #expect(RecoveryStore(directory: t.appendingPathComponent("none")).all().isEmpty)
         let store = RecoveryStore(directory: t)
         let junk = store.fileURL(forDocumentPath: "/docs/a.txt")
         try Data("not a plist".utf8).write(to: junk)
         #expect(store.read(documentPath: "/docs/a.txt") == nil)
-        #expect(store.all().isEmpty)
-        // Damaged bytes are set aside, not deleted and not left under the live name.
+        // Damaged bytes are set aside by read itself, not deleted and not left under the live name.
         #expect(!fm.fileExists(atPath: junk.path))
-        let aside = try fm.contentsOfDirectory(at: t, includingPropertiesForKeys: nil)
-            .filter { $0.lastPathComponent.contains("unreadable-") }
+        let aside = try setAside(in: t)
         #expect(aside.count == 1)
         #expect(try Data(contentsOf: aside[0]) == Data("not a plist".utf8))
+    }
+
+    @Test func allSetsJunkAside() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let junk = store.fileURL(forDocumentPath: "/docs/b.txt")
+        try Data("also not a plist".utf8).write(to: junk)
+        #expect(store.all().isEmpty)
+        #expect(!fm.fileExists(atPath: junk.path))
+        let aside = try setAside(in: t)
+        #expect(aside.count == 1)
+        #expect(try Data(contentsOf: aside[0]) == Data("also not a plist".utf8))
+    }
+
+    /// A write that arrives while a read is about to set junk aside waits
+    /// for it (another store value on the same folder too): the junk goes
+    /// aside, and the new copy stays live and readable.
+    @Test func aWriteDuringSetAsideStaysLive() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let writer = RecoveryStore(directory: t)
+        var reader = RecoveryStore(directory: t)
+        let junk = reader.fileURL(forDocumentPath: "/docs/a.txt")
+        try Data("not a plist".utf8).write(to: junk)
+        let fresh = record(text: "new")
+        let done = DispatchSemaphore(value: 0)
+        reader.checkBeforeSetAside = { _ in
+            DispatchQueue.global().async {
+                try? writer.write(fresh)
+                done.signal()
+            }
+            // Without the folder lock the write would land here, before the move.
+            Thread.sleep(forTimeInterval: 0.3)
+        }
+        #expect(reader.read(documentPath: "/docs/a.txt") == nil)
+        #expect(done.wait(timeout: .now() + 10) == .success)
+        #expect(writer.read(documentPath: "/docs/a.txt") == fresh)
+        let aside = try setAside(in: t)
+        #expect(aside.count == 1)
+        #expect(try Data(contentsOf: aside[0]) == Data("not a plist".utf8))
+    }
+
+    /// A live file that is there but can't be read is set aside (bytes
+    /// kept), not left for a later write to replace.
+    @Test func anUnreadableFileIsSetAsideOnRead() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "kept"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var failing = store
+        failing.checkFailRead = true
+        #expect(failing.read(documentPath: "/docs/a.txt") == nil)
+        #expect(!fm.fileExists(atPath: live.path))
+        let aside = try setAside(in: t)
+        #expect(aside.count == 1)
+        #expect(try Data(contentsOf: aside[0]) == bytes)
+    }
+
+    /// write itself sets an unreadable live file aside before replacing
+    /// it, and fails rather than replace it if its bytes can't be kept.
+    @Test func writeKeepsAnUnreadableLiveFileOrFails() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "old"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var stuck = store
+        stuck.checkFailRead = true
+        stuck.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try stuck.write(record(text: "new")) }
+        #expect(try Data(contentsOf: live) == bytes, "not replaced")
+        // A read that can't keep it holds it: a plain write still won't replace it.
+        #expect(stuck.read(documentPath: "/docs/a.txt") == nil)
+        var noAside = store
+        noAside.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try noAside.write(record(text: "new")) }
+        #expect(try Data(contentsOf: live) == bytes)
+        // Once it can be set aside, the write goes ahead and the old bytes are kept.
+        var unreadable = store
+        unreadable.checkFailRead = true
+        try unreadable.write(record(text: "new"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "new")
+        let aside = try setAside(in: t)
+        #expect(aside.count == 1)
+        #expect(try Data(contentsOf: aside[0]) == bytes)
     }
 
     @Test func recoveryWriteIsDurableAndAFailedFlushLeavesThePreviousCopy() throws {
@@ -128,6 +221,29 @@ import Testing
         #expect(store.read(documentPath: "/docs/a.txt")?.text == "two")
     }
 
+    /// First use with the folder and its parents missing: each new folder
+    /// is made and its entry flushed through its parent; a failed flush
+    /// fails the write (nothing acknowledged), and the retry flushes the
+    /// unconfirmed folder again before going on.
+    @Test func firstRecoveryWriteMakesMissingFoldersDurably() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let a = t.appendingPathComponent("a"), b = a.appendingPathComponent("b"), dir = b.appendingPathComponent("Recovery")
+        let store = RecoveryStore(directory: dir)
+        #expect(throws: (any Error).self) {
+            try store.write(record(text: "one"), syncFolder: { _ in throw CocoaError(.fileWriteUnknown) })
+        }
+        #expect(!fm.fileExists(atPath: store.fileURL(forDocumentPath: "/docs/a.txt").path))
+        let synced = Synced()
+        // Another value on the same folder shares what is unconfirmed.
+        try RecoveryStore(directory: dir).write(record(text: "one"), syncFolder: { synced.add($0) })
+        let p = { (u: URL) in u.standardizedFileURL.path }
+        #expect(synced.paths == [p(t), p(a), p(b), p(dir)])
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "one")
+        #expect(mode(dir) == 0o700)
+    }
+
+    /// The throttle's own rule; RecoveryWriter's first write before
+    /// textChanged() returns is covered by the iOS tests (RecoveryWriterTests).
     @Test func firstRecoveryWriteIsImmediateThenAtMostEveryThreeSeconds() {
         #expect(RecoveryThrottle.delay(sinceLastWrite: nil) == 0, "the first edit writes at once")
         #expect(RecoveryThrottle.delay(sinceLastWrite: 0) == RecoveryThrottle.interval)
@@ -202,4 +318,11 @@ import Testing
         #expect(SavePolicy.showsSaveButton(saveAutomatically: false))
         #expect(!SavePolicy.showsSaveButton(saveAutomatically: true))
     }
+}
+
+private final class Synced: @unchecked Sendable {
+    private let lock = NSLock()
+    private var list: [String] = []
+    func add(_ p: String) { lock.lock(); list.append(p); lock.unlock() }
+    var paths: [String] { lock.lock(); defer { lock.unlock() }; return list }
 }
