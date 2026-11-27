@@ -47,10 +47,16 @@ public final class WikiVault: @unchecked Sendable {
     /// disk's root never widens the vault to the whole home folder or disk.
     /// (An opened folder still wins over this walk, whatever it is.)
     public static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default, home: URL? = nil) -> URL? {
+        obsidianRoot(above: folder, fileManager: fm, home: home, volume: readIsVolume)
+    }
+
+    /// `volume`: how a folder's `isVolume` is read (tests give a fake one).
+    static func obsidianRoot(above folder: URL, fileManager fm: FileManager = .default, home: URL? = nil,
+                             volume: (URL) -> VolumeRead) -> URL? {
         let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
         var dir = folder.standardizedFileURL
         for _ in 0..<PreviewRoot.maxLevels {
-            guard mayBeVaultRoot(dir, home: home) else { return nil }
+            guard mayBeVaultRoot(dir, home: home, volume: volume) else { return nil }
             var isDir: ObjCBool = false
             if fm.fileExists(atPath: dir.appendingPathComponent(".obsidian").path, isDirectory: &isDir), isDir.boolValue { return dir }
             dir = dir.deletingLastPathComponent()
@@ -64,7 +70,41 @@ public final class WikiVault: @unchecked Sendable {
     /// or a folder holding it (`/Users`, …). Every rule applies to the path
     /// both as written and with symbolic links resolved, so a link to
     /// `/System/Volumes/Data` or a disk is refused like the volume itself.
+    /// A folder whose `isVolume` can't be read (permission denied, as a
+    /// Time Machine or network mount can answer) may be a mount point, so
+    /// it is refused too: before 0.6.1 a failed read counted as "not a
+    /// volume", and a readable mount that failed it but passed the path
+    /// rules could become the vault. A path that doesn't exist is not a
+    /// volume (the path rules alone decide).
     public static func mayBeVaultRoot(_ dir: URL, home: URL) -> Bool {
+        mayBeVaultRoot(dir, home: home, volume: readIsVolume)
+    }
+
+    /// What reading a folder's `isVolume` gave.
+    enum VolumeRead: Equatable {
+        case volume, notVolume
+        /// No such file or folder (ENOENT, ENOTDIR): not a volume.
+        case missing
+        /// Any other failure (EACCES, EPERM, …), or no value: unknown.
+        case unreadable
+    }
+
+    /// A fresh URL each time: resource values are cached on the URL.
+    static func readIsVolume(_ url: URL) -> VolumeRead {
+        do {
+            guard let v = try URL(fileURLWithPath: url.path).resourceValues(forKeys: [.isVolumeKey]).isVolume else { return .unreadable }
+            return v ? .volume : .notVolume
+        } catch {
+            let ns = error as NSError
+            let posix = (ns.userInfo[NSUnderlyingErrorKey] as? NSError).flatMap { $0.domain == NSPOSIXErrorDomain ? $0.code : nil }
+            if let posix { return posix == Int(ENOENT) || posix == Int(ENOTDIR) ? .missing : .unreadable }
+            let missing = ns.domain == NSCocoaErrorDomain
+                && (ns.code == CocoaError.fileReadNoSuchFile.rawValue || ns.code == CocoaError.fileNoSuchFile.rawValue)
+            return missing ? .missing : .unreadable
+        }
+    }
+
+    static func mayBeVaultRoot(_ dir: URL, home: URL, volume: (URL) -> VolumeRead) -> Bool {
         let d = dir.standardizedFileURL
         let candidates = [d, d.resolvingSymlinksInPath()]
         let homes = [home.standardizedFileURL, home.standardizedFileURL.resolvingSymlinksInPath()]
@@ -76,8 +116,10 @@ public final class WikiVault: @unchecked Sendable {
                 let hp = h.pathComponents
                 if hp.count >= comps.count, Array(hp.prefix(comps.count)) == comps { return false }
             }
-            // A fresh URL per candidate: resource values are cached on the URL.
-            if let v = try? URL(fileURLWithPath: c.path).resourceValues(forKeys: [.isVolumeKey]).isVolume, v { return false }
+            switch volume(c) {
+            case .volume, .unreadable: return false
+            case .notVolume, .missing: continue
+            }
         }
         return true
     }
