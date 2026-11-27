@@ -111,7 +111,7 @@ import CedricCore
     }
 }
 
-#if CEDRIC_BUILTIN
+#if os(macOS) || CEDRIC_BUILTIN
 /// The built-in engine's cancel is per request: a request starting can no
 /// longer clear an earlier one's cancel (0.5.2 reset one shared flag on
 /// every generate, so a cancelled prefill ran on to its end once the owl

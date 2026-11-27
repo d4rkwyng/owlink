@@ -89,17 +89,57 @@ public struct RecoveryStore: Sendable {
         return directory.appendingPathComponent(String(format: "%016llx", h) + ".recovery")
     }
 
-    public func write(_ record: RecoveryRecord) throws {
+    public func write(_ record: RecoveryRecord, durable: Bool = true, failSync: Bool = false,
+                      syncFolder: ((String) throws -> Void)? = nil) throws {
         try PrivateDirectory.make(directory, root: directory)
         PrivateDirectory.excludeFromBackup(directory)
         let data = try PropertyListEncoder().encode(record)
-        try PrivateDirectory.writePrivateFile(data, to: fileURL(forDocumentPath: record.documentPath))
+        try PrivateDirectory.writePrivateFile(data, to: fileURL(forDocumentPath: record.documentPath),
+                                              durable: durable, failSync: failSync, syncFolder: syncFolder)
+    }
+
+    /// Moves an unreadable recovery file aside, next to it
+    /// (`*.recovery.unreadable-<date>`), so a later launch can still look
+    /// at the bytes and a new write can use the original name. Copied
+    /// there if it can't be moved. Returns the new URL, or nil if there
+    /// was no file or it couldn't be kept.
+    @discardableResult
+    public func setAsideDamaged(at url: URL, now: Date = Date()) -> URL? {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path) else { return nil }
+        let stamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "")
+        func dest(_ tag: String) -> URL { url.appendingPathExtension("unreadable-\(tag)") }
+        var next = dest(stamp)
+        var n = 0
+        while fm.fileExists(atPath: next.path) {
+            n += 1
+            next = dest("\(stamp)-\(n)")
+        }
+        do {
+            try fm.moveItem(at: url, to: next)
+            return next
+        } catch {
+            do {
+                try fm.copyItem(at: url, to: next)
+                try? fm.removeItem(at: url)
+                return fm.fileExists(atPath: url.path) ? nil : next
+            } catch {
+                return nil
+            }
+        }
+    }
+
+    /// A readable record from `url`, or nil. Unreadable recovery files
+    /// are set aside, not deleted and not left under the live name.
+    private func record(fromFile url: URL) -> RecoveryRecord? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        if let r = try? PropertyListDecoder().decode(RecoveryRecord.self, from: data) { return r }
+        _ = setAsideDamaged(at: url)
+        return nil
     }
 
     public func read(documentPath path: String) -> RecoveryRecord? {
-        guard let data = try? Data(contentsOf: fileURL(forDocumentPath: path)),
-              let r = try? PropertyListDecoder().decode(RecoveryRecord.self, from: data),
-              r.documentPath == path else { return nil }
+        guard let r = record(fromFile: fileURL(forDocumentPath: path)), r.documentPath == path else { return nil }
         return r
     }
 
@@ -113,7 +153,7 @@ public struct RecoveryStore: Sendable {
     public func all() -> [RecoveryRecord] {
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.pathExtension == "recovery" }
-            .compactMap { (try? Data(contentsOf: $0)).flatMap { try? PropertyListDecoder().decode(RecoveryRecord.self, from: $0) } }
+            .compactMap { record(fromFile: $0) }
             .sorted { $0.savedAt > $1.savedAt }
     }
 

@@ -88,10 +88,9 @@ extension TextDocument {
     var recoveryPath: String { fileURL.standardizedFileURL.path }
 }
 
-/// Keeps a recovery copy of one editor's unsaved text: written at most
-/// every 3 seconds while the document has unsaved changes (either save
-/// mode), off the main thread and atomically; cleared on save and on a
-/// clean close.
+/// Keeps a recovery copy of one editor's unsaved text: the first unsaved
+/// edit writes at once, then at most every 3 seconds, off the main thread,
+/// atomically and durably; cleared on save and on a clean close.
 @MainActor final class RecoveryWriter {
     private weak var document: TextDocument?
     private let path: String
@@ -107,10 +106,16 @@ extension TextDocument {
         self.snapshot = snapshot
     }
 
-    /// The text changed: write soon (now, or when 3 s have passed since the last write).
+    /// The text changed: the first unsaved edit writes at once (a 0-delay
+    /// timer would still wait for the run loop); later ones wait until 3 s
+    /// have passed since the last write.
     func textChanged() {
         guard !stopped, timer == nil, document?.hasUnsavedChanges == true else { return }
         let delay = RecoveryThrottle.delay(sinceLastWrite: lastWrite.map { Date().timeIntervalSince($0) })
+        if delay == 0 {
+            writeNow()
+            return
+        }
         timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.writeNow() }
         }

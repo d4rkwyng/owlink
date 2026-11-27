@@ -120,7 +120,10 @@ extension EditorViewController {
         undo?.disableUndoRegistration()
         if changesText {
             if edits.count > 1 { storage.beginEditing() }
-            for edit in edits.reversed() { storage.replaceCharacters(in: edit.range, with: edit.replacement) }
+            for edit in edits.reversed() {
+                document.noteTextReplacement(edit.range, newLength: (edit.replacement as NSString).length)
+                storage.replaceCharacters(in: edit.range, with: edit.replacement)
+            }
             if edits.count > 1 { storage.endEditing() }
         }
         let bookmarksMoved = changesText && marks != nil

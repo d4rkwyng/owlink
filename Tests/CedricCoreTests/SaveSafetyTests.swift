@@ -93,9 +93,45 @@ import Testing
         let t = try temp(); defer { try? fm.removeItem(at: t) }
         #expect(RecoveryStore(directory: t.appendingPathComponent("none")).all().isEmpty)
         let store = RecoveryStore(directory: t)
-        try Data("not a plist".utf8).write(to: store.fileURL(forDocumentPath: "/docs/a.txt"))
+        let junk = store.fileURL(forDocumentPath: "/docs/a.txt")
+        try Data("not a plist".utf8).write(to: junk)
         #expect(store.read(documentPath: "/docs/a.txt") == nil)
         #expect(store.all().isEmpty)
+        // Damaged bytes are set aside, not deleted and not left under the live name.
+        #expect(!fm.fileExists(atPath: junk.path))
+        let aside = try fm.contentsOfDirectory(at: t, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.contains("unreadable-") }
+        #expect(aside.count == 1)
+        #expect(try Data(contentsOf: aside[0]) == Data("not a plist".utf8))
+    }
+
+    @Test func recoveryWriteIsDurableAndAFailedFlushLeavesThePreviousCopy() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "one"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "one")
+        // failSync is the dying-disk check: the temp file's flush fails
+        // before the rename, so the previous copy stays.
+        #expect(throws: (any Error).self) { try store.write(record(text: "two"), failSync: true) }
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "one")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).filter { $0.hasSuffix(".recovery") }.count == 1)
+    }
+
+    @Test func recoveryWriteFolderFlushFailureIsUnconfirmedAndReadersSeeTheNewCopy() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "one"))
+        #expect(throws: PrivateDirectory.Unconfirmed.self) {
+            try store.write(record(text: "two"), syncFolder: { _ in throw CocoaError(.fileWriteUnknown) })
+        }
+        // The rename happened; only the folder flush failed.
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "two")
+    }
+
+    @Test func firstRecoveryWriteIsImmediateThenAtMostEveryThreeSeconds() {
+        #expect(RecoveryThrottle.delay(sinceLastWrite: nil) == 0, "the first edit writes at once")
+        #expect(RecoveryThrottle.delay(sinceLastWrite: 0) == RecoveryThrottle.interval)
+        #expect(RecoveryThrottle.delay(sinceLastWrite: RecoveryThrottle.interval) == 0)
     }
 
     @Test func throttleWritesAtMostEveryThreeSeconds() {

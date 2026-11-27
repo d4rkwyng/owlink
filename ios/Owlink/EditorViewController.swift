@@ -1166,6 +1166,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             // Plain newline (no indent to keep): let the system insert it, as the Mac
             // falls back to insertNewline, so it stays in the current typing undo group.
             if edit.replacement == "\n", edit.selection == NSRange(location: range.location + 1, length: 0) {
+                document.noteTextReplacement(range, newLength: 1)
                 return true
             }
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
@@ -1184,7 +1185,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
 
-        guard !self.textView.isPasting, replacement.utf16.count == 1, let raw = replacement.utf16.first else { return true }
+        guard !self.textView.isPasting, replacement.utf16.count == 1, let raw = replacement.utf16.first else {
+            document.noteTextReplacement(range, newLength: (replacement as NSString).length)
+            return true
+        }
         let typed = straightenedTyping(replacement) ?? replacement
         let character = typed.utf16.first ?? raw
 
@@ -1205,7 +1209,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             case .pair(let pair)?:
                 let edit = TextEdit(range: range, replacement: pair,
                                     selection: NSRange(location: range.location + 1, length: 0))
-                guard applyTextEdit(edit, actionName: String(localized: "Typing")) else { return true }
+                guard applyTextEdit(edit, actionName: String(localized: "Typing")) else {
+                    document.noteTextReplacement(range, newLength: (replacement as NSString).length)
+                    return true
+                }
                 autoClosers.append(range.location + 1)
                 if autoClosers.count > 16 { autoClosers.removeFirst(autoClosers.count - 16) }
                 return false
@@ -1225,6 +1232,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                 selection: NSRange(location: range.location + (typed as NSString).length, length: 0))
             return !applyTextEdit(edit, actionName: String(localized: "Typing"))
         }
+        document.noteTextReplacement(range, newLength: (replacement as NSString).length)
         return true
     }
 
