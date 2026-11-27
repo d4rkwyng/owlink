@@ -2,9 +2,13 @@ name: Release
 
 # Builds a universal "Owlink.app", signs it with the owner's Developer ID
 # (hardened runtime, secure timestamp; llama.framework first, then the app),
-# notarizes and staples it, Sparkle-signs the zip and writes a signed
-# appcast.xml for it, and attaches Owlink-<version>.zip and appcast.xml to the
-# GitHub Release for the tag. Every release it makes is a DRAFT (final tags
+# notarizes and staples it, zips it, then puts that same stapled app in
+# Owlink-<version>.dmg (drag-to-install, with an /Applications alias) and
+# signs, notarizes and staples the DMG too; launch-smoke-tests both,
+# Sparkle-signs the zip (the update enclosure: docs/updates.md says why the
+# zip and not the DMG) and writes a signed appcast.xml for it, and attaches
+# Owlink-<version>.dmg (the download people use), Owlink-<version>.zip
+# and appcast.xml to the GitHub Release for the tag. Every release it makes is a DRAFT (final tags
 # too): the owner publishes it by hand. A tag with a suffix (v0.1.0-rc1) is
 # also a prerelease. Nothing is uploaded to owlink.app: the owner puts
 # appcast.xml at https://owlink.app/appcast.xml by hand after publishing.
@@ -43,7 +47,7 @@ jobs:
     runs-on: macos-26   # macOS 26 SDK: the Apple Intelligence engine (FoundationModels) compiles in; tests.yml uses the same runner
     timeout-minutes: 90
     permissions:
-      contents: write  # create the release and upload Owlink-<version>.zip
+      contents: write  # create the release and upload Owlink-<version>.dmg/.zip
     env:
       TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
@@ -81,9 +85,11 @@ jobs:
             echo "Owlink ${TAG}: a fast, native text editor for macOS 14 Sonoma and later (universal: Intel and Apple silicon). Signed with Developer ID and notarized."
             echo
             BASE="${TAG#v}"; BASE="${BASE%%-*}"   # v0.1.0-rc1 -> 0.1.0
+            echo "**Download: \`Owlink-${BASE}.dmg\`.** Open it and drag Owlink onto the Applications folder beside it, then open Owlink from Applications. (Or with Homebrew: \`brew install --cask d4rkwyng/tap/owlink\`.)"
+            echo
             Scripts/changelog-section.sh "$BASE"
             echo
-            echo "Install: download \`Owlink-${BASE}.zip\`, open it, and move Owlink to Applications."
+            echo "\`Owlink-${BASE}.zip\` is the same app, for Owlink's built-in updater (Owlink › Check for Updates…); you don't need to download it. Opened from anywhere but Applications (a zip unpacked in Downloads, or the DMG itself), Owlink offers to move itself to Applications, where it can update."
           } > "$RUNNER_TEMP/release-notes.md"
           cat "$RUNNER_TEMP/release-notes.md"
 
@@ -124,22 +130,6 @@ jobs:
           V="${TAG#v}"; export CEDRIC_VERSION="${V%%-*}"
           ./Scripts/release.sh
 
-      # Apple's notarization answer and log, kept also when the step above
-      # failed (an Invalid submission's issues list is in the log). Apple's
-      # log has no credentials: id, status, archive name, sha256, cdhashes
-      # and the issues. Nothing to upload when the run stopped before
-      # notarizing.
-      - name: Keep the notarization log
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: notary-${{ env.TAG }}
-          path: |
-            dist/notary-result.json
-            dist/notary-log.json
-          if-no-files-found: ignore
-          retention-days: 90
-
       # Launch the zip that ships: Scripts/smoke-launch.sh unzips the exact
       # dist/Owlink-<version>.zip the next step uploads into a fresh temp
       # folder, checks the bundle's layout, hides this checkout's Resources
@@ -165,6 +155,51 @@ jobs:
           # uses this account's real Application Support): allowed here
           # because the runner is a disposable VM.
           OWLINK_RELEASE_GATE=1 Scripts/smoke-launch.sh --seconds 10 "$ZIP"
+
+      # The DMG, from the app the zip has (release.sh's stapled
+      # dist/Owlink.app, never rebuilt or re-signed): Scripts/make-dmg.sh
+      # lays it out with an /Applications alias and checks the app on it is
+      # that bundle (same files, same CDHash, ticket present); then the DMG
+      # is signed, notarized, stapled and assessed by Gatekeeper (open
+      # context for the image, exec for the app on it).
+      - name: DMG (sign, notarize, staple)
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: |
+          V="${TAG#v}"; export CEDRIC_VERSION="${V%%-*}"
+          ./Scripts/release-dmg.sh
+
+      # Apple's notarization answers and logs (the app's zip and the DMG),
+      # kept also when a step above failed (an Invalid submission's issues list is in the log). Apple's
+      # log has no credentials: id, status, archive name, sha256, cdhashes
+      # and the issues. Nothing to upload when the run stopped before
+      # notarizing.
+      - name: Keep the notarization log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: notary-${{ env.TAG }}
+          path: |
+            dist/notary-result.json
+            dist/notary-log.json
+            dist/notary-dmg-result.json
+            dist/notary-dmg-log.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+      # The same clean-machine launch as the zip's, from the DMG: mounted
+      # read-only, its Owlink.app copied out as a Finder drag would, the
+      # image detached, then layout, hidden fallbacks, llama check, a 10 s
+      # run, a Quit and no crash report (Scripts/smoke-launch.sh).
+      - name: DMG launch smoke test
+        run: |
+          set -euo pipefail
+          V="${TAG#v}"; DMG="dist/Owlink-${V%%-*}.dmg"
+          [ -f "$DMG" ] || { echo "::error::$DMG is missing; the DMG step did not finish."; ls -la dist || true; exit 1; }
+          # A release gate on a disposable runner, as for the zip.
+          OWLINK_RELEASE_GATE=1 Scripts/smoke-launch.sh --seconds 10 "$DMG"
 
       # The Sparkle update (docs/updates.md): the same steps as
       # `Scripts/release.sh --appcast`, run on the zip that was just
@@ -234,10 +269,14 @@ jobs:
             -- --ed-key-file "$KEYFILE"
           SHA=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)
           echo "sha256 $SHA  $ZIP"
+          DMG="dist/Owlink-${VERSION}.dmg"
+          DMG_SHA=$(shasum -a 256 "$DMG" | cut -d' ' -f1)
+          echo "sha256 $DMG_SHA  $DMG"
           {
             echo "### Owlink ${VERSION} (${TAG})"
             echo
-            echo "- \`Owlink-${VERSION}.zip\` sha256 \`$SHA\`, ${ED_LEN} bytes"
+            echo "- \`Owlink-${VERSION}.dmg\` (the download; notarized, stapled) sha256 \`$DMG_SHA\`, $(stat -f '%z' "$DMG") bytes. For the cask (d4rkwyng/tap Casks/owlink.rb) once published: url .../download/${TAG}/Owlink-${VERSION}.dmg, sha256 \`$DMG_SHA\`."
+            echo "- \`Owlink-${VERSION}.zip\` (the Sparkle enclosure) sha256 \`$SHA\`, ${ED_LEN} bytes"
             echo "- Sparkle edSignature \`$ED_SIG\` (verified with \`$OWLINK_SPARKLE_PUBLIC_KEY\`)"
             echo "- Enclosure: $ENCLOSURE"
             echo "- \`appcast.xml\` (signed) is attached to the draft. Not uploaded to $OWLINK_SPARKLE_FEED_URL: do that by hand after publishing the release."
@@ -253,6 +292,7 @@ jobs:
         with:
           tag_name: ${{ env.TAG }}
           files: |
+            dist/Owlink-*.dmg
             dist/Owlink-*.zip
             dist/appcast.xml
           fail_on_unmatched_files: true
