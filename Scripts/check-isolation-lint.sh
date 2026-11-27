@@ -12,12 +12,15 @@
 #   1. source check-env.sh and call cedric_isolate before its first launch
 #      (CEDRIC_REPLACE_UNDO_DIR for every launch);
 #   2. set CEDRIC_SESSION_DIR;
-#   3. on a launch that strips the environment (env -i, ENV_CLEAN, or
+#   3. if it launches a bundle (Contents/MacOS/Cedric), call
+#      cedric_require_check_build before its first launch, so a release
+#      build is refused before it runs;
+#   4. on a launch that strips the environment (env -i, ENV_CLEAN, or
 #      -u CEDRIC_REPLACE_UNDO_DIR / -u CEDRIC_SESSION_DIR), set both
 #      variables on that same command.
 # The release gate (launch-check.sh, smoke-launch.sh) launches release
 # builds as shipped; a script marked "# isolation-lint: release-gate" is
-# held only to 3, and a launch there meant to run as a user does carries
+# held only to 4, and a launch there meant to run as a user does carries
 # "# isolation-lint: real-launch <why>" on the line above it instead.
 # The lint lists every launch it allowed that way.
 set -euo pipefail
@@ -89,12 +92,15 @@ for path in sys.argv[1:]:
         return None
     src = line_of(r'(^|\s)(\.|source)\s+\S*check-env\.sh')
     iso = line_of(r'(^|[\s;&|])cedric_isolate\s')
+    req = line_of(r'(^|[\s;&|])cedric_require_check_build\s')
     if not gate and (src is None or src > first):
         problems.append(f"{path}:{first}: launches the app without sourcing Scripts/check-env.sh first")
     if not gate and (iso is None or iso > first):
         problems.append(f"{path}:{first}: launches the app before cedric_isolate (no CEDRIC_REPLACE_UNDO_DIR: the launch prunes the real ReplaceUndo)")
     if not gate and "CEDRIC_SESSION_DIR" not in text:
         problems.append(f"{path}:{first}: launches the app without CEDRIC_SESSION_DIR")
+    if not gate and any(v in bundle_vars for *_, v in launches) and (req is None or req > first):
+        problems.append(f"{path}:{first}: launches a bundle without cedric_require_check_build first (a release build would use the real session, token and ReplaceUndo)")
     for n, l, marker, v in launches:
         strips = re.search(r'\benv\s+-i\b|ENV_CLEAN|-u\s+CEDRIC_(REPLACE_UNDO_DIR|SESSION_DIR)\b', l)
         if not strips:

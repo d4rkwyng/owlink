@@ -15,9 +15,12 @@
 #
 #   Scripts/session-check.sh [--from OLD.app] [APP]     default "dist/Owlink.app"
 #
-# --from OLD.app first has another build (say an older release)
-# save a session, by a normal quit and by a kill -9 after a hot close, and
-# checks that APP restores all of it, Reopen Closed Tab included.
+# --from OLD.app first has another build save a session, by a normal quit
+# and by a kill -9 after a hot close, and checks that APP restores all of
+# it, Reopen Closed Tab included. OLD.app must be a check build too (build
+# the older version's tag with Scripts/bundle-app.sh): a release build
+# ignores CEDRIC_SESSION_DIR and would save into the real session, so both
+# bundles are refused unless marked, before either runs (Scripts/check-env.sh).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 FROM=""
@@ -25,9 +28,10 @@ if [ "${1:-}" = "--from" ]; then FROM=${2%/}; shift 2; fi
 APP="${1:-dist/Owlink.app}"
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+cedric_require_check_build "$APP"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
-. Scripts/check-env.sh
 cedric_isolate "$W"
 fail=0
 check() { # description, pattern
@@ -39,6 +43,7 @@ dump() { env CEDRIC_SESSION_DUMP=1 CEDRIC_NO_SESSION_SAVE=1 "$BIN" -ApplePersist
 if [ -n "$FROM" ]; then
     OLD_BIN="$FROM/Contents/MacOS/Cedric"
     [ -x "$OLD_BIN" ] || { echo "no app at $FROM" >&2; exit 1; }
+    cedric_require_check_build "$FROM"
     echo "session-check: saving with $FROM ($(plutil -extract CFBundleName raw "$FROM/Contents/Info.plist" 2>/dev/null)), restoring with $APP ($(plutil -extract CFBundleName raw "$APP/Contents/Info.plist" 2>/dev/null))"
     export CEDRIC_SESSION_DIR="$W/session0"
     printf 'old build line\n' > "$W/old.txt"

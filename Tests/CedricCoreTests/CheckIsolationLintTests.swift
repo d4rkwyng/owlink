@@ -131,8 +131,9 @@ import Testing
             BIN="$APP/Contents/MacOS/Cedric"
             [ -x "$BIN" ] || exit 1
             otool -L "$BIN" | grep -q Sparkle && exit 1
-            W=$(mktemp -d)
             . Scripts/check-env.sh
+            cedric_require_check_build "$APP"
+            W=$(mktemp -d)
             cedric_isolate "$W"
             env CEDRIC_SESSION_DIR="$W/s" perl -e 'alarm 60; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES
             """, "inspect-only.sh": """
@@ -144,5 +145,90 @@ import Testing
         defer { try? FileManager.default.removeItem(at: d) }
         let (status, out) = try lint(paths)
         #expect(status == 0, "\(out)")
+    }
+
+    @Test func aBundleLaunchWithoutTheCheckBuildGuardFails() throws {
+        let (d, paths) = try fixtures(["unguarded.sh": """
+            #!/bin/bash
+            APP="${1:-dist/Owlink.app}"
+            BIN="$APP/Contents/MacOS/Cedric"
+            W=$(mktemp -d)
+            . Scripts/check-env.sh
+            cedric_isolate "$W"
+            env CEDRIC_SESSION_DIR="$W/s" "$BIN" -ApplePersistenceIgnoreState YES
+            """])
+        defer { try? FileManager.default.removeItem(at: d) }
+        let (status, out) = try lint(paths)
+        #expect(status == 1)
+        #expect(out.contains("unguarded.sh:7: launches a bundle without cedric_require_check_build first"), "\(out)")
+    }
+}
+
+/// Scripts/check-env.sh's cedric_require_check_build decides from the
+/// bundle alone and never runs it: the fixture "Cedric" executables here
+/// would leave a file behind if anything ran them.
+@Suite(.offPool) struct CheckBuildGuardTests {
+    let fm = FileManager.default
+
+    /// An Owlink.app in a fresh folder whose executable records any run.
+    func bundle(checkKey: String?, sparkle: Bool = false) throws -> (URL, URL) {
+        let d = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("cedric-check-guard-\(UUID().uuidString)")
+        let app = d.appendingPathComponent("Owlink.app")
+        let macos = app.appendingPathComponent("Contents/MacOS")
+        try fm.createDirectory(at: macos, withIntermediateDirectories: true)
+        let ran = d.appendingPathComponent("ran")
+        let exe = macos.appendingPathComponent("Cedric")
+        try "#!/bin/sh\ntouch '\(ran.path)'\n".write(to: exe, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: exe.path)
+        var plist: [String: Any] = ["CFBundleExecutable": "Cedric"]
+        if let checkKey { plist["CedricCheckBuild"] = checkKey == "true" ? true as Any : checkKey as Any }
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try data.write(to: app.appendingPathComponent("Contents/Info.plist"))
+        if sparkle {
+            try fm.createDirectory(at: app.appendingPathComponent("Contents/Frameworks/Sparkle.framework"), withIntermediateDirectories: true)
+        }
+        return (app, ran)
+    }
+
+    /// Sources check-env.sh and calls cedric_require_check_build APP, then
+    /// launches APP as a check script would; status and stderr.
+    func guardThenLaunch(_ app: URL) throws -> (Int32, String) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/bash")
+        p.currentDirectoryURL = CheckIsolationLintTests.root
+        p.arguments = ["-c", "set -euo pipefail; . Scripts/check-env.sh; cedric_require_check_build \"$1\"; \"$1/Contents/MacOS/Cedric\"", "check", app.path]
+        p.environment = ["PATH": "/usr/bin:/bin"]
+        let err = Pipe()
+        p.standardError = err
+        try p.run()
+        let data = err.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+    }
+
+    @Test func aReleaseBundleIsRefusedWithoutRunning() throws {
+        for (key, sparkle) in [(nil, false), (nil, true), ("false", false), ("true", true)] as [(String?, Bool)] {
+            let (app, ran) = try bundle(checkKey: key, sparkle: sparkle)
+            defer { try? fm.removeItem(at: app.deletingLastPathComponent()) }
+            let (status, err) = try guardThenLaunch(app)
+            #expect(status == 1, "key \(key ?? "absent"), Sparkle \(sparkle)")
+            #expect(err.contains("refusing to launch"), "\(err)")
+            #expect(!fm.fileExists(atPath: ran.path), "the guard ran the bundle (key \(key ?? "absent"), Sparkle \(sparkle))")
+        }
+    }
+
+    @Test func aMarkedCheckBundleIsLaunched() throws {
+        let (app, ran) = try bundle(checkKey: "true")
+        defer { try? fm.removeItem(at: app.deletingLastPathComponent()) }
+        let (status, err) = try guardThenLaunch(app)
+        #expect(status == 0, "\(err)")
+        #expect(fm.fileExists(atPath: ran.path))
+    }
+
+    /// bundle-app.sh writes the key for a check build only.
+    @Test func bundleAppMarksOnlyCheckBuilds() throws {
+        let text = try String(contentsOf: CheckIsolationLintTests.root.appendingPathComponent("Scripts/bundle-app.sh"), encoding: .utf8)
+        let line = try #require(text.split(separator: "\n").first { $0.contains("CedricCheckBuild") && !$0.hasPrefix("#") })
+        #expect(line.contains("$CHECKS = 1") && line.contains("-bool YES"), "\(line)")
     }
 }

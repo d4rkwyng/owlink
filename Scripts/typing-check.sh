@@ -15,9 +15,10 @@ cd "$(dirname "$0")/.."
 APP="${1:-dist/Owlink.app}"
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+cedric_require_check_build "$APP"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
-. Scripts/check-env.sh
 cedric_isolate "$W"
 printf 'func hello() {\n    print("hi")\n}\n' > "$W/file.swift"
 python3 - "$W/big.json" <<'PY'

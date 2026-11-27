@@ -32,6 +32,8 @@ cd "$(dirname "$0")/.."
 APP="${1:-dist/Owlink.app}"
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+cedric_require_check_build "$APP"
 W=$(mktemp -d)
 PIDS=()
 cleanup() {
@@ -39,7 +41,6 @@ cleanup() {
     rm -rf "$W"
 }
 trap cleanup EXIT
-. Scripts/check-env.sh
 cedric_isolate "$W"
 # A 30-day-old Replace in Files undo operation in this run's ReplaceUndo:
 # the launches' prune must take it (checked at the end), which shows they
