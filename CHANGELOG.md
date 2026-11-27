@@ -6,12 +6,24 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-27
+
 ### Added
+- **Automatic updates.** Owlink checks for a new version about once a day and asks before installing it. Owlink › Check for Updates… checks now; Settings › General › Automatically check for updates turns the daily check off. Only updates signed with Owlink's key are accepted, from `https://owlink.app/appcast.xml`.
+- **Wiki links.** Type `[[` to link a note in the open folder, click a link to open it, and see Backlinks beside Outline.
+- **Tags.** A Tags pane lists every #tag and its notes.
 - Markdown preview: Mermaid diagrams and math render when Allow JavaScript is on (bundled, nothing fetched).
-- **Updates.** Owlink checks for a new version about once a day and asks before installing it; Owlink › Check for Updates… checks now, and Settings › General › Automatically check for updates turns the daily check off. Only updates signed with Owlink's key are accepted, from `https://owlink.app/appcast.xml`.
+- Context Bar: the Image button picks an image and copies it into images/ with a relative link, like drag and drop. Open in Terminal Here opens Terminal at the document's or folder's location.
+
+### Changed
+- **Opening a file is much faster, and large files use less memory.** On an M4 Pro, a 1 MB file opens and settles in about 0.38 s (was 1.45 s). Opening a 1 GB file uses about half the memory (about 1.2 GB instead of 2.3 GB) and is no slower than before. Misspellings are underlined at once, including further down a file.
+- Typing stays fast with the Context Bar shown, and split views restore correctly.
+- CSV preview: click the # header to put rows back in file order.
 
 ### Fixed
-- **Reliability: unsaved work survives a force quit or crash, checked by new tests.** A new tab's first text, or the first edit to a file, is kept within moments, not only after a 1.5 s pause in typing. If Owlink can't read its session file, it keeps that file aside and reopens the unsaved text as Recovered tabs, where it used to delete it. A file deleted or moved while Owlink wasn't running comes back with its unsaved text and the “deleted or moved” bar. Two windows come back as two windows, not merged into one.
+- **Unsaved work survives a force quit, a crash or a failed save more reliably.** A new tab's first text, or the first edit to a file, is kept within moments, not only after a 1.5 s pause in typing. Closed tabs with unsaved text stay recoverable through a reopen journal. A save counts only once the file and its folder are flushed to disk. If Owlink can't read its session file, it keeps that file aside and reopens the unsaved text as Recovered tabs, where it used to delete it. A file deleted or moved while Owlink wasn't running comes back with its unsaved text and the “deleted or moved” bar. Two windows come back as two windows, not merged into one. Quit asks before it drops anything it couldn't back up. Remaining limits (none new in 0.6) are listed in [docs/known-limits-0.6.md](docs/known-limits-0.6.md).
+- Replace in Files edits the open tab for a file opened under another name or through a hard link, and refuses a tab whose file was replaced on disk since it was read.
+- Names with combining marks (for example a slash followed by an accent) work in wiki links, preview links and the `cedric` command.
 
 ## [0.5.4] - 2026-11-25
 
@@ -352,6 +364,7 @@ spirit of Notepad++. Universal (Apple silicon and Intel), signed with Developer 
 - Two portable modules (CedricCore, CedricAI: Foundation only, no AppKit) and the AppKit app. llama.cpp is a pinned SwiftPM binary target (release b12360, checksum-verified), copied into `Contents/Frameworks`.
 - Releases: `Scripts/release.sh` builds universal, signs `llama.framework` and then the app with the hardened runtime and no entitlements, checks both carry the same Team ID, real-launches the signed app, notarizes, staples and zips; `.github/workflows/release.yml` runs it on a `v*` tag (a `-rcN` suffix makes a draft prerelease) and keeps Apple's notary log as a workflow artifact. `.github/workflows/tests.yml` runs the tests on pushes and pull requests with Swift 6.1. The version lives in one place, `CedricVersion.source`; the release refuses a build whose Info.plist, `CEDRIC_VERSION` or tag disagree with it.
 
+[0.6.0]: https://github.com/d4rkwyng/owlink/releases/tag/v0.6.0
 [0.5.4]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.4
 [0.5.3]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.3
 [0.5.2]: https://github.com/d4rkwyng/owlink/releases/tag/v0.5.2
