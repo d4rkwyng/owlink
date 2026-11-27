@@ -1060,7 +1060,8 @@ public enum ClosedTabs {
     /// (its buffer would be deleted, and that text is nowhere else): when
     /// they alone pass the limit, the list grows past it. Returns the new
     /// list and what was dropped (whose buffers the caller deletes).
-    /// Tabs in `keeping` (`expire`) are never dropped, by date or count.
+    /// Tabs in `keeping` (`expire`) are never dropped, by date or count,
+    /// and don't count toward `unsavedLimit`; nor is `tab` ever dropped.
     public static func push(_ tab: SessionTab, onto list: [SessionTab], limit: Int = ClosedTabs.limit, keeping: Set<UUID> = [])
         -> (list: [SessionTab], dropped: [SessionTab]) {
         push(tab, onto: list, limit: limit, now: Date(), keeping: keeping)
@@ -1077,13 +1078,19 @@ public enum ClosedTabs {
         tab.closed = now
         out.append(tab)
         var dropped: [SessionTab] = fresh.dropped
-        while out.count > max(1, limit), let i = out.firstIndex(where: { !$0.hasBuffer }) {
+        // The tab being closed is never dropped (its text would go with
+        // it, the moment it was kept).
+        while out.count > max(1, limit), let i = out.firstIndex(where: { !$0.hasBuffer && $0.id != tab.id }) {
             dropped.append(out.remove(at: i))
         }
         // Unsaved text is kept, but not without end: past `unsavedLimit`
-        // the oldest goes (and then `keepDays`, see `expire`).
-        var unsaved = out.filter(\.hasBuffer).count
-        while unsaved > max(1, unsavedLimit), let i = out.firstIndex(where: { $0.hasBuffer && !keeping.contains($0.id) }) {
+        // the oldest goes (and then `keepDays`, see `expire`). Only
+        // ordinary entries count: one in `keeping` is never dropped, so
+        // counting it would only make room for fewer of the others (and,
+        // with `unsavedLimit` of them, none: not even this one).
+        var unsaved = out.filter { $0.hasBuffer && !keeping.contains($0.id) }.count
+        while unsaved > max(1, unsavedLimit),
+              let i = out.firstIndex(where: { $0.hasBuffer && !keeping.contains($0.id) && $0.id != tab.id }) {
             dropped.append(out.remove(at: i))
             unsaved -= 1
         }

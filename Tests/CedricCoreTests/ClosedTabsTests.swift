@@ -33,10 +33,16 @@ import Testing
         let r = ClosedTabs.push(tab("d3", dirty: true), onto: [tab("x", dirty: true), tab("y", dirty: true)], limit: 2)
         #expect(r.list.map(\.untitledName) == ["x", "y", "d3"])
         #expect(r.dropped.isEmpty)
-        // A clean tab pushed onto a full list of unsaved ones: the clean one is what goes.
+        // A clean tab pushed onto a full list of unsaved ones: kept, since
+        // the tab being closed is never dropped (it is what ⇧⌘T brings
+        // back next). The next clean close drops it, so the list passes
+        // the limit by at most this one clean tab.
         let c = ClosedTabs.push(tab("c", dirty: false), onto: r.list, limit: 2)
-        #expect(c.list.map(\.untitledName) == ["x", "y", "d3"])
-        #expect(c.dropped.map(\.untitledName) == ["c"])
+        #expect(c.list.map(\.untitledName) == ["x", "y", "d3", "c"])
+        #expect(c.dropped.isEmpty)
+        let c2 = ClosedTabs.push(tab("c2", dirty: false), onto: c.list, limit: 2)
+        #expect(c2.list.map(\.untitledName) == ["x", "y", "d3", "c2"])
+        #expect(c2.dropped.map(\.untitledName) == ["c"])
         // 60 unsaved closes at the default limit of 50: all 60 kept.
         var list: [SessionTab] = []
         for n in 0..<60 {
@@ -57,11 +63,42 @@ import Testing
         old.closed = owed.closed
         let e = ClosedTabs.expire([owed, old], now: now, keeping: [owed.id])
         #expect(e.list.map(\.untitledName) == ["owed"] && e.dropped.map(\.untitledName) == ["old"])
-        // Past the unsaved cap the oldest tab not owed goes, not the owed one.
+        // The owed tab doesn't count toward the unsaved cap (Astra 25e #2):
+        // at a cap of two, the owed tab and two ordinary ones all stay.
         var mid = tab("mid", dirty: true)
         mid.closed = now
         let p = ClosedTabs.push(tab("new", dirty: true), onto: [owed, mid], unsavedLimit: 2, now: now, keeping: [owed.id])
-        #expect(p.list.map(\.untitledName) == ["owed", "new"] && p.dropped.map(\.untitledName) == ["mid"])
+        #expect(p.list.map(\.untitledName) == ["owed", "mid", "new"] && p.dropped.isEmpty)
+        // Past the cap the oldest ordinary tab goes, never the owed one.
+        let q = ClosedTabs.push(tab("newer", dirty: true), onto: p.list, unsavedLimit: 2, now: now, keeping: [owed.id])
+        #expect(q.list.map(\.untitledName) == ["owed", "new", "newer"] && q.dropped.map(\.untitledName) == ["mid"])
+    }
+
+    /// A full set of protected entries (`unsavedLimit` of them, owed or
+    /// held) and one more dirty tab closed: it is kept, never dropped as
+    /// the only one that could go (its buffer would be deleted at once).
+    @Test func aTabClosedOntoAFullProtectedSetIsKept() {
+        let now = Date()
+        let protected = (0..<ClosedTabs.unsavedLimit).map { n -> SessionTab in
+            var t = tab("p\(n)", dirty: true)
+            t.closed = now.addingTimeInterval(-60)
+            return t
+        }
+        let keeping = Set(protected.map(\.id))
+        let new = tab("new", dirty: true)
+        let p = ClosedTabs.push(new, onto: protected, now: now, keeping: keeping)
+        #expect(p.dropped.isEmpty, "dropped: \(p.dropped.map(\.untitledName))")
+        #expect(p.list.count == ClosedTabs.unsavedLimit + 1 && p.list.last?.id == new.id)
+        // And with room for ordinary ones as usual: the next ones are kept too.
+        let q = ClosedTabs.push(tab("next", dirty: true), onto: p.list, now: now, keeping: keeping)
+        #expect(q.dropped.isEmpty && q.list.count == ClosedTabs.unsavedLimit + 2)
+        // At a cap of one, a new close drops the older ordinary one, never itself.
+        let r = ClosedTabs.push(tab("last", dirty: true), onto: q.list, unsavedLimit: 1, now: now, keeping: keeping)
+        #expect(r.dropped.map(\.untitledName) == ["new", "next"] && r.list.last?.untitledName == "last")
+        // A clean tab closed onto a full list of dirty ones isn't dropped either.
+        let clean = tab("clean", dirty: false)
+        let c = ClosedTabs.push(clean, onto: protected, limit: 2, now: now, keeping: keeping)
+        #expect(c.dropped.isEmpty && c.list.last?.id == clean.id)
     }
 
     @Test func savedWithTheSession() throws {
