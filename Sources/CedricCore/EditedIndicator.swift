@@ -62,6 +62,14 @@ public struct EditedState {
     /// LF over the CRLF file (Sol round 2).
     private var savedEnding: LineEnding?
     public private(set) var breaksDiffer = false
+    /// The encoding a save writes (TextEncoding: with or without a BOM),
+    /// at the baseline (nil: not given, not compared), and whether the
+    /// document's differs now. Reverting to a version written with a BOM,
+    /// then ⌘Z, gives the old text and its old encoding back
+    /// (DocumentFormat); if that text is the saved text, only the
+    /// encoding says a save would change the file.
+    private var savedEncoding: TextEncoding?
+    public private(set) var encodingDiffers = false
     /// Longer saved texts (UTF-16 units) are kept as a fingerprint.
     public let snapshotLimit: Int
     /// The fingerprint's chunk length.
@@ -79,7 +87,7 @@ public struct EditedState {
         saved(savedText.map { NSString(string: $0) })
     }
 
-    public var isDirty: Bool { textDiffers || breaksDiffer || formatChanged || forced }
+    public var isDirty: Bool { textDiffers || breaksDiffer || encodingDiffers || formatChanged || forced }
 
     /// Whether the saved text is kept as a fingerprint (not a copy).
     public var keepsFingerprint: Bool { savedPrint != nil }
@@ -88,10 +96,13 @@ public struct EditedState {
     /// Keeps an immutable copy, never the caller's mutable storage, or for
     /// a long text its fingerprint.
     /// `breaks`: the text's odd line breaks as saved (nil: none);
-    /// `ending`: the line ending it was saved with (nil: not compared).
-    public mutating func saved(_ text: NSString?, breaks: LineBreaks? = nil, ending: LineEnding? = nil) {
+    /// `ending`: the line ending it was saved with (nil: not compared);
+    /// `encoding`: the encoding it was saved in (nil: not compared).
+    public mutating func saved(_ text: NSString?, breaks: LineBreaks? = nil, ending: LineEnding? = nil,
+                               encoding: TextEncoding? = nil) {
         savedBreaks = breaks?.others ?? []
         savedEnding = breaks?.dominant ?? ending
+        savedEncoding = encoding
         if let text, text.length > snapshotLimit {
             baseline(TextFingerprint(text, chunk: chunk))
         } else {
@@ -104,9 +115,11 @@ public struct EditedState {
 
     /// Saved, with the text's fingerprint already made (off the main
     /// thread, while opening). Its chunk length is used as it is.
-    public mutating func saved(fingerprint: TextFingerprint, breaks: LineBreaks? = nil, ending: LineEnding? = nil) {
+    public mutating func saved(fingerprint: TextFingerprint, breaks: LineBreaks? = nil, ending: LineEnding? = nil,
+                               encoding: TextEncoding? = nil) {
         savedBreaks = breaks?.others ?? []
         savedEnding = breaks?.dominant ?? ending
+        savedEncoding = encoding
         baseline(fingerprint)
     }
 
@@ -120,6 +133,7 @@ public struct EditedState {
     private mutating func clearFlags() {
         textDiffers = false
         breaksDiffer = false
+        encodingDiffers = false
         formatChanged = false
         forced = false
     }
@@ -172,6 +186,13 @@ public struct EditedState {
         savedBreaks = breaks?.others ?? []
         if let dominant = breaks?.dominant { savedEnding = dominant }
         breaksDiffer = false
+    }
+
+    /// The encoding may have changed (a reload's ⌘Z or redo gave another
+    /// version's back): unsaved while it isn't the saved one, whatever the
+    /// text says. Not compared when the baseline gave none.
+    public mutating func encodingChanged(to encoding: TextEncoding) {
+        encodingDiffers = savedEncoding != nil && encoding != savedEncoding
     }
 
     /// Encoding or line endings changed (applied on save).

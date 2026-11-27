@@ -248,8 +248,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// (LineBreakTracking.swift).
     var pendingBreaks: [(location: Int, removed: [Int])] = []
     var undoInserted: [NSRange] = []
-    /// Reload's ⌘Z: the line breaks the text it brings back had.
-    var pendingBreakSnapshot: (LineEnding, LineBreaks?)?
+    /// Reload's ⌘Z (or redo): the format the text it brings back had.
+    var pendingFormatSnapshot: DocumentFormat?
     /// The line endings the status bar and the mixed bar last showed
     /// (`lineEndingShown`): an edit or undo that changes them refreshes the bar.
     var lastLineEndingShown: (ending: LineEnding, mixed: Bool)?
@@ -558,7 +558,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         }
         textView.undoManager?.removeAllActions()
         pendingBreaks = []
-        pendingBreakSnapshot = nil
+        pendingFormatSnapshot = nil
         loading = false
         // Opening is the first setText, before the appearance is applied,
         // and there are no proposals yet. A later replacement (disk reload,
@@ -1419,7 +1419,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         do {
             let (d, mod) = try EditorDocument.read(url, encoding: doc.encoding)
             let all = NSRange(location: 0, length: storage.length)
-            let breaksBefore = (doc.lineEnding, doc.lineBreaks)
+            let formatBefore = doc.format
             textView.breakUndoCoalescing()
             let replaced = replacingFromDisk { () -> Bool in
                 guard textView.shouldChangeText(in: all, replacementString: d.text) else { return false }
@@ -1432,8 +1432,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             }
             guard replaced else { NSSound.beep(); return false }
             doc.apply(d)
-            // ⌘Z gives the old text its own breaks back, ⌘⇧Z these.
-            registerLineBreaksSnapshotUndo(restoring: breaksBefore, redoing: (doc.lineEnding, doc.lineBreaks))
+            // ⌘Z gives the old text its own format back (breaks, encoding
+            // and BOM, the guess), ⌘⇧Z these.
+            registerFormatSnapshotUndo(restoring: formatBefore, redoing: doc.format)
             doc.noteDisk(mod)
             doc.markSaved()
             resetPreviewTrust()

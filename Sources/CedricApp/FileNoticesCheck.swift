@@ -28,7 +28,8 @@ import CedricCore
 /// them; a tab closed unsaved and brought back with ⇧⌘T after its file
 /// was moved away keeps them (from what was kept, not the file); Revert
 /// to Saved after the file was rewritten with one kind, then ⌘Z: the
-/// edited text's own breaks again. Picking the guessed encoding from the
+/// edited text's own breaks again; Revert to the same words saved with a
+/// BOM, then ⌘Z: no BOM again, unsaved, and saved without one. Picking the guessed encoding from the
 /// status bar's Save with Encoding settles the guess, as Keep does.
 extension DevChecks {
     static func fileNoticesCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -449,6 +450,36 @@ extension DevChecks {
                 EditorWindowController.checkSaveAsURL = target
                 t.saveAs()
                 expect(bytes(target) == b("one!\r\ntwo\nthree\rfour\r\n"), "…saved: still its own breaks", show(bytes(target)))
+                close(t)
+            },
+            // Revert to the same words saved with a BOM, then ⌘Z: the
+            // edited version's encoding (no BOM) comes back with its text,
+            // unsaved by the encoding alone, and a save writes no BOM. Before
+            // 0.6.1 the BOM stayed, the tab was clean, and ⌘S wrote one.
+            sync {
+                guard let t = open("revert-bom.txt", "draft\n") else { return }
+                tab = t
+                t.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                type("!")
+            },
+            sync {
+                guard let t = tab else { return }
+                try? Data([0xEF, 0xBB, 0xBF] + b("draft!\n")).write(to: t.doc.fileURL!)
+                app.revertToSaved(nil)
+                expect(t.text == "draft!\n" && t.doc.encoding == .utf8BOM && !t.doc.isDirty,
+                       "Revert to Saved: the same words, UTF-8 with BOM, saved", "\(t.doc.encoding) \(t.doc.isDirty)")
+            },
+            sync { tab?.textView.undoManager?.undo() },
+            sync {
+                guard let t = tab else { return }
+                expect(t.text == "draft!\n" && t.doc.encoding == .utf8 && t.doc.isDirty,
+                       "⌘Z: the edited version's UTF-8 (no BOM), unsaved", "\(t.doc.encoding) \(t.doc.isDirty)")
+                expect(t.statusBar.encodingButton.title == "UTF-8", "…and the status bar says so", t.statusBar.encodingButton.title)
+                let target = dir.appendingPathComponent("revert-bom-saved.txt")
+                try? FileManager.default.removeItem(at: target)
+                EditorWindowController.checkSaveAsURL = target
+                t.saveAs()
+                expect(bytes(target) == b("draft!\n"), "…saved: no BOM", show(bytes(target)))
                 close(t)
             },
             // Convert Indentation rewrites every line's leading whitespace in

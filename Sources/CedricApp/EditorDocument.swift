@@ -104,14 +104,35 @@ final class EditorDocument {
         updateEdited {
             $0.textChanged(to: currentText?())
             $0.breaksChanged(to: lineBreaks, ending: lineEnding)
+            $0.encodingChanged(to: encoding)
         }
     }
 
-    /// The odd line breaks were set apart from an edit (undo or redo gave
-    /// some back, or restored a snapshot): unsaved unless they are the
-    /// saved ones again (EditedState.breaksChanged).
+    /// The odd line breaks (or, from a reload's ⌘Z or redo, the whole
+    /// format) were set apart from an edit (undo or redo gave some back,
+    /// or restored a snapshot): unsaved unless they and the encoding are
+    /// the saved ones again (EditedState.breaksChanged, encodingChanged).
     func noteBreaksChange() {
-        updateEdited { $0.breaksChanged(to: lineBreaks, ending: lineEnding) }
+        updateEdited {
+            $0.breaksChanged(to: lineBreaks, ending: lineEnding)
+            $0.encodingChanged(to: encoding)
+        }
+    }
+
+    /// How the text is written now: encoding (and BOM), the guess, and
+    /// line endings. Reload's undo record keeps one for each side
+    /// (EditorWindowController.registerFormatSnapshotUndo).
+    var format: DocumentFormat {
+        DocumentFormat(encoding: encoding, encodingGuessed: encodingGuessed, lineEnding: lineEnding, lineBreaks: lineBreaks)
+    }
+
+    /// Sets the whole format back (a reload's ⌘Z or redo). The caller then
+    /// calls `noteBreaksChange`, which compares it with the saved one.
+    func restore(_ f: DocumentFormat) {
+        encoding = f.encoding
+        encodingGuessed = f.encodingGuessed
+        lineEnding = f.lineEnding
+        lineBreaks = f.lineBreaks
     }
 
     /// Follow File appended `odd` (its breaks of another kind) at
@@ -146,9 +167,9 @@ final class EditorDocument {
         guard !isDirty else { return }
         let text = currentText?()
         if let fingerprint, let text, fingerprint.length == text.length, fingerprint.length > edited.snapshotLimit {
-            edited.saved(fingerprint: fingerprint, breaks: lineBreaks, ending: lineEnding)
+            edited.saved(fingerprint: fingerprint, breaks: lineBreaks, ending: lineEnding, encoding: encoding)
         } else {
-            edited.saved(text, breaks: lineBreaks, ending: lineEnding)
+            edited.saved(text, breaks: lineBreaks, ending: lineEnding, encoding: encoding)
         }
     }
 
@@ -163,7 +184,7 @@ final class EditorDocument {
     /// The saved text is kept as chunk hashes, not a copy (checks).
     var keepsSavedFingerprint: Bool { edited.keepsFingerprint }
 
-    func markSaved() { edited.saved(currentText?(), breaks: lineBreaks, ending: lineEnding); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
+    func markSaved() { edited.saved(currentText?(), breaks: lineBreaks, ending: lineEnding, encoding: encoding); unsavedSince = nil; changedOnDisk = false; missingOnDisk = false }
     /// Restored from a session buffer: unsaved by definition.
     func markDirtyFromSession() {
         changeCount += 1
@@ -224,9 +245,7 @@ final class EditorDocument {
     /// `text` as this document saves it: its encoding, and its line
     /// ending, or each line's own when they are mixed (`lineBreaks`).
     /// Nil if a character can't be represented in the encoding.
-    func encoded(_ text: String) -> Data? {
-        TextCodec.encodeDocument(text, encoding: encoding, lineEnding: lineEnding, lineBreaks: lineBreaks)
-    }
+    func encoded(_ text: String) -> Data? { format.encoded(text) }
 
     /// Checks only (DevEnvironment.checksEnabled): a fault for the next
     /// save to hit, once (an in-place save that fails part way).
