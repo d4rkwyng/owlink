@@ -152,8 +152,8 @@ Terminal window at the file's folder. All three are off for an untitled tab.
 **Files changed on disk** reload by themselves when the tab has no unsaved
 changes. With unsaved changes, a bar says so (**Reload** / **Keep Mine**),
 owl or no owl. **⌘S never overwrites another app's changes:** if the file
-changed since Owlink read or saved it, a sheet asks first (**Keep My
-Version**, **Reload Theirs** (undoable) or **Compare**).
+changed since Owlink read or saved it, a sheet asks first (**Keep What's in
+This Tab**, **Reload from Disk** (undoable), **Compare** or **Cancel**).
 
 **A file deleted or moved away** while its tab is open gets a bar when
 you come back to the window: "“name” was deleted or moved. Its text is
@@ -713,7 +713,8 @@ menu overrides it.
 ### Themes
 
 System (light or dark with macOS), Light, Dark, Tankard (deep
-purple and amber) and Dracula, the same set as Tankard. Every theme's text
+purple and amber), Dracula, and Owlink's own **Cedric** (peach paper, navy
+text) and **Cedric Night** (navy page, sepia text). Every theme's text
 colours meet WCAG AA contrast (4.5:1), checked by a test. SF Mono by
 default, or any installed fixed-pitch font (Markdown and plain text can
 have their own *prose font*, below); ⌘+ / ⌘− / ⌘0 zoom. The zoom
