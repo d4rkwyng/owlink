@@ -35,11 +35,8 @@ import Testing
         #expect(d(unit(0xD83D) + unit(0xD83D) + unit(0xDE00)) == nil, "two highs")
         #expect(d(u("a") + [0x00]) == nil, "an odd byte count")
         #expect(d([]) == "")
-        // What Foundation gives on this Mac, for the record (not relied on).
-        let enc: String.Encoding = bigEndian ? .utf16BigEndian : .utf16LittleEndian
-        for b in [u("\u{FEFF}x"), u("a\u{FEFF}"), u("😀"), unit(0xFFFE)] {
-            #expect(Self.scalars(String(data: Data(b), encoding: enc)) == Self.scalars(d(b)), "same as Foundation here: \(b)")
-        }
+        // Not compared with Foundation: what it does with a U+FEFF is the
+        // macOS variation this decoder exists to not depend on.
     }
 
     /// FileTail's append path takes the decoder (not Foundation) for UTF-16,
@@ -176,5 +173,18 @@ import Testing
         callbacks.sync {}
         #expect(!events.all.contains { if case .appended(let s) = $0.0 { return s.contains("\u{FFFD}") || s.contains("b") }; return false },
                 "nothing shown for bytes that aren't text")
+        // Valid text after them is shown, but never with a size: the
+        // skipped bytes are in the file, not the tab (`lossy`), so a save
+        // stamped as the file would drop them.
+        let more = try FileHandle(forWritingTo: url)
+        try more.seekToEnd()
+        try more.write(contentsOf: Data(Self.units("c\n", bigEndian: be)))
+        try more.close()
+        tail.poll()
+        _ = tail.isWatching
+        callbacks.sync {}
+        let after = try #require(events.all.last { if case .appended(let s) = $0.0 { return s.contains("c") }; return false },
+                                 "the valid text after the skipped bytes is delivered")
+        #expect(after.1.bytes == nil, "and not stamped as the file's bytes")
     }
 }
