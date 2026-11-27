@@ -2,9 +2,12 @@ name: Release
 
 # Builds a universal "Owlink.app", signs it with the owner's Developer ID
 # (hardened runtime, secure timestamp; llama.framework first, then the app),
-# notarizes and staples it, and attaches Owlink-<version>.zip to the GitHub Release
-# for the tag. Every release it makes is a DRAFT (final tags too): the owner
-# publishes it by hand. A tag with a suffix (v0.1.0-rc1) is also a prerelease.
+# notarizes and staples it, Sparkle-signs the zip and writes a signed
+# appcast.xml for it, and attaches Owlink-<version>.zip and appcast.xml to the
+# GitHub Release for the tag. Every release it makes is a DRAFT (final tags
+# too): the owner publishes it by hand. A tag with a suffix (v0.1.0-rc1) is
+# also a prerelease. Nothing is uploaded to owlink.app: the owner puts
+# appcast.xml at https://owlink.app/appcast.xml by hand after publishing.
 #
 # Needs these repository secrets (Settings → Secrets and variables → Actions):
 #   CERT_P12_BASE64    base64 of the exported "Developer ID Application" .p12
@@ -12,6 +15,14 @@ name: Release
 #   NOTARY_APPLE_ID    Apple ID used for notarization
 #   NOTARY_TEAM_ID     10-character Team ID
 #   NOTARY_PASSWORD    app-specific password from appleid.apple.com
+#   SPARKLE_ED_PRIVATE_KEY  the Sparkle EdDSA private key, as exported by
+#                      `generate_keys -x` (base64 of the 32-byte seed). Written
+#                      only to a mode-600 temp file under $RUNNER_TEMP, checked
+#                      against the committed public key before anything is
+#                      signed, and deleted in an `if: always()` step.
+#
+# Only this workflow (and the dispatch-only verify-sparkle-key.yml) gets
+# SPARKLE_ED_PRIVATE_KEY; it runs on tags and by hand, never on pull requests.
 #
 # The signing and notarizing steps are Scripts/release.sh, the same script
 # the owner can run locally. Same pipeline as Tankard's.
@@ -43,9 +54,10 @@ jobs:
           NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
           NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
           NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
         run: |
           missing=""
-          for s in CERT_P12_BASE64 CERT_P12_PASSWORD NOTARY_APPLE_ID NOTARY_TEAM_ID NOTARY_PASSWORD; do
+          for s in CERT_P12_BASE64 CERT_P12_PASSWORD NOTARY_APPLE_ID NOTARY_TEAM_ID NOTARY_PASSWORD SPARKLE_ED_PRIVATE_KEY; do
             [ -n "${!s}" ] || missing="$missing $s"
           done
           if [ -n "$missing" ]; then
@@ -154,11 +166,96 @@ jobs:
           # because the runner is a disposable VM.
           OWLINK_RELEASE_GATE=1 Scripts/smoke-launch.sh --seconds 10 "$ZIP"
 
+      # The Sparkle update (docs/updates.md): the same steps as
+      # `Scripts/release.sh --appcast`, run on the zip that was just
+      # notarized and smoke-tested. The private key goes to a mode-600 file
+      # in a private folder under $RUNNER_TEMP (outside the checkout); this
+      # step is the only one that sees the secret. Before anything is
+      # signed, the key's public half must be the committed one
+      # (Scripts/sparkle-defaults.sh), or the job stops. No set -x here,
+      # and nothing prints the key or the file.
+      - name: Sparkle key (temp file, checked against the committed public key)
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          set +x +v
+          umask 077
+          KEYDIR="$RUNNER_TEMP/sparkle-key"
+          rm -rf "$KEYDIR"
+          mkdir -m 700 "$KEYDIR"
+          # printf is a shell builtin: the key is never on a command line.
+          printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" > "$KEYDIR/ed25519.key"
+          chmod 600 "$KEYDIR/ed25519.key"
+          unset SPARKLE_ED_PRIVATE_KEY
+          . Scripts/sparkle-defaults.sh
+          DERIVED=$(swift Scripts/sparkle-public-key.swift "$KEYDIR/ed25519.key") || {
+            echo "::error::SPARKLE_ED_PRIVATE_KEY is not a Sparkle ed25519 key file (base64 of a 32-byte seed, from generate_keys -x)."
+            exit 1
+          }
+          if [ "$DERIVED" != "$OWLINK_SPARKLE_PUBLIC_KEY" ]; then
+            echo "::error::SPARKLE_ED_PRIVATE_KEY's public key is $DERIVED, not the committed $OWLINK_SPARKLE_PUBLIC_KEY (Scripts/sparkle-defaults.sh). Installed copies would refuse anything it signs; nothing was signed."
+            exit 1
+          fi
+          echo "Sparkle key matches the committed public key $OWLINK_SPARKLE_PUBLIC_KEY"
+
+      # Sign the zip (sign_update --ed-key-file), check its length and the
+      # signature against the committed public key (Scripts/ed-verify.swift),
+      # then write, sign and verify dist/appcast.xml as a new feed with this
+      # one item (Scripts/appcast-item.sh). The enclosure URL is this tag's
+      # GitHub release asset; for an rc tag that is the rc's own release.
+      # sign_update's raw output (it can echo key text on a bad key) never
+      # reaches the log: stderr is dropped and failures print fixed text.
+      - name: Sparkle-sign the zip and write appcast.xml
+        run: |
+          set -euo pipefail
+          KEYFILE="$RUNNER_TEMP/sparkle-key/ed25519.key"
+          V="${TAG#v}"; VERSION="${V%%-*}"
+          ZIP="dist/Owlink-${VERSION}.zip"
+          [ -f "$ZIP" ] || { echo "::error::$ZIP is missing"; exit 1; }
+          . Scripts/sparkle-defaults.sh
+          SIGN_UPDATE=$(find .build/artifacts -maxdepth 5 -type f -path '*Sparkle*/bin/sign_update' 2>/dev/null | head -1)
+          [ -n "$SIGN_UPDATE" ] && [ -x "$SIGN_UPDATE" ] || { echo "::error::no Sparkle sign_update under .build/artifacts"; exit 1; }
+          ENCLOSURE="https://github.com/d4rkwyng/owlink/releases/download/${TAG}/Owlink-${VERSION}.zip"
+          ATTRS=$("$SIGN_UPDATE" --ed-key-file "$KEYFILE" "$ZIP" 2>/dev/null) || { echo "::error::sign_update could not sign $ZIP"; exit 1; }
+          ED_SIG=$(sed -n 's/.*sparkle:edSignature="\([A-Za-z0-9+/=]*\)".*/\1/p' <<<"$ATTRS")
+          ED_LEN=$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<<"$ATTRS")
+          if [ -z "$ED_SIG" ] || [ "$ED_LEN" != "$(stat -f '%z' "$ZIP")" ]; then
+            echo "::error::sign_update's output isn't a signature and length for $ZIP"
+            exit 1
+          fi
+          swift Scripts/ed-verify.swift "$OWLINK_SPARKLE_PUBLIC_KEY" "$ED_SIG" "$ZIP" || {
+            echo "::error::the zip's signature doesn't verify with the committed public key"
+            exit 1
+          }
+          rm -f dist/appcast.xml
+          Scripts/appcast-item.sh --out dist/appcast.xml --sign-update "$SIGN_UPDATE" \
+            --version "$VERSION" --url "$ENCLOSURE" --length "$ED_LEN" --signature "$ED_SIG" \
+            -- --ed-key-file "$KEYFILE"
+          SHA=$(shasum -a 256 "$ZIP" | cut -d' ' -f1)
+          echo "sha256 $SHA  $ZIP"
+          {
+            echo "### Owlink ${VERSION} (${TAG})"
+            echo
+            echo "- \`Owlink-${VERSION}.zip\` sha256 \`$SHA\`, ${ED_LEN} bytes"
+            echo "- Sparkle edSignature \`$ED_SIG\` (verified with \`$OWLINK_SPARKLE_PUBLIC_KEY\`)"
+            echo "- Enclosure: $ENCLOSURE"
+            echo "- \`appcast.xml\` (signed) is attached to the draft. Not uploaded to $OWLINK_SPARKLE_FEED_URL: do that by hand after publishing the release."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The key file goes whether signing worked, failed or never ran.
+      - name: Delete the Sparkle key file
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/sparkle-key"
+
       - name: Upload to the release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3  # v3
         with:
           tag_name: ${{ env.TAG }}
-          files: dist/Owlink-*.zip
+          files: |
+            dist/Owlink-*.zip
+            dist/appcast.xml
+          fail_on_unmatched_files: true
           body_path: ${{ runner.temp }}/release-notes.md
           # Always a draft, final tags included: nothing is public (or
           # "latest" for the cask) until the owner publishes it by hand.

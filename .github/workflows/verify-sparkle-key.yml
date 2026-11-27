@@ -1,0 +1,85 @@
+name: verify-sparkle-key
+
+# By hand only: checks that the SPARKLE_ED_PRIVATE_KEY repository secret is
+# the private half of the committed Sparkle public key
+# (Scripts/sparkle-defaults.sh), without building, notarizing or releasing
+# anything. It writes the secret to a mode-600 temp file under $RUNNER_TEMP
+# (outside the checkout), checks the key's derived public key, signs a dummy
+# file with Sparkle's sign_update --ed-key-file, verifies that signature with
+# the committed public key (Scripts/ed-verify.swift), prints PASS or FAIL,
+# and always deletes the key file. Nothing it prints is secret.
+#
+# Separate from release.yml so a dispatch can't start a notarized release.
+# Never runs on pull requests.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sparkle-key:
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          persist-credentials: false
+
+      # Sparkle's sign_update comes from the pinned package's binary
+      # artifact, as in release.yml.
+      - name: Cache SwiftPM binary artifacts
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/Library/Caches/org.swift.swiftpm/artifacts
+          key: spm-artifacts-${{ runner.os }}-${{ hashFiles('Package.swift') }}
+
+      - name: Resolve packages (timeout and retry)
+        timeout-minutes: 20
+        run: |
+          for i in 1 2 3; do
+            if perl -e 'alarm shift; exec @ARGV' 300 swift package resolve; then exit 0; fi
+            echo "::warning::swift package resolve: try $i failed or took over 5 minutes"
+            sleep 15
+          done
+          echo "::error::swift package resolve failed 3 times"
+          exit 1
+
+      - name: Verify the Sparkle key
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -uo pipefail
+          set +x +v
+          umask 077
+          result() { echo "$1"; [ "$1" = PASS ]; exit $?; }
+          if [ -z "${SPARKLE_ED_PRIVATE_KEY:-}" ]; then
+            echo "::error::the SPARKLE_ED_PRIVATE_KEY repository secret is missing"
+            result FAIL
+          fi
+          KEYDIR="$RUNNER_TEMP/sparkle-key"
+          rm -rf "$KEYDIR"
+          mkdir -m 700 "$KEYDIR" || result FAIL
+          # printf is a shell builtin: the key is never on a command line.
+          printf '%s\n' "$SPARKLE_ED_PRIVATE_KEY" > "$KEYDIR/ed25519.key" || result FAIL
+          chmod 600 "$KEYDIR/ed25519.key"
+          unset SPARKLE_ED_PRIVATE_KEY
+          . Scripts/sparkle-defaults.sh
+          DERIVED=$(swift Scripts/sparkle-public-key.swift "$KEYDIR/ed25519.key" 2>/dev/null) || result FAIL
+          [ "$DERIVED" = "$OWLINK_SPARKLE_PUBLIC_KEY" ] || result FAIL
+          SIGN_UPDATE=$(find .build/artifacts -maxdepth 5 -type f -path '*Sparkle*/bin/sign_update' 2>/dev/null | head -1)
+          [ -n "$SIGN_UPDATE" ] && [ -x "$SIGN_UPDATE" ] || result FAIL
+          DUMMY="$KEYDIR/dummy.bin"
+          echo "owlink verify-sparkle-key $GITHUB_RUN_ID" > "$DUMMY"
+          ATTRS=$("$SIGN_UPDATE" --ed-key-file "$KEYDIR/ed25519.key" "$DUMMY" 2>/dev/null) || result FAIL
+          ED_SIG=$(sed -n 's/.*sparkle:edSignature="\([A-Za-z0-9+/=]*\)".*/\1/p' <<<"$ATTRS")
+          [ -n "$ED_SIG" ] || result FAIL
+          swift Scripts/ed-verify.swift "$OWLINK_SPARKLE_PUBLIC_KEY" "$ED_SIG" "$DUMMY" >/dev/null 2>&1 || result FAIL
+          result PASS
+
+      - name: Delete the Sparkle key file
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/sparkle-key"

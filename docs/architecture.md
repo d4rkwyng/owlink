@@ -2391,11 +2391,16 @@ launches it. `Scripts/check-isolation-lint.sh` fails if any other script sets
   signing nor notarization sees it.
 
 **On GitHub.** `.github/workflows/release.yml` runs on a `v*` tag push (or by hand with a
-tag) on `macos-26`: checks the five secrets, builds the release notes from
+tag) on `macos-26`: checks the six secrets, builds the release notes from
 `CHANGELOG.md` (`Scripts/changelog-section.sh`, after Tankard's), restores the SwiftPM
 artifact cache, resolves packages, imports the certificate, runs `Scripts/test.sh`, then
-`Scripts/release.sh` with `CEDRIC_VERSION` from the tag, and attaches `Owlink-<version>.zip` to the
-release. Every release it makes is a draft, final tags included, so nothing is public until
+`Scripts/release.sh` with `CEDRIC_VERSION` from the tag, smoke-launches the zip, then
+Sparkle-signs it: the `SPARKLE_ED_PRIVATE_KEY` secret goes to a mode-600 temp file under
+`$RUNNER_TEMP` (checked against the committed public key first, deleted in an `if: always()`
+step), `sign_update --ed-key-file` signs the zip, `Scripts/ed-verify.swift` checks it, and
+`Scripts/appcast-item.sh` writes a signed `dist/appcast.xml`; it prints the zip's sha256 and
+attaches `Owlink-<version>.zip` and `appcast.xml` to the release (docs/updates.md, "Signing in
+CI"). Nothing goes to owlink.app. Every release it makes is a draft, final tags included, so nothing is public until
 the owner publishes it by hand; a tag with a suffix (`v0.1.0-rc1`) is also a prerelease.
 `notary-result.json`
 and `notary-log.json` are kept as the workflow artifact `notary-<tag>` (90 days) with
@@ -2410,7 +2415,7 @@ and checksum are pinned); SwiftPM extracts a cached zip without the network. The
 `swift package resolve` gets five minutes per try (killed by a `perl alarm`, since macOS
 has no `timeout`), three tries, before the build starts.
 
-Secrets (Settings › Secrets and variables › Actions), the same five as Tankard's:
+Secrets (Settings › Secrets and variables › Actions), Tankard's five plus the Sparkle key:
 
 | secret | value |
 |---|---|
@@ -2419,6 +2424,7 @@ Secrets (Settings › Secrets and variables › Actions), the same five as Tanka
 | `NOTARY_APPLE_ID` | Apple ID |
 | `NOTARY_TEAM_ID` | Team ID |
 | `NOTARY_PASSWORD` | app-specific password |
+| `SPARKLE_ED_PRIVATE_KEY` | Sparkle EdDSA private key, `generate_keys -x` output (base64 32-byte seed); also used by the dispatch-only `verify-sparkle-key.yml` |
 
 No secrets live in the repository.
 
