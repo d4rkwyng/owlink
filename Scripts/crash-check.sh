@@ -40,8 +40,14 @@
 #  13. Two Owlinks on one session folder: the second (launched while
 #      the first runs, before it backs up a new tab, and typing after
 #      it) can't claim the folder's lock, so it saves and prunes nothing
-#      there; its quit asks. The first's text survives and comes back
-#      after a kill.
+#      there: it writes its own store (instances/<uuid>/), so its quit
+#      needn't ask. The first's text survives and comes back after a kill.
+#  14. A second Owlink's own crash: it types, its timed backup runs, it
+#      is killed: the text is on disk in its own store. The first quits;
+#      the next writer adopts the dead one's text at launch (killed at
+#      its first commit: the dead store is still there, the text already
+#      here; then relaunched: committed, the dead store removed), while
+#      a third Owlink, still running, keeps its store untouched.
 #
 # Safety: the temp root must be this user's own 0700 folder, neither in
 # nor around the real ~/Library/Application Support/Cedric (compared by
@@ -727,12 +733,57 @@ expect_tab "12: past its closing date's retention: back open, exact text, caret"
 expect_count "12" 1
 grep -q '^closed:' "$W/dump.txt" && bad "12: still on the closed list" || ok "12: no longer on the closed list"
 
+# Whether an instance store in DIR (instances/*/) names an untitled tab
+# with unsaved text whose SHA-256 is SHA, and has its buffer: prints it.
+inst_holds() { # DIR SHA
+    python3 -I - "$@" <<'PY'
+import hashlib, json, os, sys
+d, sha = sys.argv[1], sys.argv[2]
+root = os.path.join(d, "instances")
+for n in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+    i = os.path.join(root, n)
+    try:
+        s = json.load(open(os.path.join(i, "session.json")))
+    except Exception:
+        continue
+    for w in s.get("windows", []):
+        for t in w.get("tabs", []):
+            if t.get("hasBuffer") and not t.get("path"):
+                try:
+                    b = open(os.path.join(i, t["id"] + ".txt"), "rb").read()
+                except OSError:
+                    continue
+                if hashlib.sha256(b).hexdigest() == sha:
+                    print(i); sys.exit(0)
+sys.exit(1)
+PY
+}
+wait_inst_holds() { # DIR SHA SECONDS
+    local end=$(( $(date +%s) + $3 ))
+    while [ "$(date +%s)" -le $end ]; do inst_holds "$1" "$2" >/dev/null && return 0; sleep 0.1; done
+    return 1
+}
+# A buffer file directly in DIR with this SHA-256 (any name).
+has_bytes() { # DIR SHA
+    python3 -I - "$@" <<'PY'
+import hashlib, os, sys
+d, sha = sys.argv[1], sys.argv[2]
+for f in os.listdir(d):
+    p = os.path.join(d, f)
+    if f.endswith(".txt") and os.path.isfile(p) and hashlib.sha256(open(p, "rb").read()).hexdigest() == sha: sys.exit(0)
+sys.exit(1)
+PY
+}
+# A store's files, and its buffers' SHA-256s (what "untouched" compares).
+buffers_of() { ( cd "$1" && ls -A && for f in *.txt; do [ -f "$f" ] && echo "$f $(sha_f "$f")"; done ) 2>/dev/null || true; }
+
 # 13. Two Owlinks on one session folder: a second is launched on it while
 #     the first runs; the first backs up a new tab; then the second types
-#     (its own saves follow) and quits (Quit Anyway when asked). Before
-#     the lock its save committed its own snapshot and pruned the first's
-#     buffer. Now it restores, saves and prunes nothing there: the first's
-#     text survives, and a kill of the first brings it back.
+#     (its own saves follow) and quits. Before the lock its save
+#     committed its own snapshot and pruned the first's buffer. Now it
+#     restores, saves and prunes nothing there, and backs up its own text
+#     in its own store: the first's text survives, the second's quit has
+#     nothing to ask, and a kill of the first brings its text back.
 T13a='the first Owlink: a new tab, backed up'
 T13b='the second Owlink: never in this session'
 S=$(child s13)
@@ -740,9 +791,9 @@ launch "$S" "$W/out13a" CEDRIC_TEST_TYPE_UNTITLED="$T13a" CEDRIC_TEST_TYPE_UNTIT
 first=$pid
 launch "$S" "$W/out13b" CEDRIC_TEST_TYPE_UNTITLED="$T13b" CEDRIC_TEST_TYPE_UNTITLED_DELAY=8 CEDRIC_TEST_QUIT_SAVE_CHOICE=quit
 second=$pid
-for _ in $(seq 1 100); do grep -q '^session: not the writer:' "$W/out13b" && break; sleep 0.05; done
-grep -q '^session: not the writer: another Owlink is using it' "$W/out13b" \
-    && ok "13: the second Owlink can't claim the session folder" || bad "13: the second Owlink claimed the session folder"
+for _ in $(seq 1 100); do grep -q '^session: ' "$W/out13b" && break; sleep 0.05; done
+grep -q "^session: own instance store: $S/instances/" "$W/out13b" \
+    && ok "13: the second Owlink can't claim the session folder: it gets a store of its own in it" || bad "13: the second Owlink claimed the session folder ($(grep '^session: ' "$W/out13b" | head -1))"
 typed_at "$W/out13a" >/dev/null
 wait_holds "$S" - "$(sha_s "$T13a")" 10 && ok "13: the first Owlink backed up its new tab" || bad "13: the first's tab never reached the session store"
 cp "$S/session.json" "$W/s13-before.json"
@@ -750,14 +801,65 @@ typed_at "$W/out13b" >/dev/null
 sleep 3
 holds "$S" - "$(sha_s "$T13a")" && ok "13: the first's buffer survives the second's typing and saves" || bad "13: the first's buffer is gone after the second's saves"
 quit_app $second
-grep -q '^quit: session save failed, choice=quit' "$W/out13b" \
-    && ok "13: the second's quit asked (its unsaved text isn't backed up)" || bad "13: the second quit without asking"
+grep -q '^quit: session save failed' "$W/out13b" \
+    && bad "13: the second's quit asked: its text wasn't backed up" || ok "13: the second quit without asking"
+inst_holds "$S" "$(sha_s "$T13b")" >/dev/null && ok "13: the second's text is in its own store" || bad "13: the second's text is nowhere on disk"
 cmp -s "$S/session.json" "$W/s13-before.json" && ok "13: the second wrote no session" || bad "13: session.json changed while the second ran"
+has_bytes "$S" "$(sha_s "$T13b")" && bad "13: the second wrote a buffer in the session folder" || ok "13: the second wrote no buffer in the session folder"
 holds "$S" - "$(sha_s "$T13a")" && ok "13: the first's buffer survives the second's quit" || bad "13: the first's buffer is gone after the second's quit"
 kill9 $first
 dump "$S"
 expect_tab "13: after a kill of the first: its tab back, exact text, caret" - "$T13a"
 expect_count "13" 1
+
+# 14. A second Owlink's own crash, and the next writer adopting its text.
+#     Round 6 kept the second's text in memory only: the kill lost it.
+T14a='the first Owlink, the session folder’s writer'
+T14b='the second Owlink: typed, backed up, then killed ✓'
+T14c='a third Owlink, still running'
+S=$(child s14)
+launch "$S" "$W/out14a" CEDRIC_TEST_TYPE_UNTITLED="$T14a"
+first=$pid
+typed_at "$W/out14a" >/dev/null
+wait_holds "$S" - "$(sha_s "$T14a")" 10 || bad "14: the first's tab never reached the session store"
+launch "$S" "$W/out14b" CEDRIC_TEST_TYPE_UNTITLED="$T14b"
+second=$pid
+for _ in $(seq 1 100); do grep -q '^session: ' "$W/out14b" && break; sleep 0.05; done
+grep -q "^session: own instance store: $S/instances/" "$W/out14b" && ok "14: the second Owlink has a store of its own" || bad "14: the second Owlink has no store of its own"
+typed_at "$W/out14b" >/dev/null
+wait_inst_holds "$S" "$(sha_s "$T14b")" 10 && ok "14: the second's timed backup put its draft in its own store" || bad "14: the second's draft never reached a store"
+kill9 $second
+dead=$(inst_holds "$S" "$(sha_s "$T14b")" || true)
+[ -n "$dead" ] && has_bytes "$dead" "$(sha_s "$T14b")" && ok "14: after kill -9 the second's draft is on disk in its store" || bad "14: the second's draft is gone after its kill"
+has_bytes "$S" "$(sha_s "$T14b")" && bad "14: the second wrote in the session folder" || ok "14: nothing of the second's in the session folder itself"
+launch "$S" "$W/out14c" CEDRIC_TEST_TYPE_UNTITLED="$T14c"
+third=$pid
+typed_at "$W/out14c" >/dev/null
+wait_inst_holds "$S" "$(sha_s "$T14c")" 10 || bad "14: the third's draft never reached its store"
+live=$(inst_holds "$S" "$(sha_s "$T14c")" || true)
+sleep 2
+live_before=$(buffers_of "$live")
+quit_app $first
+# The next writer, stopped at its first commit: the dead store's text is
+# here already (journaled), and the dead store still there.
+launch "$S" "$W/out14d" CEDRIC_TEST_HOLD_SESSION_COMMIT="$W/held14"
+for _ in $(seq 1 150); do [ -s "$W/held14" ] && break; sleep 0.1; done
+[ -s "$W/held14" ] && ok "14: the next writer's launch saves at once, held before its commit" || bad "14: the next writer never reached its commit"
+has_bytes "$S" "$(sha_s "$T14b")" && ok "14: at that point the dead one's text is in the session folder" || bad "14: the dead one's text wasn't adopted before the commit"
+[ -n "$dead" ] && [ -d "$dead" ] && has_bytes "$dead" "$(sha_s "$T14b")" && ok "14: and its store is still there (no commit yet)" || bad "14: the dead store went before a commit had its text"
+kill9 $pid
+launch "$S" "$W/out14e"
+next=$pid
+wait_holds "$S" - "$(sha_s "$T14b")" 15 && ok "14: relaunched: the session folder's commit has the dead one's text" || bad "14: the dead one's text never reached the session"
+for _ in $(seq 1 100); do [ -d "$dead" ] || break; sleep 0.1; done
+[ -n "$dead" ] && [ ! -e "$dead" ] && ok "14: the dead store is removed after that commit" || bad "14: the dead store is still there"
+[ -n "$live" ] && [ -d "$live" ] && [ "$(buffers_of "$live")" = "$live_before" ] && ok "14: the live third's store is untouched" || bad "14: the live third's store changed"
+quit_app $next
+dump "$S"
+expect_tab "14: the first's tab back, exact text, caret" - "$T14a"
+expect_tab "14: the dead second's draft back, exact text, caret" - "$T14b"
+expect_count "14" 2
+kill9 $third
 
 [ ! -e "$CANARY" ] && ok "the launches pruned this run's ReplaceUndo (its 30-day-old operation is gone), not the real one" \
     || bad "the 30-day-old operation in this run's ReplaceUndo is still there: the launches pruned some other folder"
