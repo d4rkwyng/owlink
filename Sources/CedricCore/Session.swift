@@ -610,7 +610,10 @@ public final class SessionStore: @unchecked Sendable {
             pendingReopened = reopened.filter(committedClosed.contains).sorted { $0.uuidString < $1.uuidString }
             let r = Self.applyJournal(s, journal: candidates, reopened: reopened,
                                       bufferReadable: { [self] in if case .text = readBufferResult($0) { true } else { false } }) {
-                fm.fileExists(atPath: bufferURL($0).path)
+                // lstat (bufferExists): a dangling link in a buffer's place
+                // is there, so it is held by the reader, not skipped here and
+                // then pruned.
+                bufferExists($0)
             }
             held = Set(r.session.heldBuffers ?? [])
             // A reopen of a held tab that stays held and closed (its buffer

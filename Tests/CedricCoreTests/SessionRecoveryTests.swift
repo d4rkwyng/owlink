@@ -326,6 +326,26 @@ import Testing
         #expect(later == [d], "applied, not scanned: \(later)")
     }
 
+    /// A journaled buffer whose file is a dangling symlink: replay sees it
+    /// (lstat, not Foundation's fileExists, which follows the link), so
+    /// launch returns it to be read (unreadable: held), and it isn't left
+    /// for the prune as if it weren't there.
+    @Test func aDanglingSymlinkBufferIsReplayedNotSkipped() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        try s1.save(Session(windows: []))
+        let b = UUID()
+        try s1.writeBuffer(b, text: "replaced by a link")
+        try fm.removeItem(at: s1.bufferURL(b))
+        try fm.createSymbolicLink(atPath: s1.bufferURL(b).path, withDestinationPath: dir.appendingPathComponent("gone.txt").path)
+        #expect(!fm.fileExists(atPath: s1.bufferURL(b).path), "the fixture: Foundation doesn't see it")
+        let s2 = store(dir)
+        guard case .session(_, let recovered) = s2.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [b], "replayed: \(recovered)")
+        if case .unreadable = s2.readBufferResult(b) {} else { Issue.record("a dangling link reads as unreadable") }
+    }
+
     // MARK: Reopened closed tabs
 
     /// A closed tab whose entry kept a buffer, closed just inside
