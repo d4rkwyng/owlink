@@ -162,7 +162,7 @@ func tempDir() -> URL {
         try store.writeBuffer(id, text: "typed, then the app died")
         #expect(store.loadForLaunch() == .recover(setAside: nil, buffers: [id]))
         try store.save(Session(windows: [SessionWindow(tabs: [SessionTab(id: id, hasBuffer: true)])]))
-        guard case .session(let s) = store.loadForLaunch() else { Issue.record("a readable session"); return }
+        guard case .session(let s, _) = store.loadForLaunch() else { Issue.record("a readable session"); return }
         #expect(s.allTabs.map(\.id) == [id])
     }
 

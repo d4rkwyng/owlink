@@ -22,15 +22,89 @@ public enum PrivateDirectory {
     /// wider (made by an older version); only this user's own real folders,
     /// never through a symbolic link. Then each must be a real folder (not
     /// a link), owned by this user, exactly 0700, or this throws.
+    ///
+    /// The session store's form: every folder on `dir`'s path whose entry
+    /// may not be on the disk is flushed through its parent
+    /// (`syncParent(parent)`), outermost first: those from `durableFrom`
+    /// (a folder that may have been made without a flush: Cedric, which
+    /// the CLI token makes too) and from any folder in `unconfirmed` (one
+    /// an earlier call made whose flush failed; the caller keeps the set
+    /// between calls) down to `dir`. Each missing folder is then made on
+    /// its own (mkdir 0700, outermost first) and its new entry flushed
+    /// before the next one is made inside it. A flush that fails throws,
+    /// so nothing is written into a folder whose path to the disk isn't
+    /// confirmed, and a retry never stops at a folder that is there but
+    /// not yet flushed.
+    public static func make(_ dir: URL, root: URL = supportRoot, durableFrom: URL? = nil, unconfirmed: inout Set<String>,
+                            syncParent: (String) throws -> Void) throws {
+        try makeDurably(dir.standardizedFileURL.path, from: durableFrom?.standardizedFileURL.path, unconfirmed: &unconfirmed,
+                        syncParent: syncParent)
+        try finish(dir, root: root)
+    }
+
     public static func make(_ dir: URL, root: URL = supportRoot) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
+        try finish(dir, root: root)
+    }
+
+    private static func finish(_ dir: URL, root: URL) throws {
         tighten(dir.path)
         try verify(dir.path)
         let r = root.standardizedFileURL.path, d = dir.standardizedFileURL.path
         if d != r, d.hasPrefix(r.hasSuffix("/") ? r : r + "/") {
             tighten(r)
             try verify(r)
+        }
+    }
+
+    /// First the entry of every folder that is there, from the outermost
+    /// of `from` and `unconfirmed` (when on `path`'s way) down to the
+    /// innermost one there, each through its parent (made by an earlier
+    /// run, another part of Owlink, or an earlier call whose flush
+    /// failed); then `path`'s missing folders, outermost first, each
+    /// flushed through its parent once made. With none missing, `path`'s
+    /// own entry is the last one flushed.
+    private static func makeDurably(_ path: String, from: String?, unconfirmed: inout Set<String>,
+                                    syncParent: (String) throws -> Void) throws {
+        func parent(_ p: String) -> String { (p as NSString).deletingLastPathComponent }
+        func onTheWay(_ a: String) -> Bool { a == path || path.hasPrefix(a.hasSuffix("/") ? a : a + "/") }
+        var missing: [String] = []
+        var p = path
+        var st = stat()
+        while p != "/", !p.isEmpty, lstat(p, &st) != 0 {
+            guard errno == ENOENT else { throw failure(errno) }
+            missing.append(p)
+            p = parent(p)
+        }
+        // `p`: the innermost folder there. Its entry and those above it up
+        // to the outermost that may not be on the disk yet.
+        var top = p
+        var doubt = false
+        for c in unconfirmed.union(from.map { [$0] } ?? []) where onTheWay(c) && c.count <= p.count {
+            doubt = true
+            if c.count < top.count { top = c }
+        }
+        var existing: [String] = []
+        // With folders to make and none there in doubt, the folder they go
+        // in counts as on the disk (Application Support, a temp folder).
+        if p != "/", !p.isEmpty, missing.isEmpty || doubt {
+            var q = p
+            while true {
+                existing.append(q)
+                if q == top || q == "/" || q.isEmpty { break }
+                q = parent(q)
+            }
+        }
+        for c in existing.reversed() {
+            try syncParent(parent(c))
+            unconfirmed.remove(c)
+        }
+        for m in missing.reversed() {
+            if mkdir(m, 0o700) != 0, errno != EEXIST { throw failure(errno) }
+            unconfirmed.insert(m)
+            try syncParent(parent(m))
+            unconfirmed.remove(m)
         }
     }
 
@@ -62,29 +136,83 @@ public enum PrivateDirectory {
     /// Writes `data` to `url` as a 0600 file, replacing it atomically: a
     /// temp file made 0600 by mkstemp in the same folder, then renamed over
     /// `url`, so the contents are never readable by others, even briefly.
-    public static func writePrivateFile(_ data: Data, to url: URL) throws {
+    ///
+    /// `durable`: also on the disk itself, not just in caches, before this
+    /// returns (power loss): the temp file is flushed (F_FULLFSYNC, or
+    /// fsync where the file system has no full flush) before the rename,
+    /// and the folder after it, so the new name and the bytes it points to
+    /// are both there. Writes made durable one after another reach the
+    /// disk in that order. A failed flush or close throws, and the old file
+    /// stays. `failSync` (check builds): the flush fails, as on a dying disk.
+    /// A folder flush that fails after the rename throws `Unconfirmed`:
+    /// the new file is in place (readers see it) but may not survive a
+    /// power loss, so the caller can't treat the write as either done or
+    /// not done. `syncFolder` flushes the folder (default
+    /// `PrivateDirectory.syncFolder`; the session store's injects failures).
+    public static func writePrivateFile(_ data: Data, to url: URL, durable: Bool = false, failSync: Bool = false,
+                                        syncFolder: ((String) throws -> Void)? = nil) throws {
         let dir = url.deletingLastPathComponent().path
         var template = Array((dir + "/." + url.lastPathComponent + ".XXXXXX").utf8CString)
         let fd = mkstemp(&template)
-        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        guard fd >= 0 else { throw failure(errno) }
         let tmp = String(cString: template)
-        var ok = fchmod(fd, 0o600) == 0
-        if ok {
-            ok = data.withUnsafeBytes { buf -> Bool in
+        var code: Int32 = fchmod(fd, 0o600) == 0 ? 0 : errno
+        if code == 0 {
+            code = data.withUnsafeBytes { buf -> Int32 in
                 var off = 0
                 while off < buf.count {
                     let n = Darwin.write(fd, buf.baseAddress! + off, buf.count - off)
-                    if n < 0 { if errno == EINTR { continue }; return false }
+                    if n < 0 { if errno == EINTR { continue }; return errno }
                     off += n
                 }
-                return true
+                return 0
             }
         }
-        close(fd)
-        guard ok, rename(tmp, url.path) == 0 else {
+        if code == 0, durable { code = (failSync && DevEnvironment.checksEnabled) ? EIO : flush(fd) }
+        if close(fd) != 0, code == 0 { code = errno }
+        if code == 0, rename(tmp, url.path) != 0 { code = errno }
+        guard code == 0 else {
             unlink(tmp)
-            throw CocoaError(.fileWriteUnknown)
+            throw failure(code)
         }
+        if durable {
+            do { try (syncFolder ?? Self.syncFolder)(dir) } catch { throw Unconfirmed(underlying: error) }
+        }
+    }
+
+    /// A durable replace whose rename happened but whose folder flush
+    /// failed (`writePrivateFile`).
+    public struct Unconfirmed: Error, LocalizedError {
+        public let underlying: Error
+        public var errorDescription: String? { underlying.localizedDescription }
+    }
+
+    /// The folder's entries (a rename, an unlink) on the disk itself.
+    public static func syncFolder(_ path: String) throws {
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw failure(errno) }
+        var code = flush(fd)
+        if close(fd) != 0, code == 0 { code = errno }
+        if code != 0 { throw failure(code) }
+    }
+
+    /// F_FULLFSYNC (through the drive's own cache), else fsync on file
+    /// systems that don't support it; 0 or the error.
+    static func flush(_ fd: Int32) -> Int32 {
+        while true {
+            if fcntl(fd, F_FULLFSYNC) == 0 { return 0 }
+            let e = errno
+            if e == EINTR { continue }
+            guard e == ENOTSUP || e == EOPNOTSUPP || e == EINVAL || e == ENOTTY else { return e }
+            while true {
+                if fsync(fd) == 0 { return 0 }
+                if errno != EINTR { return errno }
+            }
+        }
+    }
+
+    private static func failure(_ code: Int32) -> Error {
+        CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)])
     }
 
     /// chmod 0700 if `path` is this user's own folder (not a link) that

@@ -61,7 +61,44 @@ them; orphan buffers are pruned after each save.
   with a buffer gets the buffer's text and stays unsaved; a clean file tab
   reopens the file from disk; a file that has gone and had no buffer is
   dropped.
+- Crash safety (SessionStore): a buffer the committed `session.json`
+  doesn't name yet is listed in the journal `pending-buffers.json` before
+  it is written, and a reopened closed tab is listed as `reopened`. Each
+  commit is numbered (`generation`), and a journal numbered at or below
+  the commit on disk is spent. A commit renamed into place whose folder
+  flush fails is uncertain: it counts as taken for numbering, so the next
+  journal outranks whichever `session.json` survives. A held run (launch
+  couldn't read or list the store) never replaces the journal it found.
+  It writes `pending-buffers.held-<uuid>.json` beside it, or the main
+  journal unnumbered when there was none. A held run's journal is applied
+  whatever its number until a commit names it in `adoptedJournals`. A
+  damaged journal makes launch scan, and the scanned ids and reopen
+  decisions are carried into the journal that replaces it. Rollback to an
+  older build with work pending is not supported: the 0.5 releases prune
+  unnamed buffers. 1bb8787 reads the current journal as damaged and
+  scans, so it reopens every unnamed buffer, but it can leave a reopened
+  closed tab on the closed list.
 - `Scripts/session-check.sh` checks it end to end (kill -9 and normal quit).
+- A held buffer (launch couldn't read it) stays held when launch's second
+  read (`retryHeldBuffers`) finds no file at all: a sync or restore may
+  be replacing it. Its owed reopen stays owed, so launch's expiry, the
+  commit after it and later prunes keep the buffer until the tab is
+  recovered or the user lets it go (0.6 review 27e #1).
+- A save counts as done only once it is on the disk (27e #5). The atomic
+  document writer (`DocumentWrite.replace`: ⌘S, Save As, quit's Save As
+  on a closed tab) flushes the new file (F_FULLFSYNC, else fsync) before
+  the rename and the destination folder after it. Either flush failing
+  fails the save: the tab stays unsaved and keeps its session buffer
+  through close and quit. Otherwise a power loss after the session
+  cleanup reached the disk, but before the save did (on another volume
+  writes are ordered independently), could lose the text. A failed folder
+  flush leaves the new file in place, and its error carries that file's
+  stamp, so the next ⌘S calls it Owlink's own unfinished save.
+  `CEDRIC_CHECK=saveasflushfail` checks it.
+- Two Owlink processes on one session folder are not coordinated in 0.6
+  (as in 0.5.3): each prunes against its own snapshot, so a second
+  instance launched explicitly (open -n) can delete the first's newest
+  backup. Finder and `cedric` reuse the running app.
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
   saved places in the tab bar (AppKit spends ~10 ms adding a window to a

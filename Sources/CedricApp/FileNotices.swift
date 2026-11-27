@@ -53,7 +53,8 @@ extension EditorWindowController {
         }
     }
 
-    private func noticeBar(_ key: ReferenceWritableKeyPath<EditorWindowController, NoticeBar?>, symbol: String) -> NoticeBar {
+    /// The bar at `key`, made (at the top of the stack) the first time.
+    func noticeBar(_ key: ReferenceWritableKeyPath<EditorWindowController, NoticeBar?>, symbol: String) -> NoticeBar {
         if let b = self[keyPath: key] { return b }
         let bar = NoticeBar(symbol: symbol)
         stack.insertArrangedSubview(bar, at: 0)

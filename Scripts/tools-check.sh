@@ -101,6 +101,41 @@ echo "== closefail"
 if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-closefail" CEDRIC_CHECK=closefail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
     | grep -E "^check:" | tee "$OUT/closefail.txt"; then fail=1; fi
 grep -q "check: done .* 0 failed" "$OUT/closefail.txt" || { echo "tools-check: closefail FAILED" >&2; fail=1; }
+# Quit while the session can't be written: likewise.
+echo "== reopenfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-reopenfail" CEDRIC_CHECK=reopenfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/reopenfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/reopenfail.txt" || { echo "tools-check: reopenfail FAILED" >&2; fail=1; }
+
+echo "== closedmemory"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-closedmemory" CEDRIC_CHECK=closedmemory perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/closedmemory.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/closedmemory.txt" || { echo "tools-check: closedmemory FAILED" >&2; fail=1; }
+
+echo "== quitsyncfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitsyncfail" CEDRIC_CHECK=quitsyncfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/quitsyncfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/quitsyncfail.txt" || { echo "tools-check: quitsyncfail FAILED" >&2; fail=1; }
+
+echo "== backupfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-backupfail" CEDRIC_SESSION_RETRY_DELAY=2 CEDRIC_CHECK=backupfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/backupfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/backupfail.txt" || { echo "tools-check: backupfail FAILED" >&2; fail=1; }
+
+echo "== quitfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitfail" CEDRIC_CHECK=quitfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/quitfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/quitfail.txt" || { echo "tools-check: quitfail FAILED" >&2; fail=1; }
+# Quit when only the journal write fails (the session file itself is fine).
+echo "== quitjournalfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-quitjournalfail" CEDRIC_CHECK=quitjournalfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/quitjournalfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/quitjournalfail.txt" || { echo "tools-check: quitjournalfail FAILED" >&2; fail=1; }
+# Save As whose flush to the disk fails: the tab stays unsaved, its buffer kept.
+echo "== saveasflushfail"
+if ! env -u CEDRIC_NO_SESSION_SAVE CEDRIC_SESSION_DIR="$W/session-saveasflushfail" CEDRIC_CHECK=saveasflushfail perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    | grep -E "^check:" | tee "$OUT/saveasflushfail.txt"; then fail=1; fi
+grep -q "check: done .* 0 failed" "$OUT/saveasflushfail.txt" || { echo "tools-check: saveasflushfail FAILED" >&2; fail=1; }
 chmod -R u+w "$W" 2>/dev/null || true
 echo "== cedric script (dry run: the URLs it would send)"
 cli=$(cd "$W" && CEDRIC_DRY_RUN=1 "$OLDPWD/Scripts/cedric" -w a.txt src/x.c:12:5 +3 b.md 'c.py:9:' 2>&1) || fail=1
