@@ -128,11 +128,15 @@ extension PreviewFolder {
             FolderTree.relativePath(of: resolved(folder), in: resolved(root)) != nil
         }
         if let f = file(for: url, in: folder, scriptOn: scriptOn), isExistingFile(f, .default) { return (folder, f) }
-        if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
-            let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
-            if resolver.documentFolder == folder.standardizedFileURL, containsFolder(resolver.root),
-               let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
-               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return (resolver.root, safe) }
+        // Bare vault names resolve only through the vault the caller
+        // supplied. Inventing one here would search the opened folder
+        // even when the preview passed no vault, and would leave that
+        // caller's vault index unbuilt (`indexIsFresh`).
+        if let vault, let requested = fileURL(for: url),
+           requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+            if vault.documentFolder == folder.standardizedFileURL, containsFolder(vault.root),
+               let hit = vault.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
+               let safe = file(for: page, in: vault.root, scriptOn: scriptOn) { return (vault.root, safe) }
         }
         for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
             if let f = file(for: url, in: root, scriptOn: scriptOn), isExistingFile(f, .default) { return (root, f) }
@@ -233,7 +237,6 @@ public enum PreviewImageAccess {
         }
         var p = PreviewRoot.cutQuery(src)
         p = p.removingPercentEncoding ?? p
-        let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
         guard p.utf8.first != 0x2f else { return false }
         let relative = folder.appendingPathComponent(p).standardizedFileURL
         guard let page = PreviewFolder.pageURL(forFile: relative) else { return false }

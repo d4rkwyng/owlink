@@ -184,7 +184,7 @@ import Testing
         let md = "# Notes\n\nSome **bold** text and a [link](https://example.com).\n\n- one\n- two\n"
         let h = try #require(check(md, fileName: "notes.txt").first { $0.id.hasPrefix(RulesHintProvider.languageGuessPrefix) })
         #expect(RulesHintProvider.guessedLanguage(h) == .markdown)
-        #expect(h.title == "This looks like Markdown. Color it that way?")
+        #expect(h.title == "This looks like Markdown. Colour it that way?")
         #expect(h.replacement == nil)
         let html = check("<!DOCTYPE html>\n<html><body><p>Hi</p></body></html>\n").first { $0.id.hasPrefix(RulesHintProvider.languageGuessPrefix) }
         #expect(html.flatMap(RulesHintProvider.guessedLanguage) == .html)
