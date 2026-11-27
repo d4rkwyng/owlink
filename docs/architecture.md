@@ -61,7 +61,47 @@ them; orphan buffers are pruned after each save.
   with a buffer gets the buffer's text and stays unsaved; a clean file tab
   reopens the file from disk; a file that has gone and had no buffer is
   dropped.
+- Crash safety (SessionStore): a buffer the committed `session.json`
+  doesn't name yet is listed in the journal `pending-buffers.json` before
+  it is written, and a reopened closed tab is listed as `reopened`. Each
+  commit is numbered (`generation`), and a journal numbered at or below
+  the commit on disk is spent. A commit renamed into place whose folder
+  flush fails is uncertain: it counts as taken for numbering, so the next
+  journal outranks whichever `session.json` survives. A held run (launch
+  couldn't read or list the store) never replaces the journal it found.
+  It writes `pending-buffers.held-<uuid>.json` beside it, or the main
+  journal unnumbered when there was none. A held run's journal is applied
+  whatever its number until a commit names it in `adoptedJournals`. A
+  damaged journal makes launch scan, and the scanned ids and reopen
+  decisions are carried into the journal that replaces it. Rollback to an
+  older build with work pending is not supported: the 0.5 releases prune
+  unnamed buffers. 1bb8787 reads the current journal as damaged and
+  scans, so it reopens every unnamed buffer, but it can leave a reopened
+  closed tab on the closed list.
 - `Scripts/session-check.sh` checks it end to end (kill -9 and normal quit).
+- A held buffer (launch couldn't read it) stays held when launch's second
+  read (`retryHeldBuffers`) finds no file at all: a sync or restore may
+  be replacing it. Its owed reopen stays owed, so launch's expiry, the
+  commit after it and later prunes keep the buffer until the tab is
+  recovered or the user lets it go (0.6 review 27e #1).
+- A save counts as done only once it is on the disk (27e #5). The atomic
+  document writer (`DocumentWrite.replace`: ⌘S, Save As, quit's Save As
+  on a closed tab) flushes the new file (F_FULLFSYNC, else fsync) before
+  the rename and the destination folder after it. Either flush failing
+  fails the save: the tab stays unsaved and keeps its session buffer
+  through close and quit. Otherwise a power loss after the session
+  cleanup reached the disk, but before the save did (on another volume
+  writes are ordered independently), could lose the text. A failed folder
+  flush leaves the new file in place, and its error carries that file's
+  stamp, so the next ⌘S calls it Owlink's own unfinished save.
+  `CEDRIC_CHECK=saveasflushfail` checks it.
+- Two Owlink processes on one session folder are not coordinated in 0.6
+  (as in 0.5.3): each prunes against its own snapshot, so a second
+  instance launched explicitly (open -n) can delete the first's newest
+  backup. Finder and `cedric` reuse the running app.
+- Review findings 0.6.0 leaves open (session recovery, same-file and
+  name validation, the check harness) are listed in
+  [known-limits-0.6.md](known-limits-0.6.md).
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
   saved places in the tab bar (AppKit spends ~10 ms adding a window to a
@@ -978,7 +1018,10 @@ set; every other language returns none.
   mirrors in right-to-left layouts.
 - **The commands.** `MarkdownBlocks` (CedricCore, `MarkdownBlocksTests`):
   heading, bulleted and numbered list, quote, code block, table and image
-  link, each a pure toggle from text and selection to one `TextEdit`,
+  link (Format › Markdown › Image Link; the bar's Image button instead runs
+  Insert Image…, an open panel whose files go through `insertImages`, the
+  paste and drop path, see `ImageFilePicker` in `MarkdownCommands.swift`;
+  checks inject the panel's answer), each a pure toggle from text and selection to one `TextEdit`,
   CRLF-safe (lines via `getLineStart`; inserted lines use the text's own
   ending). Bold, italic and inline code are the existing `MarkdownFormat`
   (wrapping now merges inner pairs of the same marker), the checkbox is
@@ -988,6 +1031,8 @@ set; every other language returns none.
 Checks: `CEDRIC_CHECK=contextbar` (`ContextBarCheck.swift`,
 `Scripts/contextbar-check.sh`, also in tools-check.sh) clicks the buttons
 with mouse events, uses ⌘1–3 and ⌘Z, the pull-down, the preview toggle,
+the Image button with injected picks (one and two files, a name clash,
+Cancel, untitled),
 VoiceOver press and labels, both themes and RTL, and times keystrokes in
 a Markdown tab with the bar hidden and shown in alternating rounds.
 
@@ -1119,6 +1164,15 @@ and `FolderWatcher.swift`. `cedric -w some/dir` returns at once: `-w`
 waits for each file's tab, a folder has none, so the app deletes the
 folder's wait marker as it opens it (the `cli` check).
 
+Open in Terminal Here (File menu, the sidebar's row and header menus;
+`OpenInTerminal.swift`, the folder from `CedricCore/TerminalHere.swift`,
+`TerminalHereTests`): a document's folder, a folder row itself, a file
+row's folder. `TerminalOpener` hands the folder's file URL to
+`NSWorkspace.open(_:withApplicationAt:configuration:)` with Terminal's
+app URL (by bundle id): no shell string or AppleScript, so spaces and
+quotes need no escaping. Off for an untitled tab. In checks `opener`
+only records the folder (`CEDRIC_CHECK=terminalhere`, in tools-check).
+
 - **Invisible until used.** Nothing is built at launch: no view, no
   listing, no FSEvents stream, no per-tab object. A session with a
   folder whose sidebar was hidden only remembers it
@@ -1191,6 +1245,93 @@ while hidden, the session state, and snapshots light and dark.
 `render-check.sh` renders the sidebar beside typed text in a light and a
 dark theme; `session-check.sh` restores a saved folder after a kill -9.
 
+## Wiki links (0.6)
+
+`[[Name]]`, `[[Name|alias]]`, `[[Name#Heading]]` in Markdown and plain-text
+notes. The rules are `CedricCore/WikiLinks.swift` (`WikiLinksTests`); the
+app side is `WikiLinksApp.swift` and `BacklinksSidebar.swift`.
+
+- **Parsing**, one line at a time: `\` escapes, code spans are skipped,
+  a body holds no `[`, `]` or line break and is at most 999 units
+  (`[[[x]]]` is the link `[[x]]`), `\|` is the alias bar in a table.
+  Fenced code is skipped by the callers (`FenceIndex` in the editor, a
+  fence scan in `WikiLinks.refs`). The Markdown tokenizer colours a link
+  with the same `WikiLinks.end`, so colouring stays viewport-only.
+- **Names** (`NoteIndex`): the notes (.md, .markdown, .mdown, .mkd, .txt,
+  .text) in Open Quickly's `FileIndex` of the sidebar's folder (so
+  hidden and git-ignored files are left out, and the 20,000-file cap
+  applies). Built off the main thread the first time `[[`, a ⌘-click on a
+  link or Backlinks asks (`WikiNotes`, one per folder, on
+  `FolderSidebar.wikiNotes`), rebuilt whenever the watcher-driven index
+  lands (`QuickOpenFiles.onIndexLanded`); never per keystroke. Resolution:
+  the exact name (or `folder/name`), then ignoring case; among several,
+  fewest folders, then fewest characters, then by path.
+- **`[[` list** (`WikiCompletion`): a borderless child panel that never
+  becomes key; the text view hands it ↑/↓, Return, Tab and ⎋
+  (`EditorTextView.commandInterceptor`). Until it shows, a keystroke costs
+  a look at the two characters before the caret; while it shows, the
+  line up to the caret (at most 4,000 units). Off with no folder open, in
+  large mode (even after Turn On Anyway), with several carets, in code
+  spans and fences.
+- **⌘-click** on a link opens its note (at the heading for `#Heading`).
+  Owlink opens nothing on a plain click in the text, and ⌘-click elsewhere
+  still adds a caret. A link to no note offers to create it (beside the
+  note when it is in the folder), with `FolderActions.create`, as the
+  sidebar's New File does.
+- **Backlinks** (View › Show Backlinks): a per-tab pane beside the
+  Outline in `EditorContainer`. `BacklinkScan` reads the notes off the
+  main thread and keeps each one's links by date and size; an FSEvents
+  batch marks its folders dirty, so only notes there are looked at again.
+  Notes over 5 MB, or past 10,000, are skipped and the pane says
+  "partial". Nothing is written; nothing runs while no pane shows.
+
+Checks: `CEDRIC_CHECK=wikilinks` (in tools-check.sh): the list and its
+keys, code span and fence, ⌘-click to a tab and a heading, a missing
+note created, Backlinks and a click to the line, a rename on disk
+followed by names and backlinks, no list in large mode.
+
+## Tags (0.6)
+
+View › Show Tags: every `#tag` in the open folder's notes, with counts,
+as a tree, in a per-tab pane beside Outline and Backlinks
+(`TagsSidebar.swift`, in `EditorContainer`). The rules are
+`CedricCore/Tags.swift` (`TagsTests`).
+
+- **Parsing** (Obsidian's rules): inline `#tag` and `#nested/tag` start
+  at the line start or after white space, so URLs, `](#anchor)`, `a#b`
+  and `&#123;` are not tags, and `# Heading` is a heading. `\#` escapes;
+  code spans and fenced code are skipped (`WikiLinks.fenceLine`, shared
+  with the link scan). A name is letters, marks, digits, emoji, `_`, `-`
+  and `/`, with at least one non-digit (`#123` is not a tag); empty
+  parts are dropped. Front matter (a first line `---`, to `---` or
+  `...`) gives `tags:`/`tag:` as a YAML list, a `[flow, list]` or a
+  comma- or space-separated value; a `#` in it is a YAML comment, not a
+  tag. Each tag is kept once per note (its first line), ignoring case.
+- **One read for links and tags.** `BacklinkScan.update(…, tags:)` reads
+  each note once for both, on `WikiNotes`' utility queue, with the same
+  walk (Open Quickly's `FileIndex`), the same per-file cache by date and
+  size, the same dirty folders from the watcher and the same caps (over
+  5 MB or past 10,000 notes: skipped, "partial"). A note cached while no
+  Tags pane showed has no tags (`nil`) and is read again once when one
+  shows. Nothing is read while neither pane shows; nothing is written.
+- **The tree** (`TagTree`) is made on `WikiNotes.queryQueue` from a value
+  snapshot of the scan, and shown only if it is still the pane's latest
+  request, the scan generation is unchanged and the folder is the same
+  `WikiNotes`. A count is the notes that have the tag or one under it;
+  siblings go by count, then by name. Opening or closing a folder posts
+  `WikiNotes.didChange`, so Backlinks and Tags follow the new folder.
+- **Clicks**: a tag lists its notes (and those of tags under it) with
+  the line; a note opens at that line (`openWikiNote`).
+- **Speed**: opening a document does nothing for tags (no pane is made
+  for a new tab, no read, no index); `#` typing gets no completion.
+
+Checks: `CEDRIC_CHECK=tags` (in tools-check.sh): nothing read before the
+pane, the tree and counts (front matter, nested, not code, fences,
+headings, URLs or numbers), the tree made off the main thread, a tag
+click → its notes → the right tab at the line, a rename and a delete on
+disk, and a large document opened while the pane shows: no scan, no
+index build, no tree.
+
 ## Git and GitHub links
 
 `CedricCore/Git.swift` (tested in `GitTests.swift`) and
@@ -1207,9 +1348,15 @@ dark theme; `session-check.sh` restores a saved folder after a kill -9.
   `GIT_OPTIONAL_LOCKS=0` (a status never takes the index lock),
   `GIT_TERMINAL_PROMPT=0`, and has a 10 s timeout.
 - **When**: nothing at launch. A tab with a file queues
-  `gitTabShown` with `AfterFirstFrame`; 0.5 s later, if the window is on
-  screen and typing has paused, the first refresh runs (an unselected
-  restored tab starts when it is first selected). Never in large mode,
+  `gitTabShown` with `AfterFirstFrame`; on the next turn, if the window is
+  on screen and typing has paused (none in the last 0.5 s, else it looks
+  again 0.5 s later), the first refresh runs (an unselected
+  restored tab starts when it is first selected). Until 0.6 it waited
+  0.5 s after the first frame; on a 1 MB file in a repository that put the
+  git processes (~15 ms of the app's CPU for the spawns) and the window
+  server's re-layout after the status bar's git label at 0.8–1.2 s, so the
+  app settled a second after its window. The processes run on `gitQueue`;
+  the main thread only applies the result. Never in large mode,
   never for untitled tabs. A refresh (on save, app focus, reload, or a
   change in the git folder) runs on one serial utility queue:
   `status --porcelain=v2 --branch -z -- file` (branch, HEAD, upstream and
@@ -2201,6 +2348,24 @@ no new crash report. Owlink has no SwiftPM resource bundles today, so the First 
 1.0.1 `Bundle.module` crash (d4rkwyng/first-light#22) can't happen as such; the smoke
 catches the same class of bug for what Owlink does ship.
 
+**Release gates belong in a disposable macOS user account or VM.** Both
+`launch-check.sh --release` and `smoke-launch.sh` launch the release binary as
+shipped, and a release binary ignores `CEDRIC_SESSION_DIR` and
+`CEDRIC_REPLACE_UNDO_DIR` (`DevEnvironment.releaseAllowed`). Every such launch
+therefore rotates `cli-token` and prunes the older Replace in Files copies in
+`ReplaceUndo` under that account's `~/Library/Application Support/Cedric`. The
+gates pass `CEDRIC_NO_RESTORE` and `CEDRIC_NO_SESSION_SAVE`, which a release
+honours, so `Session` is left alone. A temp extraction folder isolates nothing.
+Both scripts exit, having launched nothing, unless `OWLINK_RELEASE_GATE=1`.
+`release.sh` sets it only on its own `launch-check.sh --release` call, and the
+release workflow sets it for the smoke on its throwaway runner. Running
+`release.sh` without `--skip-launch-check` on a maintainer's own account
+touches that account's real data. Whatever the flags, `release.sh` refuses a
+built bundle whose Info.plist carries `CedricCheckBuild` before it signs or
+launches it. `Scripts/check-isolation-lint.sh` fails if any other script sets
+`OWLINK_RELEASE_GATE`, or if a release gate launches before
+`cedric_require_release_gate`.
+
 **Entitlements: none.** Checked 2026-11-17 on the M4 Pro:
 
 - *Library validation* (part of the hardened runtime) only loads code signed by Apple or
@@ -2226,11 +2391,16 @@ catches the same class of bug for what Owlink does ship.
   signing nor notarization sees it.
 
 **On GitHub.** `.github/workflows/release.yml` runs on a `v*` tag push (or by hand with a
-tag) on `macos-26`: checks the five secrets, builds the release notes from
+tag) on `macos-26`: checks the six secrets, builds the release notes from
 `CHANGELOG.md` (`Scripts/changelog-section.sh`, after Tankard's), restores the SwiftPM
 artifact cache, resolves packages, imports the certificate, runs `Scripts/test.sh`, then
-`Scripts/release.sh` with `CEDRIC_VERSION` from the tag, and attaches `Owlink-<version>.zip` to the
-release. Every release it makes is a draft, final tags included, so nothing is public until
+`Scripts/release.sh` with `CEDRIC_VERSION` from the tag, smoke-launches the zip, then
+Sparkle-signs it: the `SPARKLE_ED_PRIVATE_KEY` secret goes to a mode-600 temp file under
+`$RUNNER_TEMP` (checked against the committed public key first, deleted in an `if: always()`
+step), `sign_update --ed-key-file` signs the zip, `Scripts/ed-verify.swift` checks it, and
+`Scripts/appcast-item.sh` writes a signed `dist/appcast.xml`; it prints the zip's sha256 and
+attaches `Owlink-<version>.zip` and `appcast.xml` to the release (docs/updates.md, "Signing in
+CI"). Nothing goes to owlink.app. Every release it makes is a draft, final tags included, so nothing is public until
 the owner publishes it by hand; a tag with a suffix (`v0.1.0-rc1`) is also a prerelease.
 `notary-result.json`
 and `notary-log.json` are kept as the workflow artifact `notary-<tag>` (90 days) with
@@ -2245,7 +2415,7 @@ and checksum are pinned); SwiftPM extracts a cached zip without the network. The
 `swift package resolve` gets five minutes per try (killed by a `perl alarm`, since macOS
 has no `timeout`), three tries, before the build starts.
 
-Secrets (Settings › Secrets and variables › Actions), the same five as Tankard's:
+Secrets (Settings › Secrets and variables › Actions), Tankard's five plus the Sparkle key:
 
 | secret | value |
 |---|---|
@@ -2254,6 +2424,7 @@ Secrets (Settings › Secrets and variables › Actions), the same five as Tanka
 | `NOTARY_APPLE_ID` | Apple ID |
 | `NOTARY_TEAM_ID` | Team ID |
 | `NOTARY_PASSWORD` | app-specific password |
+| `SPARKLE_ED_PRIVATE_KEY` | Sparkle EdDSA private key, `generate_keys -x` output (base64 32-byte seed); also used by the dispatch-only `verify-sparkle-key.yml` |
 
 No secrets live in the repository.
 
@@ -2305,7 +2476,59 @@ inside `SpellScope.ranges`: prose in Plain Text and Markdown (minus code,
 links and markup tokens), only comments and strings in code, nothing in
 data (`SpellScope.checks`: JSON, YAML, TOML/INI/.env, XML, and CSV/TSV
 files; checking is off for those tabs, so no underlines and no typo
-hint). The marks are
+hint). On TextKit 2 a pass that doesn't start at the top of the text
+hands its results over relative to the checked range (`{15, 4}` for a
+word 15 characters into `{14875, 1215}`); the scope test and the record
+use document offsets (TextKit 1 hands over document offsets). The
+convention (`TextCheckingOffset`) comes from the batch when only one
+reading fits (a result before the range's start can't be a document
+offset, one past its length can't be relative); when both fit (`{10,
+1000}` with one misspelling at `{20, 3}`), from the text: each spelling
+result must cover a whole word under the reading chosen; and if the text
+can't tell, from the callback path (relative on TextKit 2, the editor's
+layout, document offsets on TextKit 1). Until 0.6 the results were read
+as document offsets, so nothing scrolled to was ever marked.
+
+**The first check of an opened file.** AppKit's continuous checking
+checks only the visible text, but its checking controller schedules the
+first pass about 1 s after the first layout (measured on a 1 MB file: the
+pass at ~1.2 s, the window at ~0.3 s; ~30 ms of the app's CPU and ~80 ms
+of AppleSpell's for 181 misspellings on screen). Owlink checks the visible
+range itself once the first frame is up (`EditorSpelling.checkVisibleNow`,
+an `AfterFirstFrame` block: the view's own `checkText(in:types:options:)`,
+so the same request, results and marks), and the marks show ~50 ms later.
+`SpellCheckCoverage` (CedricCore) records the range and the public
+checking types asked for (the view's enabled ones plus correction, which
+AppKit's pass asks for even with autocorrection off) and the spelling
+dictionary's state (`SpellDictionaryState`: the checker's language and
+Automatic by Language, the document's ignored words, and later which of
+the early marks have been learned). `EditorTextView.checkText` skips
+AppKit's request only when it asks for nothing more: a range inside the
+early one, no public type it didn't ask for, no options (AppKit's
+scheduled pass passes none), no checking-type bit outside the public ones
+and the two AppKit's passes carry on macOS 27 (13 and 28), the early
+results back, and the same dictionary state. The first request, skipped
+or not, clears the record, as do an edit, a language or settings change,
+turning continuous checking off or on (Fix Typos' Ignore All and Learn
+Word redraw the marks that way, and clear it first themselves), Ignore
+Spelling, and opening the context menu (its Learn, Ignore and Unlearn),
+so scrolling, typing, Learn/Ignore and Check Document Now are always
+AppKit's own passes. The early check is optional, so it isn't made once
+the text has been edited or while an input method is composing. The rest
+of the text is checked when it is scrolled to, as before.
+`CEDRIC_CHECK=spellopen` (tools-check): marks before AppKit's pass, only
+visible text, AppKit's first pass skipped once and the text checked once,
+scrolled-to and typed misspellings marked, an edit after the early check
+lets AppKit's pass run; Fix Typos' Ignore All and a word ignored through
+the spell checker between the early reply and AppKit's pass (the ignored
+word's mark goes, the other's stays); an edit and an IME composition
+before the queued check (no early check, AppKit's pass marks); JSON
+checked not at all. A mark only counts when AppKit draws it: the text
+layout manager's `.spellingState` rendering attribute at the word and not
+at the words either side (after a scroll down too), and it has to go when
+the word is corrected, not Owlink's own record of what it passed on.
+
+The marks are
 the text view's spelling state, a drawing attribute, so text colours are
 never touched; suggestions, Learn and Ignore are the standard context menu.
 Check Document Now walks our scope (the system's would stop on

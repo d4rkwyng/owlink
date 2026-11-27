@@ -4,6 +4,15 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
+## [Unreleased]
+
+### Added
+- Markdown preview: Mermaid diagrams and math render when Allow JavaScript is on (bundled, nothing fetched).
+- **Updates.** Owlink checks for a new version about once a day and asks before installing it; Owlink › Check for Updates… checks now, and Settings › General › Automatically check for updates turns the daily check off. Only updates signed with Owlink's key are accepted, from `https://owlink.app/appcast.xml`.
+
+### Fixed
+- **Reliability: unsaved work survives a force quit or crash, checked by new tests.** A new tab's first text, or the first edit to a file, is kept within moments, not only after a 1.5 s pause in typing. If Owlink can't read its session file, it keeps that file aside and reopens the unsaved text as Recovered tabs, where it used to delete it. A file deleted or moved while Owlink wasn't running comes back with its unsaved text and the “deleted or moved” bar. Two windows come back as two windows, not merged into one.
+
 ## [0.5.4] - 2026-11-25
 
 ### Changed

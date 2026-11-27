@@ -265,6 +265,13 @@ public struct MarkdownTokenizer: Tokenizer {
                 i += delim.count
                 continue
             }
+            // A [[wiki link]] or ![[embed]] (WikiLinks: the same rules as Backlinks).
+            if c == C.lbracket || c == C.bang, i + 2 < n, b[i + 1] == C.lbracket,
+               let end = WikiLinks.end(in: b, open: c == C.bang ? i + 1 : i) {
+                t.add(i, end, .link)
+                i = end
+                continue
+            }
             if c == C.lbracket || (c == C.bang && i + 1 < n && b[i + 1] == C.lbracket) {
                 let open = c == C.bang ? i + 1 : i
                 if let closeBracket = b.find([C.rbracket], from: open + 1), closeBracket + 1 < n, b[closeBracket + 1] == C.lparen,

@@ -6,8 +6,9 @@ import Foundation
 /// page can send such a URL, so a path is accepted only if it is exactly
 /// what the script makes, `mktemp "$TMPDIR/cedric-stdin.XXXXXX"`:
 ///
-/// - its folder, with `..` and symlinks resolved (realpath), is the user's
-///   own temp folder (NSTemporaryDirectory, resolved the same way);
+/// - its folder, opened once, is the user's own temp folder
+///   (NSTemporaryDirectory) by device and inode, and the file is opened
+///   relative to that folder's descriptor;
 /// - its name is the prefix and mktemp's random letters and digits only;
 /// - it is a regular file (lstat: not a symlink), with one link (not a
 ///   hard link to a file elsewhere), owned by this user.
@@ -42,16 +43,32 @@ public enum CLIHandoff {
     /// what is read is what was checked.
     public static func inspect(_ path: String, kind: Kind, tempDirs: [String] = [NSTemporaryDirectory()],
                                uid: uid_t = getuid(), read: Bool = false, maxBytes: Int = 64 << 20) -> Handoff? {
-        guard path.hasPrefix("/") else { return nil }
-        let ns = path as NSString
-        let name = ns.lastPathComponent
-        guard name.hasPrefix(kind.prefix) else { return nil }
-        let random = name.dropFirst(kind.prefix.count)
-        guard random.count >= 6, random.unicodeScalars.allSatisfy({ $0.isASCII && CharacterSet.alphanumerics.contains($0) }) else { return nil }
-        guard let dir = realpath(ns.deletingLastPathComponent) else { return nil }
-        guard tempDirs.compactMap(realpath).contains(dir) else { return nil }
-        let file = dir + "/" + name
-        let fd = Darwin.open(file, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        // Absolute by its first byte; split at the last "/" byte (a text
+        // test takes a slash before a combining mark for part of a name).
+        let bytes = Array(path.utf8)
+        guard bytes.first == 0x2f, !bytes.contains(0), let slash = bytes.lastIndex(of: 0x2f) else { return nil }
+        let nameBytes = bytes[(slash + 1)...], prefix = Array(kind.prefix.utf8)
+        guard nameBytes.starts(with: prefix) else { return nil }
+        let random = nameBytes.dropFirst(prefix.count)
+        // mktemp's letters and digits: ASCII bytes only.
+        guard random.count >= 6, random.allSatisfy({ (0x30...0x39).contains($0) || (0x41...0x5a).contains($0) || (0x61...0x7a).contains($0) })
+        else { return nil }
+        let name = String(decoding: nameBytes, as: UTF8.self)
+        guard Beneath.isName(name) else { return nil }
+        let parentBytes = slash == 0 ? [UInt8(0x2f)] : Array(bytes[..<slash])
+        // The folder holding it, opened once; it must be one of `tempDirs`
+        // by device and inode (the same folder, however either path is
+        // spelled), never by comparing the paths' text.
+        let dfd = (parentBytes + [0]).withUnsafeBufferPointer { b in
+            b.baseAddress!.withMemoryRebound(to: CChar.self, capacity: b.count) { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC) }
+        }
+        guard dfd >= 0 else { return nil }
+        defer { close(dfd) }
+        guard let dirID = Beneath.FileID(fd: dfd),
+              let allowed = tempDirs.first(where: { Beneath.FileID(path: $0, followLast: true) == dirID }),
+              let dir = realpath(allowed) else { return nil }
+        // The checked name, relative to that very folder.
+        let fd = openat(dfd, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var st = stat()
@@ -62,6 +79,9 @@ public enum CLIHandoff {
             let h = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
             data = (try? h.readToEnd()) ?? Data()
         }
+        // Named under the allowed folder's resolved path; `remove` deletes
+        // it only while that name is still this inode.
+        let file = (dir == "/" ? "" : dir) + "/" + name
         return Handoff(url: URL(fileURLWithPath: file), device: UInt64(st.st_dev), inode: UInt64(st.st_ino), data: data)
     }
 

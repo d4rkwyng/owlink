@@ -24,6 +24,25 @@ final class EditorContainer: NSView {
             needsLayout = true
         }
     }
+    /// Backlinks, beside the outline (nil while hidden; BacklinksSidebar.swift).
+    var backlinks: NSView? {
+        didSet {
+            guard oldValue !== backlinks else { return }
+            oldValue?.removeFromSuperview()
+            if let backlinks { addSubview(backlinks) }
+            needsLayout = true
+        }
+    }
+
+    /// Tags, beside Backlinks (nil while hidden; TagsSidebar.swift).
+    var tags: NSView? {
+        didSet {
+            guard oldValue !== tags else { return }
+            oldValue?.removeFromSuperview()
+            if let tags { addSubview(tags) }
+            needsLayout = true
+        }
+    }
 
     init(gutter: GutterView, scrollView: NSScrollView) {
         self.gutter = gutter
@@ -37,8 +56,13 @@ final class EditorContainer: NSView {
 
     override func layout() {
         super.layout()
-        let side = sidebar == nil ? 0 : min(OutlineSidebar.width, max(0, bounds.width - 200))
-        sidebar?.frame = NSRect(x: 0, y: 0, width: side, height: bounds.height)
+        let outlineW = sidebar == nil ? 0 : min(OutlineSidebar.width, max(0, bounds.width - 200))
+        let backW = backlinks == nil ? 0 : min(BacklinksSidebar.width, max(0, bounds.width - 200 - outlineW))
+        let tagsW = tags == nil ? 0 : min(TagsSidebar.width, max(0, bounds.width - 200 - outlineW - backW))
+        let side = outlineW + backW + tagsW
+        sidebar?.frame = NSRect(x: 0, y: 0, width: outlineW, height: bounds.height)
+        backlinks?.frame = NSRect(x: outlineW, y: 0, width: backW, height: bounds.height)
+        tags?.frame = NSRect(x: outlineW + backW, y: 0, width: tagsW, height: bounds.height)
         let g = showsGutter ? gutterWidth : 0
         // Beside the scroll view, at the window edge. Readable Width draws
         // it in the column's margin instead, just left of the text.
@@ -213,6 +237,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     /// "This file isn’t valid UTF-8…" and "mixed line endings" (FileNotices.swift).
     var encodingBar: NoticeBar?
     var lineEndingBar: NoticeBar?
+    /// "Unsaved work isn’t being backed up" (AppDelegate.noteSessionSave):
+    /// a bar of its own, so another notice never hides it.
+    var backupBar: NoticeBar?
     /// Keep / Keep Mixed was chosen: the bar stays away for this tab.
     var encodingNoticeKept = false
     var lineEndingNoticeKept = false
@@ -252,6 +279,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     let fences = FenceIndex()
     /// The Markdown outline sidebar (OutlineSidebar.swift).
     let outline = OutlineState()
+    /// `[[` completion and Backlinks (WikiLinksApp.swift, BacklinksSidebar.swift).
+    let wiki = WikiTabState()
     /// The owl's disk facts (OwlFacts.swift), made when first asked.
     var fileProbe: FileProbe?
     /// The file has the quarantine attribute (read after open, OwlFacts.swift).
@@ -322,6 +351,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         PerfTrace.mark("owl")
         recheckWriteAccess()
         AfterFirstFrame.run { [weak self] in self?.gitTabShown() }
+        // The visible text's misspellings as soon as the first frame is up
+        // (AppKit's own first pass comes about 1 s after layout).
+        AfterFirstFrame.run { [weak self] in self?.spelling.checkVisibleNow() }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -634,6 +666,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
 
     private func storageEdited() {
         guard let storage = textView.textStorage, storage.editedMask.contains(.editedCharacters) else { return }
+        // The text the first-frame spell check saw has changed.
+        primaryTextView.spellCoverage.clear()
         let edited = storage.editedRange
         let delta = storage.changeInLength
         // Every change, loading or not: a long saved text is chunk hashes,
@@ -713,6 +747,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         refreshLineEndingNoticeIfChanged()
         schedulePreview()
         outlineTextChanged()
+        wikiTextChanged()
         // Before the owl hears of the edit: a paste may take it over the cap.
         updateAutoReviewCap(newText: false)
         if let owl {
@@ -749,6 +784,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         scheduleHighlights()
         updateBracketMatch()
         updateOutlineCurrent()
+        wikiSelectionChanged()
         if !editing.writing.isOff { writingSelectionChanged() }
     }
 
@@ -819,6 +855,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         splitEditor?.applyPalette(p)
         if previewVisible { renderPreview() }
         outline.sidebar?.applyPalette(p)
+        wiki.backlinks?.applyPalette(p)
+        wiki.tags?.applyPalette(p)
         owl?.layoutViews()
         spelling.apply()
         gitState?.settingChanged()
@@ -1484,6 +1522,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     }
 
     func windowWillClose(_ notification: Notification) {
+        wikiHideCompletion()
+        if let o = wiki.observer { NotificationCenter.default.removeObserver(o); wiki.observer = nil }
+        if tagsVisible { hideTags() }
         observers.forEach { NotificationCenter.default.removeObserver($0) }
         observers = []
         unsplit(closing: true)
@@ -1576,8 +1617,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
     func topLine(in pane: EditorPane) -> Int {
         let textView = pane.textView
         guard let vr = textView.viewportCharacterRange else { return 0 }
-        // The viewport range starts above the visible rect; use the visible rect's top instead.
-        let visibleTop = pane.scrollView.contentView.bounds.minY
+        // The viewport range starts above the visible rect; use the visible rect's top instead,
+        // a backing pixel down: a line whose top is less than a pixel above it (an estimated,
+        // fractional y the scroll view can't stop on) is the one shown.
+        let pixel = PixelSnap.pixel(scale: Double(textView.window?.backingScaleFactor ?? 1))
+        let visibleTop = pane.scrollView.contentView.bounds.minY + pixel
         if let tlm = textView.textLayoutManager,
            let frag = tlm.textLayoutFragment(for: CGPoint(x: 0, y: max(0, visibleTop - textView.textContainerOrigin.y))) {
             return lineIndex.line(containing: textView.offset(of: frag.rangeInElement.location))
@@ -1613,6 +1657,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         // out: until its viewport is laid out, a fragment far down can
         // report a frame near the top (and look visible already).
         let secondPane = pane !== primaryPane
+        // The scroll view stops on whole backing pixels: round the target up to
+        // one so the line's top is at or above the visible top, not inside the line above.
+        let scale = Double(textView.window?.backingScaleFactor ?? 1)
         for _ in 0..<10 {
             tlm.ensureLayout(for: r)
             if secondPane { vlc.layoutViewport() }
@@ -1624,9 +1671,11 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             if inView && position == .center { break }
             var y = fy
             if position == .center { y -= max(0, (visible.height - f.height) / 2) }
-            y = max(0, y)
-            if abs(y - visible.minY) < 1 { break }
+            y = CGFloat(PixelSnap.up(Double(max(0, y)), scale: scale))
+            if abs(y - visible.minY) < CGFloat(PixelSnap.pixel(scale: scale)) / 2 { break }
             textView.scroll(NSPoint(x: 0, y: y))
+            // Clamped at the end of the text: it can't get any closer.
+            if scrollView.contentView.bounds.minY == visible.minY { break }
             vlc.layoutViewport()
         }
         colorizer.scheduleViewport()

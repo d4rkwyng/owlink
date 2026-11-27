@@ -6,8 +6,9 @@ import Foundation
 /// ending back on save.
 public struct LineIndex: Sendable {
     /// `starts[i]` is where line i begins; `starts[0] == 0`. Always at
-    /// least one line (an empty document has one empty line).
-    public private(set) var starts: [Int] = [0]
+    /// least one line (an empty document has one empty line). Four bytes
+    /// a line (LineStarts): a 1 GB log's 14.6 M lines took 117 MB as Ints.
+    public private(set) var starts: LineStarts = [0]
     public private(set) var length: Int = 0
 
     public init() {}
@@ -160,11 +161,107 @@ public struct LineIndex: Sendable {
         while removeEnd < starts.count, starts[removeEnd] <= oldRange.location + oldRange.length { removeEnd += 1 }
         var inserted: [Int] = []
         Self.scanNewlines(text, in: NSRange(location: oldRange.location, length: newLength)) { inserted.append($0) }
-        if delta != 0 {
-            for k in removeEnd..<starts.count { starts[k] += delta }
-        }
+        if delta != 0 { starts.shift(from: removeEnd, by: delta) }
         starts.replaceSubrange((firstLine + 1)..<removeEnd, with: inserted)
         length += delta
         return firstLine
+    }
+}
+
+/// The line starts of a LineIndex: Ints to their users, kept as UInt32
+/// while every start fits (a text under 4 G UTF-16 units, so any file
+/// Owlink opens in practice), as Ints from the first one that doesn't.
+public struct LineStarts: RandomAccessCollection, Equatable, Sendable, ExpressibleByArrayLiteral {
+    /// The starts while they all fit in 32 bits; empty once `wide` is used.
+    private var narrow: [UInt32] = []
+    /// All the starts, once one didn't fit in `narrow`.
+    private var wide: [Int] = []
+    /// `wide` holds the starts (one start, or a shift, passed UInt32.max).
+    private(set) var isWide = false
+
+    public init() {}
+    public init(arrayLiteral elements: Int...) {
+        self.init()
+        reserveCapacity(elements.count)
+        for e in elements { append(e) }
+    }
+    public init<S: Sequence>(_ elements: S) where S.Element == Int {
+        self.init()
+        for e in elements { append(e) }
+    }
+
+    public var startIndex: Int { 0 }
+    public var endIndex: Int { isWide ? wide.count : narrow.count }
+    public var count: Int { endIndex }
+
+    public subscript(i: Int) -> Int {
+        isWide ? wide[i] : Int(narrow[i])
+    }
+
+    static func fits(_ v: Int) -> Bool { v >= 0 && v <= Int(UInt32.max) }
+
+    /// From here on as Ints.
+    private mutating func widen() {
+        guard !isWide else { return }
+        wide = narrow.map { Int($0) }
+        narrow = []
+        isWide = true
+    }
+
+    public mutating func reserveCapacity(_ n: Int) {
+        if isWide { wide.reserveCapacity(n) } else { narrow.reserveCapacity(n) }
+    }
+
+    public mutating func append(_ v: Int) {
+        if !isWide, Self.fits(v) { narrow.append(UInt32(v)); return }
+        widen()
+        wide.append(v)
+    }
+
+    /// Adds `delta` to every start from `index` on (an edit before them).
+    mutating func shift(from index: Int, by delta: Int) {
+        guard delta != 0, index < count else { return }
+        if !isWide, let last = narrow.last, Self.fits(Int(last) + delta), Self.fits(Int(narrow[index]) + delta) {
+            // Starts increase, so the first and last bound the rest.
+            if delta > 0 {
+                let d = UInt32(delta)
+                for k in index..<narrow.count { narrow[k] += d }
+            } else {
+                let d = UInt32(-delta)
+                for k in index..<narrow.count { narrow[k] -= d }
+            }
+            return
+        }
+        widen()
+        for k in index..<wide.count { wide[k] += delta }
+    }
+
+    mutating func replaceSubrange(_ range: Range<Int>, with new: [Int]) {
+        if !isWide, new.allSatisfy(Self.fits) {
+            narrow.replaceSubrange(range, with: new.map { UInt32($0) })
+            return
+        }
+        widen()
+        wide.replaceSubrange(range, with: new)
+    }
+
+    /// Whether `other` keeps its starts in the very same storage as this
+    /// one (checks: the same index, not a copy). Empty starts share
+    /// nothing. The addresses are compared only while both are borrowed.
+    public func sharesStorage(with other: LineStarts) -> Bool {
+        guard isWide == other.isWide else { return false }
+        func same<T>(_ a: [T], _ b: [T]) -> Bool {
+            a.withUnsafeBufferPointer { pa in
+                b.withUnsafeBufferPointer { pb in
+                    pa.count > 0 && pa.count == pb.count && pa.baseAddress != nil && pa.baseAddress == pb.baseAddress
+                }
+            }
+        }
+        return isWide ? same(wide, other.wide) : same(narrow, other.narrow)
+    }
+
+    public static func == (a: LineStarts, b: LineStarts) -> Bool {
+        if !a.isWide, !b.isWide { return a.narrow == b.narrow }
+        return a.elementsEqual(b)
     }
 }

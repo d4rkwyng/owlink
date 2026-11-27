@@ -167,6 +167,43 @@ import Testing
         #expect(GitIgnore(folder: URL(fileURLWithPath: "/")).root.path == "/")
     }
 
+    /// Astra batch 9b: a folder whose name starts with a combining mark.
+    /// The URL entry point keeps a first-level one inside the repository
+    /// (a text prefix test fused "root/" and the mark), the path splits at
+    /// the "/" bytes so an intermediate parent's .gitignore is read (a text
+    /// split fused "p/" and the mark and skipped "p"), and a leading "/"
+    /// before a mark anchors the pattern. Both entry points; a sibling named
+    /// root + mark and the root itself are never ignored.
+    @Test func combiningMarkFoldersReadTheirParentsRules() throws {
+        let base = tempDir()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git/info"), withIntermediateDirectories: true)
+        try write(root, "p/.gitignore", "*.log\n/\u{301}r/\n")
+        try write(root, "\u{301}m/.gitignore", "*.log\n")
+        try write(base, "repo\u{301}/x.log", "")
+        let g = GitIgnore(folder: root)
+        let real = g.root
+        let cases: [(String, Bool, Bool)] = [
+            ("p/\u{301}q/b.log", false, true),    // only p/.gitignore has the rule
+            ("p/\u{301}q/c.txt", false, false),
+            ("p/\u{301}r", true, true),           // "/\u{301}r/" anchored in p
+            ("p/\u{301}r/c.txt", false, true),    // inside the ignored folder
+            ("p/x/\u{301}r", true, false),        // anchored: not one level down
+            ("\u{301}m/a.log", false, true),      // a first-level folder's own rules
+            ("\u{301}m/a.txt", false, false),
+        ]
+        for (rel, isDir, want) in cases {
+            #expect(g.isIgnored(relative: rel, isDirectory: isDir) == want, "relative \(rel)")
+            #expect(g.isIgnored(real.appendingPathComponent(rel), isDirectory: isDir) == want, "URL \(rel)")
+        }
+        #expect(!g.isIgnored(real, isDirectory: true), "the root itself")
+        let sibling = URL(fileURLWithPath: real.path + "\u{301}").appendingPathComponent("x.log")
+        #expect(!g.isIgnored(sibling, isDirectory: false), "a sibling named root + mark is outside")
+        #expect(GitIgnoreRules("/\u{301}r/\n").patterns == [.init(glob: "\u{301}r", negated: false, dirOnly: true, anchored: true)])
+        #expect(GitIgnoreRules("a/\u{301}r\n").patterns.first?.anchored == true)
+    }
+
     @Test func parsesPatternFlags() {
         let r = GitIgnoreRules("# c\n!/a/b/\n\\#x\nplain\n")
         #expect(r.patterns.count == 3)

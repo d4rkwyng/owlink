@@ -14,7 +14,8 @@ public enum FolderActions {
     }
 
     public static func destination(in parent: URL, name: String) throws -> URL {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else {
+        // One name by its bytes (Beneath.isName): a slash before a combining mark is still a separator.
+        guard Beneath.isName(name) else {
             throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
                           userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a single file or folder name.")])
         }
@@ -33,6 +34,22 @@ public enum FolderActions {
         return url
     }
 
+    /// A new empty file `name` in `folder`, which must be `root` or inside
+    /// it: for callers holding paths (the tests). `root` is opened and the
+    /// file made beneath it as `FolderRoot.createFile` does; `folder`'s
+    /// place in `root` only names the components (the kernel keeps the
+    /// lookup inside `root`, so a parent that leads out is refused).
+    public static func createFile(named name: String, in folder: URL, within root: URL,
+                                  walk: Bool = !Beneath.kernelEnforced) throws -> URL {
+        _ = try destination(in: folder, name: name)
+        let pinned = try FolderRoot(root)
+        guard let rel = FolderTree.relativePath(of: folder, in: root)
+                ?? FolderTree.relativePath(of: folder.resolvingSymlinksInPath(), in: root.resolvingSymlinksInPath()) else {
+            throw FolderRoot.outsideError(folder.appendingPathComponent(name), folder: folder.lastPathComponent)
+        }
+        return try pinned.createFile(FolderTree.components(rel) + [name], walk: walk)
+    }
+
     public static func rename(_ source: URL, name: String) throws -> URL {
         let destination = try destination(in: source.deletingLastPathComponent(), name: name)
         if source.lastPathComponent == name { return source }
@@ -48,5 +65,78 @@ public enum FolderActions {
 
     private static func error(_ url: URL) -> NSError {
         NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: url.path])
+    }
+}
+
+/// The folder open in the sidebar, pinned by a descriptor when it is
+/// opened (Astra review, 0.6). A note made from a wiki link is created
+/// from this descriptor, never from the folder's saved path looked up
+/// again: if the folder was moved or replaced at its path, the note goes
+/// in the folder that was opened, and the caller is told rather than
+/// shown a different file. The descriptor is `O_EVTONLY`, so it doesn't
+/// keep the folder's volume from being ejected.
+public final class FolderRoot: @unchecked Sendable {
+    /// The path the folder was opened at (what the sidebar shows).
+    public let url: URL
+    private let fd: Int32
+
+    public init(_ url: URL) throws {
+        let fd = open(url.path, O_EVTONLY | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: url.path]) }
+        self.url = url
+        self.fd = fd
+    }
+
+    deinit { close(fd) }
+
+    /// Makes the empty file `components` (each one name; the last is the
+    /// file) beneath this folder: looked up beneath the descriptor
+    /// (`Beneath.open`: a folder that leads out is refused), created with
+    /// `O_CREAT | O_EXCL | O_NOFOLLOW` (an existing file or link of that
+    /// name is never replaced or followed). Where the kernel can't keep a
+    /// lookup inside (`walk`, the default there; tests force it), only a
+    /// single name directly in this folder is made: a parent opened on the
+    /// way could be moved before the file is created in it, so a note in a
+    /// subfolder is refused before anything is made (Astra batch 3,
+    /// must-fix 2). Returns the file's URL under `url` once that path is
+    /// checked to be the file made (device and inode); throws if it isn't
+    /// (the folder was moved or replaced), so the caller opens nothing.
+    public func createFile(_ components: [String], walk: Bool = !Beneath.kernelEnforced) throws -> URL {
+        let target = components.reduce(url) { $0.appendingPathComponent($1) }
+        if walk, components.count > 1, components.allSatisfy(Beneath.isName) {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFeatureUnsupportedError, userInfo: [
+                NSFilePathErrorKey: target.path,
+                NSLocalizedDescriptionKey: String(localized: "This version of macOS can’t make a note in a subfolder safely, so “\(components.joined(separator: "/"))” wasn’t created. A note can be made directly in the open folder “\(url.lastPathComponent)”."),
+            ])
+        }
+        let made = Beneath.open(components, beneath: fd, flags: O_WRONLY | O_CREAT | O_EXCL, mode: 0o666, walk: walk)
+        guard made >= 0 else {
+            let err = errno
+            // ENOTCAPABLE (Beneath.notCapable): the lookup left the folder.
+            if err == Beneath.notCapable || err == ELOOP {
+                throw Self.outsideError(target, folder: target.deletingLastPathComponent().lastPathComponent)
+            }
+            if err == EINVAL {
+                throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteInvalidFileNameError,
+                              userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a single file or folder name.")])
+            }
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(err), userInfo: [NSFilePathErrorKey: target.path])
+        }
+        let id = Beneath.FileID(fd: made)
+        close(made)
+        guard let id, Beneath.FileID(path: target.path, followLast: false) == id else {
+            throw NSError(domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [
+                NSFilePathErrorKey: target.path,
+                NSLocalizedDescriptionKey: String(localized: "The open folder “\(url.lastPathComponent)” was moved or replaced, so the new note wasn’t opened."),
+            ])
+        }
+        return target
+    }
+
+    static func outsideError(_ target: URL, folder: String) -> NSError {
+        NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError, userInfo: [
+            NSFilePathErrorKey: target.path,
+            NSLocalizedDescriptionKey: String(localized: "The folder “\(folder)” leads outside the open folder, so the note wasn’t created."),
+        ])
     }
 }

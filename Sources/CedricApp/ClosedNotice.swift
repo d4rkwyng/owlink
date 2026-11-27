@@ -29,14 +29,31 @@ extension AppDelegate {
     func saveClosedTab(_ id: UUID) {
         // Reopened already (⇧⌘T): save that tab.
         if let open = tabs.first(where: { $0.doc.id == id }) { _ = open.save(); return }
-        guard let i = closedTabs.lastIndex(where: { $0.id == id }) else { NSSound.beep(); return }
+        guard let tab = reopenClosed(id) else { return }
+        // Reopened as untitled (the file is open again in another tab): leave it for the user.
+        guard tab.doc.fileURL != nil else { return }
+        if tab.save() { tab.window?.performClose(nil) }
+    }
+
+    /// Quit's Save As when only closed tabs' text is at risk: reopens the
+    /// closed tab and runs Save As on it.
+    func saveAsClosedTab(_ id: UUID) {
+        guard let tab = tabs.first(where: { $0.doc.id == id }) ?? reopenClosed(id) else { return }
+        tab.window?.makeKeyAndOrderFront(nil)
+        DispatchQueue.main.async { _ = tab.saveAs() }
+    }
+
+    /// Reopens closed tab `id` as ⇧⌘T would (moved to the end of the list,
+    /// not passed over): the tab, or nil if it didn't reopen.
+    private func reopenClosed(_ id: UUID) -> EditorWindowController? {
+        guard let i = closedTabs.lastIndex(where: { $0.id == id }) else { NSSound.beep(); return nil }
         let entry = closedTabs.remove(at: i)
         closedTabs.append(entry)
+        closedTabsPassedOver.remove(id)
         let before = tabs.count
         reopenClosedTab(nil)
-        // Reopened as untitled (the file is open again in another tab): leave it for the user.
-        guard tabs.count > before, let tab = tabs.last, tab.doc.id == id, tab.doc.fileURL != nil else { return }
-        if tab.save() { tab.window?.performClose(nil) }
+        guard tabs.count > before, let tab = tabs.last, tab.doc.id == id else { return nil }
+        return tab
     }
 }
 

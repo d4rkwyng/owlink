@@ -19,6 +19,8 @@ OUT=${1:-$(mktemp -d -t cedric-ai-check)}
 WORK=$(mktemp -d -t cedric-ai-work)
 SUITE="cedric-ai-check-$$"
 trap 'rm -rf "$WORK"; defaults delete "$SUITE" >/dev/null 2>&1 || true; rm -f "$HOME/Library/Preferences/$SUITE.plist"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$WORK"
 python3 - "$WORK/Inventory.swift" <<'PY'
 import sys
 lines = ["// Inventory helpers: filler so the file is well over the owl's 8 KB context cap."]

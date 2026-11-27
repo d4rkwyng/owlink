@@ -42,8 +42,11 @@ brew install --cask d4rkwyng/tap/owlink
 
 This also puts the `cedric` command on your PATH. Or download
 `Owlink-<version>.zip` from [Releases](https://github.com/d4rkwyng/owlink/releases),
-open it, and move Owlink to Applications. Owlink doesn't update itself:
-`brew upgrade` (or a new download) brings a new version.
+open it, and move Owlink to Applications. Owlink checks for a new version
+about once a day and asks before installing it (Owlink › Check for
+Updates… checks now; Settings › General › Automatically check for updates
+turns the daily check off). Only updates signed with Owlink's key are
+accepted. `brew upgrade` (or a new download) works too.
 
 ## Tabs, files and sessions
 
@@ -117,7 +120,8 @@ of the editor. **View › Show Folder Sidebar** (⌃⌘1) hides and shows it
 again. Until a folder is open nothing is loaded or watched.
 **File › Open Enclosing Folder** (⌥⇧⌘O) opens the folder holding the
 current tab's file, with the file selected; **File › Reveal in Finder**
-shows the file in Finder. Both are off for an untitled tab.
+shows the file in Finder; **File › Open in Terminal Here** opens a
+Terminal window at the file's folder. All three are off for an untitled tab.
 
 - Click a file to open it in a tab, or to go to its tab if it is open
   (Return does the same). Click a folder's triangle, or select it and
@@ -128,7 +132,8 @@ shows the file in Finder. Both are off for an untitled tab.
 - The tree follows files created, deleted and renamed on disk.
 - A newly created or renamed hidden file is shown so you can see it, without turning on Show Hidden Files.
 - Right-click a folder or file for New File, New Folder, Rename, Move to
-  Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
+  Trash, Reveal in Finder, Open in Terminal Here (Terminal at that folder,
+  or at a file's folder), Copy Path and Find in Folder… (Find in Files
   on that folder). New items go inside the folder, or beside the file;
   a new file opens in a tab. Rename edits the name in the tree (the extension is left unselected) and open
   tabs follow a renamed file or folder without losing edits. Move to Trash
@@ -295,7 +300,7 @@ typing is as fast with it shown as hidden.
 Markdown's set, left to right: a heading pull-down (Body, Heading 1,
 Heading 2, Heading 3), Bold, Italic, Strikethrough, Inline Code, Link,
 Bulleted List, Numbered List, Checkbox, Quote, Code Block, Insert Table
-and Image Link (see [Markdown editing](#markdown-editing)), and at the far
+and Insert Image… (see [Markdown editing](#markdown-editing)), and at the far
 end a preview toggle (an eye) that lights up while the preview shows. The
 icons take their colour from the theme and stand out from the bar at
 least 3:1 in every theme.
@@ -869,7 +874,26 @@ quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 folder on disk (`static/`, `public/`, `quartz/static/` and `content/`), never the network. Fenced code blocks are
 coloured by their language (```` ```swift ````, `py`, `js`, `bash`, …)
 both in the editor and in the preview, by Owlink's own tokenizers and
-the theme's colours (no JavaScript highlighter). **Detach Preview** (View menu, ⇧⌥⌘P,
+the theme's colours (no JavaScript highlighter).
+
+**Diagrams and math** (with Allow JavaScript on): a ```` ```mermaid ````
+block is drawn as a [Mermaid](https://mermaid.js.org) diagram, and TeX
+math is typeset by [KaTeX](https://katex.org): `$e^{i\pi}+1=0$` inline,
+`$$…$$` or `\[…\]` (on lines of their own) as a display. A diagram that
+doesn't parse keeps its source and shows Mermaid's error above it. A
+dollar sign is math only when it reads as math: `$` followed by a space,
+or a closing `$` after a space or before a digit, is no delimiter, so
+"$5 and $10" stays text; `\$` is a plain dollar, and code spans and
+fenced code are never math. Both libraries are bundled in Owlink
+(nothing is fetched), loaded only for a document that has a diagram or
+math, and allowed by the page's security policy by their exact file
+names; Allow Network stays as it was. With Allow JavaScript off, the
+preview is exactly as before: the block shows its source and the TeX is
+text. Export as PDF… follows the tab's Allow JavaScript (only the
+bundled scripts run, never the page's own); Export as HTML… and Copy as
+HTML / Rich Text never carry script, so they keep the source.
+
+**Detach Preview** (View menu, ⇧⌥⌘P,
 or Detach on the preview bar) moves it into its own resizable
 window, "notes.md — Preview", still updating as you type; it stays
 with its own document whichever tab is in front, and closes with that
@@ -926,6 +950,13 @@ way. A session saved before that leaves the preview closed.
   between the parentheses (or uses a URL on the clipboard), a selected
   URL into `![](url)`, and with the caret in an image it takes the image
   markup off and leaves its alt text.
+  Insert Image… (the Context Bar's Image button) asks for one or more
+  image files and treats them exactly as a paste or drop: each is copied
+  into the `images` folder next to the document (a file of the same name
+  there is never replaced; the copy becomes `name-2.png`), a file already
+  inside the document's folder is linked where it is, and the links go
+  in at the caret as one undo step. Undo takes the links out and leaves
+  the copied files. An untitled document is asked to save first.
 - **Checkboxes:** Format › Markdown › Checkbox (⌘↩) checks
   or unchecks `- [ ]` / `- [x]` on the caret's line or every selected
   line, adds a box to a list item without one, and turns a plain line
@@ -976,7 +1007,10 @@ unresolved wikilink is plain text), and embedded notes are written out in
 place. Edit › Copy as HTML puts
 the rendered HTML of the selection (or the whole document) on the
 clipboard as text; Copy as Rich Text puts it there as rich text (RTF and
-HTML) for Mail, Notes or a word processor.
+HTML) for Mail, Notes or a word processor. With the preview's Allow
+JavaScript on, the PDF draws Mermaid diagrams and math as the preview
+does; the HTML file and the copies keep the diagram's source and the TeX
+as typed.
 
 ## CSV and TSV as a spreadsheet
 
@@ -1534,7 +1568,11 @@ folder and passes it along; Owlink deletes it when that file's tab closes
 ## Privacy and what stays on this Mac
 
 The AI engines run on this Mac or a server on your own network, never
-the cloud. What Owlink keeps on this Mac, all under
+the cloud. Owlink has no accounts or analytics. About once a day it asks
+`https://owlink.app/appcast.xml` whether there is a new version (turn that
+off in Settings › General › Automatically check for updates); it accepts
+only an update signed with Owlink's key, and asks before installing it.
+What Owlink keeps on this Mac, all under
 `~/Library/Application Support/Cedric/` (owner-only, 0700; files 0600):
 
 - **`Session/`**: the open tabs and the **unsaved text** of open and
@@ -1590,13 +1628,24 @@ Tests (Swift Testing; the script adds the paths the Command Line Tools need):
 Scripts/test.sh                     # unit tests: tokenizers, Markdown, codecs, find, session store, themes
 Scripts/session-check.sh            # end to end: unsaved tabs survive a kill -9, a normal quit and a last-window close
 Scripts/typing-check.sh             # real key events in every theme; typed glyphs' pixels must be visible
-Scripts/launch-check.sh             # real launches: stays up, quits cleanly, no crash report
-Scripts/launch-check.sh --release   # the same for a build to ship: fails unless it reports "dev hooks: off"
+Scripts/launch-check.sh             # real launches of a check build, in temp session/undo folders: stays up, quits cleanly, no crash report
 Scripts/pdf-check.sh                # PDF tabs in the running app: find, copy, zoom, Open as Text, session
 Scripts/image-check.sh              # image and Office tabs: zoom, copy, GIFs, docx/xlsx text, session, a 12000² PNG vs typing
 Scripts/launch-speed-check.sh       # launch phase medians: empty, 8-tab session, 500 KB file
-swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app
+Scripts/tools-check.sh              # in-app tool checks; --with-recent (the real Open Recent list) and --with-spellstep opt in
+swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app   # check build only; temp session/undo folders
 ```
+
+Every check script, and `launch-time.swift`, launches only a check build
+(the `CedricCheckBuild` Info.plist key, read before anything runs) and gives
+it a temp session folder and ReplaceUndo folder, so the real data in
+`~/Library/Application Support/Cedric` is left alone. The release gates,
+`Scripts/launch-check.sh --release` and `Scripts/smoke-launch.sh`, launch a
+release build, which ignores those folders: it rotates `cli-token` and
+prunes `ReplaceUndo` in the account it runs in. Run them only in a
+disposable macOS user account or VM, with `OWLINK_RELEASE_GATE=1`. Without
+it they refuse to start. `Scripts/release.sh` sets it for its own launch
+check (*Signing a release* in `docs/architecture.md`).
 
 `bundle-app.sh` makes a check build by default: the check scripts drive it
 with `CEDRIC_*` switches (open files, take snapshots), so don't use it as
@@ -1644,7 +1693,7 @@ More in [docs/architecture.md](architecture.md).
 
 ## Not built yet
 
-Macros and automatic updates; folding HTML and XML tags; per-pane folds in split view. See
+Macros; folding HTML and XML tags; per-pane folds in split view. See
 `docs/architecture.md` for where they plug in.
 
 ## Built with Claude
@@ -1658,7 +1707,15 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 [Dracula Theme](https://draculatheme.com), used under the MIT license.
 
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
-(MIT, © the ggml authors), bundled as `llama.framework`. Models are not
+(MIT, © the ggml authors), bundled as `llama.framework`. Release builds
+include [Sparkle](https://sparkle-project.org) (MIT, © Andy Matuschak and
+the Sparkle Project contributors) as `Sparkle.framework` for Check for
+Updates…, with its licence in `Owlink.app/Contents/Resources/Sparkle-LICENSE.txt`.
+The Markdown
+preview draws diagrams with [Mermaid](https://github.com/mermaid-js/mermaid)
+(MIT) and math with [KaTeX](https://github.com/KaTeX/KaTeX) (MIT), both
+bundled in the app (versions, sources and checksums in
+[THIRD_PARTY.md](THIRD_PARTY.md)). Models are not
 bundled: the ones Owlink offers to download are Qwen models by Alibaba
 Cloud, each under its own licence. Download first opens a confirmation
 with the model name, licence name and full bundled licence text; no

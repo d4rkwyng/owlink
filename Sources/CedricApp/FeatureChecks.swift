@@ -6,7 +6,7 @@ import CedricCore
 /// the other DevChecks: the menus' key equivalents and real key events
 /// sent to the step-through's panel, clicks on its buttons.
 ///
-///   CEDRIC_CHECK=spellstep|detachpreview|csvpreview
+///   CEDRIC_CHECK=spellstep|detachpreview|csvpreview|csvrownumber
 @MainActor
 extension DevChecks {
     static func featureCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -14,6 +14,7 @@ extension DevChecks {
         case "spellstep": spellStep(app)
         case "detachpreview": detachPreview(app)
         case "csvpreview": csvPreview(app)
+        case "csvrownumber": csvRowNumberHeader(app)
         case "grammar": grammarCheck(app)
         case "cert": certificateCheck(app)
         default: return markdownCheck(name, app)
@@ -62,8 +63,8 @@ extension DevChecks {
         let tv = md.textView
         var s: SpellStepController? { md.spellStep }
         var guess = ""
-        var learned: [String] = []
-        var learnedThen = false
+        let dictionary = EditorTextView.spellDictionary as? RecordingSpellDictionary
+        var learnedBefore: [String] = []
         func now() -> String { s?.current?.word ?? "-" }
         func progress() -> String { s?.progressLabel.stringValue ?? "-" }
         var steps: [Step] = []
@@ -118,19 +119,22 @@ extension DevChecks {
                 press(b)
                 expect(now() == "zqxlearnwrd", "Ignore All passes the rest of that word", now())
                 expect(md.text.contains("verry good, verry nice"), "and changes nothing")
-                // Learn Word goes to the user's dictionary: learned, checked, and forgotten again.
-                s?.onLearn = { w in
-                    NSSpellChecker.shared.learnWord(w)
-                    learnedThen = NSSpellChecker.shared.hasLearnedWord(w)
-                    NSSpellChecker.shared.unlearnWord(w)
-                    learned.append(w)
-                }
+                expect(dictionary?.ignoreCalls.last == "verry", "Ignore All ignores it in the document", "\(dictionary?.ignoreCalls ?? [])")
+                // Learn Word goes to the spelling dictionary: in a check, the
+                // check's own (RecordingSpellDictionary), never the user's.
+                learnedBefore = dictionary?.learnCalls ?? []
             },
             sync {
+                // Never pressed with the user's dictionary in use.
+                guard dictionary != nil else {
+                    expect(false, "the check's own spelling dictionary is in use", "\(Swift.type(of: EditorTextView.spellDictionary))")
+                    return
+                }
                 guard let b = s?.learnButton else { return }
                 press(b)
-                expect(learned == ["zqxlearnwrd"] && learnedThen, "Learn Word learns it", "\(learned)")
-                expect(!NSSpellChecker.shared.hasLearnedWord("zqxlearnwrd"), "(and the check forgot it again)")
+                let learned = Array((dictionary?.learnCalls ?? []).dropFirst(learnedBefore.count))
+                expect(learned == ["zqxlearnwrd"] && dictionary?.learned.contains("zqxlearnwrd") == true, "Learn Word learns it", "\(learned)")
+                expect(!NSSpellChecker.shared.hasLearnedWord("zqxlearnwrd"), "(and the user's own dictionary doesn't have it)")
                 expect(now() == "beleive", "then wraps round to the top", now())
                 expect(progress() == "7 of 7", "7 of 7", progress())
                 expect(!md.text.contains("codde") || now() != "codde", "code spans and links are never stepped into")
@@ -537,6 +541,261 @@ extension DevChecks {
     /// The text drawn in a grid cell (the table's own view for it).
     static func shown(_ g: CSVPreview, _ row: Int, _ col: Int) -> String {
         (g.table.view(atColumn: col, row: row, makeIfNecessary: true) as? NSTextField)?.stringValue ?? "<no cell>"
+    }
+
+    /// The grid's "#" cell (above the row numbers, level with the header
+    /// row): plain in file order, lit once a column header click sorts,
+    /// and a click on it (then VoiceOver's press) puts file order back;
+    /// still level after the preview is resized; a click on it while an
+    /// edit is being parsed shows the edited text in file order. Snapshots
+    /// in light and dark.
+    static func csvRowNumberHeader(_ app: AppDelegate) {
+        let tab = app.open(write("ages.csv", "name,age\nzoe,30\nbob,20\namy,40\n"))!
+        sized(tab)
+        var g: CSVPreview? { tab.previewPane?.renderer as? CSVPreview }
+        var before = 0
+        let theme = Settings.shared.themeOverride
+        func setTheme(_ t: EditorTheme) {
+            Settings.shared.themeOverride = t
+            NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
+        }
+        /// The cell's frame and the table header's, in window coordinates,
+        /// as the window's own layout left them.
+        func frames(_ g: CSVPreview) -> (cell: NSRect, header: NSRect)? {
+            guard let hv = g.table.headerView else { return nil }
+            return (g.ruler.header.convert(g.ruler.header.bounds, to: nil), hv.convert(hv.bounds, to: nil))
+        }
+        func level(_ g: CSVPreview, _ when: String) {
+            guard let f = frames(g) else { expect(false, "the table has a header row"); return }
+            expect(abs(f.cell.minY - f.header.minY) < 0.5 && abs(f.cell.height - f.header.height) < 0.5 && f.cell.height > 0,
+                   "\(when): level with the header row, the same height", "cell \(f.cell) header \(f.header)")
+            expect(abs(f.cell.maxX - f.header.minX) < 1.5 && f.cell.width > 0, "\(when): just left of the first column's header",
+                   "cell \(f.cell) header \(f.header)")
+        }
+        /// Polls `cond` (up to 5 s), then goes on; `name` is checked.
+        func wait(_ name: String, _ cond: @escaping () -> Bool) -> Step {
+            { next in
+                let deadline = Date().addingTimeInterval(5)
+                @MainActor func poll() {
+                    if cond() { expect(true, name); next() }
+                    else if Date() > deadline { expect(false, name, "timed out"); next() }
+                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
+                }
+                poll()
+            }
+        }
+        // The CSV queue held, so an edit's parse stays under way.
+        let gate = DispatchSemaphore(value: 0)
+        var held = false
+        func release() { if held { held = false; gate.signal() } }
+        var parseBefore = 0
+        let edited = "name,age\nzoe,30\nbob,20\namy,40\nann,10\n"
+        let edited2 = edited + "cat,25\n"
+        let landed = DispatchSemaphore(value: 0)
+        func inFileOrder(_ g: CSVPreview, _ how: String) {
+            expect(!g.isSorted && g.cell(row: 0, column: 0) == "zoe" && g.cell(row: 2, column: 0) == "amy",
+                   "\(how) puts the rows back in file order", "\(g.table.sortDescriptors.map { $0.key ?? "-" }) \(g.cell(row: 0, column: 0))")
+            expect(g.ruler.number?(0) == 1, "row numbers are file order again", "\(String(describing: g.ruler.number?(0)))")
+            expect(!g.ruler.header.isActive, "and the # cell is plain again")
+            expect(g.ruler.header.accessibilityValue() as? String == "File order", "its value says file order",
+                   "\(String(describing: g.ruler.header.accessibilityValue()))")
+        }
+        let steps: [Step] = [
+            sync {
+                setTheme(.light)
+                focus(tab)
+                key("p", [.command, .option])
+                expect(g != nil, "⌥⌘P shows the grid")
+            },
+            waitForGrid(tab, after: { 0 }, "the grid renders"),
+            sync {
+                guard let g else { return }
+                let cell = g.ruler.header
+                expect(!cell.isHidden && cell.superview === g.ruler, "a # cell sits in the row-number ruler")
+                level(g, "shown")
+                expect(cell.titleCell().stringValue == "#", "it shows #", cell.titleCell().stringValue)
+                expect(cell.titleCell().font == g.table.tableColumns.first?.headerCell.font, "in the header's font")
+                expect(!cell.isActive && !g.isSorted, "plain in file order")
+                expect(cell.isAccessibilityElement() && cell.accessibilityRole() == .button, "a button to VoiceOver")
+                expect(cell.accessibilityLabel() == "Row number, click to restore file order", "its label",
+                       cell.accessibilityLabel() ?? "-")
+                expect(cell.accessibilityValue() as? String == "File order", "its value says file order")
+            },
+            snapshot("csv-rownumber-light.png"),
+            sync {
+                guard let g, let header = g.table.headerView else { return }
+                before = g.renders
+                let hr = header.headerRect(ofColumn: 1)
+                click(header, at: NSPoint(x: hr.midX, y: hr.midY))
+            },
+            waitForGrid(tab, after: { before }, "a header click sorts"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.table.sortDescriptors.first?.key == "c1", "sorted by age",
+                       "\(g.table.sortDescriptors.map { $0.key ?? "-" })")
+                expect(g.cell(row: 0, column: 0) == "bob" && g.ruler.number?(0) == 2, "bob (row 2) first", g.cell(row: 0, column: 0))
+                expect(g.ruler.header.isActive, "the # cell is lit while sorted")
+                expect(g.ruler.header.accessibilityValue() as? String == "Sorted", "its value says sorted")
+                expect(g.ruler.header.titleCell().attributedStringValue.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+                       == .controlAccentColor, "# in the accent colour")
+            },
+            snapshot("csv-rownumber-sorted-light.png"),
+            sync { setTheme(.dark) },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { next() } },
+            snapshot("csv-rownumber-sorted-dark.png"),
+            sync {
+                guard let g else { return }
+                expect(g.ruler.header.isActive, "still lit after the theme changes")
+                before = g.renders
+                let cell = g.ruler.header
+                if let w = cell.window {
+                    let p = cell.convert(NSPoint(x: cell.bounds.midX, y: cell.bounds.midY), to: nil)
+                    let root = w.contentView?.superview ?? w.contentView
+                    let hit = root?.hitTest(root?.superview?.convert(p, from: nil) ?? p)
+                    expect(hit === cell, "a click there reaches the # cell", "\(String(describing: hit))")
+                }
+                click(cell, at: NSPoint(x: cell.bounds.midX, y: cell.bounds.midY))
+            },
+            waitForGrid(tab, after: { before }, "clicking # re-renders"),
+            sync {
+                guard let g else { return }
+                inFileOrder(g, "clicking #")
+                expect(tab.text == "name,age\nzoe,30\nbob,20\namy,40\n" && !tab.doc.isDirty, "the text is untouched")
+            },
+            snapshot("csv-rownumber-dark.png"),
+            sync {
+                guard let g else { return }
+                before = g.renders
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c0", ascending: false)]
+            },
+            waitForGrid(tab, after: { before }, "sorting by name re-renders"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.cell(row: 0, column: 0) == "zoe" && g.cell(row: 1, column: 0) == "bob" && g.ruler.header.isActive,
+                       "sorted by name (descending), the cell lit", g.cell(row: 1, column: 0))
+                before = g.renders
+                expect(g.ruler.header.accessibilityPerformPress(), "VoiceOver can press it")
+            },
+            waitForGrid(tab, after: { before }, "the press re-renders"),
+            sync {
+                guard let g else { return }
+                inFileOrder(g, "VoiceOver's press")
+                // A smaller window: a smaller preview, laid out by the window.
+                tab.window?.setContentSize(NSSize(width: 900, height: 520))
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { next() } },
+            sync {
+                guard let g else { return }
+                level(g, "after the preview is resized")
+                sized(tab)
+            },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { next() } },
+            sync {
+                guard let g else { return }
+                level(g, "resized back")
+                before = g.renders
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c1", ascending: true)]
+            },
+            waitForGrid(tab, after: { before }, "sorted by age again"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.cell(row: 0, column: 0) == "bob", "sorted by age, bob first", g.cell(row: 0, column: 0))
+                // Hold the CSV queue, then edit: the edit's parse waits.
+                held = true
+                CSVPreview.queue.async { gate.wait() }
+                parseBefore = g.parseRevision
+                before = g.renders
+                focus(tab)
+                tab.textView.insertText("ann,10\n", replacementRange: NSRange(location: (tab.text as NSString).length, length: 0))
+            },
+            wait("the edit starts a parse") { (g?.parseRevision ?? 0) > parseBefore },
+            sync {
+                guard let g else { release(); return }
+                expect(g.renders == before && g.table.numberOfRows == 3, "the parse is still under way: the old table shown",
+                       "\(g.renders - before) renders, \(g.table.numberOfRows) rows")
+                let cell = g.ruler.header
+                click(cell, at: NSPoint(x: cell.bounds.midX, y: cell.bounds.midY))
+                expect(!g.isSorted, "# clicked while it parses: no sort")
+                release()
+            },
+            wait("the edited text lands") { (g?.renders ?? 0) > before && g?.table.numberOfRows == 4 },
+            // Anything late (the old table's sort) would land in this time.
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                guard let g else { return }
+                expect(tab.text == edited, "the edit is in the text", tab.text)
+                expect(g.table.numberOfRows == 4 && g.cell(row: 3, column: 0) == "ann", "the edited table is shown, not the one before",
+                       "\(g.table.numberOfRows) rows, last \(g.cell(row: 3, column: 0))")
+                inFileOrder(g, "clicking # while an edit parses")
+                expect(g.ruler.number?(3) == 4, "ann is row 4", "\(String(describing: g.ruler.number?(3)))")
+                // Click-to-caret uses the new table's offsets.
+                g.selectField(row: 3, column: 1)
+                let want = (edited as NSString).range(of: "10\n").location
+                expect(tab.textView.selectedRange().location == want, "a click on ann's age puts the caret there",
+                       "\(tab.textView.selectedRange().location), want \(want)")
+                // Again, sorted, then: hold the queue, edit, click "#". Behind
+                // the edit's parse, a second hold, so the re-sort of the edited
+                // table that the parse queues waits; a column click lands then.
+                before = g.renders
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c1", ascending: false)]
+            },
+            waitForGrid(tab, after: { before }, "sorted by age, oldest first"),
+            sync {
+                guard let g else { return }
+                expect(g.isSorted && g.cell(row: 0, column: 0) == "amy", "sorted by age descending, amy first", g.cell(row: 0, column: 0))
+                held = true
+                CSVPreview.queue.async { gate.wait() }
+                parseBefore = g.parseRevision
+                before = g.renders
+                focus(tab)
+                tab.textView.insertText("cat,25\n", replacementRange: NSRange(location: (tab.text as NSString).length, length: 0))
+            },
+            wait("the second edit starts a parse") { (g?.parseRevision ?? 0) > parseBefore },
+            sync {
+                guard let g else { release(); return }
+                expect(g.renders == before && g.table.numberOfRows == 4, "the second parse is under way: the old table shown",
+                       "\(g.renders - before) renders, \(g.table.numberOfRows) rows")
+                let cell = g.ruler.header
+                click(cell, at: NSPoint(x: cell.bounds.midX, y: cell.bounds.midY))
+                expect(!g.isSorted, "# clicked while the second edit parses: no sort")
+                // The second hold, queued behind the parse: once it starts,
+                // the parse has posted its result to the main queue.
+                CSVPreview.queue.async {
+                    landed.signal()
+                    gate.wait()
+                }
+                release()
+                held = true
+            },
+            wait("the edited parse is done, its re-sort held") { landed.wait(timeout: .now()) == .success },
+            // A main-queue turn after that: the parse's result has been applied.
+            { next in DispatchQueue.main.async { next() } },
+            sync {
+                guard let g else { release(); return }
+                expect(g.renders == before, "the edited table waits for its re-sort", "\(g.renders - before) renders")
+                // A column click before that re-sort applies.
+                g.table.sortDescriptors = [NSSortDescriptor(key: "c1", ascending: true)]
+                release()
+            },
+            wait("the edited table lands, sorted") { (g?.renders ?? 0) > before && g?.table.numberOfRows == 5 },
+            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            sync {
+                guard let g else { return }
+                expect(tab.text == edited2, "the second edit is in the text", tab.text)
+                let names = (0..<g.table.numberOfRows).map { g.cell(row: $0, column: 0) }
+                expect(names == ["ann", "bob", "cat", "zoe", "amy"], "the edited table is shown, sorted by age",
+                       "\(names)")
+                expect(g.isSorted && g.ruler.header.isActive, "sorted: # lit")
+                expect(g.ruler.number?(2) == 5, "cat is row 5", "\(String(describing: g.ruler.number?(2)))")
+                g.selectField(row: 2, column: 1)
+                let want = (edited2 as NSString).range(of: "25\n").location
+                expect(tab.textView.selectedRange().location == want, "a click on cat's age puts the caret there",
+                       "\(tab.textView.selectedRange().location), want \(want)")
+                Settings.shared.themeOverride = theme
+                NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
+            },
+        ]
+        run(steps, gap: 0.4)
     }
 
     static func csvPreview(_ app: AppDelegate) {

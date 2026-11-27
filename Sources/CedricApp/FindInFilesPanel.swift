@@ -89,7 +89,7 @@ final class FindInFilesPanel: NSView, NSOutlineViewDataSource, NSOutlineViewDele
     /// Whether there is a replace to undo.
     var canUndo: (() -> Bool)?
     /// The text of files open in a tab, by standardized path, for these files.
-    var buffers: (([URL]) -> [String: String])?
+    var buffers: (([URL]) -> [String: OpenBuffer])?
     private(set) var results: [FileSearchResult] = []
     private(set) var nodes: [ResultNode] = []
     private(set) var running: FileSearch?

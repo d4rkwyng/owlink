@@ -45,7 +45,7 @@ enum MenuShortcuts {
     /// listed after the menus' in Help › Keyboard Shortcuts.
     static let extraRows: [(String, String)] = [
         ("⌥-drag", String(localized: "Text › Selection: column selection")),
-        ("⌘-click", String(localized: "Text › Selection: add or remove a caret")),
+        ("⌘-click", String(localized: "Text › Selection: add or remove a caret (on a [[wiki link]]: open its note)")),
         ("⎋", String(localized: "Text › Selection › Single Caret (with several carets)")),
         ("click ▾ / ▸", String(localized: "Text › Folding: fold or unfold (the triangles beside the line numbers)")),
     ]

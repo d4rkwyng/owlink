@@ -194,6 +194,8 @@ import Testing
                                  "quote", "codeBlock", "table", "image", "preview", "explain", "rewrite"])
         #expect(md.first?.choices.map(\.command) == ["markdownBodyMenu:", "markdownHeading1Menu:", "markdownHeading2Menu:", "markdownHeading3Menu:"])
         #expect(md.filter(\.trailing).map(\.id) == ["preview", "explain", "rewrite"])
+        // The Image button picks files (Insert Image…), not the Image Link text command.
+        #expect(md.first { $0.id == "image" }?.command == "markdownInsertImageFileMenu:")
         #expect(md.prefix { $0.id != "preview" }.allSatisfy { !$0.trailing })
         #expect(Set(md.map(\.symbol)).count == md.count, "every item has its own symbol")
         // No bar for code or plain text.

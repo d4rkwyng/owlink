@@ -2,6 +2,19 @@
 # Clean-machine launch smoke test for the zip that ships, after First
 # Light's (d4rkwyng/first-light#22, its 1.0.0/1.0.1 launch crash).
 #
+# isolation-lint: release-gate (launches the release build that ships)
+#
+# A RELEASE GATE: run it only in a disposable macOS user account or VM
+# (the release workflow's CI runner). A release binary ignores
+# CEDRIC_SESSION_DIR and CEDRIC_REPLACE_UNDO_DIR, so its launches rotate
+# the cli-token and prune the ReplaceUndo copies in that account's
+# ~/Library/Application Support/Cedric; the temp extraction folder
+# isolates nothing. (It honours CEDRIC_NO_RESTORE / CEDRIC_NO_SESSION_SAVE,
+# which it gets, so Session is left alone.) It also renames the build
+# checkout's Resources and .build while it runs (step 2). It refuses to
+# start, having unpacked and launched nothing, unless OWLINK_RELEASE_GATE=1
+# (cedric_require_release_gate, Scripts/check-env.sh).
+#
 #   Scripts/smoke-launch.sh [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip
 #
 #   --seconds N           how long the app must stay up (default: 10)
@@ -76,6 +89,8 @@ done
 [ -n "$ZIP" ] && [ -f "$ZIP" ] || { echo "usage: $0 [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip" >&2; exit 2; }
 ZIP=$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")
 HERE=$(cd "$(dirname "$0")/.." && pwd)
+. "$HERE/Scripts/check-env.sh"
+cedric_require_release_gate
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 # Runs a command with a time limit (perl's alarm: no coreutils `timeout`
@@ -171,6 +186,9 @@ for d in "${TARGETS[@]}"; do [ ! -e "$d" ] || fail "fallback path still exists d
 ENV_CLEAN=(env)
 for v in $(env | sed -n 's/^\(CEDRIC_[A-Z_]*\)=.*/\1/p'); do ENV_CLEAN+=(-u "$v"); done
 ENV_CLEAN+=(CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1)
+# A release build ignores these two; a check build (--allow-check-build)
+# would otherwise use the real session and prune the real ReplaceUndo.
+ENV_CLEAN+=(CEDRIC_SESSION_DIR="$TMP/session" CEDRIC_REPLACE_UNDO_DIR="$TMP/replace-undo")
 
 # Every process name a crash report from this zip could carry: the owl's
 # and the app's names, each app-like bundle's (*/Contents/Info.plist)
@@ -230,6 +248,7 @@ wait_for_report() { # seconds
 CRASH_WAIT=10
 
 # 3. llama.framework and the build kind.
+# isolation-lint: real-launch the shipped zip's build; ENV_CLEAN sets the session and undo folders
 out=$("${ENV_CLEAN[@]}" CEDRIC_LLAMA_CHECK=1 perl -e 'alarm shift; exec @ARGV' 30 "$EXE" -ApplePersistenceIgnoreState YES 2>"$TMP/llama-stderr") || {
     rc=$?; wait_for_report $CRASH_WAIT; cat "$TMP/llama-stderr" >&2
     fail "CEDRIC_LLAMA_CHECK run exited $rc: $out $(new_reports)"; }
@@ -239,6 +258,7 @@ if [ "$hooks" != off ] && [ $ALLOW_CHECK = 0 ]; then fail "dev hooks: ${hooks:-n
 echo "llama ok: llama.framework loads from Contents/Frameworks; dev hooks: $hooks"
 
 # 4. A real launch.
+# isolation-lint: real-launch the shipped zip's build; ENV_CLEAN sets the session and undo folders
 "${ENV_CLEAN[@]}" "$EXE" -ApplePersistenceIgnoreState YES >"$TMP/stdout" 2>"$TMP/stderr" &
 PID=$!
 echo "launched pid $PID; watching for ${SECONDS_UP}s"

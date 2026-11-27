@@ -74,10 +74,13 @@ More in the manual: [Building from source](docs/MANUAL.md#building-from-source).
 
 ## Privacy
 
-Owlink has no accounts, analytics or update checks, and Cedric runs on
-your Mac. It uses the network only when you ask it to: downloading a model,
-letting a preview load remote content, using a model server on your network,
-or opening a link such as Open on GitHub.
+Owlink has no accounts or analytics, and Cedric runs on your Mac. It
+checks for updates about once a day (from `owlink.app`; only signed
+updates are accepted, and it asks before installing one); turn that off in
+Settings › General › Automatically check for updates. Otherwise it uses the
+network only when you ask it to: downloading a model, letting a preview
+load remote content, using a model server on your network, or opening a
+link such as Open on GitHub.
 
 ## Built with Claude
 

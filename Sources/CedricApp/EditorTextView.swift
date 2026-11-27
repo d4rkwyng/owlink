@@ -17,6 +17,17 @@ final class EditorTextView: NSTextView {
     var textCheckingPasses = 0
     /// Misspellings the checker has marked (in scope), for the checks.
     var markedMisspellings: [NSRange] = []
+    /// What the first-frame spell check covered, so AppKit's own first
+    /// pass over the same text is skipped (EditorSpelling.checkVisibleNow).
+    var spellCoverage = SpellCheckCoverage()
+    /// Set by `watchSpellDictionary`: a word learned in Owlink clears `spellCoverage`.
+    var spellLearnedWatch: SpellLearnedWatch?
+    /// The first-frame check is calling `checkText` (not AppKit).
+    var checkingVisibleNow = false
+    /// AppKit passes skipped because the first-frame check had done them (checks).
+    var skippedTextChecks = 0
+    /// First-frame checks made (checks).
+    var earlyTextChecks = 0
     /// Grammar in prose (Grammar.swift): the issues' ranges, drawn as
     /// green dotted underlines; their suggestions in the right-click menu.
     weak var grammar: EditorGrammar?
@@ -653,7 +664,11 @@ final class EditorTextView: NSTextView {
     // MARK: Multiple carets: the entry points (MultiCaretEditing.swift)
 
     /// Key commands (arrows, Delete, Return, Esc…) at every caret.
+    /// Takes keys first while a list shows over the text (the `[[` notes list).
+    var commandInterceptor: ((Selector) -> Bool)?
+
     override func doCommand(by selector: Selector) {
+        if let commandInterceptor, commandInterceptor(selector) { return }
         if multiCarets != nil, multiCommand(selector) { return }
         if folding != nil {
             keyNavigating = true
@@ -676,6 +691,12 @@ final class EditorTextView: NSTextView {
                 folding.unfold(folding.state.folds.filter { $0.location == hit.hidden.location })
                 return
             }
+        }
+        // ⌘-click on a [[wiki link]] opens its note (WikiLinksApp.swift).
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command, event.clickCount == 1,
+           let tab = window?.windowController as? EditorWindowController {
+            let i = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+            if i != NSNotFound, tab.wikiCommandClick(at: i, in: self) { return }
         }
         if !event.modifierFlags.isDisjoint(with: [.option, .command]), multiMouseDown(event) { return }
         super.mouseDown(with: event)

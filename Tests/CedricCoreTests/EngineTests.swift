@@ -99,12 +99,12 @@ import Testing
                 #expect((0...text.length).contains(prefix) && viaPrefix == reference.filter { $0 <= prefix },
                         "the fast path reports the loop's starts for what it scans, \(prefix) of \(text.length) units")
                 let idx = LineIndex(text)
-                #expect(idx.starts == reference, "init, \(text.length) units")
+                #expect(Array(idx.starts) == reference, "init, \(text.length) units")
                 #expect(idx.length == text.length)
                 let newlines = reference.count - 1
                 for hint in [0, 1, newlines + 1, newlines + 7] {
                     let hinted = LineIndex(text, expectedLineCount: hint)
-                    #expect(hinted.starts == reference && hinted.length == text.length, "hint \(hint)")
+                    #expect(Array(hinted.starts) == reference && hinted.length == text.length, "hint \(hint)")
                 }
             }
         }
@@ -132,7 +132,7 @@ import Testing
                     "an 8-bit C string read in place, \(text.length) units")
             var viaPointer = [0]
             #expect(LineIndex.scanASCIIPointer(text) { viaPointer.append($0) }, "the pointer path is taken, \(text.length) units")
-            #expect(viaPointer == Self.loopStarts(text) && LineIndex(text).starts == viaPointer, "…with the loop's starts")
+            #expect(viaPointer == Self.loopStarts(text) && Array(LineIndex(text).starts) == viaPointer, "…with the loop's starts")
             var viaPrefix = [0]
             #expect(CFStringGetFastestEncoding(cf) == CFStringBuiltInEncodings.ASCII.rawValue, "stored as 8-bit ASCII, \(text.length) units")
             #expect(LineIndex.scanASCIIPrefix(text) { viaPrefix.append($0) } == text.length && viaPrefix == viaPointer,
@@ -155,8 +155,8 @@ import Testing
                 #expect(LineIndex.scanASCIIPrefix(text) { seen.append($0) } == 0, "non-ASCII takes the loop")
                 #expect(seen.isEmpty)
                 let reference = Self.loopStarts(text)
-                #expect(LineIndex(text).starts == reference)
-                #expect(LineIndex(text, expectedLineCount: reference.count).starts == reference)
+                #expect(Array(LineIndex(text).starts) == reference)
+                #expect(Array(LineIndex(text, expectedLineCount: reference.count).starts) == reference)
             }
         }
     }

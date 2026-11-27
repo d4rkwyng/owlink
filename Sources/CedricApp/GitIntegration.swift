@@ -131,12 +131,15 @@ final class GitTabState {
 
     var showsGutter: Bool { Settings.shared.showGitChanges }
 
-    /// After the first frame, once the tab is on screen and idle.
+    /// After the first frame, once the tab is on screen and typing has
+    /// paused. The git processes run on `gitQueue`; the main thread only
+    /// applies the result. Starting at once (not 0.5 s after the frame)
+    /// shows the branch sooner and lets the window settle sooner: the
+    /// status bar's git label re-lays out the window, and the window
+    /// server's tiling update follows it.
     func tabShown() {
         guard !started else { return }
-        AfterFirstFrame.run { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startIfIdle() }
-        }
+        AfterFirstFrame.run { [weak self] in self?.startIfIdle() }
     }
 
     private func startIfIdle() {

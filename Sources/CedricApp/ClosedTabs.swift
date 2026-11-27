@@ -23,7 +23,7 @@ extension AppDelegate {
         guard needsBuffer(t) else { return true }
         let d = t.doc
         if !sessionSaving {
-            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
+            keepClosedText(d.id, EditorDocument.bufferText(t.text, breaks: d.lineBreaks))
             return true
         }
         if d.sessionChangeCount == d.changeCount, FileManager.default.fileExists(atPath: store.bufferURL(d.id).path) { return true }
@@ -58,7 +58,7 @@ extension AppDelegate {
         // A tab closed without windowShouldClose (programmatically): write now.
         if keepText, !keepTextForClose(t) {
             // Couldn't write it: keep it in memory at least, for this run.
-            closedTexts[d.id] = EditorDocument.bufferText(t.text, breaks: d.lineBreaks)
+            keepClosedText(d.id, EditorDocument.bufferText(t.text, breaks: d.lineBreaks))
         }
         if !keepText { store.removeBuffer(d.id) }
         // Kept for ⇧⌘T, but the file wasn't written: say so once (ClosedNotice.swift).
@@ -74,10 +74,10 @@ extension AppDelegate {
                                indentation: d.indentation, folds: t.sessionFolds, split: t.sessionSplit,
                                writing: t.sessionWriting, wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil)
         d.noteFormat(in: &entry)
-        let r = ClosedTabs.push(entry, onto: closedTabs)
+        let r = ClosedTabs.push(entry, onto: closedTabs, keeping: store.heldReopened)
         closedTabs = r.list
         for gone in r.dropped {
-            closedTexts[gone.id] = nil
+            dropClosedText(gone.id)
             if gone.hasBuffer { store.removeBuffer(gone.id) }
         }
         // Now, not in 1.5 s: the closed list must name the buffer before a
@@ -86,13 +86,45 @@ extension AppDelegate {
     }
 
     @objc func reopenClosedTab(_ sender: Any?) {
-        guard let st = closedTabs.popLast() else { NSSound.beep(); return }
-        if st.pdf != nil { reopenClosedPDF(st); return }
-        if st.image != nil || st.office != nil || st.certificate != nil { reopenClosedViewer(st); return }
+        // The newest entry not passed over (an unreadable one, this run);
+        // when all were, from the newest again.
+        closedTabsPassedOver.formIntersection(closedTabs.map(\.id))
+        if closedTabs.allSatisfy({ closedTabsPassedOver.contains($0.id) }) { closedTabsPassedOver = [] }
+        guard let st = closedTabs.last(where: { !closedTabsPassedOver.contains($0.id) }) else { NSSound.beep(); return }
+        closedTabsPassedOver.remove(st.id)
+        if st.pdf != nil { closedTabs.removeAll { $0.id == st.id }; reopenClosedPDF(st); return }
+        if st.image != nil || st.office != nil || st.certificate != nil { closedTabs.removeAll { $0.id == st.id }; reopenClosedViewer(st); return }
         // A restored tab for the same file may not be built yet: build them
         // all first, so the check below sees it and it isn't opened twice.
         finishRestore()
-        var text: String? = closedTexts.removeValue(forKey: st.id) ?? (st.hasBuffer ? store.readBuffer(st.id) : nil)
+        // Its unsaved text: kept in memory (its close couldn't write it),
+        // else its buffer. A buffer that is there but can't be read stays
+        // where it is, held (never pruned), and so does the entry: the
+        // tab isn't reopened without its text, nor its buffer let go.
+        // `onDisk`: the text was read back from its buffer, so the buffer
+        // holds it. Text kept in memory is not on disk: the next save
+        // writes it (and quit checks it was).
+        var text: String?
+        var onDisk = false
+        if let kept = closedTexts[st.id] {
+            text = kept
+        } else if st.hasBuffer {
+            switch store.readBufferResult(st.id) {
+            case .text(let t): text = t; onDisk = true; store.releaseBuffer(st.id)
+            case .missing: store.releaseBuffer(st.id)
+            case .unreadable(let why):
+                store.holdBuffer(st.id)
+                closedTabsPassedOver.insert(st.id)
+                let name = st.untitledName ?? st.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
+                let older = closedTabs.contains { !closedTabsPassedOver.contains($0.id) }
+                    ? " " + String(localized: "Reopen Closed Tab again brings back the tab closed before it.") : ""
+                noteRecoveryProblem(String(localized: "Owlink couldn’t read the unsaved text of “\(name)” (\(why)), so it didn’t reopen it. It is kept as \(store.bufferURL(st.id).path) and stays in File › Reopen Closed Tab.") + older)
+                NSSound.beep()
+                return
+            }
+        }
+        closedTabs.removeAll { $0.id == st.id }
+        dropClosedText(st.id)
         var url = st.path.map { URL(fileURLWithPath: $0) }
         if let u = url, let open = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == u.standardizedFileURL }) {
             guard text != nil else {
@@ -135,12 +167,29 @@ extension AppDelegate {
             doc.languageChoice = .untitled(content: body)
         }
         let tab = makeTab(doc, text: body)
+        // Open again: journaled before anything else is written for it, so
+        // a crash before the next commit can't leave it on the closed list
+        // under its old closing date (SessionStore.noteReopened).
+        // If that write fails, the last commit still lists it closed under
+        // its old date until a commit works: the tab says so, with Save As.
+        if sessionSaving {
+            let store = self.store, id = st.id
+            var failure: Error?
+            sessionQueue.sync {
+                do { try store.noteReopened(id) } catch { failure = error }
+            }
+            if let failure {
+                FileHandle.standardError.write(Data("session: reopened tab not journaled: \(failure)\n".utf8))
+                tab.showNotice(String(localized: "Owlink couldn’t record that “\(name)” was reopened (\(failure.localizedDescription)). Until its session is saved again, a crash could put it back in File › Reopen Closed Tab. Save it with File › Save As… to keep it."),
+                               buttons: [(String(localized: "Save As…"), { [weak tab] in _ = tab?.saveAs() })])
+            }
+        }
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }
         if let w = st.writing, !w.isOff { tab.setWriting(w) }
         if st.hasBuffer || url == nil && st.path != nil {
             doc.markDirtyFromSession()
-            // The buffer on disk already holds this text.
-            if sessionSaving, st.hasBuffer { doc.sessionChangeCount = doc.changeCount }
+            // The buffer on disk already holds this text (read back from it).
+            if sessionSaving, onDisk { doc.sessionChangeCount = doc.changeCount }
         }
         let len = (body as NSString).length
         let loc = min(st.selectionLocation, len)

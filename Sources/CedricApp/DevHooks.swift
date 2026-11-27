@@ -42,6 +42,20 @@ import WebKit
 ///   CEDRIC_TEST_EARLY_CLOSE=1     close the selected tab 0.5 s in, before deferred tabs are built
 ///   CEDRIC_TEST_EARLY_REOPEN=1    reopen the newest closed tab 0.5 s in, likewise
 ///   CEDRIC_SESSION_DUMP=1         print the restored tabs and closed tabs, and quit
+///   CEDRIC_TEST_ABORT_AFTER=2     abort() this many seconds in: a crash, no quit path (crash-check)
+///   CEDRIC_TEST_SAVE_PAUSE=/tmp/m ⌘S the front tab CEDRIC_TEST_SAVE_PAUSE_AFTER s in (default 3) and
+///                                 hold the write half way: the marker gets the bytes written, then the
+///                                 save waits for the kill (crash-check)
+///   CEDRIC_TEST_TYPE_BURST=a|b    2 s after the first frame (CEDRIC_TEST_TYPE_BURST_DELAY), a new untitled
+///                                 tab: insert "a" and "b" in one turn (two quick changes), then "." every
+///                                 0.1 s until killed (crash-check)
+///   CEDRIC_TEST_HOLD_SESSION_COMMIT=/tmp/m  a session save that wrote a buffer its session doesn't name yet
+///                                 stops before committing session.json: the marker gets the ids, then it
+///                                 waits for the kill (crash-check)
+///   CEDRIC_TEST_SESSION_WRITE_FAIL=1  every session write fails, as on a full disk (crash-check)
+///   CEDRIC_TEST_QUIT_SAVE_CHOICE=keep  answer the "couldn't save your unsaved work" quit alert
+///                                 (keep|saveas|retry|quit) instead of showing it
+///   CEDRIC_TEST_SAVE_AFTER=4      ⌘S the front tab this many seconds in and print "saved: ok=…" (crash-check)
 ///   CEDRIC_TEST_SAVE_AS_DIR=dir   with the dump: Save As each mixed-endings tab into dir (its name), the real write
 ///   CEDRIC_TYPE_CHECK=1           run the typing check (TypingCheck.swift), print results, quit
 ///   CEDRIC_LAUNCH_METRICS=1       print "metric launch_ms=…" (process start → first window drawn), and
@@ -108,6 +122,35 @@ enum DevHooks {
     static let allowsQuitOnLastClose = env["CEDRIC_TEST_QUIT_ON_LAST_CLOSE"] == "1"
         || !env.keys.contains { $0.hasPrefix("CEDRIC_") && !launchOnly.contains($0) }
 
+    /// Session-store faults for crash-check, before the first save.
+    /// CEDRIC_DISPOSABLE_STORE=device:inode (crash-check): exit at once,
+    /// before anything opens the store, unless the session folder is that
+    /// folder and not in or around the real one (DisposableStore). Says
+    /// "disposable store: verified" on stdout when it is.
+    static func verifyDisposableStore() {
+        guard DevEnvironment.checksEnabled, let expected = env["CEDRIC_DISPOSABLE_STORE"] else { return }
+        let dir = SessionStore.defaultDirectory()
+        let real = PrivateDirectory.supportRoot
+        if env["CEDRIC_SESSION_DIR"]?.isEmpty != false {
+            FileHandle.standardOutput.write(Data("disposable store: REFUSED no CEDRIC_SESSION_DIR\n".utf8)); exit(3)
+        }
+        if let why = DisposableStore.refusal(dir, expected: expected, protected: [real, real.appendingPathComponent("Session")]) {
+            FileHandle.standardOutput.write(Data("disposable store: REFUSED \(why)\n".utf8)); exit(3)
+        }
+        FileHandle.standardOutput.write(Data("disposable store: verified \(expected)\n".utf8))
+    }
+
+    static func configureSessionStore(_ store: SessionStore) {
+        guard DevEnvironment.checksEnabled else { return }
+        if env["CEDRIC_TEST_SESSION_WRITE_FAIL"] == "1" { store.checkFailWrites = true }
+        if let marker = env["CEDRIC_TEST_HOLD_SESSION_COMMIT"], !marker.isEmpty {
+            store.checkBeforeCommit = {
+                try? Data("held\n".utf8).write(to: URL(fileURLWithPath: marker))
+                while true { sleep(60) }
+            }
+        }
+    }
+
     static func afterLaunch(_ app: AppDelegate) {
         // The hooks below expect every restored tab to exist now, not
         // after the first frame (AppDelegate.restoreNextPending).
@@ -157,6 +200,53 @@ enum DevHooks {
         if let t = env["CEDRIC_TEST_TYPE_UNTITLED"] {
             app.newTab(nil)
             if let tab = app.tabs.last { tab.textView.insertText(t, replacementRange: NSRange(location: 0, length: 0)) }
+        }
+        // Crash check: two changes in one turn, then steady typing (the
+        // leading save must not be put off by it).
+        if let burst = env["CEDRIC_TEST_TYPE_BURST"]?.split(separator: "|", maxSplits: 1).map(String.init), burst.count == 2 {
+            let delay = env["CEDRIC_TEST_TYPE_BURST_DELAY"].flatMap(Double.init) ?? 2
+            AfterFirstFrame.run { DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                app.newTab(nil)
+                guard let tab = app.tabs.last else { return }
+                tab.textView.insertText(burst[0], replacementRange: NSRange(location: 0, length: 0))
+                tab.textView.insertText(burst[1], replacementRange: tab.textView.selectedRange())
+                print(String(format: "typed: t=%.3f", now()))
+                fflush(stdout)
+                Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+                    MainActor.assumeIsolated { tab.textView.insertText(".", replacementRange: tab.textView.selectedRange()) }
+                }
+            } }
+        }
+        if env["CEDRIC_TEST_TYPE"] != nil || env["CEDRIC_TEST_TYPE_UNTITLED"] != nil {
+            // When the typing happened, for crash-check's "killed at once".
+            print(String(format: "typed: t=%.3f", now()))
+            fflush(stdout)
+        }
+        // Crash check: a real crash (SIGABRT), none of the quit path's saving.
+        if let delay = env["CEDRIC_TEST_ABORT_AFTER"].flatMap(Double.init) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { abort() }
+        }
+        // Crash check: ⌘S on the front tab, held half way through writing
+        // the new file (DocumentWrite.Faults.pauseAfter) until the kill.
+        if let marker = env["CEDRIC_TEST_SAVE_PAUSE"], let tab = app.currentTab ?? app.tabs.last {
+            let delay = env["CEDRIC_TEST_SAVE_PAUSE_AFTER"].flatMap(Double.init) ?? 3
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak tab] in
+                guard let tab else { return }
+                let half = (tab.doc.encoded(tab.text)?.count ?? 2) / 2
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(pauseAfter: half, paused: { n in
+                    try? Data("\(n)\n".utf8).write(to: URL(fileURLWithPath: marker))
+                    while true { sleep(60) }
+                })
+                _ = tab.save()
+            }
+        }
+        // Crash check: a plain ⌘S of the front tab this many seconds in.
+        if let delay = env["CEDRIC_TEST_SAVE_AFTER"].flatMap(Double.init), let tab = app.currentTab ?? app.tabs.last {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak tab] in
+                guard let tab else { return }
+                print("saved: ok=\(tab.save()) dirty=\(tab.doc.isDirty)")
+                fflush(stdout)
+            }
         }
         // Session check: detach the front tab's preview to this frame ("x,y,w,h").
         if let f = env["CEDRIC_TEST_DETACH_PREVIEW"]?.split(separator: ",").compactMap({ Double($0) }), f.count == 4,
@@ -245,6 +335,21 @@ enum DevHooks {
             let earlySplits = app.tabs.filter(\.isSplit).count
             AfterFirstFrame.run { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 // Windows in on-screen order, tabs in tab-bar order.
+                // crash-check: each tab's window, whole text (SHA-256 of
+                // its UTF-8 and its UTF-16 length), selection, large mode,
+                // and the notices it shows.
+                for (w, group) in app.tabGroups().enumerated() {
+                    for t in group {
+                        let text = t.text
+                        let sel = t.primaryTextView.selectedRange()
+                        print("exact: win=\(w) name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) "
+                              + "sha=\(FileReplace.sha256(Data(text.utf8)).map { String(format: "%02x", $0) }.joined()) len=\((text as NSString).length) "
+                              + "sel=\(sel.location),\(sel.length) large=\(t.largeReason.map { "\($0)" } ?? "-")")
+                        let disk = t.diskBar.flatMap { $0.isHidden ? nil : $0.label.stringValue } ?? "-"
+                        let info = t.noticeBar.flatMap { $0.isHidden ? nil : $0.label.stringValue } ?? "-"
+                        print("notice: name=\(t.doc.displayName) missing=\(t.doc.missingOnDisk) disk=\(disk) info=\(info)")
+                    }
+                }
                 for t in app.tabGroups().joined() {
                     let body = t.text.replacingOccurrences(of: "\n", with: "\\n")
                     print("tab: name=\(t.doc.displayName) file=\(t.doc.fileURL?.path ?? "-") dirty=\(t.doc.isDirty) language=\(t.doc.language.rawValue) text=\(body.prefix(60))")

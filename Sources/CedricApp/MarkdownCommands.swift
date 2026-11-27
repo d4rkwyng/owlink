@@ -1,5 +1,6 @@
 import AppKit
 import CedricCore
+import UniformTypeIdentifiers
 
 // Format › Markdown: bold, italic, strikethrough, inline code and link
 // (MarkdownFormat in CedricCore). Each is one undo step, and only for
@@ -91,6 +92,8 @@ extension AppDelegate {
         currentTab?.markdownBlock(String(localized: "Insert Table")) { MarkdownBlocks.insertTable(in: $0, selection: $1) }
     }
     @objc func markdownImageMenu(_ sender: Any?) { currentTab?.markdownImage() }
+    /// Format › Markdown › Insert Image… (the Context Bar's Image button).
+    @objc func markdownInsertImageFileMenu(_ sender: Any?) { currentTab?.insertImageFiles() }
 
     static let markdownActions: Set<Selector> = [
         #selector(markdownBoldMenu(_:)), #selector(markdownItalicMenu(_:)), #selector(markdownStrikethroughMenu(_:)),
@@ -98,7 +101,7 @@ extension AppDelegate {
         #selector(formatTableMenu(_:)), #selector(markdownBodyMenu(_:)), #selector(markdownHeading1Menu(_:)),
         #selector(markdownHeading2Menu(_:)), #selector(markdownHeading3Menu(_:)), #selector(markdownBulletListMenu(_:)),
         #selector(markdownNumberedListMenu(_:)), #selector(markdownQuoteMenu(_:)), #selector(markdownCodeBlockMenu(_:)),
-        #selector(markdownTableMenu(_:)), #selector(markdownImageMenu(_:)),
+        #selector(markdownTableMenu(_:)), #selector(markdownImageMenu(_:)), #selector(markdownInsertImageFileMenu(_:)),
     ]
 
     func validateMarkdownItem(_ item: NSMenuItem) -> Bool? {
@@ -118,6 +121,8 @@ func markdownMenu() -> NSMenuItem {
         item(String(localized: "Inline Code"), #selector(AppDelegate.markdownCodeMenu(_:)), "`", [.control]),
         item(String(localized: "Link"), #selector(AppDelegate.markdownLinkMenu(_:)), "k"),
         item(String(localized: "Image Link"), #selector(AppDelegate.markdownImageMenu(_:))),
+        // Image files from an open panel, copied in as paste and drop do (the Context Bar's Image button).
+        item(String(localized: "Insert Image…"), #selector(AppDelegate.markdownInsertImageFileMenu(_:))),
         .separator(),
         // ⌘1–⌘3 as in Bear (plain ⌘1–3 were free; ⌃⌘1 is the folder sidebar, ⌥⌘1… Open Recent).
         item(String(localized: "Body"), #selector(AppDelegate.markdownBodyMenu(_:))),
@@ -146,46 +151,126 @@ extension EditorWindowController {
         guard textView.isEditable else { NSSound.beep(); return }
         guard let docURL = doc.fileURL else { askToSaveForImages(files, bitmap: bitmap, at: range); return }
         let dir = docURL.deletingLastPathComponent()
-        let images = dir.appendingPathComponent("images", isDirectory: true)
-        let fm = FileManager.default
-        var paths: [String] = []
-        func copyTarget(_ name: String) throws -> URL {
-            // An "images" that is a link out of the document's folder is refused.
-            guard SafePaths.isInside(images, dir) else {
-                throw NSError(domain: "Cedric", code: 3, userInfo: [NSLocalizedDescriptionKey:
-                    String(localized: "The “images” folder next to this document points outside its folder, so pasted images aren’t saved there.")])
+        // A link to a file already in the folder, or a name published in "images".
+        enum Piece { case inPlace(String), copied(String) }
+        var pieces: [Piece] = []
+        // "images" is opened once per batch beneath the pinned document
+        // folder; every copy is staged and published as images/<name>
+        // through descriptors (ImageStore; the kernel keeps the rename
+        // beneath the folder, or on macOS 15 it is made relative to the
+        // held "images", which must be a real folder): moving or replacing "images" can't redirect the
+        // staging or the published file through it, nothing is overwritten,
+        // and no partial file gets a final name.
+        var opened: ImageStore?
+        func store() throws -> ImageStore {
+            if let opened { return opened }
+            do {
+                let s = try ImageStore.open(in: dir)
+                opened = s
+                return s
+            } catch let failure as ImageStore.Failure {
+                throw Self.imageStoreError(failure)
             }
-            try fm.createDirectory(at: images, withIntermediateDirectories: true)
-            return images.appendingPathComponent(MarkdownPaste.uniqueName(name) { fm.fileExists(atPath: images.appendingPathComponent($0).path) })
         }
         do {
             for f in files {
-                if let rel = MarkdownPaste.relativePath(of: f, from: dir) { paths.append(rel); continue }
-                // Only a regular file is copied (not a folder named x.png).
-                guard SafePaths.isRegularFile(f) else { NSSound.beep(); continue }
-                let target = try copyTarget(f.lastPathComponent)
-                try fm.copyItem(at: f, to: target)
-                paths.append(MarkdownPaste.relativePath(of: target, from: dir) ?? "images/" + target.lastPathComponent)
+                // Only a regular file is linked in place (not a folder named x.png).
+                if let rel = MarkdownPaste.relativePath(of: f, from: dir) {
+                    guard SafePaths.isRegularFile(f) else { NSSound.beep(); continue }
+                    pieces.append(.inPlace(rel)); continue
+                }
+                // Only a regular file's bytes are copied (not a folder named x.png, not
+                // a pipe; a symbolic link's target is read, the link isn't copied).
+                let name: String
+                do {
+                    name = try store().copy(from: f, name: f.lastPathComponent)
+                } catch ImageStore.Failure.notRegularFile {
+                    NSSound.beep(); continue
+                } catch let failure as ImageStore.Failure {
+                    throw Self.imageStoreError(failure)
+                }
+                pieces.append(.copied(name))
             }
             if let bitmap {
                 guard let png = NSBitmapImageRep(data: bitmap)?.representation(using: .png, properties: [:]) else { NSSound.beep(); return }
                 let f = DateFormatter()
                 f.locale = Locale(identifier: "en_US_POSIX")
                 f.dateFormat = "yyyyMMdd-HHmmss"
-                let target = try copyTarget("image-\(f.string(from: Date())).png")
-                try png.write(to: target, options: .atomic)
-                paths.append(MarkdownPaste.relativePath(of: target, from: dir) ?? "images/" + target.lastPathComponent)
+                let name: String
+                do {
+                    name = try store().write(png, name: "image-\(f.string(from: Date())).png")
+                } catch let failure as ImageStore.Failure {
+                    throw Self.imageStoreError(failure)
+                }
+                pieces.append(.copied(name))
             }
         } catch {
             showError(error)
-            if paths.isEmpty { return }
+            if pieces.isEmpty { return }
         }
-        guard !paths.isEmpty else { return }
+        guard !pieces.isEmpty else { return }
+        // Just before inserting: every copied image's link must still lead to
+        // the file written (ImageStore.link). If the folder or "images" was
+        // swapped, nothing is inserted and the user is told.
+        let paths: [String]
+        do {
+            paths = try pieces.map { piece in
+                switch piece {
+                case .inPlace(let rel): return rel
+                case .copied(let name): return try store().link(for: name)
+                }
+            }
+        } catch {
+            showError(Self.imageStoreError(.destinationChanged))
+            return
+        }
         let len = (textView.string as NSString).length
         let r = NSRange(location: min(range.location, len), length: min(range.length, len - min(range.location, len)))
         let s = MarkdownPaste.imageLinks(paths)
         apply(TextEdit(range: r, replacement: s, selection: NSRange(location: r.location + (s as NSString).length, length: 0)),
               actionName: String(localized: "Insert Image"))
+    }
+
+    /// What the user is told when ImageStore refuses.
+    static func imageStoreError(_ failure: ImageStore.Failure) -> NSError {
+        let text: String, code: Int
+        switch failure {
+        case .outside:
+            // An "images" that is a link out of the document's folder is refused.
+            text = String(localized: "The “images” folder next to this document points outside its folder, so pasted images aren’t saved there.")
+            code = 3
+        case .destinationChanged:
+            text = String(localized: "The “images” folder next to this document changed while the images were copied, so no links were inserted.")
+            code = 4
+        case .imagesIsLink:
+            // On macOS 15 (no kernel-kept beneath lookups) only a real "images" folder is used.
+            text = String(localized: "The “images” folder next to this document is a symbolic link, and on this version of macOS pasted images are only saved in a real folder. Replace the link with a folder.")
+            code = 8
+        case .otherVolume:
+            text = String(localized: "The “images” folder next to this document is on a different volume from the document, so pasted images can’t be saved there. Use an “images” folder on the same volume.")
+            code = 7
+        case .notRegularFile, .badName:
+            text = String(localized: "The image couldn’t be copied.")
+            code = 6
+        }
+        return NSError(domain: "Cedric", code: code, userInfo: [NSLocalizedDescriptionKey: text])
+    }
+
+    /// Format › Markdown › Insert Image… (the Context Bar's Image button):
+    /// image files picked in an open panel go through `insertImages`, the
+    /// paste and drop path (same images/ folder, naming, no overwrite,
+    /// links, one undo step; an untitled tab is asked to save first).
+    /// Cancel changes nothing.
+    func insertImageFiles() {
+        guard markdownEditable, textView.multiCarets == nil, let window else { NSSound.beep(); return }
+        ImageFilePicker.pick(for: window) { [weak self] urls in
+            guard let self, let urls else { return }
+            // What a paste takes: existing files with an image extension.
+            let images = urls.filter { MarkdownPaste.isImageFile($0) && FileManager.default.fileExists(atPath: $0.path) }
+            guard !images.isEmpty else { NSSound.beep(); return }
+            guard self.markdownEditable else { NSSound.beep(); return }
+            self.insertImages(images, bitmap: nil, at: self.textView.selectedRange())
+        }
     }
 
     /// An untitled tab has no folder for the image: say so, and offer Save As.
@@ -202,6 +287,44 @@ extension EditorWindowController {
                 guard let self, self.saveAs(), self.doc.fileURL != nil else { return }
                 self.insertImages(files, bitmap: bitmap, at: range)
             }
+        }
+    }
+}
+
+/// The open panel behind Insert Image…: image files only (the extensions
+/// paste and drop take), one or several. Checks never show it: they set
+/// `injected` (the URLs a user would pick, nil for Cancel).
+@MainActor
+enum ImageFilePicker {
+    static let dryRun = DevEnvironment.values["CEDRIC_CHECK"] != nil
+    static var injected: (() -> [URL]?)?
+    /// Panels asked for (shown or, in checks, answered by `injected`).
+    static var asks = 0
+
+    static var contentTypes: [UTType] {
+        MarkdownPaste.imageExtensions.sorted().compactMap { UTType(filenameExtension: $0) }
+    }
+
+    /// `done` gets the picked files, or nil on Cancel; on the next turn of
+    /// the run loop, after the panel's sheet has gone (a save-first sheet
+    /// may follow).
+    static func pick(for window: NSWindow, done: @escaping ([URL]?) -> Void) {
+        asks += 1
+        if dryRun {
+            let r = injected?()
+            DispatchQueue.main.async { done(r) }
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = contentTypes
+        panel.prompt = String(localized: "Insert")
+        panel.message = String(localized: "Images are copied into the “images” folder next to the document.")
+        panel.beginSheetModal(for: window) { response in
+            let urls = response == .OK ? panel.urls : nil
+            DispatchQueue.main.async { done(urls) }
         }
     }
 }
