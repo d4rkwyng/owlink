@@ -955,8 +955,9 @@ public final class SessionStore: @unchecked Sendable {
     /// its reopen is never let go with the tab still closed (a later commit
     /// would list it closed, unprotected, under the old date that expires
     /// it). One read now that no tab lists is returned in `recovered`; one
-    /// that still can't be read in `unreadable` (the caller says so; it
-    /// stays held, and an owed reopen stays owed).
+    /// that still can't be read, or isn't there at all, in `unreadable`
+    /// (the caller says so; it stays held, and an owed reopen stays owed,
+    /// until the tab is recovered or the user lets it go).
     public struct HeldRetry {
         public var session: Session
         public var recovered: [UUID]
@@ -982,7 +983,11 @@ public final class SessionStore: @unchecked Sendable {
                     recovered.append(id)
                 }
                 releaseBuffer(id)
-            case .missing: releaseBuffer(id)
+            // Not there now (a sync or restore may be replacing it): it
+            // stays held, and an owed reopen owed, as for an unreadable
+            // one. Let go here, the buffer could be back before launch's
+            // expiry or a later prune and be deleted with its text.
+            case .missing: unreadable.append((id, "it isn’t there right now"))
             case .unreadable(let why): unreadable.append((id, why))
             }
         }

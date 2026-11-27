@@ -554,6 +554,68 @@ import Testing
         #expect(s3.readBuffer(closed.id) == "the only copy")
     }
 
+    /// An owed reopen whose first read at launch fails and whose buffer
+    /// is briefly not there at the second read (Astra 27e #1: a sync or
+    /// restore touching the store): that must not let the hold or the
+    /// owed reopen go. The bytes come back before launch's expiry (past
+    /// the old closing date's retention), its commit and prune, and a
+    /// later launch: the text is still there, the reopen still owed.
+    @Test func anOwedReopenMissingOnTheSecondTryStaysOwed() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let t1 = Date()
+        let s0 = store(dir)
+        var closed = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        closed.closed = t1.addingTimeInterval(-Double(ClosedTabs.keepDays) * 86_400 + 3600)
+        try s0.writeBuffer(closed.id, text: "the only copy", open: false)
+        s0.holdBuffer(closed.id)
+        try s0.save(Session(windows: [], closedTabs: [closed]))
+        let s1 = store(dir)
+        _ = s1.loadForLaunch(now: t1)
+        s1.releaseBuffer(closed.id)
+        try s1.noteReopened(closed.id)
+
+        // The next launch, past the old closing date's retention: the
+        // first read fails (owed, held, closed) ...
+        let path = s1.bufferURL(closed.id).path
+        let away = dir.deletingLastPathComponent().appendingPathComponent("away-\(UUID().uuidString)").path
+        defer { try? fm.removeItem(atPath: away) }
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
+        let t2 = t1.addingTimeInterval(2 * 3600)
+        let s2 = store(dir)
+        guard case .session(let first, _) = s2.loadForLaunch(now: t2) else { Issue.record("readable"); return }
+        #expect(first.heldReopened == [closed.id] && first.closedTabs?.map(\.id) == [closed.id])
+        // ... the second finds no such file (ENOENT) ...
+        try fm.moveItem(atPath: path, toPath: away)
+        #expect(s2.readBufferResult(closed.id) == .missing)
+        let retry = s2.retryHeldBuffers(first)
+        // ... and then the original bytes are back.
+        try fm.moveItem(atPath: away, toPath: path)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        #expect(retry.unreadable.map(\.id) == [closed.id] && retry.recovered.isEmpty, "said, not let go")
+        #expect(retry.session == first, "still held, still owed, still closed")
+        #expect(s2.heldReopened == [closed.id] && s2.heldBuffers == [closed.id])
+        // Launch's expiry, commit and prune, as restoreSession does.
+        let second = retry.session
+        let kept = ClosedTabs.expire(second.closedTabs ?? [], now: t2, keeping: Set(second.heldReopened ?? []))
+        #expect(kept.dropped.isEmpty, "an owed reopen never expires")
+        for gone in kept.dropped where gone.hasBuffer { s2.removeBuffer(gone.id) }
+        var committed = second
+        committed.closedTabs = kept.list.isEmpty ? nil : kept.list
+        try s2.save(committed)
+        s2.pruneBuffers(keeping: committed.bufferIDs)
+        #expect(s2.readBuffer(closed.id) == "the only copy")
+
+        // A later launch: the text is there, and opens (its reopen still owed).
+        let t3 = t1.addingTimeInterval(2 * 86_400)
+        let s3 = store(dir)
+        guard case .session(let third, _) = s3.loadForLaunch(now: t3) else { Issue.record("readable"); return }
+        let opened = s3.retryHeldBuffers(third).session
+        #expect(opened.allTabs.contains { $0.id == closed.id && $0.hasBuffer && $0.closed == nil }, "reopened at last")
+        #expect(s3.readBuffer(closed.id) == "the only copy")
+    }
+
     /// The same, the second read failing too: still held, still owed, still closed.
     @Test func anOwedReopenUnreadableOnBothTriesStaysOwed() throws {
         let dir = tempDir()
