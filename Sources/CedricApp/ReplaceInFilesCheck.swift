@@ -316,7 +316,102 @@ extension DevChecks {
             },
         ]
         steps += steps4
+        steps += replaceAliasSteps(app, root: root)
         run(steps)
+    }
+
+    /// Astra batch 17v must 4: a tab opened under another spelling of the
+    /// same file (case, NFD for an NFC name, the Data volume's firmlinked
+    /// path to the folder, a hard link: one file by device and inode) is
+    /// that file's tab. Path resolution turns the first three into the
+    /// listed spelling on APFS; only identity finds the hard link. Planning takes its unsaved text, and Replace All edits
+    /// the tab's buffer and never writes the file, both when the plan came
+    /// from the tab and when it came from disk while the tab was open.
+    static func replaceAliasSteps(_ app: AppDelegate, root: URL) -> [Step] {
+        let caseDisk = root.appendingPathComponent("alias-case.txt"), caseTab = root.appendingPathComponent("ALIAS-CASE.TXT")
+        let nfcDisk = root.appendingPathComponent("caf\u{E9}-alias.txt"), nfdTab = root.appendingPathComponent("cafe\u{301}-alias.txt")
+        // The Data volume's firmlinked path to the same folder: realpath keeps it, so only identity says it is the same file.
+        let firm = URL(fileURLWithPath: "/System/Volumes/Data" + (CLIHandoff.realpath(root.path) ?? root.path))
+        let firmDisk = root.appendingPathComponent("alias-firm.txt"), firmTab = firm.appendingPathComponent("alias-firm.txt")
+        // A hard link: the same file by another path, which no path resolution turns into the listed one.
+        let linkDisk = root.appendingPathComponent("alias-link.txt"), linkTab = root.appendingPathComponent("alias-link-2.txt")
+        let applyDisk = root.appendingPathComponent("alias-apply.txt"), applyTab = firm.appendingPathComponent("Alias-Apply.TXT")
+        let dirtyDisk = root.appendingPathComponent("alias-dirty.txt"), dirtyTab = firm.appendingPathComponent("ALIAS-dirty.txt")
+        let onlyDisk = root.appendingPathComponent("alias-only.txt"), onlyTab = root.appendingPathComponent("alias-only-2.txt")
+        let disk = Data("owl alias\n".utf8)
+        func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
+        var tabs: [EditorWindowController] = []
+        let q = ReplaceQuery(query: "owl", template: "hoot")
+        return [
+            sync {
+                // Made only now, after the main check's previews (they'd show up there).
+                for u in [caseDisk, nfcDisk, firmDisk, linkDisk, applyDisk, dirtyDisk, onlyDisk] { try? disk.write(to: u) }
+                for (a, b) in [(linkDisk, linkTab), (onlyDisk, onlyTab)] { link(a.path, b.path) }
+                let same = [(caseDisk, caseTab), (nfcDisk, nfdTab), (firmDisk, firmTab), (linkDisk, linkTab), (applyDisk, applyTab), (dirtyDisk, dirtyTab), (onlyDisk, onlyTab)].allSatisfy {
+                    Beneath.FileID(path: $0.0.path, followLast: true) == Beneath.FileID(path: $0.1.path, followLast: true)
+                }
+                expect(same, "alias: each tab spelling is the same file as the listed one (APFS)",
+                       [(caseDisk, caseTab), (nfcDisk, nfdTab), (firmDisk, firmTab), (linkDisk, linkTab), (applyDisk, applyTab), (dirtyDisk, dirtyTab)].map {
+                           "\($0.1.path)=\(Beneath.FileID(path: $0.0.path, followLast: true) == Beneath.FileID(path: $0.1.path, followLast: true))"
+                       }.joined(separator: " "))
+                guard same else { tabs = []; return }
+                tabs = [caseTab, nfdTab, firmTab, linkTab, applyTab, dirtyTab, onlyTab].compactMap { app.open($0) }
+                expect(tabs.count == 7, "alias: seven tabs opened under the other spellings")
+                expect(zip(tabs, [caseTab, nfdTab, firmTab, linkTab, applyTab, dirtyTab]).allSatisfy { FolderTree.sameBytes($0.0.doc.fileURL?.path ?? "", $0.1.path) },
+                       "alias: …and they keep that spelling", tabs.map { $0.doc.fileURL?.path ?? "-" }.joined(separator: ", "))
+            },
+            until("alias: the tabs are read", timeout: 10) { tabs.count == 7 && tabs.allSatisfy { $0.text == "owl alias\n" } },
+            sync {
+                // Unsaved text in the first four; the last two hold the disk's text (planned from disk below).
+                for t in tabs.prefix(4) { t.textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0)) }
+                expect(tabs.prefix(4).allSatisfy { $0.doc.isDirty && $0.text == "owl unsaved owl alias\n" }, "alias: four tabs hold unsaved text")
+                // Planning, from the listed spelling: the tab's text, not the disk's.
+                let listed = [caseDisk, nfcDisk, firmDisk, linkDisk]
+                let cands = listed.map { FileReplace.Candidate(url: $0, relativePath: $0.lastPathComponent, searchStamp: DiskStamp.of($0)) }
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: cands, buffers: app.openBuffers(for: listed)) else {
+                    expect(false, "alias: plan"); return
+                }
+                expect(plan.files.count == 4 && plan.files.allSatisfy { $0.disk == nil && $0.sourceText == "owl unsaved owl alias\n" && $0.edits.count == 2 },
+                       "alias: planning takes each alias tab's unsaved text (case, NFD, firmlinked path, hard link)",
+                       plan.files.map { "\($0.relativePath) disk=\($0.disk != nil) \($0.sourceText.debugDescription)" }.joined(separator: "; "))
+                app.applyReplace(plan) { _ in }
+            },
+            until("alias: the tab-planned replace lands", timeout: 10) { !ReplaceInFiles.writing },
+            sync {
+                expect(tabs.prefix(4).allSatisfy { $0.text == "hoot unsaved hoot alias\n" && $0.doc.isDirty },
+                       "alias: Replace All edits the alias tabs' buffers", tabs.prefix(4).map(\.text.debugDescription).joined(separator: ", "))
+                expect([caseDisk, nfcDisk, firmDisk, linkDisk].allSatisfy { read($0) == disk }, "alias: …and writes none of their files on disk")
+                // Planned from disk (no buffers) while the last two are open under the firmlinked path,
+                // the sixth with unsaved text typed after the plan.
+                let cs = [applyDisk, dirtyDisk].map { FileReplace.Candidate(url: $0, relativePath: $0.lastPathComponent, searchStamp: DiskStamp.of($0)) }
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: cs), plan.files.count == 2, plan.files.allSatisfy({ $0.disk != nil }) else {
+                    expect(false, "alias: disk plan"); return
+                }
+                tabs[5].textView.insertText("typed ", replacementRange: NSRange(location: 0, length: 0))
+                app.applyReplace(plan) { _ in }
+            },
+            until("alias: the disk-planned replace lands", timeout: 10) { !ReplaceInFiles.writing },
+            sync {
+                expect(tabs[4].text == "hoot alias\n", "alias: apply finds the open alias tab and edits its buffer", tabs[4].text.debugDescription)
+                expect(read(applyDisk) == disk, "alias: …never the file behind it",
+                       String(decoding: read(applyDisk) ?? Data(), as: UTF8.self).debugDescription)
+                expect(tabs[5].text == "typed owl alias\n" && tabs[5].doc.isDirty && read(dirtyDisk) == disk,
+                       "alias: a dirty alias tab changed since the plan is skipped: its buffer kept, its file not written",
+                       "\(tabs[5].text.debugDescription) disk=\(String(decoding: read(dirtyDisk) ?? Data(), as: UTF8.self).debugDescription)")
+                // Apply on its own: a plan from the tab's text for the listed path, the tab open as a hard link.
+                tabs[6].textView.insertText("owl unsaved ", replacementRange: NSRange(location: 0, length: 0))
+                let c = FileReplace.Candidate(url: onlyDisk, relativePath: onlyDisk.lastPathComponent, searchStamp: DiskStamp.of(onlyDisk))
+                guard let plan = try? FileReplace.plan(q, root: root, candidates: [c], buffers: [onlyDisk.standardizedFileURL.path: tabs[6].text]),
+                      plan.files.first?.disk == nil else { expect(false, "alias: tab plan for apply"); return }
+                app.applyReplace(plan) { _ in }
+            },
+            until("alias: the apply-only replace lands", timeout: 10) { !ReplaceInFiles.writing },
+            sync {
+                expect(tabs[6].text == "hoot unsaved hoot alias\n" && read(onlyDisk) == disk,
+                       "alias: apply edits the tab open as another path to the file (a hard link), not the disk",
+                       "\(tabs[6].text.debugDescription) disk=\(String(decoding: read(onlyDisk) ?? Data(), as: UTF8.self).debugDescription)")
+            },
+        ]
     }
 
     /// A Phase 0 menu item: it exists, has its shortcut (if any) and

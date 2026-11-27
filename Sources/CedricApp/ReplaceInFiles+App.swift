@@ -102,18 +102,42 @@ extension AppDelegate {
     }
 
     /// The open text tab showing `url` (symbolic links resolved on both sides).
-    func tab(showing url: URL) -> EditorWindowController? {
-        let want = url.standardizedFileURL.resolvingSymlinksInPath().path
-        return tabs.first { $0.doc.fileURL?.standardizedFileURL.resolvingSymlinksInPath().path == want }
+    func tab(showing url: URL) -> EditorWindowController? { tabFinder()(url) }
+
+    /// Finds the open text tab showing a file, for many files in a row
+    /// (the tabs as they are now). The same file is decided by file-system
+    /// identity: the resolved paths' exact bytes are a fast yes, but a
+    /// miss isn't "no tab". The file the URL leads to (device and inode)
+    /// is compared with each tab's file, so a tab opened under another
+    /// spelling of the same file (case or normalization, one name to
+    /// APFS) is found and its unsaved text is used, never the disk's
+    /// (Astra batch 17v). A file that doesn't exist matches only by bytes.
+    func tabFinder() -> (URL) -> EditorWindowController? {
+        let open: [(tab: EditorWindowController, path: String)] = tabs.compactMap { t in
+            t.doc.fileURL.map { (t, $0.standardizedFileURL.resolvingSymlinksInPath().path) }
+        }
+        var byID: [Beneath.FileID: EditorWindowController]?
+        return { url in
+            let want = url.standardizedFileURL.resolvingSymlinksInPath().path
+            if let hit = open.first(where: { FolderTree.sameBytes($0.path, want) }) { return hit.tab }
+            guard !open.isEmpty, let id = Beneath.FileID(path: want, followLast: true) else { return nil }
+            if byID == nil {
+                var m: [Beneath.FileID: EditorWindowController] = [:]
+                for o in open { if let i = Beneath.FileID(path: o.path, followLast: true), m[i] == nil { m[i] = o.tab } }
+                byID = m
+            }
+            return byID?[id]
+        }
     }
 
     /// The text of the files in `urls` that are open in a tab, by standardized path.
     func openBuffers(for urls: [URL]) -> [String: String] {
         // Tabs restored lazily from the session are built first, so none is missed.
         finishRestore()
+        let find = tabFinder()
         var out: [String: String] = [:]
         for u in urls {
-            if let t = tab(showing: u) { out[u.standardizedFileURL.path] = t.text }
+            if let t = find(u) { out[u.standardizedFileURL.path] = t.text }
         }
         return out
     }
@@ -131,8 +155,10 @@ extension AppDelegate {
         var diskFiles: [ReplaceFile] = []
         var skipped: [SkippedFile] = []
         var tabReplacements = 0
+        let find = tabFinder()
         for f in plan.files where !f.edits.isEmpty {
-            guard let tab = tab(showing: f.url) else {
+            // No tab by bytes or by identity: only then is the file closed.
+            guard let tab = find(f.url) else {
                 if f.disk != nil { diskFiles.append(f) } else {
                     // Planned from a tab that has closed since: its file wasn't checked on disk.
                     skipped.append(SkippedFile(url: f.url, relativePath: f.relativePath, reason: .changedSincePreview))
