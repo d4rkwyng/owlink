@@ -18,6 +18,15 @@ public struct DocumentFileType: Sendable, Hashable, Identifiable {
     /// For the types macOS doesn't declare: what Owlink's imported
     /// declaration says.
     public let imported: Imported?
+    /// The entry's LSHandlerRank. Alternate only for MD, JSON, YAML and the
+    /// catch-all, which together hold 0.2.x's claims (see
+    /// Resources/document-types.txt).
+    public let rank: Rank
+
+    public enum Rank: String, Sendable, Hashable {
+        case none = "None"
+        case alternate = "Alternate"
+    }
 
     public struct Imported: Sendable, Hashable {
         public let conformsTo: [String]
@@ -43,12 +52,14 @@ public struct DocumentFileType: Sendable, Hashable, Identifiable {
         imported?.extensions.first ?? UTType(primaryType)?.preferredFilenameExtension ?? label.lowercased()
     }
 
-    public init(label: String, icon: String, name: String, contentTypes: [String], imported: Imported? = nil) {
+    public init(label: String, icon: String, name: String, contentTypes: [String], imported: Imported? = nil,
+                rank: Rank = .none) {
         self.label = label
         self.icon = icon
         self.name = name
         self.contentTypes = contentTypes
         self.imported = imported
+        self.rank = rank
     }
 }
 
@@ -57,14 +68,18 @@ public enum DocumentTypes {
         .init(conformsTo: conforms, extensions: exts)
     }
 
-    /// The labelled types, in the Settings list's order.
+    /// The labelled types, in the Settings list's order. MD, JSON and YAML
+    /// hold their 0.2.x claim at Alternate themselves: Owlink opens those
+    /// types by itself on a clean Mac, and Finder draws the icon of the
+    /// entry whose claim won. The rest are None (an exact Alternate claim
+    /// in a row of its own took xml and css from Safari).
     public static let all: [DocumentFileType] = [
         .init(label: "TXT", icon: "doc-txt", name: "Plain Text", contentTypes: ["public.plain-text"]),
         // Imported: macOS 15 and earlier have no Markdown type (26 does; then this is inactive).
         .init(label: "MD", icon: "doc-md", name: "Markdown", contentTypes: ["net.daringfireball.markdown"],
-              imported: imp(["public.plain-text"], ["md", "markdown"])),
-        .init(label: "JSON", icon: "doc-json", name: "JSON", contentTypes: ["public.json"]),
-        .init(label: "YAML", icon: "doc-yaml", name: "YAML", contentTypes: ["public.yaml"]),
+              imported: imp(["public.plain-text"], ["md", "markdown"]), rank: .alternate),
+        .init(label: "JSON", icon: "doc-json", name: "JSON", contentTypes: ["public.json"], rank: .alternate),
+        .init(label: "YAML", icon: "doc-yaml", name: "YAML", contentTypes: ["public.yaml"], rank: .alternate),
         .init(label: "SWIFT", icon: "doc-swift", name: "Swift Source", contentTypes: ["public.swift-source"]),
         .init(label: "PY", icon: "doc-py", name: "Python Script", contentTypes: ["public.python-script"]),
         .init(label: "JS", icon: "doc-js", name: "JavaScript", contentTypes: ["com.netscape.javascript-source"]),
@@ -87,13 +102,13 @@ public enum DocumentTypes {
     /// The rows of Settings › Default editor for….
     public static var settingsTypes: [DocumentFileType] { all.filter(\.inSettings) }
 
-    /// Any other text: the unlabelled icon. The only Alternate-rank text
-    /// claim (the labelled ones are None; see Resources/document-types.txt),
-    /// listing exactly 0.2.x's types so no default changes on update.
+    /// Any other text: the unlabelled icon. At Alternate with 0.2.x's
+    /// claims but the three MD, JSON and YAML hold, so together with those
+    /// rows no default changes on update (see Resources/document-types.txt).
     public static let catchAll = DocumentFileType(label: "*", icon: "doc-text", name: "Text", contentTypes: [
-        "public.text", "public.plain-text", "public.source-code", "public.script", "public.json", "public.yaml", "public.html",
-        "public.xml", "public.css", "net.daringfireball.markdown", "public.log", "public.data",
-    ])
+        "public.text", "public.plain-text", "public.source-code", "public.script", "public.html", "public.xml", "public.css",
+        "public.log", "public.data",
+    ], rank: .alternate)
 
     /// Every row of Resources/document-types.txt, in order.
     public static var declared: [DocumentFileType] { all + [catchAll] }
@@ -104,7 +119,7 @@ public enum DocumentTypes {
             let l = line.trimmingCharacters(in: .whitespaces)
             guard !l.isEmpty, !l.hasPrefix("#") else { return nil }
             let f = l.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-            guard f.count == 5 else { return nil }
+            guard f.count == 6, let rank = DocumentFileType.Rank(rawValue: f[5]) else { return nil }
             var imported: DocumentFileType.Imported?
             if f[4] != "-" {
                 let parts = f[4].split(separator: ";", omittingEmptySubsequences: false).map(String.init)
@@ -113,7 +128,7 @@ public enum DocumentTypes {
                                  extensions: parts[1].split(separator: ",").map(String.init))
             }
             return DocumentFileType(label: f[0], icon: f[1], name: f[2], contentTypes: f[3].split(separator: ",").map(String.init),
-                                    imported: imported)
+                                    imported: imported, rank: rank)
         }
     }
 }

@@ -23,11 +23,15 @@ final class QuickOpenFiles {
     private(set) var index: FileIndex?
     private(set) var matcher: FileMatchIndex?
     private var running = false
-    private var pending: [String: Bool] = [:]
+    /// Folders to list again, by the event's relative path bytes: whether
+    /// the whole subtree, and the event-spelled root they are relative to.
+    private var pending: FolderTree.PathMap<(recursive: Bool, base: String)> = [:]
     private var pendingFull = false
     private var stale = false
     /// The index (or a refresh of it) landed (the palette shows it).
     var onUpdate: (() -> Void)?
+    /// The same, for the `[[` note names (WikiNotes).
+    var onIndexLanded: (() -> Void)?
     /// Full builds and folder refreshes done (the checks).
     private(set) var builds = 0, refreshes = 0
     /// How long the last full build took (listing and preparing), in ms.
@@ -78,6 +82,7 @@ final class QuickOpenFiles {
         matcher = m
         running = false
         onUpdate?()
+        onIndexLanded?()
         drain()
     }
 
@@ -87,15 +92,15 @@ final class QuickOpenFiles {
         if pendingFull || stale { startBuild(); return }
         guard !pending.isEmpty, var idx = index else { return }
         // Parents before children: a new folder is walked from its parent.
-        let jobs = pending.sorted { a, b in
-            let da = a.key.split(separator: "/").count, db = b.key.split(separator: "/").count
-            return da != db ? da < db : a.key < b.key
+        let jobs = pending.map { (rel: $0.key, recursive: $0.value.recursive, base: $0.value.base) }.sorted { a, b in
+            let da = FolderTree.components(a.rel).count, db = FolderTree.components(b.rel).count
+            return da != db ? da < db : a.rel.utf8.lexicographicallyPrecedes(b.rel.utf8)
         }
         pending = [:]
         running = true
         let ref = WeakRef(self), box = MainBox(value: jobs)
         Self.queue.async {
-            for (rel, recursive) in box.value { idx.refresh(rel, recursive: recursive) }
+            for j in box.value { idx.refresh(j.rel, base: j.base, recursive: j.recursive) }
             let result = MainBox(value: (idx, FileMatchIndex(paths: idx.paths)))
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -110,9 +115,9 @@ final class QuickOpenFiles {
     /// index has been asked for.
     func handle(_ changes: [FolderWatcher.Change]) {
         guard index != nil || running else { return }
-        func rel(_ p: String) -> String? {
-            let u = URL(fileURLWithPath: p)
-            return FolderTree.relativePath(of: u, in: URL(fileURLWithPath: realRoot)) ?? FolderTree.relativePath(of: u, in: root)
+        // By bytes, else by the root's identity (another spelling of it).
+        func rel(_ p: String) -> (rel: String, base: String)? {
+            FolderTree.eventRelativePath(p, roots: [URL(fileURLWithPath: realRoot), root])
         }
         for c in changes {
             switch c {
@@ -120,9 +125,9 @@ final class QuickOpenFiles {
             case .folder(let p):
                 guard let r = rel(p) else { continue }
                 let gitignore = FileManager.default.fileExists(atPath: (p as NSString).appendingPathComponent(".gitignore"))
-                pending[r] = gitignore || pending[r] == true
+                pending[r.rel] = (gitignore || pending[r.rel]?.recursive == true, r.base)
             case .subtree(let p):
-                if let r = rel(p) { pending[r] = true }
+                if let r = rel(p) { pending[r.rel] = (true, r.base) }
             }
         }
         drain()

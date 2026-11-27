@@ -9,8 +9,14 @@
 # log that gets none, an email typed key by key); and,
 # with a fake AI and automatic checks off (Intel's default), checks that
 # typing never asks the AI and "Ask AI Now" does; and that files opened
-# while Ask Cedric is key never become tabs of the panel. Snapshots go to the
-# directory given (default: a temp dir) for a look.
+# while Ask Cedric is key never become tabs of the panel. Recent hints in
+# the popover show a hint again (OwlHistoryCapCheck.swift), and a log over
+# the auto-review cap is never checked on its own: a quiet note, and Ask AI
+# Now only after a confirmation. With the built-in engine (a spy, never
+# llama.cpp), opening and idling never load the model (BuiltInGateCheck).
+# Snapshots go to the directory given
+# (default: a temp dir) for a look; CEDRIC_OWL_CHECK_SHOTS=dir also copies
+# the recent-hint and cap snapshots there.
 #
 #   Scripts/owl-check.sh [out-dir]
 set -euo pipefail
@@ -20,6 +26,8 @@ BIN=$(swift build --show-bin-path)/CedricApp
 OUT=${1:-$(mktemp -d -t cedric-owl-check)}
 WORK=$(mktemp -d -t cedric-owl-work)
 trap 'rm -rf "$WORK"' EXIT
+. Scripts/check-env.sh
+cedric_isolate "$WORK"
 status=0
 for theme in light dark; do
     printf '{"name":"Cedric","kind":"owl","monocle":true,"hints":["json","tabs",{"crlf":null}],"empty":{},"list":[],"n":42}\n' > "$WORK/sample-$theme.json"
@@ -125,6 +133,35 @@ CEDRIC_SESSION_DIR="$WORK/session-grammar-ai" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESS
 CEDRIC_OPEN="$WORK/letter.txt" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_CHAT=1 CEDRIC_GRAMMAR_FAKE=1 CEDRIC_GRAMMAR_PAUSE=0.3 \
 CEDRIC_AI=1 CEDRIC_AI_FAKE=0.3 CEDRIC_AI_AUTO=0 CEDRIC_AI_DEFAULTS="$SUITE" \
 CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/grammar-ai" CEDRIC_OWL_CHECK_CHAT=grammar "$BIN" || status=1
+# Recent hints, selectable (OwlHistoryCapCheck.runHistory): a doubled word,
+# shown again from the popover by a click, then by Return once stale.
+printf 'Fix the the bug.\n' > "$WORK/history.txt"
+CEDRIC_SESSION_DIR="$WORK/session-history" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/history.txt" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/history" CEDRIC_OWL_CHECK_HISTORY=1 "$BIN" || status=1
+# The auto-review cap (OwlHistoryCapCheck.runCap): a 6,132-line log of
+# about 730 KB, like the one that froze a Mac, with automatic AI checks on.
+awk 'BEGIN { for (i = 1; i <= 6132; i++) printf "[2026-11-20 03:%02d:%02d] [INFO] [agent] pwnagotchi: channel %2d, %4d aps, waiting for handshakes on wlan0mon %06d ......\n", (i/60)%60, i%60, i%14, i%977, i }' > "$WORK/pwnagotchi.log"
+CEDRIC_SESSION_DIR="$WORK/session-cap" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/pwnagotchi.log" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_SOURCE=rulesAndAI CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_AI=1 CEDRIC_AI_FAKE=0.3 CEDRIC_AI_AUTO=1 CEDRIC_AI_PAUSE=0.2 CEDRIC_AI_MIN_IDLE=0.2 CEDRIC_AI_INTERVAL=0.2 \
+CEDRIC_AI_DEFAULTS="$SUITE" CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/cap" CEDRIC_OWL_CHECK_CAP=1 "$BIN" || status=1
+# The freeze path (BuiltInGateCheck.swift): Built-in, automatic checks on,
+# Rules + AI, Load model at launch off. Opening, typing and idling load
+# nothing; Ask AI Now loads once; the watchdog's notice; the setting.
+# CEDRIC_BUILTIN_SPY=1: a spy instead of llama.cpp (never a real model),
+# and a stand-in "installed" default model in a temp models dir.
+MODELS="$WORK/models"
+mkdir -p "$MODELS"
+read -r MFILE MSIZE MSHA < <(python3 -I -c 'import json,sys; m=[x for x in json.load(open(sys.argv[1]))["models"] if x.get("isDefault")][0]; print(m["fileName"], m["sizeBytes"], m["sha256"])' Resources/AI/models.json)
+mkfile -n "$MSIZE" "$MODELS/$MFILE"
+printf '%s\n' "$MSHA" > "$MODELS/$MFILE.verified"
+printf 'func total(_ items: [Int]) -> Int {\n    var t = 0\n    for i in items { t += i }\n    return t\n}\n' > "$WORK/Gate.swift"
+CEDRIC_SESSION_DIR="$WORK/session-builtin" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 \
+CEDRIC_OPEN="$WORK/Gate.swift" CEDRIC_OWL=1 CEDRIC_OWL_RESET=1 CEDRIC_OWL_SOURCE=rulesAndAI CEDRIC_OWL_PAUSE=0.5 CEDRIC_OWL_INTERVAL=1 \
+CEDRIC_AI=1 CEDRIC_AI_BACKEND=builtIn CEDRIC_AI_AUTO=1 CEDRIC_AI_PAUSE=0.5 CEDRIC_AI_MIN_IDLE=1 CEDRIC_AI_INTERVAL=1 \
+CEDRIC_BUILTIN_SPY=1 CEDRIC_MODELS_DIR="$MODELS" \
+CEDRIC_AI_DEFAULTS="$SUITE" CEDRIC_SNAPSHOT_SIZE=760x420 CEDRIC_OWL_CHECK="$OUT/builtin" CEDRIC_OWL_CHECK_BUILTIN=1 "$BIN" || status=1
 defaults delete "$SUITE" >/dev/null 2>&1 || true
 rm -f "$HOME/Library/Preferences/$SUITE.plist"
 echo "owl-check: snapshots in $OUT"

@@ -4,12 +4,19 @@ import CedricCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The key window when it can host a new document tab: never a panel
-    /// (Ask Cedric, Find), Settings, a detached preview or any other window
-    /// that doesn't tab. 0.1.1 (rc1 VM): a file opened while Ask Cedric was
-    /// key became a tab inside the panel.
-    static var documentKeyWindow: NSWindow? {
-        guard let w = NSApp.keyWindow, !(w is NSPanel), w.tabbingMode != .disallowed else { return nil }
-        return w
+    /// (Ask Cedric, Find), Settings or any other window that doesn't tab.
+    /// 0.1.1 (rc1 VM): a file opened while Ask Cedric was key became a tab
+    /// inside the panel.
+    static var documentKeyWindow: NSWindow? { documentWindow(for: NSApp.keyWindow) }
+
+    /// `window` if a new tab can join it. A detached preview (key after
+    /// Detach) stands for its tab's editor window: the new tab joins the
+    /// window that owns the preview, never the preview itself.
+    static func documentWindow(for window: NSWindow?) -> NSWindow? {
+        guard let w = window, !(w is NSPanel) else { return nil }
+        if w.tabbingMode != .disallowed { return w }
+        let owner = (NSApp.delegate as? AppDelegate)?.tabs.first { $0.previewWindow?.window === w }
+        return owner?.window
     }
 
     private(set) var tabs: [EditorWindowController] = []
@@ -22,7 +29,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var certificateTabs: [CertificateTabController] = []
     let store = SessionStore(directory: SessionStore.defaultDirectory())
     private let env = DevEnvironment.values
+    /// The trailing save: 1.5 s after the last change (scheduleSessionSave).
     private var sessionTimer: Timer?
+    /// The leading save: the first change after a quiet spell, a few ms
+    /// on. Armed apart from the trailing one, so later changes never
+    /// cancel or postpone it.
+    private var leadingSaveTimer: Timer?
+    /// What went wrong at launch reading the last session (shown on the
+    /// front tab: `noteRecoveryProblem`).
+    private var recoveryProblems: [String] = []
+    /// When the last session save started (system uptime).
+    private var lastSessionSave: TimeInterval = -.infinity
+    /// A first save after a quiet spell is waiting for the first frame.
+    private var leadingSaveAfterFirstFrame = false
     private var appearanceObservation: NSKeyValueObservation?
     /// Files handed over before launch finished (Finder, `open`).
     private var pendingOpen: [URL] = []
@@ -36,6 +55,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// buffer files. `closedTexts` holds the text in memory instead when
     /// session saving is off (the checks).
     var closedTabs: [SessionTab] = []
+    /// Closed tabs ⇧⌘T couldn't read this run: passed over by the next
+    /// ⇧⌘T (so one that stays unreadable doesn't block every older one),
+    /// kept on the list with their buffers held. Once every entry has
+    /// been passed over, ⇧⌘T tries them again from the newest.
+    var closedTabsPassedOver = Set<UUID>()
     /// Files' word goals (the stats popover), from and to the session.
     var fileWordGoals: [FileWordGoal] = []
     /// Words written today, across documents (the stats popover's second ring).
@@ -43,12 +67,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Window › Float on Top, per window (FloatOnTop.swift). The set, not
     /// the live level: full screen changes the level on its own.
     var floatingWindows = Set<ObjectIdentifier>()
-    var closedTexts: [UUID: String] = [:]
+    /// Set only through `keepClosedText` / `dropClosedText`, which keep
+    /// each entry's revision: a save that wrote an older copy may clear
+    /// only that copy, never text kept since (a later close that failed).
+    private(set) var closedTexts: [UUID: String] = [:]
+    private var closedTextRevision: [UUID: Int] = [:]
+    private var closedTextRevisions = 0
+
+    /// Keeps a closed tab's text in memory (its buffer couldn't be written).
+    func keepClosedText(_ id: UUID, _ text: String) {
+        closedTextRevisions += 1
+        closedTexts[id] = text
+        closedTextRevision[id] = closedTextRevisions
+    }
+
+    func dropClosedText(_ id: UUID) {
+        closedTexts[id] = nil
+        closedTextRevision[id] = nil
+    }
 
     // MARK: Launch
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         LaunchTrace.mark("will_finish")
+        // A save past the file-size limit fails with an error the save
+        // recovers from, instead of SIGXFSZ ending the app mid-write.
+        // Caught, not ignored: git and other programs Owlink starts get
+        // the default action back.
+        DocumentWrite.catchFileSizeSignal()
+        DevHooks.configureSessionStore(store)
         NSWindow.allowsAutomaticWindowTabbing = true
         dailyWords.onChange = { [weak self] in self?.refreshOpenStatsPopovers() }
         NotificationCenter.default.addObserver(self, selector: #selector(windowExitedFullScreen(_:)),
@@ -88,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Replace in Files' undo copies past 7 days (or the newest 5) go
         // even when no replace follows: after the first frame, off the
         // main thread, on the queue the replaces use.
+        // Sparkle, only in a release build set up for updates (Updater.swift):
+        // otherwise nothing is loaded and nothing goes to the network.
+        AfterFirstFrame.run { Updater.shared.startIfConfigured() }
         AfterFirstFrame.run {
             let store = ReplaceInFiles.store
             ReplaceInFiles.queue.async { store.pruneAtLaunch() }
@@ -98,9 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
             toOpen += list.split(separator: ":").map { URL(fileURLWithPath: String($0)) }
         }
-        for url in toOpen { open(url) }
+        for url in toOpen { open(url, background: true) }
         pendingOpen = []
-        if tabs.isEmpty && viewerTabs.isEmpty { newTab(nil) }
+        // A big file still reading: its tab is the launch's window.
+        if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
         schedulePendingRestore()
         LaunchTrace.mark("tabs_ready")
         recentMenu?.delegate = self
@@ -112,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard launched else { pendingOpen += urls; return }
-        for url in urls { open(url) }
+        for url in urls { open(url, background: true) }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -131,10 +182,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// No "save changes?" on quit: unsaved text is kept in the session and
     /// comes back as open tabs next launch, reopen on or off (with it off,
     /// only clean files go to Reopen Closed Tab: SessionReopenPolicy.plan).
+    /// Unless that save fails: then the app stays open (`prepareToQuit`).
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // Closing the last window already saved (quitAfterLastClose / a
         // last-window terminate started from windowShouldClose).
-        if !terminating { prepareToQuit() }
+        if !terminating, !prepareToQuit() { return .terminateCancel }
         return .terminateNow
     }
 
@@ -148,7 +200,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
-    private func prepareToQuit() {
+    /// False, with the app left open, when the session (unsaved text
+    /// included) couldn't be written and the user didn't choose to quit
+    /// anyway (`askAfterFailedQuitSave`).
+    private func prepareToQuit() -> Bool {
         // Replace in Files' disk writes under way finish first.
         ReplaceInFiles.waitForWrites()
         // The last words of the day, if typing hadn't paused yet.
@@ -156,10 +211,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // The whole session, whatever Reopen files from last session says:
         // launch decides what comes back (SessionReopenPolicy.plan; with it
         // off, files go to Reopen Closed Tab there and unsaved text reopens).
-        saveSession()
+        // Waits for the queued writes, then writes every unsaved text not
+        // yet on disk again (one whose earlier write failed included).
+        while let failure = saveSession(sync: true, quitting: true) {
+            FileHandle.standardError.write(Data("session: quit save failed: \(failure)\n".utf8))
+            switch askAfterFailedQuitSave(failure) {
+            case .retry: continue
+            case .quitAnyway: break
+            case .keepOpen: return false
+            case .saveAs:
+                if let t = firstUnsavedTab() {
+                    t.window?.makeKeyAndOrderFront(nil)
+                    DispatchQueue.main.async { _ = t.saveAs() }
+                } else if let c = closedTabs.last(where: { closedTexts[$0.id] != nil }) {
+                    // Only a closed tab's text kept in memory is at risk:
+                    // reopen it (from memory) and Save As that.
+                    saveAsClosedTab(c.id)
+                }
+                return false
+            }
+            break
+        }
         releaseAllWaiters()
+        failPendingBackgroundOpens()
         terminating = true
         sessionTimer?.invalidate()
+        leadingSaveTimer?.invalidate()
+        return true
+    }
+
+    enum QuitSaveChoice: String { case keepOpen = "keep", saveAs = "saveas", retry = "retry", quitAnyway = "quit" }
+    /// Check builds: answers the alert instead of the user.
+    static var checkQuitSaveChoice: ((String) -> QuitSaveChoice)?
+
+    /// The tab whose unsaved text is in most danger: the first with any.
+    private func firstUnsavedTab() -> EditorWindowController? {
+        tabs.first { $0.doc.isDirty || $0.doc.fileURL == nil && ($0.textView.textStorage?.length ?? 0) > 0 }
+    }
+
+    /// Quitting, the session couldn't be written: say so and let the user
+    /// keep Owlink open (the default), Save As, try again, or quit anyway.
+    private func askAfterFailedQuitSave(_ failure: String) -> QuitSaveChoice {
+        if DevEnvironment.checksEnabled {
+            let choice = Self.checkQuitSaveChoice?(failure)
+                ?? env["CEDRIC_TEST_QUIT_SAVE_CHOICE"].flatMap(QuitSaveChoice.init(rawValue:))
+            if let choice {
+                print("quit: session save failed, choice=\(choice.rawValue)")
+                fflush(stdout)
+                return choice
+            }
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = String(localized: "Owlink couldn’t save your unsaved work")
+        alert.informativeText = String(localized: "Its session couldn’t be written: \(failure)\n\nIf you quit now, unsaved text may be lost. Keep Owlink open and save your tabs with File › Save As…, or try again.")
+        alert.addButton(withTitle: String(localized: "Keep Owlink Open"))
+        alert.addButton(withTitle: String(localized: "Save As…"))
+        alert.addButton(withTitle: String(localized: "Try Again"))
+        let quit = alert.addButton(withTitle: String(localized: "Quit Anyway"))
+        quit.hasDestructiveAction = true
+        switch alert.runModal() {
+        case .alertSecondButtonReturn: return .saveAs
+        case .alertThirdButtonReturn: return .retry
+        case NSApplication.ModalResponse(rawValue: NSApplication.ModalResponse.alertThirdButtonReturn.rawValue + 1): return .quitAnyway
+        default: return .keepOpen
+        }
     }
 
     /// Settings › "Quit when the last window closes", once launch is done
@@ -168,8 +284,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// dev hooks drive tabs open and shut, so it is off under them unless
     /// CEDRIC_TEST_QUIT_ON_LAST_CLOSE=1.
     var quitsOnLastClose: Bool {
-        launched && !terminating && pendingRestore.isEmpty && DevHooks.allowsQuitOnLastClose
-            && Settings.shared.quitWhenLastWindowCloses
+        lastCloseMayQuit && DevHooks.allowsQuitOnLastClose && Settings.shared.quitWhenLastWindowCloses
+    }
+
+    /// Nothing still to come that a last close would throw away: launch
+    /// done, restored tabs built, no big file reading in the background
+    /// (its tab is on its way: closing the only other tab must not quit).
+    var lastCloseMayQuit: Bool {
+        launched && !terminating && pendingRestore.isEmpty && backgroundOpens.isEmpty
     }
 
     /// The document tabs' windows other than `window` (text and viewer tabs:
@@ -189,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// The last document tab has closed: only a fallback (windowShouldClose
     /// / Close Window usually quit first, while the tabs were still open).
     func quitAfterLastClose() {
-        prepareToQuit()
+        guard prepareToQuit() else { return }
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
 
@@ -207,7 +329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let onlyGroup = windowGroups().count == 1
         let lastTab = otherDocumentWindows(than: window) == 0
         if onlyGroup, lastTab || isClosingWholeWindow(window) {
-            prepareToQuit()
+            // The session couldn't be saved: nothing closes.
+            guard prepareToQuit() else { return false }
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return false
         }
@@ -218,7 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// quit-causing last window, terminate with the session already saved.
     func closeDocumentWindows(in window: NSWindow) {
         if quitsOnLastClose, windowGroups().count == 1 {
-            prepareToQuit()
+            guard prepareToQuit() else { return }
             DispatchQueue.main.async { NSApp.terminate(nil) }
             return
         }
@@ -273,7 +396,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let trusted = CLIToken.matches(given, CLIToken.ensure())
             || (Date().timeIntervalSince(Self.cliTokenRotated) < CLIToken.rotationGrace && CLIToken.matches(given, Self.previousCLIToken))
         if let raw = q["path"] {
-            guard raw.hasPrefix("/") else { refuseURL("path isn’t absolute"); return }
+            // Absolute by its first byte: "/" then a combining mark is one
+            // Swift character, which a text test refused as relative.
+            guard raw.utf8.first == 0x2f else { refuseURL("path isn’t absolute"); return }
             let path = (raw as NSString).standardizingPath
             if trusted {
                 openFromURL(path, q)
@@ -300,7 +425,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// The last cedric:// refusal's reason (the checks read it).
+    static var lastURLRefusal: String?
+
     private func refuseURL(_ why: String) {
+        Self.lastURLRefusal = why
         FileHandle.standardError.write(Data((CLIToken.refusal(why, secret: CLIToken.ensure()) + "\n").utf8))
     }
 
@@ -339,8 +468,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
             return
         }
-        if FileManager.default.fileExists(atPath: path) {
-            open(url)
+        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
+        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
+        // The file's tab, now or (a big file read in the background) when it is ready.
+        let arrived: (EditorWindowController) -> Void = { [weak self] tab in
+            if let line { tab.goToLine(line, column: col) }
+            // `cedric -w`: the script waits until this marker file goes.
+            if let marker = q["wait"] { self?.addWaiter(marker, for: tab) }
+        }
+        // No tab after all (unreadable, gone before it was read): the
+        // script stops waiting rather than hang.
+        let failed = {
+            if let marker = q["wait"], let h = CLIHandoff.inspect(marker, kind: .wait) { CLIHandoff.remove(h) }
+        }
+        let pendingStd = url.standardizedFileURL
+        // Already being read in the background (or open): that job's tab,
+        // or its failure, even if the file is gone meanwhile. Gone, it used
+        // to take the new-file branch below: an empty tab that saved over
+        // a file put back there, while the read's text was thrown away.
+        if backgroundOpens[pendingStd] != nil || FileManager.default.fileExists(atPath: path) {
+            open(url, background: true, then: arrived, failed: failed)
         } else {
             // A new file: an empty tab that saves there.
             let doc = EditorDocument(fileURL: url, untitledName: url.lastPathComponent)
@@ -348,21 +495,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let tab = makeTab(doc, text: "")
             doc.markDirtyFromSession()
             tab.updateTitle()
+            arrived(tab)
         }
-        let line = q["line"].flatMap(Int.init).map { max(1, $0) }
-        let col = q["col"].flatMap(Int.init).map { max(1, $0) } ?? 1
-        let tab = tabs.first { $0.doc.fileURL?.standardizedFileURL == url.standardizedFileURL }
+        let std = url.standardizedFileURL
+        guard !tabs.contains(where: { $0.doc.fileURL?.standardizedFileURL == std }), backgroundOpens[std] == nil else { return }
         // A PDF: `cedric file.pdf:3` opens it at page 3; -w waits for its tab.
-        if tab == nil, let pdf = pdfTab(for: url) {
+        if let pdf = pdfTab(for: url) {
             if let line { pdf.goToPage(OneBased.index(line, count: Int.max)) }
             if let marker = q["wait"] { addWaiter(marker, forID: pdf.id) }
-        } else if tab == nil, let viewer = viewerTab(for: url), let marker = q["wait"] {
+        } else if let viewer = viewerTab(for: url), let marker = q["wait"] {
             // An image or Office tab: -w waits for it too.
             addWaiter(marker, forID: viewer.id)
         }
-        if let line { tab?.goToLine(line, column: col) }
-        // `cedric -w`: the script waits until this marker file goes.
-        if let marker = q["wait"], let tab { addWaiter(marker, for: tab) }
     }
 
     // MARK: Tabs
@@ -377,8 +521,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @discardableResult
     func makeTab(_ doc: EditorDocument, text: String, in group: NSWindow? = nil, newWindow: Bool = false, show: Bool = true,
-                 tabIndex: Int? = nil) -> EditorWindowController {
-        let tab = EditorWindowController(doc: doc, text: text)
+                 tabIndex: Int? = nil, prepared: EditorWindowController.PreparedText? = nil) -> EditorWindowController {
+        let tab = EditorWindowController(doc: doc, text: text, prepared: prepared)
         if let path = doc.fileURL?.path { tab.editing.wordGoal = FileWordGoals.goal(for: path, in: fileWordGoals) }
         tab.onChange = { [weak self] _ in self?.scheduleSessionSave() }
         tab.onClose = { [weak self] t in
@@ -395,6 +539,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if last { self.quitAfterLastClose() }
         }
         tabs.append(tab)
+        // Checks: every tab as it is registered, before it is shown.
+        if DevEnvironment.checksEnabled { Self.tabMadeForChecks?(tab) }
         guard let window = tab.window else { return tab }
         let host = newWindow ? nil : group ?? Self.documentKeyWindow ?? tabs.dropLast().last?.window
         if let tabIndex, let host = group, host !== window, let tg = host.tabGroup {
@@ -437,16 +583,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.canChooseDirectories = false
         if let dir = currentTab?.doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         guard panel.runModal() == .OK else { return }
-        panel.urls.forEach { open($0) }
+        panel.urls.forEach { open($0, background: true) }
     }
 
-    /// Set while the command palette validates the whole menu in one go
-    /// (nothing changes windows in between): the current tab and viewer
-    /// tab are worked out once, not once per menu item. Without a key
+    /// Set while the command palette validates the whole menu, or the
+    /// Context Bar its buttons, in one go (nothing changes windows in
+    /// between): the current tab and viewer tab are worked out once, not
+    /// once per menu item. Without a key
     /// window that is a window-server round trip (orderedWindows) each.
     var validationPass: (tab: EditorWindowController?, viewer: (any ViewerTab)?)?
 
+    /// Inside a pass already: that one stands (its end clears it).
     func withValidationPass<T>(_ body: () -> T) -> T {
+        guard validationPass == nil else { return body() }
         let viewer = currentViewerTab
         let tab = currentTab
         validationPass = (tab, viewer)
@@ -487,8 +636,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let w = NSApp.keyWindow, w.attachedSheet == nil { a.beginSheetModal(for: w) } else { a.runModal() }
     }
 
+    /// Opens a file. `background`: a text file of `backgroundOpenBytes`
+    /// or more is read, decoded and indexed off the main thread, and its
+    /// tab appears only when the text is ready (`then` runs with it), so
+    /// there is never a half-loaded tab to edit, save or close; this
+    /// returns nil for it. Otherwise the tab is made at once and returned
+    /// (and `then` runs with it too). `failed` runs instead if the file
+    /// can't be opened as text (now, or when read in the background).
     @discardableResult
-    func open(_ url: URL, asText: Bool = false) -> EditorWindowController? {
+    func open(_ url: URL, asText: Bool = false, background: Bool = false,
+              then: ((EditorWindowController) -> Void)? = nil, failed: (() -> Void)? = nil) -> EditorWindowController? {
         let std = url.standardizedFileURL
         // A folder (dropped on the Dock icon, `owlink dir`): the folder sidebar.
         if Self.isFolder(std) { openFolder(std); return nil }
@@ -505,7 +662,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
             existing.window?.makeKeyAndOrderFront(nil)
+            then?(existing)
             return existing
+        }
+        // Already being read in the background: one tab when it is ready.
+        if let pending = backgroundOpens[std] {
+            if let then { pending.thens.append(then) }
+            if let failed { pending.failures.append(failed) }
+            return nil
         }
         // A PDF (by its first bytes, or its name) opens in a viewer tab.
         if !asText {
@@ -520,33 +684,195 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .text: break
             }
         }
+        if background, let size = (try? std.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size >= Self.backgroundOpenBytes {
+            openInBackground(std, then: then, failed: failed)
+            return nil
+        }
         do {
-            let (d, mod) = try EditorDocument.read(std)
-            let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
-            doc.apply(d)
-            doc.fileModified = mod
+            // The text goes into the tab's storage (a copy) and is let go.
+            let (d, mod) = try EditorDocument.read(std, shareBytes: true)
             PerfTrace.mark("read_decode")
-            doc.languageChoice = .forFile(named: std.lastPathComponent, content: d.text)
+            let language = LanguageChoice.forFile(named: std.lastPathComponent, content: d.text)
             PerfTrace.mark("detect_language")
-            let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
-            // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
-            let tab = makeTab(doc, text: d.looksBinary ? "" : d.text)
-            if d.looksBinary { tab.holdBinary(d.text) }
-            blank?.window?.close()
-            OwlHub.shared.activity(in: tab)
-            tab.readQuarantineForOwl()
-            noteRecent(std)
-            // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
-            if Certificates.isCertificateText(d.text, fileName: std.lastPathComponent), !CertificatePanel.closedByUser {
-                DispatchQueue.main.async { [weak tab] in
-                    guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
-                    tab.togglePreview()
-                }
-            }
+            let certificate = Certificates.isCertificateText(d.text, fileName: std.lastPathComponent)
+            let tab = showRead(std, d, mod, language: language, certificate: certificate, prepared: nil)
+            then?(tab)
             return tab
         } catch {
+            failed?()
             NSAlert(error: error).runModal()
             return nil
+        }
+    }
+
+    /// A file read (on the main thread or off it): its tab.
+    private func showRead(_ std: URL, _ d: DecodedText, _ mod: DiskStamp?, language: LanguageChoice, certificate: Bool,
+                          prepared: EditorWindowController.PreparedText?) -> EditorWindowController {
+        let doc = EditorDocument(fileURL: std, untitledName: std.lastPathComponent)
+        doc.apply(d)
+        doc.noteDisk(mod)
+        doc.languageChoice = language
+        let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
+        // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
+        let tab = makeTab(doc, text: d.looksBinary ? "" : d.text, prepared: d.looksBinary ? nil : prepared)
+        if d.looksBinary { tab.holdBinary(d.text) }
+        blank?.window?.close()
+        OwlHub.shared.activity(in: tab)
+        tab.readQuarantineForOwl()
+        noteRecent(std)
+        // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
+        if certificate, !CertificatePanel.closedByUser {
+            DispatchQueue.main.async { [weak tab] in
+                guard let tab, tab.previewPane == nil, !tab.extrasPaused, tab.showsCertificatePanel else { return }
+                tab.togglePreview()
+            }
+        }
+        return tab
+    }
+
+    // MARK: Background open
+
+    /// Text files this big (bytes) open in the background (`open`'s
+    /// `background`): a 1 GB log took 2.8 s to decode on the main thread.
+    static let backgroundOpenBytes = 16 * 1024 * 1024
+
+    /// A file being read off the main thread (or waiting its turn), and
+    /// what waits for its tab: `thens` with the tab, `failures` if none
+    /// comes (unreadable, gone, quitting), e.g. a `cedric -w` marker.
+    @MainActor final class BackgroundOpen {
+        var thens: [(EditorWindowController) -> Void] = []
+        var failures: [() -> Void] = []
+    }
+
+    /// Files being read in the background or waiting to be, by standardized URL.
+    private(set) var backgroundOpens: [URL: BackgroundOpen] = [:]
+    /// The files waiting their turn, first first. One is read at a time
+    /// and the next starts only once its tab is made: a multi-file open
+    /// of big logs never holds more than one decoded text waiting for
+    /// the main thread (each is the size of its file).
+    private var backgroundQueue: [URL] = []
+    /// The one being read (or its text waiting for the main thread).
+    private(set) var backgroundReading: URL?
+    /// The most background reads ever under way or done-not-shown at once (checks).
+    private(set) var mostBackgroundReadsForChecks = 0
+    /// The line index the last background open made (check builds only:
+    /// BigOpenCheck sees the tab use it rather than scan the text again).
+    var lastBackgroundIndexForChecks: LineIndex?
+    /// Checks only (DevEnvironment.checksEnabled): the next background
+    /// read waits for this before it reads (BigOpenCheck holds it there to
+    /// look at the app while the file can't be whole), and every tab made
+    /// is passed to `tabMadeForChecks` as it is registered.
+    static var backgroundReadGateForChecks: DispatchSemaphore?
+    static var tabMadeForChecks: ((EditorWindowController) -> Void)?
+    /// Run (once) when the last background open has finished (launch metrics).
+    var whenBackgroundOpensDone: [() -> Void] = []
+
+    /// Everything a background open makes before the tab.
+    struct BackgroundRead: Sendable {
+        let decoded: DecodedText
+        let stamp: DiskStamp?
+        let language: LanguageChoice
+        let certificate: Bool
+        let prepared: EditorWindowController.PreparedText?
+    }
+
+    private func openInBackground(_ std: URL, then: ((EditorWindowController) -> Void)?, failed: (() -> Void)?) {
+        let job = BackgroundOpen()
+        if let then { job.thens.append(then) }
+        if let failed { job.failures.append(failed) }
+        backgroundOpens[std] = job
+        backgroundQueue.append(std)
+        startNextBackgroundRead()
+    }
+
+    private func startNextBackgroundRead() {
+        guard backgroundReading == nil, !terminating, !backgroundQueue.isEmpty else { return }
+        let std = backgroundQueue.removeFirst()
+        guard let job = backgroundOpens[std] else { startNextBackgroundRead(); return }
+        backgroundReading = std
+        // Counted as the reads are: under way, or done and not yet shown.
+        backgroundReadsInFlight += 1
+        mostBackgroundReadsForChecks = max(mostBackgroundReadsForChecks, backgroundReadsInFlight)
+        let gate = DevEnvironment.checksEnabled ? Self.backgroundReadGateForChecks : nil
+        Self.backgroundReadGateForChecks = nil
+        DispatchQueue.global(qos: .userInitiated).async {
+            gate?.wait()
+            let result = Result { try Self.readInBackground(std) }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.finishBackgroundOpen(std, job, result) }
+            }
+        }
+    }
+
+    private var backgroundReadsInFlight = 0
+
+    /// Quitting: whoever waits on a file still to be read stops waiting
+    /// (a `cedric -w` marker goes, as for a tab).
+    func failPendingBackgroundOpens() {
+        for job in backgroundOpens.values {
+            let failures = job.failures
+            job.failures = []
+            failures.forEach { $0() }
+        }
+    }
+
+    /// Off the main thread: read and decode, then (side by side) the line
+    /// index, the saved-text fingerprint, the language and the certificate
+    /// sniff. The text is immutable until the tab copies it.
+    nonisolated static func readInBackground(_ std: URL) throws -> BackgroundRead {
+        let (d, mod) = try EditorDocument.read(std, shareBytes: true)
+        let name = std.lastPathComponent
+        let text = d.text
+        let ns = text as NSString
+        nonisolated(unsafe) var index: LineIndex?
+        nonisolated(unsafe) var print: TextFingerprint?
+        nonisolated(unsafe) var language = LanguageChoice()
+        nonisolated(unsafe) var certificate = false
+        DispatchQueue.concurrentPerform(iterations: 3) { k in
+            switch k {
+            case 0: if !d.looksBinary { index = LineIndex(ns, expectedLineCount: d.newlineCount.map { $0 + 1 }) }
+            case 1: if !d.looksBinary, ns.length > EditedState.snapshotLimit { print = TextFingerprint(ns) }
+            default:
+                language = LanguageChoice.forFile(named: name, content: text)
+                certificate = Certificates.isCertificateText(text, fileName: name)
+            }
+        }
+        return BackgroundRead(decoded: d, stamp: mod, language: language, certificate: certificate,
+                              prepared: index.map { EditorWindowController.PreparedText(lineIndex: $0, fingerprint: print) })
+    }
+
+    private func finishBackgroundOpen(_ std: URL, _ job: BackgroundOpen, _ result: Result<BackgroundRead, Error>) {
+        backgroundOpens[std] = nil
+        defer {
+            // Its tab is made (or it failed): the next file's turn, after
+            // any alert, so no text waits on the main thread meanwhile.
+            backgroundReadsInFlight -= 1
+            backgroundReading = nil
+            startNextBackgroundRead()
+            if backgroundOpens.isEmpty {
+                let done = whenBackgroundOpensDone
+                whenBackgroundOpensDone = []
+                done.forEach { $0() }
+            }
+        }
+        // Quitting: nothing more to show (the session never had this tab).
+        guard !terminating else { job.failures.forEach { $0() }; return }
+        switch result {
+        case .failure(let error):
+            job.failures.forEach { $0() }
+            NSAlert(error: error).runModal()
+            // Opened at launch with nothing else: the usual new tab.
+            if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
+        case .success(let r):
+            // Opened another way meanwhile (a check, a session tab): that tab.
+            if let existing = tabs.first(where: { $0.doc.fileURL?.standardizedFileURL == std }) {
+                existing.window?.makeKeyAndOrderFront(nil)
+                job.thens.forEach { $0(existing) }
+                return
+            }
+            let tab = showRead(std, r.decoded, r.stamp, language: r.language, certificate: r.certificate, prepared: r.prepared)
+            if DevEnvironment.checksEnabled { lastBackgroundIndexForChecks = r.prepared?.lineIndex }
+            job.thens.forEach { $0(tab) }
         }
     }
 
@@ -563,11 +889,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     // MARK: Session
 
-    /// Saves soon after a change (coalesced): a crash loses at most ~1.5 s of typing.
+    /// Coalesced session saves: 1.5 s after the last change.
+    static let sessionSaveDelay: TimeInterval = 1.5
+
+    /// Saves soon after a change. The first change after a quiet spell (no
+    /// save for 1.5 s) is saved on the next turn, so a new tab's first
+    /// text or a file's first edit is on disk in a few milliseconds, not
+    /// only once typing pauses; while typing goes on, the leading save
+    /// comes again at most every 1.5 s; and one more save comes 1.5 s
+    /// after the last change. A crash loses at most about 1.5 s of
+    /// typing, never a whole new tab.
+    /// The leading save has its own timer, which changes never cancel or
+    /// postpone (they did: a second change within its few ms turned it
+    /// into the trailing 1.5 s, and steady typing then put off every save
+    /// until the typing paused). Only the trailing save is debounced.
+    /// No leading save while restored tabs wait to be built (a save builds
+    /// them all at once: AppDelegate.finishRestore) nor before the first
+    /// frame (then right after it), and not with a large document unsaved,
+    /// whose whole text each save copies: those keep the trailing 1.5 s.
+    /// Per change: two timer checks; the large-document test (cached
+    /// flags) only when no leading save is armed.
     func scheduleSessionSave() {
         sessionTimer?.invalidate()
-        sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated { self?.saveSession(sync: false) }
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionSaveDelay, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
+        }
+        guard leadingSaveTimer?.isValid != true, !leadingSaveAfterFirstFrame, pendingRestore.isEmpty,
+              !tabs.contains(where: { $0.isLargeDocument && $0.doc.isDirty }) else { return }
+        if AfterFirstFrame.passed {
+            let wait = max(0.02, lastSessionSave + Self.sessionSaveDelay - ProcessInfo.processInfo.systemUptime)
+            leadingSaveTimer = Timer.scheduledTimer(withTimeInterval: wait, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
+            }
+        } else {
+            leadingSaveAfterFirstFrame = true
+            AfterFirstFrame.run { [weak self] in
+                guard let self, self.leadingSaveAfterFirstFrame else { return }
+                self.leadingSaveAfterFirstFrame = false
+                // Still waiting (nothing saved since): save now.
+                if self.sessionTimer?.isValid == true, self.pendingRestore.isEmpty { self.saveSession(sync: false) }
+            }
         }
     }
 
@@ -594,19 +955,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Session writes, in order, off the main thread (a 636 KB unsaved
     /// buffer is a few ms of disk work); quit waits for them.
     let sessionQueue = DispatchQueue(label: "cedric.session-save", qos: .utility)
+    /// Numbers each buffer write a snapshot queues (EditorDocument.sessionWritingSequence).
+    private var sessionWriteSequence = 0
+    /// Numbers each snapshot as it is queued, read on `sessionQueue`: a
+    /// timed snapshot with a newer one behind it skips its commit.
+    private let snapshotSerial = SnapshotSerial()
+
+    final class SnapshotSerial: @unchecked Sendable {
+        private let lock = NSLock()
+        private var latest = 0
+        func next() -> Int { lock.lock(); defer { lock.unlock() }; latest += 1; return latest }
+        func isLatest(_ n: Int) -> Bool { lock.lock(); defer { lock.unlock() }; return n == latest }
+    }
 
     /// Snapshots the tabs on the main thread, then writes the changed
     /// buffers, the session and the prune on `sessionQueue`, in that order.
-    /// `sync`: wait for it (quit).
-    func saveSession(sync: Bool = true) {
+    /// `sync`: wait for it (quit). Nothing is pruned after a failed write.
+    /// `quitting`: also write again every unsaved text whose write is
+    /// queued (it is waited for anyway) and closed tabs' text kept only
+    /// in memory (`closedTexts`). Returns what failed, nil when every
+    /// unsaved text and the session are on disk (sync only; an async
+    /// save that fails is tried again `sessionRetryDelay` later).
+    @discardableResult
+    func saveSession(sync: Bool = true, quitting: Bool = false) -> String? {
         sessionTimer?.invalidate()
-        guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return }
+        leadingSaveTimer?.invalidate()
+        guard env["CEDRIC_NO_SESSION_SAVE"] != "1" else { return nil }
+        lastSessionSave = ProcessInfo.processInfo.systemUptime
         // Tabs not built yet would be dropped from the session (and their buffers pruned).
         finishRestore()
         var windows: [SessionWindow] = []
         var keep = Set<UUID>()
-        var buffers: [(UUID, String)] = []
+        var buffers: [(UUID, String, LineBreaks?, Int)] = []
         var written: [UUID: (EditorDocument, Int)] = [:]
+        // What the commit needs of each buffer it names: a write queued
+        // now or by an earlier snapshot (by its number), or one on disk.
+        var needs: [UUID: SessionStore.BufferNeed] = [:]
+        var docs: [UUID: EditorDocument] = [:]
         for group in windowGroups() {
             var sessionTabs: [SessionTab] = []
             var selected = 0
@@ -622,15 +1007,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 let needsBuffer = d.isDirty || d.fileURL == nil && !isEmpty
                 if needsBuffer {
                     keep.insert(d.id)
-                    if d.sessionChangeCount != d.changeCount, d.sessionWritingCount != d.changeCount {
+                    docs[d.id] = d
+                    if d.sessionChangeCount == d.changeCount {
+                        needs[d.id] = .onDisk
+                    } else if quitting || d.sessionWritingCount != d.changeCount {
                         // One copy of the text (the storage keeps changing).
-                        buffers.append((d.id, t.text))
+                        // A mixed file's breaks go into the buffer with it (restoreFormat).
+                        sessionWriteSequence += 1
+                        buffers.append((d.id, t.text, d.lineBreaks, sessionWriteSequence))
                         written[d.id] = (d, d.changeCount)
                         // sessionChangeCount moves only once the write has
                         // worked (finished, below): hot close skips its own
                         // write when it matches, so a failed write must not
                         // look done.
                         d.sessionWritingCount = d.changeCount
+                        d.sessionWritingSequence = sessionWriteSequence
+                        needs[d.id] = .written(sessionWriteSequence)
+                    } else {
+                        // Queued by an earlier snapshot, not done yet.
+                        needs[d.id] = .written(d.sessionWritingSequence)
                     }
                 } else {
                     d.sessionChangeCount = -1
@@ -645,6 +1040,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               language: d.languageIsManual ? d.language : nil,
                                               selectionLocation: sel.location, selectionLength: sel.length,
                                               topLine: t.primaryTopLine, fileModified: d.fileModified,
+                                              fileSize: d.diskStamp.size, fileID: d.diskStamp.identity,
                                               bookmarks: t.editing.bookmarks.isEmpty ? nil : t.editing.bookmarks.lines,
                                               indentation: d.indentation,
                                               previewDetached: t.previewDetached ? true : nil,
@@ -654,6 +1050,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               folds: t.sessionFolds, split: t.sessionSplit, writing: t.sessionWriting,
                                               wordGoal: d.fileURL == nil ? t.editing.wordGoal : nil,
                                               explicitText: d.fileURL.map { DocumentKind.hasPDFExtension($0.path) } == true ? true : nil))
+                d.noteFormat(in: &sessionTabs[sessionTabs.count - 1])
                 if t.window === NSApp.keyWindow || t.window?.tabGroup?.selectedWindow === t.window { selected = sessionTabs.count - 1 }
             }
             if !sessionTabs.isEmpty {
@@ -664,43 +1061,187 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                               floatOnTop: floats ? true : nil))
             }
         }
-        for c in closedTabs where c.hasBuffer { keep.insert(c.id) }
+        // Closed tabs whose text couldn't be written when they closed: on
+        // every save until it is (not only at quit).
+        var memoryOnly: [(UUID, String, Int, Int?)] = []
+        for c in closedTabs where c.hasBuffer {
+            keep.insert(c.id)
+            if let text = closedTexts[c.id] {
+                sessionWriteSequence += 1
+                memoryOnly.append((c.id, text, sessionWriteSequence, closedTextRevision[c.id]))
+                needs[c.id] = .written(sessionWriteSequence)
+            } else {
+                needs[c.id] = .onDisk
+            }
+        }
         let session = Session(windows: windows, closedTabs: closedTabs.isEmpty ? nil : closedTabs, folder: folderSessionState,
                               wordGoals: fileWordGoals.isEmpty ? nil : fileWordGoals)
         let store = self.store
-        let toWrite = buffers, keeping = keep
-        let write: @Sendable () -> Set<UUID> = {
+        let toWrite = buffers, keeping = keep, needed = needs, lateClosed = memoryOnly
+        // A timed snapshot superseded by the time it runs (a newer one is
+        // queued behind it, timed or not) writes its buffers, which the
+        // newer one may count on, but not its commit: the newer one
+        // commits a later state with the same checks, so the main thread
+        // (quit, a close) waits for one commit, not one per snapshot.
+        let serial = snapshotSerial, mine = snapshotSerial.next(), mayCoalesce = !sync
+        let write: @Sendable () -> (ok: Set<UUID>, failures: [String], missing: [UUID], coalesced: Bool) = {
             var ok = Set<UUID>()
-            for (id, text) in toWrite {
+            var failures: [String] = []
+            var missing: [UUID] = []
+            for (id, text, breaks, seq) in toWrite {
                 do {
-                    try store.writeBuffer(id, text: text)
+                    try store.writeBuffer(id, text: EditorDocument.bufferText(text, breaks: breaks), sequence: seq)
                     ok.insert(id)
                 } catch {
                     FileHandle.standardError.write(Data("session: buffer write failed: \(error)\n".utf8))
+                    failures.append(error.localizedDescription)
                 }
             }
-            do {
-                try store.save(session)
-                store.pruneBuffers(keeping: keeping)
-            } catch {
-                FileHandle.standardError.write(Data("session: save failed: \(error)\n".utf8))
+            for (id, text, seq, _) in lateClosed {
+                do {
+                    try store.writeBuffer(id, text: text, open: false, sequence: seq)
+                    ok.insert(id)
+                } catch {
+                    FileHandle.standardError.write(Data("session: closed tab's buffer write failed: \(error)\n".utf8))
+                    failures.append(error.localizedDescription)
+                }
             }
-            return ok
+            if mayCoalesce, !serial.isLatest(mine) { return (ok, [], [], true) }
+            do {
+                // Commits (and clears the journal) only with every buffer it
+                // names on disk, this snapshot's writes and earlier ones it
+                // relies on included; else the older commit and the journal
+                // stay. Pruned only after that.
+                try store.save(session, requiring: needed)
+                if failures.isEmpty { store.pruneBuffers(keeping: keeping) }
+            } catch {
+                if case SessionStoreError.buffersMissing(let ids) = error { missing = ids }
+                FileHandle.standardError.write(Data("session: save failed: \(error)\n".utf8))
+                failures.append(error.localizedDescription)
+            }
+            return (ok, failures, missing, false)
         }
         // Each written tab's count, once its write is done: advanced if it
-        // worked, else left as it was so the next save (or a close) tries again.
-        let finished: @MainActor (Set<UUID>) -> Void = { ok in
+        // worked (never back: an older async write can finish after a
+        // newer sync one), else left as it was so the next save (or a
+        // close) tries again.
+        // A buffer the commit needed on disk that isn't there: an open
+        // tab's text is written again next save; a closed tab's (not in
+        // memory) can't be, so it is held: its entry keeps claiming it,
+        // and the commits go ahead without it.
+        let finished: @MainActor (Set<UUID>, [UUID]) -> Void = { [weak self] ok, missing in
             for (id, (d, count)) in written {
                 if d.sessionWritingCount == count { d.sessionWritingCount = -1 }
-                if ok.contains(id) { d.sessionChangeCount = count }
+                if ok.contains(id), count > d.sessionChangeCount { d.sessionChangeCount = count }
+            }
+            guard let self else { return }
+            // Only the copy this save wrote: one kept since (reopened,
+            // edited, closed again with the write failing) stays.
+            for (id, _, _, revision) in lateClosed where ok.contains(id) && self.closedTextRevision[id] == revision {
+                self.dropClosedText(id)
+            }
+            for id in missing where needed[id] == .onDisk {
+                if let d = docs[id] { d.sessionChangeCount = -1; continue }
+                guard self.closedTexts[id] == nil, let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) else { continue }
+                // Held whatever the reason (lstat only: the commit found no
+                // readable regular file there, so nothing is opened, a
+                // FIFO would block): never pruned, named in every commit,
+                // so it doesn't block the healthy tabs' commits. Not
+                // there right now is held too, its entry keeping
+                // hasBuffer: a sync or restore may be moving it aside,
+                // and let go, the first prune after it is back deletes it
+                // (SessionStore.holdNeededBuffer).
+                self.noteUnusableClosedBuffer(self.closedTabs[i])
             }
         }
         if sync {
-            finished(sessionQueue.sync(execute: write))
+            let r = sessionQueue.sync(execute: write)
+            finished(r.ok, r.missing)
+            if !quitting { noteSessionSave(failure: r.failures.first) }
+            if let first = r.failures.first {
+                if !quitting { retrySessionSaveLater() }
+                return first
+            }
+            guard quitting else { return nil }
+            // Everything that needs its text kept has it on disk now.
+            let unwritten = tabs.filter { t in
+                let d = t.doc
+                return (d.isDirty || d.fileURL == nil && (t.textView.textStorage?.length ?? 0) > 0) && d.sessionChangeCount != d.changeCount
+            }
+            if !unwritten.isEmpty { return String(localized: "\(unwritten.count) tab(s) with unsaved text weren’t written") }
+            if closedTabs.contains(where: { $0.hasBuffer && closedTexts[$0.id] != nil }) {
+                return String(localized: "a closed tab’s unsaved text wasn’t written")
+            }
+            return nil
         } else {
             sessionQueue.async {
-                let ok = write()
-                DispatchQueue.main.async { MainActor.assumeIsolated { finished(ok) } }
+                let r = write()
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        finished(r.ok, r.missing)
+                        // Coalesced: the newer snapshot's commit reports.
+                        guard !r.coalesced else { return }
+                        self.noteSessionSave(failure: r.failures.first)
+                        if !r.failures.isEmpty { self.retrySessionSaveLater() }
+                    }
+                }
+            }
+            return nil
+        }
+    }
+
+    /// After a failed timed save: try again a little later if nothing
+    /// else saves meanwhile (a full disk may have room again).
+    /// CEDRIC_SESSION_RETRY_DELAY overrides it (check builds: backupfail).
+    static let sessionRetryDelay: TimeInterval = DevEnvironment.values["CEDRIC_SESSION_RETRY_DELAY"].flatMap(Double.init) ?? 10
+
+    /// Saves that failed in a row (none since the last complete one).
+    private static var failedSessionSaves = 0
+    /// The notice shown while unsaved work isn't backed up, if any.
+    private static var backupNotice: String?
+
+    /// One failure can pass (the retry may work); a second in a row means
+    /// unsaved work isn't being backed up: every text tab says so, with
+    /// Save As, until a save writes everything (buffers and session).
+    /// The notice is in a bar of its own (`backupBar`), so a recovery or
+    /// file notice on the same tab never hides it, and it never hides
+    /// one. It stays: Dismiss hides it on that tab only until the next
+    /// failed save.
+    func noteSessionSave(failure: String?) {
+        guard let failure else {
+            Self.failedSessionSaves = 0
+            guard Self.backupNotice != nil else { return }
+            Self.backupNotice = nil
+            for t in tabs { t.backupBar?.isHidden = true }
+            FileHandle.standardError.write(Data("session: saving again, backup notice cleared\n".utf8))
+            return
+        }
+        Self.failedSessionSaves += 1
+        guard Self.failedSessionSaves >= 2 else { return }
+        let text = String(localized: "Unsaved work isn’t being backed up: Owlink can’t save its session (\(failure)). It keeps trying. Save your tabs with File › Save As… to keep them.")
+        if Self.backupNotice == nil { FileHandle.standardError.write(Data("session: backup notice: \(failure)\n".utf8)) }
+        Self.backupNotice = text
+        for t in tabs {
+            if t.backupBar?.isHidden == false, t.backupBar?.label.stringValue == text { continue }
+            let bar = t.noticeBar(\.backupBar, symbol: "exclamationmark.triangle")
+            bar.show(text, buttons: [
+                (String(localized: "Save As…"), { [weak t] in _ = t?.saveAs() }),
+                (String(localized: "Dismiss"), { [weak bar] in bar?.isHidden = true }),
+            ])
+            bar.setAccessibilityLabel(text)
+        }
+    }
+
+    /// Whether the not-backed-up notice is up (checks).
+    var backupNoticeShown: Bool { Self.backupNotice != nil }
+    /// Session saves failed in a row (checks).
+    var sessionSaveFailures: Int { Self.failedSessionSaves }
+
+    private func retrySessionSaveLater() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.sessionRetryDelay) { [weak self] in
+            guard let self, !self.terminating, self.sessionTimer?.isValid != true, self.leadingSaveTimer?.isValid != true else { return }
+            self.sessionTimer = Timer.scheduledTimer(withTimeInterval: 0, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { _ = self?.saveSession(sync: false) }
             }
         }
     }
@@ -736,9 +1277,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DevEnvironment.values["CEDRIC_RESTORE_DELAY"].flatMap(Double.init) ?? 0.25
 
     private func restoreSession() {
-        guard let session = store.load() else { return }
-        // Closed tabs past ClosedTabs.keepDays go, with their unsaved text.
-        let kept = ClosedTabs.expire(session.closedTabs ?? [])
+        var session: Session
+        var recovered: [UUID]
+        let load = store.loadForLaunch()
+        if let hold = store.hold {
+            noteRecoveryProblem(String(localized: "Owlink isn’t saving its session this run, and keeps everything in \(store.directory.path) as it is: \(hold). Save your unsaved tabs with File › Save As…."))
+        }
+        switch load {
+        case .none: return
+        case .session(let s, let r): session = s; recovered = r
+        case .recover(let aside, let buffers):
+            recoverBuffers(buffers, setAside: aside, unreadableSession: true)
+            return
+        }
+        // Buffers an earlier launch couldn't read: again. A closed tab's
+        // (Reopen Closed Tab couldn't read it) stays on the closed list,
+        // unless its reopen is owed: then it opens (SessionStore.retryHeldBuffers).
+        let retry = store.retryHeldBuffers(session)
+        session = retry.session
+        recovered += retry.recovered
+        for (id, why) in retry.unreadable { noteUnreadableBuffer(id, why) }
+        defer { if !recovered.isEmpty { recoverBuffers(recovered, setAside: nil, unreadableSession: false) } }
+        // Closed tabs past ClosedTabs.keepDays go, with their unsaved text;
+        // never a held one whose reopen is owed (its text is all that is
+        // left of an edit made after the reopen, under the old date).
+        let owed = Set(session.heldReopened ?? [])
+        let kept = ClosedTabs.expire(session.closedTabs ?? [], keeping: owed)
         closedTabs = kept.list
         fileWordGoals = session.wordGoals ?? []
         for gone in kept.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
@@ -752,7 +1316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if !plan.park.isEmpty {
             var closed = closedTabs
             for tab in plan.park {
-                let r = ClosedTabs.push(tab, onto: closed)
+                let r = ClosedTabs.push(tab, onto: closed, keeping: owed)
                 closed = r.list
                 for gone in r.dropped where gone.hasBuffer { store.removeBuffer(gone.id) }
             }
@@ -786,7 +1350,88 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             guard let host else { continue }
             if group.floatOnTop { setWindowFloats(true, host) }
             pendingRestore += rest.sorted().map { PendingTab(tab: openTabs[$0], group: group, index: $0) }
-            host.makeKeyAndOrderFront(nil)
+            orderInAlone(host, key: true)
+        }
+    }
+
+    /// A restored window, ordered in on its own: AppKit's automatic
+    /// tabbing (`.preferred`) otherwise adds it to the window restored
+    /// before it, and a session saved with two windows comes back as one.
+    private func orderInAlone(_ window: NSWindow, key: Bool) {
+        let mode = window.tabbingMode
+        window.tabbingMode = .disallowed
+        if key { window.makeKeyAndOrderFront(nil) } else { window.orderFront(nil) }
+        window.tabbingMode = mode
+    }
+
+    /// The session file couldn't be read (SessionStore.loadForLaunch: kept
+    /// aside as `setAside`), or there is none but unsaved text is in the
+    /// store, or (`unreadableSession` false) the session was read but
+    /// didn't name buffers written just before the app died (the journal)
+    /// or held since an earlier launch: each buffer opens as an unsaved
+    /// "Recovered" tab, oldest first, in one window, caret at the end,
+    /// with a notice saying what happened. Their files, places and the
+    /// closed list were in the session; the text is all the store still
+    /// has, and it is not lost: the tabs are unsaved, so the next save
+    /// keeps their buffers. One that can't be read is held (kept, never
+    /// pruned) and reported.
+    private func recoverBuffers(_ ids: [UUID], setAside: URL?, unreadableSession: Bool) {
+        var host: NSWindow?
+        var built: [EditorWindowController] = []
+        var names: [String] = []
+        for id in ids {
+            let name = UntitledNames.next(open: names, base: String(localized: "Recovered"))
+            let st = SessionTab(id: id, untitledName: name, hasBuffer: true, selectionLocation: Int.max)
+            let place = host.map { h in (host: h, index: h.tabGroup?.windows.count ?? 1) }
+            guard let tab = restoreTab(st, into: place) as? EditorWindowController else { continue }
+            names.append(name)
+            built.append(tab)
+            // On screen before the next joins its tab group.
+            if host == nil, let w = tab.window { host = w; orderInAlone(w, key: true) }
+        }
+        let kept = setAside.map { String(localized: "Its session file was kept as “\($0.lastPathComponent)” in \($0.deletingLastPathComponent().path).") } ?? ""
+        let text = unreadableSession
+            ? String(localized: "Owlink couldn’t read its last session. This is unsaved text it found from it.") + (kept.isEmpty ? "" : " " + kept)
+            : String(localized: "Owlink found this unsaved text in its session folder. Its last session didn’t list it: Owlink stopped while saving it, or couldn’t read it before.")
+        for tab in built { tab.showNotice(text, buttons: []) }
+        host?.makeKeyAndOrderFront(nil)
+        if let setAside { FileHandle.standardError.write(Data("session: unreadable, kept as \(setAside.path); \(built.count) unsaved text(s) recovered\n".utf8)) }
+        if !unreadableSession, !built.isEmpty { FileHandle.standardError.write(Data("session: \(built.count) unsaved text(s) the session didn’t list recovered\n".utf8)) }
+    }
+
+    /// A closed tab's buffer a commit needed that isn't there right now,
+    /// isn't a regular file, or can't be read: held (kept, never pruned,
+    /// its entry stays on the closed list with its buffer) and said once.
+    func noteUnusableClosedBuffer(_ tab: SessionTab) {
+        guard let because = store.holdNeededBuffer(tab.id) else { return }
+        let name = tab.untitledName ?? tab.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled")
+        switch because {
+        case .missing:
+            noteRecoveryProblem(String(localized: "Owlink can’t find the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t there right now. If it comes back it is kept, and the tab stays in File › Reopen Closed Tab."))
+        case .unusable:
+            noteRecoveryProblem(String(localized: "Owlink can’t use the unsaved text kept for the closed tab “\(name)”: \(store.bufferURL(tab.id).path) isn’t a file it can read. It is left where it is, and the tab stays in File › Reopen Closed Tab."))
+        }
+    }
+
+    /// A buffer that is there but couldn't be read: kept (held) and said.
+    private func noteUnreadableBuffer(_ id: UUID, _ why: String) {
+        store.holdBuffer(id)
+        noteRecoveryProblem(String(localized: "Owlink couldn’t read unsaved text from its last session (\(why)). It is kept as \(store.bufferURL(id).path) and tried again next launch."))
+    }
+
+    /// Something launch couldn't recover: on stderr, and on the front tab
+    /// once launch is done (after the notices restored tabs show).
+    func noteRecoveryProblem(_ text: String) {
+        FileHandle.standardError.write(Data("session: recovery problem: \(text)\n".utf8))
+        recoveryProblems.append(text)
+        guard recoveryProblems.count == 1 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let all = self.recoveryProblems.joined(separator: " ")
+            self.recoveryProblems = []
+            guard let tab = self.currentTab ?? self.tabs.last else { return }
+            let shown = tab.noticeBar.flatMap { $0.isHidden ? nil : $0.label.stringValue }
+            tab.showNotice(shown.map { $0 + " " + all } ?? all, buttons: [])
         }
     }
 
@@ -800,22 +1445,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return restorePDFTab(st, into: place)
         }
         if st.image != nil || st.office != nil || st.certificate != nil { return restoreViewerTab(st, into: place) }
-        let doc = EditorDocument(id: st.id, fileURL: st.path.map { URL(fileURLWithPath: $0) },
+        var text: String?
+        var held = false
+        if st.hasBuffer {
+            // Not there right now is held too (a sync or restore may be
+            // moving it aside): skipped, the next prune after it is back
+            // would delete it (SessionStore.readBufferHoldingMissing).
+            switch store.readBufferHoldingMissing(st.id) {
+            case .text(let t): text = t
+            case .missing:
+                held = true
+                noteUnreadableBuffer(st.id, String(localized: "it isn’t there right now"))
+            case .unreadable(let why):
+                // Kept, never pruned; the tab (if its file is there) gets
+                // another id, so its own writes can't replace that buffer.
+                held = true
+                noteUnreadableBuffer(st.id, why)
+            }
+        }
+        let doc = EditorDocument(id: held ? UUID() : st.id, fileURL: st.path.map { URL(fileURLWithPath: $0) },
                                  untitledName: st.untitledName ?? st.path.map { URL(fileURLWithPath: $0).lastPathComponent } ?? String(localized: "Untitled"))
         doc.indentation = st.indentation
-        var text: String?
         var binary = false
-        if st.hasBuffer { text = store.readBuffer(st.id) }
-        if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding) {
+        // The text goes into the tab's storage and is let go (shareBytes: no second copy of a big file).
+        let fromBuffer = text != nil
+        if text == nil, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, encoding: st.encoding, shareBytes: true) {
             doc.apply(d)
-            doc.fileModified = mod
+            doc.noteDisk(mod)
             text = d.text
             binary = d.looksBinary
         } else if text != nil {
             doc.encoding = st.encoding
             doc.lineEnding = st.lineEnding
-            doc.fileModified = st.fileModified
+            // A pre-0.5.4 date-only stamp through a link: unverified (⌘S asks).
+            doc.noteDisk(doc.fileURL.map { DiskStamp.restored(st.diskStamp, for: $0) } ?? st.diskStamp)
         }
+        if fromBuffer { text = doc.restoreFormat(st, buffer: text) } else { _ = doc.restoreFormat(st, buffer: nil) }
         guard let body = text else { return nil } // the file is gone and there was no buffer
         if let l = st.language {
             doc.languageChoice.choose(l)
@@ -826,8 +1491,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         let tab = makeTab(doc, text: binary ? "" : body, in: place?.host, newWindow: place == nil, show: false, tabIndex: place?.index)
         if binary { tab.holdBinary(body) }
-        if st.hasBuffer { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
+        if st.hasBuffer, !held { doc.markDirtyFromSession(); doc.sessionChangeCount = doc.changeCount }
         tab.updateTitle()
+        // Unsaved text for a file deleted or moved while the app was not
+        // running: the "deleted or moved" bar, as when it goes while open.
+        if fromBuffer, let url = doc.fileURL, case .missing = DiskStamp.status(known: doc.diskStamp, at: url) { tab.showFileMissing() }
         let len = (body as NSString).length
         tab.textView.setSelectedRange(NSRange(location: min(st.selectionLocation, len), length: min(st.selectionLength, max(0, len - st.selectionLocation))))
         if let goal = st.wordGoal { tab.editing.wordGoal = goal }
@@ -887,7 +1555,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 if let f = p.group.frame { w.setFrame(from: f) }
                 if p.group.floatOnTop { setWindowFloats(true, w) }
                 p.group.built.append((p.index, w))
-                w.orderFront(nil)
+                orderInAlone(w, key: false)
             }
             return
         }
@@ -929,6 +1597,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func goToLine(_ sender: Any?) { currentTab?.goToLinePrompt(sender) }
     @objc func togglePreview(_ sender: Any?) { currentTab?.togglePreview() }
     @objc func toggleOutlineMenu(_ sender: Any?) { currentTab?.toggleOutline() }
+    @objc func toggleBacklinksMenu(_ sender: Any?) { currentTab?.toggleBacklinks() }
+    @objc func toggleTagsMenu(_ sender: Any?) { currentTab?.toggleTags() }
     @objc func goToHeadingMenu(_ sender: Any?) { currentTab?.goToHeading() }
     @objc func exportHTMLMenu(_ sender: Any?) { currentTab?.exportHTML() }
     @objc func exportPDFMenu(_ sender: Any?) { currentTab?.exportPDF() }
@@ -976,6 +1646,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc func pickLineEndingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let le = LineEnding(rawValue: raw) { currentTab?.convertLineEndings(to: le) }
     }
+    /// Format › Reopen with Encoding… (⌥⇧⌘R): the picker, under the status bar's encoding.
+    @objc func reopenWithEncodingMenu(_ sender: Any?) {
+        currentTab?.showReopenEncodingPicker()
+    }
+
     @objc func pickEncodingMenu(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let e = TextEncoding(rawValue: raw) { currentTab?.convertEncoding(to: e) }
     }
@@ -992,6 +1667,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             setShowHide(item, shown: s.showLineNumbers, show: String(localized: "Show Line Numbers"), hide: String(localized: "Hide Line Numbers"))
         case #selector(toggleSpellingWhileTyping(_:)): item.state = s.checkSpellingWhileTyping ? .on : .off
         case #selector(checkDocumentNow(_:)): return tab != nil
+        // Disabled, with a tooltip saying why, until the build is set up for updates (Updater.swift).
+        case #selector(checkForUpdates(_:)): return Updater.shared.validate(item)
         case #selector(showStatisticsMenu(_:)): return tab?.statusBar.counts.onClick != nil && tab?.statusBar.counts.isHidden == false
         // Explain & tidy (OwlTools.swift): on a selection that is one.
         case #selector(explainRegexMenu(_:)): return tab?.canExplainRegex == true
@@ -1020,6 +1697,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleOutlineMenu(_:)):
             setShowHide(item, shown: tab?.outlineVisible == true, show: String(localized: "Show Outline"), hide: String(localized: "Hide Outline"))
             return tab?.doc.language.hasOutline == true
+        case #selector(toggleBacklinksMenu(_:)):
+            setShowHide(item, shown: tab?.backlinksVisible == true, show: String(localized: "Show Backlinks"), hide: String(localized: "Hide Backlinks"))
+            return tab?.backlinksApply == true
+        case #selector(toggleTagsMenu(_:)):
+            setShowHide(item, shown: tab?.tagsVisible == true, show: String(localized: "Show Tags"), hide: String(localized: "Hide Tags"))
+            return tab != nil
         case #selector(goToHeadingMenu(_:)):
             return tab?.doc.language.hasOutline == true
         case #selector(exportHTMLMenu(_:)), #selector(exportPDFMenu(_:)),
@@ -1050,6 +1733,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(previewHomeMenu(_:)): return tab?.previewBarEnables(.home) == true
         case #selector(pickLanguageMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.language.rawValue ? .on : .off
         case #selector(pickLineEndingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.lineEnding.rawValue ? .on : .off
+        case #selector(reopenWithEncodingMenu(_:)): return tab?.doc.fileURL != nil
         case #selector(pickEncodingMenu(_:)): item.state = (item.representedObject as? String) == tab?.doc.encoding.rawValue ? .on : .off
         case #selector(reopenClosedTab(_:)): return !closedTabs.isEmpty
         case #selector(toggleFloatOnTop(_:)):

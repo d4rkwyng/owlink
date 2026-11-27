@@ -258,11 +258,23 @@ final class EditorGrammar {
         NotificationCenter.default.post(name: .cedricGrammarChecked, object: tab)
         if prose { offerHint(userAsked: false) }
         // Automatic AI grammar only where automatic AI checks are on (never
-        // on Intel by default), at most once per the AI's interval.
-        if prose, Settings.shared.owlChat, OwlHub.shared.ai.isActive, OwlHub.shared.ai.isAutomatic,
+        // on Intel by default), at most once per the AI's interval, and
+        // never over the auto-review cap.
+        // The built-in engine only once the user has loaded its model this
+        // session (or "Load model at launch"): this pass never loads it.
+        if prose, !tab.autoReviewCapped, Settings.shared.owlChat, OwlHub.shared.ai.isActive, OwlHub.shared.ai.isAutomatic,
+           Self.automaticAIAllowed(),
            Date().timeIntervalSince(lastAIPass ?? .distantPast) >= AIStore.load().minInterval {
             checkWithAI(userAsked: false)
         }
+    }
+
+    /// Automatic AI grammar may run: on the built-in engine only while a
+    /// model the user (or the launch opt-in) loaded is in memory, and not
+    /// after a load hung. Other engines: as before.
+    static func automaticAIAllowed() -> Bool {
+        guard AskCedricEngine.fakeDelay == nil, AskCedricEngine.settings()?.backend == .builtIn else { return true }
+        return BuiltInModelHost.shared.session.allowsAutomatic
     }
 
     // MARK: Check Grammar with Cedric
@@ -296,7 +308,9 @@ final class EditorGrammar {
         aiPasses += 1
         lastAIPass = Date()
         tab.owl?.setThinking(true)
-        Task { @MainActor [weak self] in
+        // Asked for: may load the built-in model. Automatic: may not
+        // (BuiltInModelHost refuses; `automaticAIAllowed` already checked).
+        BuiltInLoad.$intent.withValue(userAsked ? .userAsked : .automatic) { Task { @MainActor [weak self] in
             let masked = await Task.detached(priority: .utility) {
                 ProseMask.masked(text as NSString, language: language, openFence: lead.fence, blankPrefix: lead.frontMatter)
             }.value
@@ -327,14 +341,16 @@ final class EditorGrammar {
                 }
             }
             done?(found.count)
-        }
+        } }
     }
 
     /// The owl's bubble for the issue nearest after the caret in view, if
-    /// the rate limit and the user's choices allow.
+    /// the rate limit and the user's choices allow. Over the auto-review
+    /// cap only when asked (the popover's Grammar Hint).
     @discardableResult
     func offerHint(userAsked: Bool) -> Bool {
         guard let tab, let owl = tab.owl, !tab.owlIdleForSpeed, owl.bubble == nil, userAsked || !owl.chatBusy else { return false }
+        guard userAsked || !tab.autoReviewCapped else { return false }
         let hub = OwlHub.shared
         guard userAsked || (!hintsOffHere && !hub.coordinator.isQuiet && !hub.coordinator.never.contains(GrammarMap.globalID)) else { return false }
         // The owl's typing pause (3 s, CEDRIC_OWL_PAUSE in checks): never while typing.
@@ -361,7 +377,7 @@ final class EditorGrammar {
             userAsked || hub.coordinator.isEligible(GrammarMap.hint(i, textStart: 0), documentID: tab.doc.id)
         }) else { return false }
         let hint = GrammarMap.hint(issue, textStart: ctx.textStart)
-        hub.coordinator.markShown(hint, documentID: tab.doc.id)
+        hub.coordinator.markShown(hint, documentID: tab.doc.id, context: ctx)
         Self.policy.noteShown(Date())
         owl.present(hint, context: ctx)
         return true
@@ -685,6 +701,9 @@ extension EditorPalette {
 extension EditorTextView {
     /// Right-click on a grammar underline: the suggestion first, then the usual menu.
     override func menu(for event: NSEvent) -> NSMenu? {
+        // Its Learn, Ignore and Unlearn Spelling change the dictionary:
+        // AppKit's next spelling pass is its own (SpellCheckCoverage).
+        spellCoverage.clear()
         let menu = super.menu(for: event)
         guard let g = grammar, !grammarRanges.isEmpty else { return menu }
         let p = convert(event.locationInWindow, from: nil)

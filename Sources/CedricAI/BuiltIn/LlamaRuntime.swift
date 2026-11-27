@@ -16,11 +16,10 @@ import CLlamaLoader
 /// Macs run on the CPU (ggml's Metal path on Intel GPUs is not something we
 /// test or rely on), which works but is slow.
 public struct LlamaRuntime: BuiltInRuntime {
-    #if os(iOS)
-    public static let contextTokens: Int32 = CedricAI.LlamaRuntime.contextTokens
-    #else
-    public static let contextTokens: Int32 = 16384
-    #endif
+    /// n_ctx for a model that isn't in the catalog (live tests only):
+    /// the largest step. Catalog models use `BuiltInModel.contextTokens()`,
+    /// which `BuiltInChatEngine.contextBudget` reads too.
+    static let uncatalogedContextTokens = ContextWindow.builtInSteps[0]
     static let batchTokens: Int32 = 512
 
     public init() {}
@@ -49,8 +48,8 @@ public struct LlamaRuntime: BuiltInRuntime {
     /// that isn't in Owlink's list, such as a hybrid one for the KV-cache
     /// fallback). Never called by the app.
     static func loadForTesting(path: String) throws -> LlamaModel {
-        let model = try LlamaModel(path: path, api: api.get())
-        LlamaModel.registerForExit(model)
+        let model = try LlamaModel(path: path, api: api.get(), contextTokens: uncatalogedContextTokens)
+        guard LlamaModel.registerForExit(model) else { model.freeNow(); throw BuiltInError.cancelled }
         return model
     }
 
@@ -68,27 +67,76 @@ public struct LlamaRuntime: BuiltInRuntime {
         guard let model = ModelCatalog.bundled()?.models.first(where: { $0.fileName == url.lastPathComponent }) else {
             throw BuiltInError.loadFailed("not a model from Owlink's list")
         }
-        #if os(iOS)
-        if let why = ModelMemoryGate.refusal(for: model, available: Int64(os_proc_available_memory()),
-                                             contextTokens: Self.contextTokens) {
-            throw BuiltInError.loadFailed(why)
-        }
-        #endif
         let store = ModelStore(directory: url.deletingLastPathComponent())
-        return try await withCheckedThrowingContinuation { cont in
-            LlamaModel.queue.async {
-                guard store.verifiedForLoad(model) else {
-                    cont.resume(throwing: BuiltInError.loadFailed("the model file doesn't match its checksum; delete it and download it again"))
-                    return
+        // Gated on this Mac's memory and the model's size (16 384, 8192 or 4096).
+        let contextTokens = model.contextTokens()
+        // Off the main thread, on llama.cpp's queue. Cancelling (the
+        // host's watchdog, BuiltInWatchdog) sets `stop`: the file read
+        // stops at its next progress callback and the warm-up decode at
+        // its next abort check. llama_init_from_model has no callback and
+        // can't be stopped; a model that finishes anyway is freed here.
+        let stop = LlamaLoadStop()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                LlamaModel.queue.async {
+                    guard !stop.isSet else { cont.resume(throwing: BuiltInError.cancelled); return }
+                    guard store.verifiedForLoad(model) else {
+                        cont.resume(throwing: BuiltInError.loadFailed("the model file doesn't match its checksum; delete it and download it again"))
+                        return
+                    }
+                    do {
+                        let model = try LlamaModel(path: url.path, api: Self.api.get(), contextTokens: contextTokens, stop: stop)
+                        // The app is quitting: freed here, never handed out.
+                        guard LlamaModel.registerForExit(model) else { model.freeNow(); throw BuiltInError.cancelled }
+                        do {
+                            // The first decode, inside the watchdog's time.
+                            try model.warmUp()
+                        } catch {
+                            model.freeNow()
+                            throw stop.isSet ? BuiltInError.cancelled : error
+                        }
+                        if stop.isSet { model.freeNow(); throw BuiltInError.cancelled }
+                        cont.resume(returning: model)
+                    } catch { cont.resume(throwing: stop.isSet ? BuiltInError.cancelled : error) }
                 }
-                do {
-                    let model = try LlamaModel(path: url.path, api: Self.api.get())
-                    LlamaModel.registerForExit(model)
-                    cont.resume(returning: model)
-                } catch { cont.resume(throwing: error) }
             }
+        } onCancel: {
+            stop.set()
         }
     }
+}
+
+/// Set when a load is given up on. llama.cpp polls it from its loader
+/// thread (progress callback) and from graph compute (abort callback).
+/// The abort callback also asks the request running now (`current`):
+/// a cancelled question stops its prefill or decode between graph nodes,
+/// not only between batches.
+final class LlamaLoadStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    private var current: LlamaRequestStop?
+    var isSet: Bool { lock.withLock { flag } }
+    func set() { lock.withLock { flag = true } }
+    /// The request whose cancel aborts a decode now (nil between requests).
+    func begin(_ request: LlamaRequestStop?) { lock.withLock { current = request } }
+    /// What the context's abort callback answers.
+    var shouldAbort: Bool { lock.withLock { flag || (current?.isSet ?? false) } }
+    var pointer: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
+    static func from(_ p: UnsafeMutableRawPointer?) -> LlamaLoadStop? {
+        p.map { Unmanaged<LlamaLoadStop>.fromOpaque($0).takeUnretainedValue() }
+    }
+}
+
+/// One generate call's cancel. Each request has its own, so a new request
+/// starting can never clear an older one's cancel (0.5.2 had one flag per
+/// model, reset by every `generate`: a question cancelled while it waited
+/// or prefilled ran on to its end once the next request, the owl's or the
+/// user's, began, and the next question waited behind it).
+final class LlamaRequestStop: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var isSet: Bool { lock.withLock { flag } }
+    func set() { lock.withLock { flag = true } }
 }
 
 /// A loaded GGUF model plus one context. Every llama.cpp call happens on
@@ -104,8 +152,6 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     private var context: OpaquePointer?
     private let vocab: OpaquePointer?
     private let template: String?
-    private let cancelLock = NSLock()
-    private var cancelFlag = false
 
     /// What the KV cache holds (sequence 0), token by token: the last
     /// request's prompt and the tokens decoded after it. nil when unknown
@@ -121,10 +167,20 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
 
     /// llama.cpp's functions (CLlamaLoader).
     private let L: cedric_llama_api
+    /// The context's n_ctx: the prompt plus the answer must fit.
+    let contextTokens: Int
+    /// The load's stop flag; llama.cpp holds a pointer to it (progress and
+    /// abort callbacks), so it lives as long as the context.
+    private let stop: LlamaLoadStop
 
-    init(path: String, api: cedric_llama_api) throws {
+    init(path: String, api: cedric_llama_api, contextTokens: Int, stop: LlamaLoadStop = LlamaLoadStop()) throws {
         L = api
+        self.contextTokens = contextTokens
+        self.stop = stop
         var mp = L.llama_model_default_params!()
+        // Returning false stops the load (the watchdog gave up on it).
+        mp.progress_callback = { _, data in !(LlamaLoadStop.from(data)?.isSet ?? false) }
+        mp.progress_callback_user_data = stop.pointer
         #if arch(x86_64)
         mp.n_gpu_layers = 0
         #else
@@ -134,8 +190,15 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
             throw BuiltInError.loadFailed("llama.cpp could not read the model file")
         }
         var cp = L.llama_context_default_params!()
-        cp.n_ctx = UInt32(LlamaRuntime.contextTokens)
+        cp.n_ctx = UInt32(contextTokens)
         cp.n_batch = UInt32(LlamaRuntime.batchTokens)
+        // True aborts a decode: after the watchdog gave up on this load,
+        // or (below) the running request was cancelled. Backends check it between graph nodes (best effort on
+        // Metal: a command buffer already on the GPU runs to its end).
+        // Also true once the running request is cancelled (Stop, a new
+        // question, the panel closed): its prefill stops mid-batch.
+        cp.abort_callback = { data in LlamaLoadStop.from(data)?.shouldAbort ?? false }
+        cp.abort_callback_data = stop.pointer
         #if arch(x86_64)
         let threads = Int32(max(1, Self.physicalCores()))
         cp.n_threads = threads
@@ -155,12 +218,31 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         Self.queue.async { [self] in freeOnQueue() }
     }
 
+    /// Frees now; on `queue` only (a load that was given up on).
+    func freeNow() { freeOnQueue() }
+
+    /// One tiny decode right after the context is made: the first decode
+    /// is where Metal builds its pipelines and first runs a graph, so a GPU
+    /// that hangs, hangs here, inside the load and its watchdog, not in
+    /// the user's first request. The cache is cleared afterwards. On `queue`.
+    func warmUp() throws {
+        guard let context else { throw BuiltInError.notInstalled }
+        var tokens = Array(tokenize("ok").prefix(4))
+        guard !tokens.isEmpty else { return }
+        let rc = tokens.withUnsafeMutableBufferPointer { buf in
+            L.llama_decode!(context, L.llama_batch_get_one!(buf.baseAddress!, Int32(buf.count)))
+        }
+        L.llama_memory_clear!(L.llama_get_memory!(context), true)
+        cached = []
+        guard rc == 0 else { throw BuiltInError.loadFailed("llama.cpp could not run the model (warm-up decode \(rc))") }
+    }
+
     private func freeOnQueue() {
         if let context { L.llama_free!(context) }
         if let model { L.llama_model_free!(model) }
         context = nil
         model = nil
-        Self.liveLock.withLock { Self.live[ObjectIdentifier(self)] = nil }
+        Self.exitRegistry.remove(self)
     }
 
     // MARK: Exit
@@ -172,26 +254,51 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     // handlers and C++ static destructors run in reverse order, so ours
     // runs before ggml's).
 
-    nonisolated(unsafe) private static var live: [ObjectIdentifier: LlamaModel] = [:]
-    private static let liveLock = NSLock()
+    static let exitRegistry = ExitRegistry<LlamaModel>()
+    private static let hookLock = NSLock()
     nonisolated(unsafe) private static var exitHookInstalled = false
 
-    static func registerForExit(_ model: LlamaModel) {
-        liveLock.withLock {
-            live[ObjectIdentifier(model)] = model
+    /// Records `model` for freeing at exit. False once exit has begun: the
+    /// caller (on `queue`) frees it and doesn't hand it out.
+    @discardableResult
+    static func registerForExit(_ model: LlamaModel) -> Bool {
+        hookLock.withLock {
             if !exitHookInstalled {
                 exitHookInstalled = true
                 atexit { LlamaModel.freeAllNow() }
             }
         }
+        return exitRegistry.register(model)
     }
 
-    /// Frees every loaded model synchronously (exit, app termination).
+    /// How long exit waits for llama.cpp's queue to free the models. A
+    /// request or warm-up stops at the abort flag (set first) within a
+    /// graph node or a batch; only a decode the flag can't reach (a GPU
+    /// that hung) or an unstoppable context creation takes longer.
+    static let exitWait: TimeInterval = 5
+
+    /// Frees every loaded model synchronously, at exit (the atexit hook):
+    /// `ExitRegistry.exit`, ending the process with `_exit` if llama.cpp's
+    /// queue doesn't get to it within `exitWait`.
+    ///
+    /// The model is registered before its warm-up decode, so a warm-up the
+    /// watchdog gave up on (a GPU that hung, the abort flag never read) is
+    /// registered while it blocks the queue. Waiting for the queue without
+    /// a limit made Quit hang there (0.5.3). Freeing would wait forever,
+    /// and running ggml's Metal device destructor with a context still
+    /// alive aborts, so the process ends at once instead.
     static func freeAllNow() {
-        let models = liveLock.withLock { Array(live.values) }
-        for m in models { m.cancelLock.withLock { m.cancelFlag = true } }
-        let free = { for m in models { m.freeOnQueue() } }
-        if DispatchQueue.getSpecific(key: queueKey) != nil { free() } else { queue.sync(execute: free) }
+        exitRegistry.exit(on: queue, onQueue: DispatchQueue.getSpecific(key: queueKey) != nil, timeout: exitWait,
+                          stop: { $0.stop.set() }, free: { $0.freeOnQueue() }, giveUp: { _exit(0) })
+    }
+
+    /// Runs `work` on `queue` and waits at most `timeout` seconds for it:
+    /// true if it ran, false if the queue was still busy (`work` stays
+    /// queued). Exit's wait (`freeAllNow`).
+    static func runBounded(on queue: DispatchQueue, timeout: TimeInterval, _ work: @escaping @Sendable () -> Void) -> Bool {
+        let done = DispatchSemaphore(value: 0)
+        queue.async { work(); done.signal() }
+        return done.wait(timeout: .now() + timeout) == .success
     }
 
     private static let queueKey = DispatchSpecificKey<Bool>()
@@ -205,27 +312,38 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
     }
 
     private func generate(_ request: GenerationRequest, stream: (@Sendable (String) -> Void)?) async throws -> GenerationResult {
-        cancelLock.withLock { cancelFlag = false }
+        // This request's own cancel: set by its task's cancellation, read
+        // by `run` between tokens and batches and by llama.cpp's abort
+        // callback inside a decode. Never cleared by a later request.
+        let cancel = LlamaRequestStop()
+        if Task.isCancelled { throw BuiltInError.cancelled }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { cont in
                 Self.queue.async { [self] in
-                    do { cont.resume(returning: try run(request, stream: stream)) } catch { cont.resume(throwing: error) }
+                    // Cancelled while it waited for the queue: never starts.
+                    guard !cancel.isSet else { cont.resume(throwing: BuiltInError.cancelled); return }
+                    stop.begin(cancel)
+                    defer { stop.begin(nil) }
+                    do { cont.resume(returning: try run(request, cancel: cancel, stream: stream)) } catch {
+                        // An aborted decode returns an error code: it is the cancel.
+                        cont.resume(throwing: cancel.isSet ? BuiltInError.cancelled : error)
+                    }
                 }
             }
         } onCancel: {
-            cancelLock.withLock { cancelFlag = true }
+            cancel.set()
         }
     }
 
-    private var isCancelled: Bool { cancelLock.withLock { cancelFlag } }
-
     // MARK: On `queue`
 
-    private func run(_ request: GenerationRequest, stream: (@Sendable (String) -> Void)? = nil) throws -> GenerationResult {
+    private func run(_ request: GenerationRequest, cancel: LlamaRequestStop,
+                     stream: (@Sendable (String) -> Void)? = nil) throws -> GenerationResult {
+        var isCancelled: Bool { cancel.isSet || stop.isSet }
         guard let context, let vocab else { throw BuiltInError.notInstalled }
         let prompt = formatChat(request.conversation)
         var tokens = tokenize(prompt)
-        let limit = Int(LlamaRuntime.contextTokens) - request.maxTokens
+        let limit = contextTokens - request.maxTokens
         guard tokens.count <= limit else { throw BuiltInError.promptTooLong(tokens: tokens.count, limit: limit) }
 
         let sampler = makeSampler(grammar: request.grammar)
@@ -393,6 +511,52 @@ final class LlamaModel: LoadedModel, @unchecked Sendable {
         var size = MemoryLayout<Int32>.size
         if sysctlbyname("hw.physicalcpu", &cores, &size, nil, 0) == 0, cores > 0 { return Int(cores) }
         return ProcessInfo.processInfo.activeProcessorCount
+    }
+}
+
+/// The models to free at exit (ggml's Metal device must outlive no
+/// context: `LlamaModel.freeAllNow`). Generic so the exit path can be
+/// tested without llama.cpp.
+final class ExitRegistry<Model: AnyObject & Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var live: [ObjectIdentifier: Model] = [:]
+    private var closed = false
+
+    /// False once exit has begun: the caller frees `model` itself.
+    func register(_ model: Model) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            live[ObjectIdentifier(model)] = model
+            return true
+        }
+    }
+
+    func remove(_ model: Model) { lock.withLock { live[ObjectIdentifier(model)] = nil } }
+
+    var isClosed: Bool { lock.withLock { closed } }
+    var count: Int { lock.withLock { live.count } }
+
+    /// Exit: closes registration, asks every model registered now to
+    /// `stop` (a warm-up or request under way ends at its abort flag), then
+    /// frees on `queue` every model still registered when the queue gets
+    /// there, waiting at most `timeout`; `giveUp` if it didn't.
+    ///
+    /// Always goes through the queue, even with nothing registered: a load
+    /// running there is refused registration when it ends and frees its
+    /// model itself, and that must happen before exit carries on. Before
+    /// 0.5.4's review, the set was read before the wait and an empty one
+    /// returned at once, so a model registering in between was left
+    /// alive for ggml's teardown.
+    func exit(on queue: DispatchQueue, onQueue: Bool, timeout: TimeInterval,
+              stop: (Model) -> Void, free: @escaping @Sendable (Model) -> Void, giveUp: () -> Void) {
+        let now: [Model] = lock.withLock { closed = true; return Array(live.values) }
+        for m in now { stop(m) }
+        let freeAll: @Sendable () -> Void = { [self] in
+            for m in lock.withLock({ Array(live.values) }) { free(m) }
+        }
+        if onQueue { freeAll(); return }
+        if LlamaModel.runBounded(on: queue, timeout: timeout, freeAll) { return }
+        giveUp()
     }
 }
 #endif

@@ -6,7 +6,7 @@ import WebKit
 /// In-process checks of the Markdown preview and tools, run by
 /// Scripts/tools-check.sh like the other DevChecks.
 ///
-///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport
+///   CEDRIC_CHECK=mdpreview|previewanchor|outline|mdexport|mermaidmath
 @MainActor
 extension DevChecks {
     static func markdownPreviewCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -18,7 +18,7 @@ extension DevChecks {
         case "previewbar": previewBarCheck(app)
         case "mdsite": siteCheck(app)
         case "previewnav": previewNavigationDemo(app)
-        case "mdfrontmatter": frontMatterCheck(app)
+        case "mermaidmath": mermaidMathCheck(app)
         default: return false
         }
         return true
@@ -50,366 +50,6 @@ extension DevChecks {
             snapshot("returned-home.png", window: tab.window),
             sync { finish() },
         ])
-    }
-
-    /// The front matter block as the reader leaves it (Codex review of
-    /// 0.5.2 (17), must-fix 3): opened, it stays open through edits (body
-    /// swaps) and a whole-page reload, and the next document opens it from
-    /// the preference; closed, the same. The preference is put back after.
-    static func frontMatterCheck(_ app: AppDelegate) {
-        let saved = UserDefaults.standard.object(forKey: FrontMatterDisclosure.preferenceKey)
-        PreviewController.frontMatterExpanded = false
-        let text = "---\ntitle: Owls of the World\nhero:\n  icon: owl.png\n---\n# Owls\n\nThey hunt at night.\n"
-        let tab = app.open(write("owls.md", text))!
-        sized(tab)
-        let p = { tab.preview }
-        var before = 0
-        let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
-        func expectState(_ want: String, _ name: String, in t: EditorWindowController? = nil) -> (@escaping () -> Void) -> Void {
-            { next in previewJS(t ?? tab, state) { v in expect(v as? String == want, name, "\(v ?? "nil")"); next() } }
-        }
-        func edit(_ s: String) -> (@escaping () -> Void) -> Void {
-            sync {
-                before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0)
-                focus(tab)
-                tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
-                type(s)
-            }
-        }
-        var second: EditorWindowController?
-        var linker: EditorWindowController?
-        var secondOpen = false
-        var direct: EditorWindowController?
-        var via: EditorWindowController?
-        var directOpen = false
-        var swinger: EditorWindowController?
-        var barred: URL?
-        run([
-            sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
-            waitForPreview(tab, contains: "They hunt at night", "the preview shows the document"),
-            expectState("false", "front matter collapsed by default"),
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            edit("a"),
-            waitForSwap(tab, "an edit renders", since: { before }),
-            expectState("true", "an opened block stays open through an edit (body swap)"),
-            sync { expect(PreviewController.frontMatterExpanded, "opening it is kept as the preference") },
-            sync { p()?.forceReload(); before = (p()?.bodySwaps ?? 0) + (p()?.pageLoads ?? 0) },
-            edit("b"),
-            waitForSwap(tab, "a reload renders", since: { before }),
-            waitForPreview(tab, contains: "night. ab", "the reloaded page shows the edits"),
-            expectState("true", "an opened block stays open through a whole-page reload"),
-            sync { second = app.open(write("barn.md", "---\ntitle: Barn owl\n---\n# Barn\n\nPale.\n")) },
-            { next in
-                guard let second else { expect(false, "second document opens"); next(); return }
-                sized(second); focus(second)
-                if !second.previewVisible { second.togglePreview() }
-                next()
-            },
-            { next in
-                guard let second else { next(); return }
-                waitForPreview(second, contains: "Pale", "the second document's preview")(next)
-            },
-            { next in
-                guard let second else { next(); return }
-                expectState("true", "the next document opens the block from the preference", in: second)(next)
-            },
-            sync { focus(tab) },
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            edit("c"),
-            waitForSwap(tab, "an edit renders", since: { before }),
-            expectState("false", "a closed block stays closed through an edit"),
-            sync { expect(!PreviewController.frontMatterExpanded, "closing it is kept as the preference") },
-            // Codex review of the 0.5.2 (17) fixes, should-fix: opened,
-            // then the preview closed with no edit or refresh between.
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { focus(tab); tab.togglePreview() },
-            until("closing the preview keeps the opened block as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
-            sync { tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview opens again"),
-            expectState("true", "the reopened preview has the block open"),
-            // Codex review round 2, should-fix: reopened at once, before
-            // the close-time read has come back, the new preview still
-            // shows the block as the reader left it.
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once"),
-            expectState("false", "reopened at once, the closed block is still closed"),
-            sync { expect(!PreviewController.frontMatterExpanded, "closing it at once is kept as the preference") },
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again"),
-            expectState("true", "reopened at once, the opened block is still open"),
-            sync { expect(PreviewController.frontMatterExpanded, "opening it at once is kept as the preference") },
-            // Codex review round 3, should-fix: the close-time read comes
-            // back after its one-second timeout (held back 1.5 s), when
-            // the reopened preview has already rendered with the old
-            // preference: the late read still sets the block there.
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (a slow close-time read)"),
-            // Codex b18 round 1, should-fix 2: the page shows the old state
-            // while the read is out (the render didn't wait for it).
-            expectState("true", "while the slow read is out, the reopened block shows the old state (open)"),
-            untilState(tab, "false", "a close-time read that comes back late sets the reopened block closed", timeout: 5),
-            sync { expect(!PreviewController.frontMatterExpanded, "the late read's closing is kept as the preference") },
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once again (a slow close-time read)"),
-            expectState("false", "while the slow read is out, the reopened block shows the old state (closed)"),
-            untilState(tab, "true", "a close-time read that comes back late sets the reopened block open", timeout: 5),
-            sync { expect(PreviewController.frontMatterExpanded, "the late read's opening is kept as the preference") },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Codex review round 3, should-fix 2: a slow close-time read in
-            // this tab doesn't hold up a render in another tab (renders
-            // used to wait for every close-time read, up to a second).
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview() },
-            { next in
-                guard let second else { expect(false, "the second document is open"); next(); return }
-                let start = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
-                let t0 = Date()
-                second.renderPreview()
-                @MainActor func poll() {
-                    let n = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
-                    let ms = Int(Date().timeIntervalSince(t0) * 1000)
-                    if n > start {
-                        expect(ms < 500, "another tab's render isn't held up by a slow close-time read", "\(ms) ms")
-                        next()
-                    } else if ms > 3000 {
-                        expect(false, "another tab's render isn't held up by a slow close-time read", "no render")
-                        next()
-                    } else {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { MainActor.assumeIsolated { poll() } }
-                    }
-                }
-                poll()
-            },
-            until("the slow close-time read still keeps the closed block", timeout: 4) { !PreviewController.frontMatterExpanded },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Codex b18 round 1, must-fix 1: a change recorded in another
-            // tab while this tab's slow read is out stays the preference,
-            // and the read still sets this document's reopened block.
-            sync { focus(tab); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview opens (unrelated tab)"),
-            expectState("false", "the preview opens with the block closed (unrelated tab)"),
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (unrelated tab)"),
-            expectState("false", "while the read is out, the reopened block is still closed (unrelated tab)"),
-            { next in
-                guard let second else { next(); return }
-                previewJS(second, "document.querySelector('details.frontmatter').open = false; 1") { _ in
-                    before = (second.preview?.bodySwaps ?? 0) + (second.preview?.pageLoads ?? 0)
-                    second.renderPreview()
-                    waitForSwap(second, "the other tab renders", since: { before })(next)
-                }
-            },
-            untilState(tab, "true", "a change in another tab doesn't stop the late read setting this document's block", timeout: 5),
-            sync { expect(!PreviewController.frontMatterExpanded, "the other tab's newer change stays the preference") },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Must-fix 2: closed, reopened and closed again before the
-            // first read comes back, then reopened: the first read (the
-            // only one that saw the change) still sets the block.
-            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens (two closes)"),
-            expectState("false", "the block starts closed (two closes)"),
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (two closes)"),
-            sync { focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens a second time (two closes)"),
-            expectState("false", "while the first read is out, the block is still closed (two closes)"),
-            untilState(tab, "true", "a second close before the first read lands doesn't drop the reader's change", timeout: 5),
-            until("and it is kept as the preference (two closes)", timeout: 3) { PreviewController.frontMatterExpanded },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Must-fix 4: the reader clicks the block twice in the reopened
-            // preview before the late read comes back: their choice stands.
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; focus(tab); tab.togglePreview(); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview reopens at once (double toggle)"),
-            expectState("true", "while the read is out, the reopened block is still open (double toggle)"),
-            { next in previewJS(tab, "const s = document.querySelector('details.frontmatter > summary'); s.click(); s.click(); 1") { _ in next() } },
-            expectState("true", "two clicks leave the block open"),
-            until("the late read comes back (double toggle)", timeout: 5) { !PreviewController.frontMatterExpanded },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
-            expectState("true", "a late read doesn't undo the reader's two clicks"),
-            sync { PreviewController.closeReadDelayForChecks = 0; focus(tab); tab.togglePreview() },
-            until("closing keeps the reader's last choice (open) as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
-            // Must-fix 3: a read belongs to the page the preview shows. The
-            // linked barn.md's state, read as A's preview closes while it
-            // shows barn, isn't set on A's reopened page; A's own read isn't
-            // set on barn shown in A's reopened preview.
-            sync {
-                linker = app.open(write("linker.md", "---\ntitle: Linker\n---\n# Linker\n\nSee [Barn](barn.md).\n"))
-                if let l = linker { sized(l); focus(l); if !l.previewVisible { l.togglePreview() } }
-            },
-            { next in
-                guard let l = linker else { expect(false, "the linking document opens"); next(); return }
-                waitForPreview(l, contains: "See Barn", "the linking document's preview")(next)
-            },
-            { next in expectState("true", "the linking page opens the block from the preference", in: linker)(next) },
-            { next in
-                guard let l = linker else { next(); return }
-                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
-                    waitForPreview(l, contains: "Pale", "the preview shows the linked page")(next)
-                }
-            },
-            { next in expectState("true", "the linked page opens the block from the preference", in: linker)(next) },
-            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
-            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the preview shows the linking page")(next) },
-            { next in expectState("true", "while the linked page's read is out, the linking page's block is open", in: linker)(next) },
-            until("the linked page's late read is kept as the preference", timeout: 5) { !PreviewController.frontMatterExpanded },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
-            { next in expectState("true", "the linked page's late read isn't set on the linking document's page", in: linker)(next) },
-            sync { PreviewController.closeReadDelayForChecks = 0; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
-            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "the linking page again")(next) },
-            { next in expectState("false", "the linking page opens closed from the preference", in: linker)(next) },
-            { next in guard let l = linker else { next(); return }; previewJS(l, "document.querySelector('details.frontmatter').open = true; 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 2.5; if let l = linker { focus(l); l.togglePreview(); l.togglePreview() } },
-            { next in guard let l = linker else { next(); return }; waitForPreview(l, contains: "See Barn", "reopened at once, the linking page")(next) },
-            { next in expectState("false", "while its read is out, the linking page's block is still closed", in: linker)(next) },
-            { next in
-                guard let l = linker else { next(); return }
-                previewJS(l, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Barn').click(); 1") { _ in
-                    waitForPreview(l, contains: "Pale", "the reopened preview follows the link")(next)
-                }
-            },
-            { next in expectState("false", "the linked page opens closed from the preference", in: linker)(next) },
-            until("the linking page's late read is kept as the preference", timeout: 5) { PreviewController.frontMatterExpanded },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
-            { next in expectState("false", "the linking page's late read isn't set on the linked page its preview shows", in: linker)(next) },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Codex b18 round 2, must-fix 1: A's late read lands while A's
-            // reopened preview is still loading, then B's late read lands
-            // before A has finished loading: A still ends up in A's state
-            // (B's read used to take A's one pending slot).
-            sync { focus(tab); tab.togglePreview() },
-            waitForPreview(tab, contains: "They hunt at night", "the preview opens (two late reads)"),
-            expectState("true", "the block starts open (two late reads)"),
-            { next in previewJS(tab, "document.querySelector('details.frontmatter').open = false; 1") { _ in next() } },
-            { next in
-                guard let second else { expect(false, "the second document is open"); next(); return }
-                previewJS(second, "const d = document.querySelector('details.frontmatter'); d.open = !d.open; String(d.open)") { v in
-                    secondOpen = v as? String == "true"
-                    next()
-                }
-            },
-            sync {
-                PreviewController.holdFinishForChecks = true
-                PreviewController.closeReadDelayForChecks = 1.0
-                focus(tab); tab.togglePreview(); tab.togglePreview()
-                PreviewController.closeReadDelayForChecks = 1.6
-                if let second { focus(second); second.togglePreview() }
-            },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { next() } },
-            sync { expect(PreviewController.frontMatterExpanded == secondOpen, "B's later read is kept as the preference (two late reads)") },
-            sync { PreviewController.releaseFinishesForChecks() },
-            untilState(tab, "false", "A's and then B's late reads land while A's page loads: A ends up in A's state", timeout: 5),
-            sync { PreviewController.closeReadDelayForChecks = 0; if let second { focus(second); second.togglePreview() } },
-            { next in
-                guard let second else { next(); return }
-                waitForPreview(second, contains: "Pale", "the second document's preview opens again")(next)
-            },
-            // Codex b18 round 2, must-fix 3: a page is keyed by the file it
-            // shows. A late read from a preview that followed a link
-            // through a symlink is set on a preview opened on the target.
-            sync {
-                let real = write("tawny.md", "---\ntitle: Tawny owl\n---\n# Tawny\n\nBrown.\n")
-                try? FileManager.default.createSymbolicLink(at: real.deletingLastPathComponent().appendingPathComponent("alias.md"),
-                                                            withDestinationURL: real)
-                direct = app.open(real)
-                if let d = direct { sized(d); focus(d); if !d.previewVisible { d.togglePreview() } }
-                via = app.open(write("via.md", "---\ntitle: Via\n---\n# Via\n\nSee [Alias](alias.md).\n"))
-                if let v = via { sized(v); focus(v); if !v.previewVisible { v.togglePreview() } }
-            },
-            { next in
-                guard let d = direct else { expect(false, "the target document opens"); next(); return }
-                waitForPreview(d, contains: "Brown", "the target's preview")(next)
-            },
-            { next in
-                guard let v = via else { expect(false, "the document linking through a symlink opens"); next(); return }
-                waitForPreview(v, contains: "See Alias", "the linking document's preview (symlink)")({
-                    previewJS(v, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Alias').click(); 1") { _ in
-                        waitForPreview(v, contains: "Brown", "the preview follows the link through the symlink")(next)
-                    }
-                })
-            },
-            { next in
-                guard let d = direct else { next(); return }
-                previewJS(d, "String(document.querySelector('details.frontmatter').open)") { v in
-                    directOpen = v as? String == "true"
-                    next()
-                }
-            },
-            { next in guard let v = via else { next(); return }; previewJS(v, "document.querySelector('details.frontmatter').open = \(!directOpen); 1") { _ in next() } },
-            sync { PreviewController.closeReadDelayForChecks = 1.0; if let v = via { focus(v); v.togglePreview() } },
-            { next in
-                guard let d = direct else { next(); return }
-                untilState(d, String(!directOpen), "a late read through a symlink is set on the preview opened on the target", timeout: 5)(next)
-            },
-            sync { PreviewController.closeReadDelayForChecks = 0 },
-            // Codex b18 round 3, must-fix: a symlink retargeted after the
-            // linked file was read but before its page loads doesn't give
-            // the page the new target's key: the key is the file shown.
-            sync {
-                let b = write("barred.md", "---\ntitle: Barred owl\n---\n# Barred\n\nStripes.\n")
-                let spotted = write("spotted.md", "---\ntitle: Spotted owl\n---\n# Spotted\n\nDots.\n")
-                let swing = b.deletingLastPathComponent().appendingPathComponent("swing.md")
-                try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: b)
-                barred = b
-                PreviewController.afterLinkedReadForChecks = {
-                    try? FileManager.default.removeItem(at: swing)
-                    try? FileManager.default.createSymbolicLink(at: swing, withDestinationURL: spotted)
-                }
-                swinger = app.open(write("swinger.md", "---\ntitle: Swinger\n---\n# Swinger\n\nSee [Swing](swing.md).\n"))
-                if let s = swinger { sized(s); focus(s); if !s.previewVisible { s.togglePreview() } }
-            },
-            { next in
-                guard let s = swinger else { expect(false, "the document linking through a retargeted symlink opens"); next(); return }
-                waitForPreview(s, contains: "See Swing", "the linking document's preview (retargeted symlink)")({
-                    previewJS(s, "[...document.querySelectorAll('a')].find(a => a.textContent === 'Swing').click(); 1") { _ in
-                        waitForPreview(s, contains: "Stripes", "the preview shows the file read before the symlink was retargeted")(next)
-                    }
-                })
-            },
-            sync {
-                PreviewController.afterLinkedReadForChecks = nil
-                let want = barred.map(PreviewController.pageKey(for:))
-                let got = swinger?.preview?.pageKeyForChecks
-                expect(want != nil && got == want, "a symlink retargeted before the page loads: the page's key is the file shown",
-                       "\(got ?? "nil") vs \(want ?? "nil")")
-            },
-            // Codex b18 round 2, should-fix 3: once no preview shows a page
-            // and no read of it is out, its kept change time goes.
-            sync { expect(!PreviewController.pageChangeKeysForChecks.isEmpty, "pages' change times are kept while their previews are open") },
-            sync {
-                for t in [tab, second, linker, direct, via, swinger].compactMap({ $0 }) where t.previewVisible { focus(t); t.togglePreview() }
-            },
-            until("the pages' change times drain once every preview has closed", timeout: 5) { PreviewController.pageChangeKeysForChecks.isEmpty },
-            sync {
-                if let saved { UserDefaults.standard.set(saved, forKey: FrontMatterDisclosure.preferenceKey) }
-                else { UserDefaults.standard.removeObject(forKey: FrontMatterDisclosure.preferenceKey) }
-                finish()
-            },
-        ])
-    }
-
-    /// Waits (up to `timeout`) for the preview's front matter block to be
-    /// `want` ("true", "false" or "none").
-    static func untilState(_ tab: EditorWindowController, _ want: String, _ name: String, timeout: Double) -> (@escaping () -> Void) -> Void {
-        { next in
-            let deadline = Date().addingTimeInterval(timeout)
-            let state = "(() => { const d = document.querySelector('details.frontmatter'); return d ? String(d.open) : 'none' })()"
-            @MainActor func poll() {
-                previewJS(tab, state) { v in
-                    if v as? String == want { expect(true, name); next() }
-                    else if Date() > deadline { expect(false, name, "\(v ?? "nil")"); next() }
-                    else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { poll() } } }
-                }
-            }
-            poll()
-        }
     }
 
     /// Runs `code` in the preview, in Cedric's own content world (where
@@ -461,7 +101,8 @@ extension DevChecks {
         func jsItem() -> NSMenuItem? { menuItem(action: #selector(AppDelegate.togglePreviewJavaScript(_:))) }
         func scrollY(_ then: @escaping @MainActor (Double) -> Void) { previewJS(tab, "window.scrollY") { then(($0 as? Double) ?? (($0 as? Int).map(Double.init) ?? -1)) } }
         var loadsBefore = 0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 key("p", [.command, .option])
@@ -521,6 +162,9 @@ extension DevChecks {
                        tab.previewPane?.header.appearance?.name.rawValue ?? "-")
             },
             snapshot("previewbar-light.png"),
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 webFrame = tab.previewPane?.renderer.view.frame ?? .zero
                 buttonFrames = frames()
@@ -585,7 +229,11 @@ extension DevChecks {
                 expect(tab.previewDetached, "Detach on the bar")
                 expect(d.accessibilityLabel() == "Attach", "it now says Attach", d.accessibilityLabel() ?? "-")
                 expect(bar?.window === tab.previewWindow?.window, "the bar goes with it into its window")
+                expectDetachedInFront(tab, app, "previewbar, Detach on the bar")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             { next in
                 guard let w = tab.previewWindow?.window else { next(); return }
                 snapshot("previewbar-detached-window-light.png", window: w)(next)
@@ -637,7 +285,9 @@ extension DevChecks {
                 if let z = cbar?.buttons[.zoomIn] { press(z); press(z) }
                 expect(abs((g?.zoom ?? 0) - 1.25) < 0.001 && (g?.table.rowHeight ?? 0) > h0, "Zoom + enlarges the grid", "zoom=\(g?.zoom ?? 0) row=\(g?.table.rowHeight ?? 0)")
             },
-        ], gap: 0.4)
+        ]
+        steps += steps3
+        run(steps, gap: 0.4)
     }
 
     /// A static site's page (Quartz, Hugo): `/images/…` root-absolute
@@ -706,7 +356,8 @@ extension DevChecks {
         let p = { tab.preview }
         var loadsBefore = 0, swapsBefore = 0
         var scrollY = 0.0
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 key("p", [.command, .option])
@@ -776,6 +427,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             // Preview → editor: a scroll the user makes in the preview.
             { next in
                 previewJS(tab, "window.__cedricQuietUntil = 0; window.scrollTo(0, document.documentElement.scrollHeight / 4); window.__cedricLineAt(window.scrollY + 8)") { v in
@@ -847,6 +501,9 @@ extension DevChecks {
                     }
                 }
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             // Hostile links: a script opens as text (never runs), an app and a
             // package are only revealed, files outside the folder only
             // revealed, other schemes ignored, a web link asks and never
@@ -932,13 +589,19 @@ extension DevChecks {
                     }
                 }
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             // Detached: still swapped in place.
             sync {
                 focus(tab)
                 key("p", [.command, .option, .shift])
                 expect(tab.previewDetached, "the preview detaches")
+                expectDetachedInFront(tab, app, "mdpreview, ⇧⌥⌘P")
                 loadsBefore = p()?.pageLoads ?? 0
                 swapsBefore = p()?.bodySwaps ?? 0
+                // Detaching focuses the preview window: back to the text to type.
+                focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: (tab.text as NSString).length, length: 0))
                 type("detached edit")
             },
@@ -951,7 +614,9 @@ extension DevChecks {
             },
             { next in perfBigMarkdown(app, tab, next) },
             sync { for t in app.tabs { t.doc.markSaved() } },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 
     /// Waits (polling, up to `seconds`) until the element with `id` is in
@@ -1112,7 +777,8 @@ extension DevChecks {
             tab.previewBarAction(.home)
             waitForPreview(tab, contains: "jump text", "This Document returns to the live document")(next)
         }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync { focus(tab); if !tab.previewVisible { tab.togglePreview() } },
             waitForPreview(tab, contains: "the unique section", "the preview shows the document"),
             // Same page: stays on the live document, no tab, heading in view.
@@ -1167,6 +833,9 @@ extension DevChecks {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) { next() }
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(LinkPrompt.shown == promptsBefore && (tab.previewPane?.window ?? tab.window)?.attachedSheet == nil && (p()?.droppedExternal ?? 0) >= 1,
                        "with JavaScript on, script re-clicking a declined web link doesn't ask again",
@@ -1225,6 +894,9 @@ extension DevChecks {
                 }
                 poll()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             waitForPreview(tab, contains: "jump text", "the reloaded document is shown again"),
             sync { livePage = p()?.webView.url },
             click("spoof"),
@@ -1284,6 +956,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             click("wiki part"),
             waitForAnchor(tab, id: "part", "a [[other#Part]] wikilink opens at the heading",
                           when: { p()?.isHome == false && noTab() }),
@@ -1328,7 +1003,9 @@ extension DevChecks {
                 if !t.previewVisible { t.togglePreview() }
             },
             { next in if let b = blank { waitForPreview(b, contains: "the far section", "an untitled document's preview shows it")(next) } else { expect(false, "untitled tab"); next() } },
-        ] + ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
+        ]
+        steps += steps4
+        steps += ["far", "lit"].flatMap { (text: String) -> [(@escaping () -> Void) -> Void] in [
             { next in
                 guard let b = blank else { next(); return }
                 expect(b.preview?.webView.url?.absoluteString == "about:blank", "\(text): the page is at about:blank", b.preview?.webView.url?.absoluteString ?? "nil")
@@ -1357,9 +1034,12 @@ extension DevChecks {
                     }
                 }
             },
-        ] } + [
+        ] }
+        let steps5: [Step] = [
             sync { for t in app.tabs { t.doc.markSaved() } },
-        ])
+        ]
+        steps += steps5
+        run(steps)
     }
 
     /// A 1 MB Markdown file with the preview open: the main thread's time
@@ -1532,7 +1212,8 @@ extension DevChecks {
         let saved = pb.string(forType: .string)
         let pdfURL = dir.appendingPathComponent("out/report.pdf")
         try? FileManager.default.createDirectory(at: pdfURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(swift)
                 for a in [#selector(AppDelegate.exportHTMLMenu(_:)), #selector(AppDelegate.exportPDFMenu(_:)),
@@ -1590,6 +1271,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             // Obsidian syntax leaves the app: wikilinks and embeds by relative
             // path (no cedric-doc: links), notes inlined, unresolved as text.
             { next in
@@ -1658,6 +1342,8 @@ extension DevChecks {
                 if let saved { pb.setString(saved, forType: .string) }
                 for t in [tab, swift] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

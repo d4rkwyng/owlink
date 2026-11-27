@@ -118,6 +118,9 @@ final class GitTabState {
     /// Every refresh that finished (checks wait on it).
     private(set) var refreshCount = 0
     private(set) var diffCount = 0
+    /// Every clear, and the ones that had state to drop and redrew (checks).
+    private(set) var clears = 0
+    private(set) var clearNotices = 0
     /// The last refresh found no repository (or no usable git).
     private(set) var notInGit = false
     /// The repository's config asks git to run programs, so Cedric runs no
@@ -128,12 +131,15 @@ final class GitTabState {
 
     var showsGutter: Bool { Settings.shared.showGitChanges }
 
-    /// After the first frame, once the tab is on screen and idle.
+    /// After the first frame, once the tab is on screen and typing has
+    /// paused. The git processes run on `gitQueue`; the main thread only
+    /// applies the result. Starting at once (not 0.5 s after the frame)
+    /// shows the branch sooner and lets the window settle sooner: the
+    /// status bar's git label re-lays out the window, and the window
+    /// server's tiling update follows it.
     func tabShown() {
         guard !started else { return }
-        AfterFirstFrame.run { [weak self] in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startIfIdle() }
-        }
+        AfterFirstFrame.run { [weak self] in self?.startIfIdle() }
     }
 
     private func startIfIdle() {
@@ -157,6 +163,10 @@ final class GitTabState {
     }
 
     private func clear() {
+        // Nothing to drop (a large document, a file outside any
+        // repository): no gutter or status bar redraw.
+        let had = status != nil || refused || baseText != nil || baseBlob != nil || repo != nil || relativePath != nil || observer != nil || !changes.isEmpty
+        clears += 1
         status = nil
         refused = false
         baseText = nil
@@ -167,6 +177,8 @@ final class GitTabState {
         repo = nil
         if let observer { NotificationCenter.default.removeObserver(observer) }
         observer = nil
+        guard had else { return }
+        clearNotices += 1
         tab?.gitStateChanged()
     }
 
@@ -356,6 +368,7 @@ final class GitTabState {
 extension EditorWindowController {
     /// The branch label, dirty dot and gutter after a git refresh or diff.
     func gitStateChanged() {
+        gitStateChanges += 1
         setGuttersNeedDisplay()
         updateGitLabel()
     }

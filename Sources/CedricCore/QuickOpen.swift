@@ -89,7 +89,10 @@ public struct FileIndex: Sendable {
     public let root: URL
     public let showHidden: Bool
     public let limit: Int
-    var dirs: [String: Dir] = [:]
+    /// By the listed relative paths' bytes (`FolderTree.PathKey`): two
+    /// canonically equivalent folders keep two listings. A watcher event's
+    /// spelling is matched to these keys in `refresh`.
+    var dirs: FolderTree.PathMap<Dir> = [:]
     /// The walk stopped at `limit`: some files aren't in the index.
     public private(set) var truncated = false
     public private(set) var fileCount = 0
@@ -158,10 +161,17 @@ public struct FileIndex: Sendable {
         }
     }
 
-    /// Forgets `rel` and every folder below it.
+    /// Forgets `rel` and every folder below it: by the path bytes, `rel`
+    /// itself or `rel` then a "/" byte (a text prefix test fused "rel/"
+    /// with a child whose name starts with a combining mark, and kept it).
     private mutating func dropSubtree(_ rel: String) {
-        let prefix = rel.isEmpty ? "" : rel + "/"
-        for k in Array(dirs.keys) where k == rel || (prefix.isEmpty || k.hasPrefix(prefix)) {
+        let r = Array(rel.utf8)
+        func inside(_ k: String) -> Bool {
+            if r.isEmpty { return true }
+            let b = Array(k.utf8)
+            return b == r || (b.count > r.count && b.starts(with: r) && b[r.count] == 0x2f)
+        }
+        for k in Array(dirs.keys) where inside(k) {
             fileCount -= dirs[k]?.files.count ?? 0
             dirs[k] = nil
         }
@@ -173,14 +183,26 @@ public struct FileIndex: Sendable {
     /// subtree is listed again (events were coalesced, or a .gitignore
     /// there changed). Refresh parents before children (one batch of
     /// events: shallowest first).
-    public mutating func refresh(_ rel: String, recursive: Bool, cancelled: () -> Bool = { false }) {
+    ///
+    /// `rel` is the event's spelling (FSEvents'), `base` the event-spelled
+    /// root path (default: `root`'s). The index keeps the listing's own
+    /// spelling: an exact key is that folder; on a miss the folder is
+    /// matched to a listed one by identity, walking down from the root
+    /// (`FolderTree.listedFolder`), and a folder gone under another
+    /// spelling relists its nearest listed ancestor. A miss alone never
+    /// skips a folder the index lists.
+    public mutating func refresh(_ rel: String, base: String? = nil, recursive: Bool, cancelled: () -> Bool = { false }) {
         let ignore = FolderIgnore(root: root)
+        var rel = rel
         // A folder the index doesn't hold, and that its (indexed) parent
         // doesn't list either, is ignored, hidden or past the cap: skipped
         // (a build folder's churn costs nothing).
         if !rel.isEmpty, dirs[rel] == nil {
-            let parent = (rel as NSString).deletingLastPathComponent, name = (rel as NSString).lastPathComponent
-            guard dirs[parent]?.subdirs.contains(name) == true else { return }
+            switch FolderTree.listedFolder(rel, base: base ?? root.path, root: root, subfolders: { dirs[$0]?.subdirs }) {
+            case .listed(let k): rel = k
+            case .ancestor(let k): rel = k
+            case .unlisted: return
+            }
         }
         if recursive {
             dropSubtree(rel)
@@ -194,10 +216,11 @@ public struct FileIndex: Sendable {
         let room = limit - fileCount
         if d.files.count > room { d.files.removeLast(d.files.count - room); truncated = true }
         fileCount += d.files.count
-        let oldSubs = Set(old?.subdirs ?? []), newSubs = Set(d.subdirs)
+        // The listing's names by their bytes (a `Set<String>` folds canonical twins).
+        let oldSubs = Set((old?.subdirs ?? []).map { FolderTree.PathKey($0) }), newSubs = Set(d.subdirs.map { FolderTree.PathKey($0) })
         dirs[rel] = d
-        for s in oldSubs.subtracting(newSubs) { dropSubtree(rel.isEmpty ? s : rel + "/" + s) }
-        let added = d.subdirs.filter { !oldSubs.contains($0) }.map { rel.isEmpty ? $0 : rel + "/" + $0 }
+        for s in oldSubs.subtracting(newSubs) { dropSubtree(rel.isEmpty ? s.string : rel + "/" + s.string) }
+        let added = d.subdirs.filter { !oldSubs.contains(FolderTree.PathKey($0)) }.map { rel.isEmpty ? $0 : rel + "/" + $0 }
         if !added.isEmpty, fileCount < limit { walk(from: added, ignore: ignore, cancelled: cancelled) }
     }
 }

@@ -51,6 +51,41 @@ extension DevChecks {
                        "missing \(missing.map(\.0)) in \(lines.filter { $0.contains("Caret") || $0.contains("Folder") || $0.contains("Occurrence") })")
             },
             { next in snapshot("keyboard-shortcuts.png", window: ShortcutsWindow.shared)(next) },
+            // Updates (Updater.swift): Owlink › Check for Updates… right after About, disabled with a
+            // tooltip; the Info.plist carries Owlink's committed feed and public key with automatic
+            // checks on, yet a check build has no Sparkle and stays off; Settings' Automatically check
+            // for updates off and disabled, and nothing written to the user's defaults.
+            sync {
+                ShortcutsWindow.shared?.close()
+                let appMenu = NSApp.mainMenu?.items.first?.submenu
+                let update = appMenu?.items.first { $0.action == #selector(AppDelegate.checkForUpdates(_:)) }
+                expect(update?.title == "Check for Updates…" && update.flatMap { appMenu?.index(of: $0) } == 1,
+                       "Owlink › Check for Updates… follows About Owlink", "\(appMenu?.items.map(\.title) ?? [])")
+                appMenu?.update()
+                expect(update?.isEnabled == false && update?.toolTip == UpdateConfig.disabled(.checkBuild).tooltip,
+                       "Check for Updates… is disabled in a check build, with a tooltip", "\(update?.isEnabled == true) \(update?.toolTip ?? "nil")")
+                expect(Updater.shared.config == .disabled(.checkBuild) && !Updater.shared.canCheck, "the updater is off in a check build")
+                let info = Bundle.main.infoDictionary ?? [:]
+                let feed = "https://owlink.app/appcast.xml", key = "hrWeLLjfQFt7O50s1x4JepXV7dXLmpEztAuhe1XcsQs="
+                expect(info["SUFeedURL"] as? String == feed && info["SUPublicEDKey"] as? String == key
+                       && info["SURequireSignedFeed"] as? Bool == true && info["SUEnableAutomaticChecks"] as? Bool == true
+                       && info["SUAutomaticallyUpdate"] as? Bool == false,
+                       "Info.plist: Owlink's feed and public key, signed feed required, automatic checks on, never installs without asking",
+                       "\(info["SUFeedURL"] ?? "nil") \(info["SUPublicEDKey"] ?? "nil") \(info["SUEnableAutomaticChecks"] ?? "nil")")
+                expect(UpdateConfig.from(info: info, checksEnabled: false) == .enabled(feed: URL(string: feed)!, publicKey: key),
+                       "the same Info.plist in a release build turns the updater on, with that feed and key")
+                let sparkle = Bundle.main.privateFrameworksURL?.appendingPathComponent("Sparkle.framework").path ?? "/"
+                expect(!FileManager.default.fileExists(atPath: sparkle), "a check build has no Sparkle.framework", sparkle)
+                SettingsWindowController.show(pane: .general)
+                let box = SettingsWindowController.shared?.autoUpdates
+                expect(box?.title == "Automatically check for updates" && box?.state == .off && box?.isEnabled == false
+                       && box?.toolTip == UpdateConfig.disabled(.checkBuild).tooltip,
+                       "Settings: Automatically check for updates is off and disabled, with the same tooltip")
+                expect(UserDefaults.standard.object(forKey: UpdateConfig.automaticChecksKey) == nil
+                       || UserDefaults.standard.bool(forKey: UpdateConfig.automaticChecksKey) == false,
+                       "and nothing turned automatic checks on")
+                SettingsWindowController.shared?.window?.close()
+            },
         ])
     }
 }

@@ -37,6 +37,17 @@ public enum LargeDocument {
         return nil
     }
 
+    /// Setting up a whole text (open, reload, restore, a replace-all):
+    /// `reason(for:)` and `needsChunks(_:)` together, with one walk of the
+    /// line starts (`longestLine`) instead of one each. The same
+    /// thresholds, strictly over; `.size` before `.longLine`.
+    public static func setupDecision(for index: LineIndex) -> (reason: Reason?, needsChunks: Bool) {
+        guard index.length > lineThreshold else { return (nil, false) }
+        let longLine = index.longestLine > lineThreshold
+        if index.length > sizeThreshold { return (.size, longLine) }
+        return (longLine ? .longLine : nil, longLine)
+    }
+
     /// After an edit: lines `lines` changed. Cheap (the edited lines only),
     /// for typing and pasting into a document that wasn't large.
     public static func reason(afterEditOf lines: Range<Int>, in index: LineIndex) -> Reason? {
@@ -47,6 +58,23 @@ public enum LargeDocument {
     }
 
     // MARK: Chunks
+
+    /// TextKit gets chunks (ChunkedContentStorage) only when a line is
+    /// over `lineThreshold`: a long line is what it can't lay out quickly.
+    /// A large file of ordinary lines (a 55 MB log) keeps TextKit's own
+    /// paragraphs, as it has below `sizeThreshold`. Handing those out one
+    /// by one through the chunking storage crashed on macOS 26 (0.5.2: an
+    /// NSCountableTextLocation compare: exception in layout, every log
+    /// past 25 M characters, the first size that turned large mode on).
+    public static func needsChunks(_ index: LineIndex) -> Bool {
+        index.length > lineThreshold && index.longestLine > lineThreshold
+    }
+
+    /// After an edit of lines `lines`: one of them is now over `lineThreshold`.
+    public static func needsChunks(afterEditOf lines: Range<Int>, in index: LineIndex) -> Bool {
+        guard index.length > lineThreshold else { return false }
+        return lines.contains { $0 < index.lineCount && index.lineLength($0) > lineThreshold }
+    }
 
     /// Where chunk `k` of `line` starts: `k × limit` from the line start,
     /// moved back to the start of a composed character sequence (surrogate
@@ -69,14 +97,35 @@ public enum LargeDocument {
         }
     }
 
-    /// The chunk of `line` holding `offset`.
+    /// The chunk of `line` holding `offset` (the line's end: the last chunk).
     public static func chunk(containing offset: Int, line: NSRange, in text: NSString, limit: Int) -> NSRange {
         guard line.length > limit else { return line }
-        var k = max(0, offset - line.location) / limit
-        // A boundary moved back for a composed sequence: offset may sit
-        // just before chunk k's start.
-        if k > 0, boundary(k, of: line, in: text, limit: limit) > offset { k -= 1 }
+        let n = (line.length + limit - 1) / limit
+        var k = min(max(0, offset - line.location) / limit, n - 1)
+        // Chunk k starts at or before offset (boundaries only move back).
+        // Chunk k+1's start moves back, never by a whole chunk, for a
+        // composed sequence it would cut: if offset is that sequence's
+        // start or inside it, offset is in chunk k+1. Picking chunk k
+        // there handed TextKit a chunk ending at offset, and its forward
+        // enumeration asked from offset again, forever: a hang on a long
+        // line with an emoji or an accent at a chunk boundary.
+        if k + 1 < n, boundary(k + 1, of: line, in: text, limit: limit) <= offset { k += 1 }
         let s = boundary(k, of: line, in: text, limit: limit)
         return NSRange(location: s, length: boundary(k + 1, of: line, in: text, limit: limit) - s)
+    }
+
+    /// A forward walk over chunks (the chunking content storage's
+    /// enumeration): where it goes after handing out `chunk`, asked for
+    /// from `offset`. Nil when `chunk` doesn't hold `offset`: the walk
+    /// would hand out an element that ends at or before where it was
+    /// asked from, or ask from the same offset again, so it stops.
+    public static func forwardStep(from offset: Int, chunk: NSRange) -> Int? {
+        NSLocationInRange(offset, chunk) ? NSMaxRange(chunk) : nil
+    }
+
+    /// A backward walk's step: the offset before `chunk`, asked for from
+    /// `offset`; nil when `chunk` doesn't hold `offset`.
+    public static func backwardStep(from offset: Int, chunk: NSRange) -> Int? {
+        NSLocationInRange(offset, chunk) ? chunk.location - 1 : nil
     }
 }

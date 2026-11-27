@@ -102,9 +102,11 @@ extension EditorWindowController {
     /// Up to this many UTF-16 units the new pane is laid out whole on split.
     static let splitFullLayoutLimit = 200_000
 
-    /// Read-only or not, in both panes (binary files, Follow File).
+    /// Read-only or not, in both panes (binary files, Follow File). A
+    /// read-only file stays read-only until Allow Editing (ReadOnlyFile.swift).
     func setEditable(_ on: Bool) {
-        panes.forEach { $0.textView.isEditable = on }
+        let editable = on && !fileBlocksTyping
+        panes.forEach { $0.textView.isEditable = editable }
     }
 
     /// View › Split Editor.
@@ -145,6 +147,8 @@ extension EditorWindowController {
         outer.insertArrangedSubview(s.view, at: index)
         Self.restoreDividers(positions, in: outer)
         splitEditor = s
+        // Its checking types follow the primary pane's (spelling off: none).
+        spelling.apply()
         // The status items follow the split as they follow the editor alone.
         s.view.postsFrameChangedNotifications = true
         NotificationCenter.default.addObserver(self, selector: #selector(editorColumnMoved(_:)),

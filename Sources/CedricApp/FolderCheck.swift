@@ -109,7 +109,8 @@ extension DevChecks {
         var savedReadableWidth: Bool?
         var listingsBeforeRefresh = 0
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(outside)
                 print("check: note: app active=\(NSApp.isActive) key window=\(NSApp.keyWindow != nil)")
@@ -152,7 +153,7 @@ extension DevChecks {
                 expect(actions.accessibilityLabel() == String(localized: "Folder Actions") &&
                        actions.toolTip == String(localized: "Folder Actions"), "folder-actions has a VoiceOver label and tooltip")
                 let expectedMenu = ["", "New File…", "New Folder…", "|", "Rename", "Move to Trash…", "|",
-                                    "Reveal in Finder", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
+                                    "Reveal in Finder", "Open in Terminal Here", "Open Enclosing Folder", "Copy Path", "Find in Folder…", "|",
                                     "Refresh", "Collapse All", "|", "Show Hidden Files", "|", "Open Folder…", "|", "Close Folder"]
                 @MainActor func checkMenu(_ name: String) {
                     s.updateHeaderMenu()
@@ -181,6 +182,9 @@ extension DevChecks {
                 listingsBeforeRefresh = s.listings
                 s.refresh(nil)
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             until("header Refresh re-lists loaded folders") { sidebar.listings > listingsBeforeRefresh },
             snapshot("folder-root.png"),
             { next in
@@ -251,6 +255,9 @@ extension DevChecks {
                 // The .gitignore edited on disk: rows re-dimmed in place, in loaded subfolders too.
                 try? "*.log\nbuild/\nfile2.txt\nb.swift\n".write(to: proj.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             until("FSEvents: an edited .gitignore dims what it now ignores", timeout: 5) {
                 node("file2.txt")?.entry.isIgnored == true && node("src/b.swift")?.entry.isIgnored == true
             },
@@ -314,6 +321,9 @@ extension DevChecks {
                        "showing with other panes restores the sidebar without a gap")
             },
             snapshot("folder-with-preview.png"),
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 let t = tab(named: "readme.md")!
                 app.hideFindInFiles()
@@ -388,6 +398,9 @@ extension DevChecks {
                        "closed again (Find in Files' close path): the sidebar keeps its width", "\(sidebar.frame.width)")
                 a.window?.setContentSize(NSSize(width: 1200, height: 720))
             },
+        ]
+        steps += steps4
+        let steps5: [Step] = [
             snapshot("folder-sidebar-open.png"),
             sync {
                 // ⌃⌘1: hidden, the stream stopped.
@@ -464,6 +477,9 @@ extension DevChecks {
                 expect(toggleItem().map { app.validateMenuItem($0) } == false, "Show Folder Sidebar disabled again")
                 expect(app.folderSessionState == nil, "session: no folder")
             },
+        ]
+        steps += steps5
+        let steps6: [Step] = [
             sync {
                 let a = tab(named: "a.swift")!
                 focus(a)
@@ -530,6 +546,9 @@ extension DevChecks {
                     if !done { p.onFinished = nil; p.cancel(); expect(false, "no-git folder: the search ends", "timed out"); next() }
                 }
             },
+        ]
+        steps += steps6
+        let steps7: [Step] = [
             sync {
                 guard let p = app.findInFiles else { return }
                 let files = Set(p.results.map(\.relativePath)).sorted()
@@ -587,6 +606,9 @@ extension DevChecks {
                 s.load(s.root)
             },
             until("viewer file is listed") { node("sidebar-test.tiff") != nil },
+        ]
+        steps += steps7
+        let steps8: [Step] = [
             sync {
                 guard let n = node("sidebar-test.tiff") else { expect(false, "viewer row exists"); return }
                 app.openFromFolder(n)
@@ -671,6 +693,9 @@ extension DevChecks {
                            "moving away a folder shows a viewer notice")
                 } catch { expect(false, "explorer file operations", error.localizedDescription) }
             },
+        ]
+        steps += steps8
+        let steps9: [Step] = [
             until("new folder is revealed") {
                 guard let n = node("created-folder") else { return false }
                 return sidebar.outline.row(forItem: n) == sidebar.outline.selectedRow
@@ -684,7 +709,9 @@ extension DevChecks {
             },
             until("the new hidden file is still shown in the tree") { node(".created-hidden") != nil },
             sync { app.closeFolder() },
-        ])
+        ]
+        steps += steps9
+        run(steps)
     }
 }
 

@@ -21,7 +21,7 @@ extension EditorWindowController {
         case .openInPreview:
             break // handled by PreviewController
         case .openInCedric(let url):
-            (NSApp.delegate as? AppDelegate)?.open(url)
+            (NSApp.delegate as? AppDelegate)?.open(url, background: true)
         case .revealInFinder(let url):
             PreviewLinkLog.reveal(url)
         case .confirmExternal(let url):

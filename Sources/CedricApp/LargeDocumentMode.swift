@@ -76,13 +76,15 @@ extension EditorWindowController {
     /// The owl's rules and AI stay off for this tab (unless clicked).
     var owlIdleForSpeed: Bool { extrasPaused }
 
-    func applyLargeMode(_ reason: LargeDocument.Reason?, newText: Bool) {
+    /// `chunks`: TextKit sees long lines in chunks (LargeDocument.needsChunks);
+    /// nil keeps the current choice. Only large mode chunks.
+    func applyLargeMode(_ reason: LargeDocument.Reason?, newText: Bool, chunks: Bool? = nil) {
         let wasPaused = extrasPaused
         let wasChunked = textView.contentStorage?.chunkLimit != nil
         largeReason = reason
         largePending = false
         if newText { largeOverride = false }
-        let chunk = reason != nil ? LargeDocument.chunkLength : nil
+        let chunk = reason != nil && (chunks ?? wasChunked) ? LargeDocument.chunkLength : nil
         // Folding is off in large mode (the chunks can't skip hidden lines).
         if reason != nil { foldingContextChanged() }
         textView.contentStorage?.chunkLimit = chunk
@@ -129,6 +131,24 @@ extension EditorWindowController {
     /// threshold turns large mode on (once per run loop turn, after
     /// TextKit has finished with the edit).
     func checkLargeAfterEdit(lines: Range<Int>) {
+        if let reason = largeReason, !largePending, textView.contentStorage?.chunkLimit == nil,
+           LargeDocument.needsChunks(afterEditOf: lines, in: lineIndex) {
+            // A large file of short lines (no chunks) just got a long line:
+            // chunks from the next turn, once TextKit is done with the edit.
+            largePending = true
+            let storage = textView.contentStorage, edits = textEditCount
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.largePending else { return }   // replaced meanwhile (setText)
+                self.largePending = false
+                // Still this text, still large and unchunked, and (after
+                // more edits, whole text) still a line that needs chunks.
+                guard self.textView.contentStorage === storage, self.largeReason != nil, storage?.chunkLimit == nil,
+                      self.textEditCount == edits ? LargeDocument.needsChunks(afterEditOf: lines, in: self.lineIndex)
+                                                  : LargeDocument.needsChunks(self.lineIndex) else { return }
+                self.applyLargeMode(self.largeReason, newText: false, chunks: true)
+            }
+            return
+        }
         guard largeReason == nil, !largePending, let reason = LargeDocument.reason(afterEditOf: lines, in: lineIndex) else { return }
         // Paused from now (no sniff, spell check or owl for this edit).
         // Any edit card shows Apply off before the bar appears on the next
@@ -136,8 +156,30 @@ extension EditorWindowController {
         largePending = true
         owlChat?.refreshCards()
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.largeReason == nil else { return }
-            self.applyLargeMode(reason, newText: false)
+            guard let self, self.largePending, self.largeReason == nil else { return }
+            self.applyLargeMode(reason, newText: false,
+                                chunks: LargeDocument.needsChunks(afterEditOf: lines, in: self.lineIndex))
+        }
+    }
+
+    /// Call before replacing the whole text as an edit (File › Revert to
+    /// Saved, Reload on the changed-on-disk bar); `done` after it. An
+    /// edit's check sees only the edited lines (here line 0 when the line
+    /// count stays), so large mode and chunks follow all of the new text
+    /// instead, on the next turn: a revert that takes a pasted long line
+    /// away turns chunks off, one that brings a long line further down
+    /// turns them on, and one that is no longer large leaves large mode.
+    func largeModeReplacingAll(_ replace: () -> Void) {
+        largePending = true   // the edit's own check stands aside
+        replace()
+        let storage = textView.contentStorage
+        DispatchQueue.main.async { [weak self] in
+            // Always, from the whole text: it also settles any edit step queued before.
+            guard let self, self.textView.contentStorage === storage else { return }
+            let wasPaused = self.extrasPaused
+            let large = LargeDocument.setupDecision(for: self.lineIndex)
+            self.applyLargeMode(large.reason, newText: false, chunks: large.needsChunks)
+            if wasPaused, !self.extrasPaused { self.colorizer.recolorAll() }
         }
     }
 }

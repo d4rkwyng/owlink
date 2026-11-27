@@ -34,7 +34,7 @@ extension DevChecks {
         func wait(_ seconds: Double, until: @escaping () -> Bool) -> (@escaping () -> Void) -> Void {
             { next in
                 let end = Date().addingTimeInterval(seconds)
-                func poll() { if until() || Date() > end { next() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: poll) } }
+                @MainActor func poll() { if until() || Date() > end { next() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { MainActor.assumeIsolated { poll() } } } }
                 poll()
             }
         }
@@ -44,7 +44,8 @@ extension DevChecks {
         var original = ""
         var negatives: [EditorWindowController] = []
         let sentence = "Their going too the store tomorrow and we was late."
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 expect(owl != nil, "the owl is on")
@@ -119,6 +120,9 @@ extension DevChecks {
                 expect(tab.text == before, "one undo step")
                 tv.undoManager?.redo()
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             snapshot("grammar-underlines.png"),
             sync {
                 // Clicking the owl: "Grammar Hint" in his popover ignores the rate limit.
@@ -177,6 +181,9 @@ extension DevChecks {
                 ]
                 for t in negatives { sized(t); focus(t); t.grammar.schedule(after: 0.1) }
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             wait(3) { false },
             sync {
                 for t in negatives {
@@ -215,6 +222,8 @@ extension DevChecks {
                 Settings.shared.owlOverride = false
                 restore()
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 }

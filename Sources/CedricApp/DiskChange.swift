@@ -72,32 +72,47 @@ final class NoticeBar: NSView {
     }
 }
 
-/// Saving over another app's changes, and noticing them. ⌘S first compares
+/// Saving over changes on disk, and noticing them. ⌘S first compares
 /// the file on disk with what this tab last read or wrote (DiskStamp: date
-/// and size); if another app changed it, a sheet asks: Keep My Version,
-/// Reload Theirs (one undoable edit) or Compare. When a window becomes key
+/// and size); if it changed, a sheet (worded by DiskConflict: never
+/// "another app" when Owlink knows it changed the file itself) asks:
+/// Keep What’s in This Tab, Reload from Disk (one undoable edit) or Compare. When a window becomes key
 /// (or the app active), a tab with unsaved edits whose file changed shows
 /// the "Changed on disk" bar; a tab without edits reloads, as before.
 /// Nothing is ever dropped silently. Works with the owl on or off.
 extension EditorWindowController {
-    /// Whether another app changed `url` since this tab read or saved it.
-    func fileChangedOnDisk(_ url: URL) -> Bool {
+    /// Whether `url` changed on disk since this tab read or saved it.
+    func fileChangedOnDisk(_ url: URL) -> Bool { fileChangedOnDisk(url, current: DiskStamp.of(url)) }
+
+    /// As `fileChangedOnDisk(_:)`, against a stamp the caller already took.
+    func fileChangedOnDisk(_ url: URL, current: DiskStamp?) -> Bool {
         guard url == doc.fileURL else { return false }
-        return DiskStamp.changed(known: doc.diskStamp, current: DiskStamp.of(url))
+        return DiskStamp.changed(known: doc.diskStamp, current: current)
     }
 
-    static var conflictKeep: String { String(localized: "Keep My Version") }
-    static var conflictReload: String { String(localized: "Reload Theirs") }
-    static var conflictCompare: String { String(localized: "Compare") }
+    static var conflictKeep: String { DiskConflict.keepTitle }
+    static var conflictReload: String { DiskConflict.reloadTitle }
+    static var conflictCompare: String { DiskConflict.compareTitle }
 
-    /// The ⌘S conflict sheet.
+    /// What Owlink knows about the change to `url` (DiskConflict.Cause).
+    func diskConflictCause(_ url: URL) -> DiskConflict.Cause {
+        let std = url.standardizedFileURL
+        let others = (NSApp.delegate as? AppDelegate)?.tabs
+            .filter { $0 !== self && $0.doc.fileURL?.standardizedFileURL == std }
+            .compactMap { $0.doc.lastSavedStamp } ?? []
+        return DiskConflict.cause(known: doc.diskStamp, lastSaved: doc.lastSavedStamp, failedSave: doc.failedSaveStamp,
+                                  otherTabsSaved: others, current: DiskStamp.of(url))
+    }
+
+    /// The ⌘S conflict sheet. Keep (first, destructive) never takes
+    /// Return; Cancel takes Escape.
     func askSaveConflict(_ url: URL) {
         guard let window else { return }
         guard window.attachedSheet == nil else { NSSound.beep(); return }
         let a = NSAlert()
         a.alertStyle = .warning
-        a.messageText = String(localized: "“\(doc.displayName)” was changed by another app since you opened it.")
-        a.informativeText = String(localized: "Keep My Version replaces the file with this tab’s text. Reload Theirs replaces this tab’s text with the file (Undo brings yours back). Compare shows the two side by side.")
+        a.messageText = DiskConflict.message(name: doc.displayName)
+        a.informativeText = DiskConflict.detail(diskConflictCause(url))
         a.addButton(withTitle: Self.conflictKeep)
         a.addButton(withTitle: Self.conflictReload)
         a.addButton(withTitle: Self.conflictCompare)
@@ -114,7 +129,7 @@ extension EditorWindowController {
         }
     }
 
-    /// Keep My Version: write over the file (the conflict was answered).
+    /// Keep What’s in This Tab: write over the file (the conflict was answered).
     func write(toKeeping url: URL) -> Bool {
         doc.noteDisk(DiskStamp.of(url))
         return save()

@@ -36,13 +36,23 @@ public enum Markdown {
         /// choice, or a page that leaves the app). Works with page
         /// JavaScript off: `<details>` opens by itself.
         public var frontMatterExpanded = false
+        /// TeX math for KaTeX (the preview with Allow JavaScript on):
+        /// `$…$` inline, `$$…$$` and `\[…\]` display, as
+        /// `<span class="math math-inline">` / `math-display` holding the
+        /// escaped TeX (PreviewRich draws them). `\$` is a literal dollar;
+        /// never inside code; a `$` followed by a space, or a closing `$`
+        /// after a space or before a digit, is no delimiter ("$5 and $10").
+        /// Off, and wherever a document has no math, the output is the same
+        /// as without it.
+        public var math = false
         public init(highlightCode: Bool = false, obsidian: Bool = false, vault: WikiVault? = nil, exportLinks: Bool = false,
-                    frontMatterExpanded: Bool = false) {
+                    frontMatterExpanded: Bool = false, math: Bool = false) {
             self.highlightCode = highlightCode
             self.obsidian = obsidian
             self.vault = vault
             self.exportLinks = exportLinks
             self.frontMatterExpanded = frontMatterExpanded
+            self.math = math
         }
         /// The live preview's (and export's) options.
         public static let preview = Options(highlightCode: true, obsidian: true)
@@ -115,6 +125,11 @@ final class MarkdownRenderer {
     private var nesting = 0
     private var linkDepth = 0
     static let maxNesting = 64
+    /// Math was rendered (Options.math), and a `\$` was held as `dollarMark`.
+    private var mathSeen = false
+    private var escapedDollar = false
+    /// The source has no `dollarMark` of its own (else `\$` stays as typed).
+    private var dollarMarkFree = true
 
     /// Lines past the nesting cap: shown as their text, not parsed further.
     private func flat(_ lines: ArraySlice<String>, attr: String) -> String {
@@ -134,10 +149,17 @@ final class MarkdownRenderer {
             out += frontmatter(lines[1..<end])
             start = end + 1
         }
+        if options.math, source.contains(Self.dollarMark) { dollarMarkFree = false }
         if options.obsidian, source.contains("%%") { stripComments(&lines, from: start) }
         collectDefinitions(&lines, from: start)
         renderBlocks(lines[start...], firstLine: start, into: &out)
         out += footnotesSection()
+        // `\$` is a dollar only in a document with math: elsewhere it stays as
+        // typed, as without Options.math.
+        if escapedDollar {
+            out = mathSeen ? out.replacingOccurrences(of: "\\" + String(Self.dollarMark), with: "$")
+                           : out.replacingOccurrences(of: String(Self.dollarMark), with: "$")
+        }
         return out
     }
 
@@ -386,6 +408,15 @@ final class MarkdownRenderer {
                 let html = options.highlightCode ? Language(fenceInfo: info).map { CodeHTML.highlight(code, language: $0) } ?? escape(code) : escape(code)
                 out += "<pre\(attr(i))><code\(lang)>\(html)\(body.isEmpty ? "" : "\n")</code></pre>\n"
                 i = min(end, j + 1)
+                continue
+            }
+
+            // Display math: `$$` or `\[` opening a line, up to the line ending
+            // in `$$` / `\]` (no blank line between).
+            if options.math, indent <= 3, let (tex, next) = displayMath(lines, from: i, end: end) {
+                out += "<div\(attr(i)) class=\"math math-display\">\(escape(tex))</div>\n"
+                mathSeen = true
+                i = next
                 continue
             }
 
@@ -688,6 +719,47 @@ final class MarkdownRenderer {
         }
     }
 
+    /// The longest display-math block looked for, in lines: a run of
+    /// openers that never close (`\[a` and `# h` alternating, no blank
+    /// line) would otherwise be rescanned from each opener.
+    static let maxDisplayMathLines = 200
+
+    /// A display-math block starting at line `i`: its TeX and the line after it.
+    func displayMath(_ lines: ArraySlice<String>, from i: Int, end: Int) -> (String, Int)? {
+        let first = lines[i].trimmingCharacters(in: .whitespaces)
+        let close: String
+        if first.hasPrefix("$$") { close = "$$" } else if first.hasPrefix("\\[") { close = "\\]" } else { return nil }
+        let rest = String(first.dropFirst(2))
+        var body: [String]
+        var next: Int
+        if let r = rest.range(of: close) {
+            // On one line: nothing after the closing delimiter.
+            guard r.upperBound == rest.endIndex else { return nil }
+            body = [String(rest[..<r.lowerBound])]
+            next = i + 1
+        } else {
+            body = [rest]
+            var j = i + 1
+            var closed = false
+            while j < end, j - i <= Self.maxDisplayMathLines {
+                let t = lines[j].trimmingCharacters(in: .whitespaces)
+                if t.isEmpty { return nil }
+                if let r = t.range(of: close) {
+                    guard r.upperBound == t.endIndex else { return nil }
+                    body.append(String(t[..<r.lowerBound]))
+                    closed = true
+                    break
+                }
+                body.append(t)
+                j += 1
+            }
+            guard closed else { return nil }
+            next = j + 1
+        }
+        let tex = body.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return tex.isEmpty ? nil : (tex, next)
+    }
+
     func fenceMarker(_ trimmed: String) -> String? {
         for f in ["```", "~~~"] where trimmed.hasPrefix(f) {
             let ch = f.first!
@@ -764,6 +836,9 @@ final class MarkdownRenderer {
 
     /// Stands for a hard line break until the placeholders are restored.
     static let breakMark = "\u{E002}"
+    /// The dollar of a `\$` with Options.math, until the render knows
+    /// whether it has math (then `\$` is `$`; else it stays as typed).
+    static let dollarMark: Character = "\u{E003}"
     private static let open: Character = "\u{E000}", close: Character = "\u{E001}"
 
     /// Inline Markdown → HTML. 1: code spans, autolinks, raw inline tags,
@@ -815,8 +890,34 @@ final class MarkdownRenderer {
         let hasLT = chars.contains("<")
         let nextGT = hasLT ? Self.nextIndex(of: ">", in: chars) : []
         let nextLT = hasLT ? Self.nextIndex(of: "<", in: chars) : []
+        let dollars = options.math && chars.contains("$") ? MathDelimiters(chars) : nil
         while i < n {
             let c = chars[i]
+            if let dollars {
+                if c == "\\", i + 1 < n, chars[i + 1] == "$" {
+                    // Kept as two characters, the dollar marked: emphasis
+                    // around it reads as it would without Options.math.
+                    s += ["\\", dollarMarkFree ? Self.dollarMark : "$"]
+                    escapedDollar = escapedDollar || dollarMarkFree
+                    i += 2
+                    continue
+                }
+                if c == "$" {
+                    if let (close, width) = dollars.closing(from: i) {
+                        let tex = String(chars[(i + width)..<close]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let kind = width == 2 ? "math-display" : "math-inline"
+                        s += hold("<span class=\"math \(kind)\">\(escape(tex))</span>", &held)
+                        mathSeen = true
+                        i = close + width
+                    } else {
+                        // A `$$` that doesn't close is two dollars, not an opener and a closer.
+                        let run = i + 1 < n && chars[i + 1] == "$" ? 2 : 1
+                        s += Array(repeating: "$", count: run)
+                        i += run
+                    }
+                    continue
+                }
+            }
             if c == "\\", i + 1 < n, Self.escapable.contains(chars[i + 1]) {
                 s += hold(escape(String(chars[i + 1])), &held)
                 i += 2
@@ -1097,6 +1198,59 @@ final class MarkdownRenderer {
     }
 
     /// For each place, the first index at or after it holding `c`.
+    /// Where inline math closes, found in one pass (a line of `$a $b $c`
+    /// that never closes stays linear). `$…$`: the opener has no space
+    /// after it, the closer no space (or backslash) before it and no digit
+    /// after it. `$$…$$`: any non-blank TeX between. Neither runs across
+    /// a backtick, so a code span later on the line stays code
+    /// ("$5 and `$x$`"). A `$…$` holding another unescaped `$` that could
+    /// open math (no space after it) doesn't open: the later one does, so
+    /// in "Costs $5 and $x$." the price stays text and `$x$` is the formula.
+    struct MathDelimiters {
+        let chars: [Character]
+        /// The next `$` that may close `$…$`, the next unescaped `$$`, the
+        /// next backtick, and the next unescaped `$` with no space after
+        /// it (one that could open math), from each index.
+        private var single: [Int?], double: [Int?], tick: [Int?], opener: [Int?]
+
+        init(_ chars: [Character]) {
+            self.chars = chars
+            let n = chars.count
+            single = [Int?](repeating: nil, count: n + 1)
+            double = [Int?](repeating: nil, count: n + 1)
+            tick = [Int?](repeating: nil, count: n + 1)
+            opener = [Int?](repeating: nil, count: n + 1)
+            var j = n - 1
+            while j >= 0 {
+                let isDollar = chars[j] == "$"
+                let before: Character? = j > 0 ? chars[j - 1] : nil
+                let after: Character? = j + 1 < n ? chars[j + 1] : nil
+                let escaped = before == "\\"
+                let closesSingle = isDollar && !escaped && before.map { !$0.isWhitespace } == true && after.map { !$0.isNumber } != false
+                    && after != "$" && before != "$"
+                single[j] = closesSingle ? j : single[j + 1]
+                double[j] = isDollar && after == "$" && !escaped ? j : double[j + 1]
+                tick[j] = chars[j] == "`" ? j : tick[j + 1]
+                opener[j] = isDollar && !escaped && after.map { !$0.isWhitespace } == true ? j : opener[j + 1]
+                j -= 1
+            }
+        }
+
+        /// The closing delimiter's index and the delimiter's width (1 or 2)
+        /// for math opening at `i`, or nil (no math here).
+        func closing(from i: Int) -> (Int, Int)? {
+            let n = chars.count
+            if i + 1 < n, chars[i + 1] == "$" {
+                guard i + 2 < n, let c = double[i + 2], (tick[i + 2] ?? n) > c,
+                      chars[(i + 2)..<c].contains(where: { !$0.isWhitespace }) else { return nil }
+                return (c, 2)
+            }
+            guard i + 1 < n, !chars[i + 1].isWhitespace, let c = single[i + 1], (tick[i + 1] ?? n) > c,
+                  (opener[i + 1] ?? n) >= c else { return nil }
+            return (c, 1)
+        }
+    }
+
     static func nextIndex(of c: Character, in s: [Character]) -> [Int?] {
         var next = [Int?](repeating: nil, count: s.count + 1)
         var j = s.count - 1
@@ -1192,7 +1346,7 @@ final class MarkdownRenderer {
         func isSpace(_ c: Character?) -> Bool { c == nil || c!.isWhitespace }
         func isPunct(_ c: Character?) -> Bool {
             guard let c, c != Self.open, c != Self.close else { return false }
-            return c.isPunctuation || c.isSymbol
+            return c.isPunctuation || c.isSymbol || c == Self.dollarMark
         }
         var i = 0
         let n = s.count

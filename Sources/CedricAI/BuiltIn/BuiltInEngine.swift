@@ -59,8 +59,11 @@ public struct BuiltInEngine: AIEngine {
         }
         let start = Date()
         do {
-            _ = try await host.generate(modelAt: store.fileURL(for: pick),
+            // Test Connection is the user asking.
+            _ = try await BuiltInLoad.userAsked {
+                try await host.generate(modelAt: store.fileURL(for: pick),
                                         GenerationRequest(system: OwlPrompts.persona, user: "Reply with the word ready.", maxTokens: 4))
+            }
             return ConnectionReport(models: infos, latency: Date().timeIntervalSince(start), suggested: suggested, error: nil)
         } catch {
             return ConnectionReport(models: infos, latency: Date().timeIntervalSince(start), suggested: suggested,
@@ -96,7 +99,7 @@ public struct BuiltInEngine: AIEngine {
 /// the same `local:<model>` source as the server engines; the output is
 /// additionally constrained by a JSON grammar, so a small model can't
 /// answer in prose.
-public struct BuiltInHintProvider: OwlHintProvider {
+public struct BuiltInHintProvider: OwlHintProvider, OwlAutomaticGate, OwlPreloadingProvider {
     public let model: BuiltInModel
     public let path: URL
     public let host: BuiltInModelHost
@@ -107,6 +110,14 @@ public struct BuiltInHintProvider: OwlHintProvider {
     }
 
     public var name: String { "local:\(model.id)" }
+
+    /// Automatic checks only while a model the user (or "Load model at
+    /// launch") loaded is in memory, and not after a load hung.
+    public var allowsAutomaticRequests: Bool { host.session.allowsAutomatic }
+    public var isUnhealthy: Bool { host.session.unhealthy != nil }
+
+    /// "Load model at launch": off the main thread, under the watchdog.
+    public func preload() async throws { try await host.preload(modelAt: path) }
 
     public func hints(for context: OwlContext) async -> [OwlHint] {
         (try? await requestHints(for: context).hints) ?? []

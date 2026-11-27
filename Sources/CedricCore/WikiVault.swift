@@ -106,13 +106,19 @@ public final class WikiVault: @unchecked Sendable {
 
     /// The file a link names (`name` without its `#…`), or nil.
     public func resolve(_ name: String) -> URL? {
-        var n = name.trimmingCharacters(in: .whitespaces)
-        guard !n.isEmpty, !n.contains("\0") else { return nil }
+        // Parsed as the UTF-8 bytes the kernel gets, not as Swift text: a
+        // slash followed by a combining mark is one Swift character, so a
+        // text split misses it and could hide a ".." or make a path look
+        // like a bare name (Astra batch 6 must-fix 3).
+        var bytes = Array(name.trimmingCharacters(in: .whitespaces).utf8)
+        guard !bytes.isEmpty, !bytes.contains(0) else { return nil }
         // A leading slash is a path from the vault root (Obsidian), not a refusal.
-        let fromVaultRoot = n.hasPrefix("/")
-        if fromVaultRoot { n.removeFirst() }
-        let parts = n.split(separator: "/").map(String.init)
-        guard !parts.contains(".."), !parts.isEmpty else { return nil }
+        let fromVaultRoot = bytes.first == 0x2f
+        if fromVaultRoot { bytes.removeFirst() }
+        let n = String(decoding: bytes, as: UTF8.self)
+        let byteParts = bytes.split(separator: 0x2f)
+        guard !byteParts.isEmpty, !byteParts.contains(where: { $0.elementsEqual("..".utf8) }) else { return nil }
+        let parts = byteParts.map { String(decoding: $0, as: UTF8.self) }
         let hasExt = !(n as NSString).pathExtension.isEmpty
         let names = hasExt ? [n, n + ".md"] : [n + ".md", n]
         // A path: from the vault root when the link is root-absolute,
@@ -151,17 +157,23 @@ public final class WikiVault: @unchecked Sendable {
         return Self.contains(url, in: root) && fm.fileExists(atPath: url.path, isDirectory: &isDir) && !isDir.boolValue
     }
 
+    /// `url` is `root` or below it, by the bytes of the two resolved paths:
+    /// a name just below `root` that starts with a combining mark makes
+    /// "/" and the mark one Swift character, so a text prefix test missed
+    /// the boundary and refused it.
     private static func contains(_ url: URL, in root: URL) -> Bool {
-        let base = PreviewFolder.resolved(root).path
-        let path = PreviewFolder.resolved(url).path
-        return path == base || path.hasPrefix(base.hasSuffix("/") ? base : base + "/")
+        let base = Array(PreviewFolder.resolved(root).path.utf8)
+        let path = Array(PreviewFolder.resolved(url).path.utf8)
+        return path == base || path.starts(with: base.last == 0x2f ? base : base + [0x2f])
     }
 
     /// Resolve an exact, bare image name, preferring the note's folder and
     /// then Obsidian's configured attachment folder.
     public func resolveImage(_ name: String) -> URL? {
-        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
-              !name.contains("\\"), !name.contains("\0"), !name.contains(":"),
+        // One bare name by its bytes (Astra batch 6 must-fix 2): a slash or
+        // backslash before a combining mark is one Swift character, so a text
+        // search misses it, and a slash would make the local candidate a path.
+        guard Beneath.isName(name), !name.utf8.contains(0x5c), !name.utf8.contains(0x3a),
               Self.imageExtensions.contains((name as NSString).pathExtension.lowercased()) else { return nil }
         let local = documentFolder.appendingPathComponent(name)
         if isFile(local) { return local }

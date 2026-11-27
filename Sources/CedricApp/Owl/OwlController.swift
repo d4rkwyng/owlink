@@ -18,9 +18,17 @@ final class OwlOverlay: NSView {
         return v === self ? nil : v
     }
 
+    private var laidOutSize: NSSize?
+
     override func layout() {
         super.layout()
         controller?.layoutViews()
+        // A resized pane (a split opened or closed) moves the owl while
+        // the caret stays put.
+        if laidOutSize != bounds.size {
+            if laidOutSize != nil { controller?.paneLayoutChanged() }
+            laidOutSize = bounds.size
+        }
     }
 }
 
@@ -575,26 +583,82 @@ final class OwlController: NSObject, NSPopoverDelegate {
         owl.needsDisplay = true
     }
 
+    /// A caret look put off until TextKit has finished an edit.
+    private(set) var caretLookPending = false
+    /// Calls that came from inside an edit (checks).
+    private(set) var caretMovesInEdit = 0
+    /// Caret looks that got as far as placing the caret (checks).
+    private(set) var caretLooks = 0
+    /// Calls to paneLayoutChanged: a resize or a new viewport laid out (checks).
+    private(set) var layoutRechecks = 0
+    /// The primary pane was resized (a split opened or closed), or TextKit
+    /// laid out a new viewport there (its viewport lags a scroll or a
+    /// resize by a layout pass). The caret is looked at again once that
+    /// pass is over, from the fragments it laid out: a caret judged out of
+    /// view from the old viewport may be in this one, and a resized pane
+    /// moves the owl while the caret stays put.
+    func paneLayoutChanged() {
+        layoutRechecks += 1
+        guard !caretLookPending else { return }
+        caretLookPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.caretLookPending = false
+            self.caretMoved()
+        }
+    }
+
     /// Fades the owl (and the bubble) while the caret is close to them.
     /// `byUser`: a selection change or typing (ends the just-turned-on hold).
     func caretMoved(byUser: Bool = false) {
         if byUser { holdVisible = false }
         guard !holdVisible || bubble != nil, !isDragging else { return }
         guard let tv = tab?.primaryTextView, let window = tv.window else { return }
+        // TextKit fixes the selection up from inside an edit
+        // (NSTextContentStorage synchronizeTextLayoutManagers), so the
+        // window hears of the new selection before the layout manager has
+        // taken the edit in. Any layout question then runs on half-updated
+        // layout: in a chunked long line, after the split was closed,
+        // ensureLayoutForBounds walked the chunks over and over and never
+        // came back (0.5.4 QA hang). Look once the edit is over.
+        if tv.textLayoutManager?.textContentManager?.hasEditingTransaction == true {
+            caretMovesInEdit += 1
+            guard !caretLookPending else { return }
+            caretLookPending = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.caretLookPending = false
+                self.caretMoved()
+            }
+            return
+        }
         let sel = tv.selectedRange()
         let caretAt = sel.location + sel.length
-        // In a chunked long line (large mode), a caret scrolled out of
-        // view can't be near the owl. (Asking TextKit for its rect lays
-        // out up to it, which re-anchored the viewport there: scrolling
-        // stalled near the caret.)
+        // In a chunked long line (large mode), a caret outside what TextKit
+        // has laid out for the viewport is out of view: it can't be near
+        // the owl. Never ask for more layout here: the caret's rect lays out
+        // up to it (that re-anchored the viewport there: scrolling stalled
+        // near the caret), and the visible rect's fragments can mean
+        // estimating across millions of characters.
+        // TextKit's viewport can lag (a scroll, a split resize):
+        // paneLayoutChanged looks again once the new one is laid out.
+        // Inside it, firstRect is answered from fragments already laid out.
+        // The viewport's end is the start of the next chunk, maybe not laid
+        // out: asking firstRect there laid it out on the main thread. So in
+        // chunks the rect comes only from fragments already laid out
+        // (laidOutCaretRect), and none is out of view.
+        let offscreen = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
         let caret: NSRect
-        if tv.contentStorage?.chunkLimit != nil, let vis = tv.visibleCharacterRange, !NSLocationInRange(caretAt, NSRange(location: vis.location, length: vis.length + 1)) {
-            caret = NSRect(x: -10_000, y: -10_000, width: 0, height: 0)
+        if tv.contentStorage?.chunkLimit != nil {
+            caret = tv.laidOutCaretRect(at: caretAt).map { overlay.convert($0, from: tv) } ?? offscreen
         } else {
+            // No rect: the caret is clipped out of the pane (a split just
+            // shrank it under the caret). Out of view, not "don't know":
+            // returning kept a fade that no longer fit.
             let screen = tv.firstRect(forCharacterRange: NSRange(location: caretAt, length: 0), actualRange: nil)
-            guard screen != .zero else { return }
-            caret = overlay.convert(window.convertFromScreen(screen), from: nil)
+            caret = screen == .zero ? offscreen : overlay.convert(window.convertFromScreen(screen), from: nil)
         }
+        caretLooks += 1
         let nearOwl = caret.insetBy(dx: -28, dy: -18).intersects(owl.frame)
         let nearBubble = bubble.map { caret.insetBy(dx: -12, dy: -12).intersects($0.frame) } ?? false
         if nearOwl != owlFaded {
@@ -638,6 +702,92 @@ final class OwlController: NSObject, NSPopoverDelegate {
         showBubble(hint, buttons: buttons(for: hint, tab: tab))
     }
 
+    // MARK: Notices
+
+    static let builtInUnhealthyID = "cedric.builtin-unhealthy"
+
+    /// A notice in the owl's bubble (not an alert: it takes no focus and
+    /// blocks nothing). OK, or the close button, dismisses it.
+    func showNotice(id: String, title: String, detail: String) {
+        let hint = OwlHint(id: id, kind: .warning, title: title, detail: detail, source: "notice")
+        presented = (hint, nil, nil)
+        showBubble(hint, buttons: [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }])
+    }
+
+    // MARK: Recent hints, again
+
+    /// Hints shown again from the popover (checks).
+    private(set) var replays = 0
+
+    /// A row under "Recent hints" was chosen: the hint again, in the same
+    /// bubble, without asking any provider (it is already in the
+    /// coordinator's shown set, so `isEligible` would say no). Its own tab
+    /// if that is another open one (brought to the front); its stored title
+    /// and detail here if its document is closed. A range that no longer
+    /// holds the text it had: title and detail only, never dropped.
+    func replay(_ shown: OwlCoordinator.Shown) {
+        closePopover()
+        guard let tab else { return }
+        if shown.documentID != tab.doc.id,
+           let other = (NSApp.delegate as? AppDelegate)?.tabs.first(where: { $0.doc.id == shown.documentID }),
+           let owl = other.owl {
+            other.window?.makeKeyAndOrderFront(nil)
+            owl.showAgain(shown, document: other.textView.string as NSString, own: true)
+            return
+        }
+        let mine = shown.documentID == tab.doc.id
+        showAgain(shown, document: mine ? tab.textView.string as NSString : nil, own: mine)
+    }
+
+    /// `own`: the hint is about this tab's document (its actions apply);
+    /// otherwise (its document is closed) only OK.
+    func showAgain(_ shown: OwlCoordinator.Shown, document: NSString?, own: Bool) {
+        guard tab != nil else { return }
+        let replay = OwlCoordinator.replay(shown, document: document)
+        // "Looks like JSON. Format it?" in an open document: checked again
+        // on the text now, off the main thread (formatting up to 64 KB, or
+        // the long one-line file's shape check over the whole file, can
+        // take a while; Sol round 3: that scan ran in the click), and
+        // shown only if the tab still holds that text: its text revision
+        // unchanged (EditorDocument.textRevision), not the whole text
+        // compared again on the main thread when the check comes back.
+        guard replay.hint.id == RulesHintProvider.jsonID else { showReplay(replay, own: own); return }
+        guard let document, let doc = tab?.doc else {
+            showReplay(RulesHintProvider.pastJSON(closed: true, source: replay.hint.source), own: own); return
+        }
+        let revision = doc.textRevision
+        let text = document.copy() as! String
+        let source = replay.hint.source
+        replayToken &+= 1
+        let token = replayToken
+        pendingRechecks += 1
+        Task { @MainActor [weak self] in
+            let r = await Task.detached(priority: .userInitiated) { RulesHintProvider.resolveJSONReplay(replay, document: text) }.value
+            guard let self else { return }
+            self.pendingRechecks -= 1
+            // Another bubble came (or went) meanwhile: that one stays.
+            guard self.replayToken == token, let tab = self.tab else { return }
+            // Nothing has touched the text since it was copied.
+            let current = tab.doc === doc && doc.textRevision == revision
+            self.showReplay(current ? r : RulesHintProvider.pastJSON(closed: false, source: source), own: own)
+        }
+    }
+
+    /// Bumped by every bubble shown or hidden: a JSON replay checked off
+    /// the main thread is dropped if anything came first.
+    private var replayToken = 0
+    /// JSON replays being checked (checks).
+    private(set) var pendingRechecks = 0
+
+    private func showReplay(_ r: OwlCoordinator.Replay, own: Bool) {
+        guard let tab else { return }
+        replays += 1
+        presented = (r.hint, r.documentRange, r.expected)
+        let buttons = own ? buttons(for: r.hint, tab: tab, isStale: r.isStale)
+            : [OwlBubble.Button(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() }]
+        showBubble(r.hint, buttons: buttons)
+    }
+
     // MARK: Typos
 
     static let typoFixID = "spelling.fixTypos"
@@ -669,15 +819,24 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let hint = OwlHint(id: Self.typoFixID, kind: .fix, title: String(localized: "Fix \(fix.count) typos?"),
                            detail: String(localized: "Fix Typos… goes through them one by one; Fix All uses the first suggestion for each, as one undo step."),
                            range: local, replacement: fix.replacement, source: "rules")
-        hub.coordinator.markShown(hint, documentID: tab.doc.id)
+        hub.coordinator.markShown(hint, documentID: tab.doc.id, context: ctx)
         present(hint, context: ctx)
         return true
     }
 
-    private func buttons(for hint: OwlHint, tab: EditorWindowController) -> [OwlBubble.Button] {
+    /// `isStale`: a recent hint shown again whose text has changed
+    /// (`OwlCoordinator.Replay.isStale`): nothing that edits the file.
+    private func buttons(for hint: OwlHint, tab: EditorWindowController, isStale: Bool = false) -> [OwlBubble.Button] {
         let hub = OwlHub.shared
         if hint.id == RulesHintProvider.letterID {
             return [.init(title: String(localized: "No thanks, I’m an owl"), isDefault: false) { [weak self] in self?.hideBubble() }]
+        }
+        if RulesHintProvider.isPastJSONHint(hint) {
+            // "Looked like JSON (the text has changed since).": asks nothing.
+            return [.init(title: String(localized: "OK"), isDefault: true) { [weak self] in self?.hideBubble() },
+                    .init(title: String(localized: "Don’t show again"), isDefault: false) { [weak self] in
+                        hub.coordinator.neverShowAgain(hint.id); self?.hideBubble()
+                    }]
         }
         if hint.id == Self.askIntroID {
             return [.init(title: String(localized: "Ask Cedric…"), isDefault: true) { [weak self, weak tab] in
@@ -709,7 +868,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
             // cliché, and Ignore this word (Settings' exceptions, saved).
             if hint.replacement != nil {
                 out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self] in _ = self?.applyPresented() })
-            } else {
+            } else if hint.range != nil {
                 out.append(.init(title: String(localized: "Show Me"), isDefault: true) { [weak self] in self?.showPresented() })
             }
             out.append(.init(title: String(localized: "Ignore this word"), isDefault: false) { [weak self] in
@@ -723,7 +882,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
             })
             return out
         }
-        if hint.id == RulesHintProvider.jsonID, hint.replacement == nil {
+        if RulesHintProvider.formatsWholeJSONFile(hint, isStale: isStale) {
             // A long one-line JSON file, only its start in view: Fix it
             // checks and formats the whole file.
             out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self, weak tab] in
@@ -741,7 +900,10 @@ final class OwlController: NSObject, NSPopoverDelegate {
             out.append(.init(title: String(localized: "Fix Typos…"), isDefault: true) { [weak self, weak tab] in
                 self?.hideBubble(); tab?.startSpellStep()
             })
-            out.append(.init(title: String(localized: "Fix All"), isDefault: false) { [weak self] in _ = self?.applyPresented() })
+            // Shown again after the text changed: no replacement, no Fix All.
+            if hint.replacement != nil {
+                out.append(.init(title: String(localized: "Fix All"), isDefault: false) { [weak self] in _ = self?.applyPresented() })
+            }
         } else if hint.replacement != nil {
             out.append(.init(title: String(localized: "Fix it"), isDefault: true) { [weak self, weak tab] in
                 guard let self, self.applyPresented() else { return }
@@ -783,6 +945,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     private func showBubble(_ hint: OwlHint, buttons: [OwlBubble.Button]) {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         let onlyButton = hint.id == RulesHintProvider.letterID
         let grammar = GrammarMap.isGrammarHint(hint.id)
@@ -804,6 +967,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
     }
 
     func hideBubble() {
+        replayToken &+= 1
         bubble?.removeFromSuperview()
         bubble = nil
         presented = nil
@@ -838,7 +1002,7 @@ final class OwlController: NSObject, NSPopoverDelegate {
         guard let p = presented, let range = p.range, let expected = p.expected, let rep = p.hint.replacement,
               let tv = tab?.textView, let storage = tv.textStorage else { return false }
         let ns = tv.string as NSString
-        guard NSMaxRange(range) <= ns.length, ns.substring(with: range) == expected else {
+        guard RulesHintProvider.stillApplies(p.hint, range: range, expected: expected, in: ns) else {
             NSSound.beep()
             return false
         }
@@ -902,11 +1066,20 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let head = NSTextField(labelWithString: String(localized: "Recent hints"))
         head.font = .systemFont(ofSize: 12, weight: .semibold)
         stack.addArrangedSubview(head)
-        if let status = hub.ai.statusLine() {
+        if let status = hub.ai.statusLine(autoReviewCapped: tab?.autoReviewCapped == true) {
             let l = NSTextField(wrappingLabelWithString: status)
             l.font = .systemFont(ofSize: 11)
             l.textColor = .secondaryLabelColor
             l.preferredMaxLayoutWidth = 260
+            stack.addArrangedSubview(l)
+        }
+        // Over the auto-review cap: a quiet line, never a modal on open.
+        if let tab, tab.autoReviewCapped {
+            let l = NSTextField(wrappingLabelWithString: AutoReviewCap.note(tab.autoReviewSize))
+            l.font = .systemFont(ofSize: 11)
+            l.textColor = .secondaryLabelColor
+            l.preferredMaxLayoutWidth = 260
+            l.identifier = Self.autoReviewNoteID
             stack.addArrangedSubview(l)
         }
         let recent = hub.coordinator.recent
@@ -919,10 +1092,12 @@ final class OwlController: NSObject, NSPopoverDelegate {
         let f = DateFormatter()
         f.timeStyle = .short
         for r in recent {
-            let l = NSTextField(wrappingLabelWithString: "\(f.string(from: r.date))  \(r.hint.title)")
-            l.font = .systemFont(ofSize: 11)
-            l.preferredMaxLayoutWidth = 260
-            stack.addArrangedSubview(l)
+            // A button that looks like the label it was: shows the hint again.
+            let time = f.string(from: r.date)
+            let spoken = OwlCoordinator.spokenRecent(time: time, title: r.hint.title, detail: r.hint.detail)
+            let row = OwlRecentHintRow(text: "\(time)  \(r.hint.title)", accessibilityText: spoken,
+                                       toolTip: r.hint.detail) { [weak self] in self?.replay(r) }
+            stack.addArrangedSubview(row)
         }
         let quiet: NSButton
         if hub.coordinator.isQuiet {
@@ -973,7 +1148,38 @@ final class OwlController: NSObject, NSPopoverDelegate {
         p.delegate = self
         p.show(relativeTo: owl.bounds, of: owl, preferredEdge: .maxY)
         popover = p
+        // Tab reaches the recent hints (custom views join the loop once it
+        // is recalculated).
+        stack.window?.autorecalculatesKeyViewLoop = true
+        stack.window?.recalculateKeyViewLoop()
     }
+
+    static let autoReviewNoteID = NSUserInterfaceItemIdentifier("owl.autoReviewNote")
+
+    /// The open popover's recent-hint rows, top first (checks).
+    var popoverRecentRows: [OwlRecentHintRow] {
+        var out: [OwlRecentHintRow] = []
+        func walk(_ v: NSView) {
+            if let r = v as? OwlRecentHintRow { out.append(r); return }
+            v.subviews.forEach(walk)
+        }
+        if let root = popover?.contentViewController?.view { walk(root) }
+        return out
+    }
+
+    /// The popover's quiet auto-review note, if shown (checks).
+    var popoverAutoReviewNote: String? {
+        func find(_ v: NSView) -> NSTextField? {
+            if let t = v as? NSTextField, t.identifier == Self.autoReviewNoteID { return t }
+            for s in v.subviews { if let t = find(s) { return t } }
+            return nil
+        }
+        guard let root = popover?.contentViewController?.view else { return nil }
+        return find(root)?.stringValue
+    }
+
+    /// The popover's window (checks: its snapshot).
+    var popoverWindow: NSWindow? { popover?.contentViewController?.view.window }
 
     var popoverShown: Bool { popover?.isShown == true }
     /// A button in the open popover (the checks).
@@ -1023,7 +1229,11 @@ final class OwlController: NSObject, NSPopoverDelegate {
     @objc func askAINow() {
         closePopover()   // at once: a fast answer must not find it still up
         guard let tab else { return }
-        OwlHub.shared.askAI(in: tab)
+        // Over the auto-review cap: a confirmation first (Cancel by default).
+        tab.confirmAskingCedric { [weak tab] in
+            guard let tab else { return }
+            OwlHub.shared.askAI(in: tab)
+        }
     }
 
     @objc func grammarWithAI() {

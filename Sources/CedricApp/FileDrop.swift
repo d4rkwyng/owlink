@@ -12,7 +12,7 @@ enum FileDrop {
     }
 
     static func open(_ urls: [URL]) {
-        for u in urls { (NSApp.delegate as? AppDelegate)?.open(u) }
+        for u in urls { (NSApp.delegate as? AppDelegate)?.open(u, background: true) }
     }
 }
 

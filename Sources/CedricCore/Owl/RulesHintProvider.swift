@@ -4,6 +4,15 @@ import Foundation
 /// and on the document facts. Pure and fast (one pass over at most 8 KB).
 public struct RulesHintProvider: OwlFactsAwareProvider {
     public static let jsonID = "rules.json-format"
+
+    /// The long one-line JSON hint (only the file's start in view, no
+    /// range, no replacement): its Fix it checks and formats the whole
+    /// file. Not a stale replay of the in-view hint (`OwlCoordinator.replay`
+    /// strips its range and replacement but keeps the ID): that one's text
+    /// has changed, so it gets no Fix it at all.
+    public static func formatsWholeJSONFile(_ hint: OwlHint, isStale: Bool) -> Bool {
+        hint.id == jsonID && hint.replacement == nil && hint.range == nil && !isStale
+    }
     public static let mixedIndentID = "rules.mixed-indent"
     public static let reloadID = "rules.changed-on-disk"
     public static let saveCopyID = "rules.unsaved-long"
@@ -42,7 +51,7 @@ public struct RulesHintProvider: OwlFactsAwareProvider {
 
         if facts.changedOnDisk {
             hint(Self.reloadID, .warning, String(localized: "This file changed on disk. Reload?"),
-                 String(localized: "Another app saved it since you opened it. Reloading replaces your unsaved changes (you can undo it)."))
+                 String(localized: "The file on disk changed since this tab last read or saved it. Reloading replaces your unsaved changes (you can undo it)."))
         }
         if let since = facts.unsavedSince, now().timeIntervalSince(since) > unsavedThreshold {
             hint(Self.saveCopyID, .tip, String(localized: "Unsaved for over 2 hours. Save a copy?"),
@@ -364,10 +373,10 @@ public struct RulesHintProvider: OwlFactsAwareProvider {
 extension JSONFormatter {
     /// The pretty-printed text if `s` is a JSON object or array written on
     /// one line; nil if it isn't valid JSON or already spans several lines.
-    public static func prettyIfMinified(_ s: String) -> String? {
+    public static func prettyIfMinified(_ s: String, limit: Int = .max) -> String? {
         let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first, first == "{" || first == "[", !trimmed.contains("\n"),
-              let pretty = try? format(trimmed, pretty: true) else { return nil }
+              let pretty = try? format(trimmed, pretty: true, limit: limit) else { return nil }
         guard pretty.contains("\n") else { return nil } // {} or []
         return pretty + (s.hasSuffix("\n") ? "\n" : "")
     }

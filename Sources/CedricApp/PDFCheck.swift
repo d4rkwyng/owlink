@@ -110,7 +110,8 @@ extension DevChecks {
         func status() -> String { tab?.statusBar.position.stringValue ?? "-" }
         func page() -> Int { tab?.currentPageIndex ?? -1 }
         func scale() -> CGFloat { tab?.pdfView?.scaleFactor ?? -1 }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 expect(DocumentKind.detect(url: manual) == .pdf && DocumentKind.detect(url: noExt) == .pdf
                        && DocumentKind.detect(url: notes) == .text, "PDFs are told apart by their first bytes")
@@ -178,6 +179,9 @@ extension DevChecks {
                 tab?.window?.contentView.map(walk)
                 expect(owlViews == 0, "no owl in a PDF tab", "\(owlViews)")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Menus: what applies is on, editing and saving are off.
                 let on: [(String, String, NSEvent.ModifierFlags)] = [
@@ -249,6 +253,9 @@ extension DevChecks {
                 tab?.findBar.findField.stringValue = "NEEDLE"
                 tab?.findBar.onChange?()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             until("the case-sensitive search finishes") { tab?.findInProgress == false },
             sync {
                 expect(tab?.matches.count == 0 && tab?.findBar.status.stringValue == "0 matches", "Match Case", tab?.findBar.status.stringValue ?? "-")
@@ -323,6 +330,9 @@ extension DevChecks {
                 NSApp.sendAction(it.action!, to: tab, from: it)
                 expect(tab?.extracting == true, "Open as Text extracts in the background")
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             until("Open as Text makes a tab") { app.tabs.count == textTabs + 1 && tab?.extracting == false },
             sync {
                 let t = app.tabs.last
@@ -394,6 +404,9 @@ extension DevChecks {
                 pressReturn(in: sheet)
                 next()
             },
+        ]
+        steps += steps4
+        let steps5: [Step] = [
             until("a wrong password asks again") { app.pdfTab(for: locked)?.passwordAlert != nil },
             { next in
                 let l = app.pdfTab(for: locked)
@@ -460,7 +473,9 @@ extension DevChecks {
                 expect(saved.contains(PDFTabState(page: 2, scale: 1.5)) && saved.contains(PDFTabState(page: 1)),
                        "the session keeps both PDF tabs", "\(saved)")
             },
-        ])
+        ]
+        steps += steps5
+        run(steps)
     }
 
     /// After a relaunch with the session `pdf` saved.

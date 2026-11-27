@@ -21,7 +21,8 @@ extension DevChecks {
         sized(tab)
         func saveItem() -> NSMenuItem? { menuItem("s", [.command]) }
         var junk: EditorWindowController?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 tab.window?.makeFirstResponder(tab.textView)
@@ -68,6 +69,9 @@ extension DevChecks {
                 expect(junk?.binary == .held(junk?.binaryHeldText ?? "") && app.certificateTabs.count == before,
                        "junk.crt is held as binary, not a certificate tab")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // The Certificate panel would open a turn after the open.
                 expect(junk?.previewPane == nil, "and gets no Certificate panel")
@@ -114,7 +118,9 @@ extension DevChecks {
                 expect(mode == 0o600, "and keeps mode 600", String(mode, radix: 8))
                 expect(!t.doc.isDirty, "the tab is saved")
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
         return true
     }
 }

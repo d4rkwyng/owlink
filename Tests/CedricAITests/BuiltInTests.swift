@@ -468,10 +468,10 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         let host = BuiltInModelHost(runtime: rt, clock: FakeClock())
         #expect(await host.loadedPath == nil)
         #expect(rt.loads.value.isEmpty)
-        _ = try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u"))
-        _ = try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u"))
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) }
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) }
         #expect(rt.loads.value == ["a.gguf"])
-        _ = try await host.generate(modelAt: b, GenerationRequest(system: "s", user: "u"))
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: b, GenerationRequest(system: "s", user: "u")) }
         #expect(rt.loads.value == ["a.gguf", "b.gguf"])
         #expect(rt.unloaded.value == ["a.gguf"])
         #expect(await host.loadedPath == b)
@@ -481,7 +481,7 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         let rt = FakeRuntime()
         let clock = FakeClock()
         let host = BuiltInModelHost(runtime: rt, clock: clock, idleTimeout: 300)
-        _ = try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u"))
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) }
         #expect(await eventually { clock.pendingSleepers == 1 })
         clock.advance(299)
         #expect(await host.loadedPath == a)
@@ -491,7 +491,7 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         #expect(await eventually { await host.loadedPath == nil })
         #expect(rt.unloaded.value == ["a.gguf"])
         // Loads again on the next request.
-        _ = try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u"))
+        _ = try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) }
         #expect(rt.loads.value == ["a.gguf", "a.gguf"])
     }
 
@@ -500,7 +500,7 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         rt.hang.mutate { $0 = true }
         let clock = FakeClock()
         let host = BuiltInModelHost(runtime: rt, clock: clock, idleTimeout: 1)
-        let task = Task { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) }
+        let task = Task { try await BuiltInLoad.userAsked { try await host.generate(modelAt: a, GenerationRequest(system: "s", user: "u")) } }
         #expect(await eventually { rt.requests.value.count == 1 })
         clock.advance(10)
         #expect(await host.idleCheck() == false)
@@ -545,7 +545,8 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         #expect(provider.name == "local:\(model.id)")
         rt.reply.mutate { $0 = #"{"hints":[{"kind":"fix","title":"Off by one","detail":"0...n runs past the end.","find":"0...items.count","replacement":"0..<items.count","confidence":0.9}]}"# }
         let code = "for i in 0...items.count { sum += items[i] }"
-        let hints = await provider.hints(for: context(code))
+        // Asked for (Ask AI Now): may load. Automatic use is BuiltInLoadGateTests.
+        let hints = await BuiltInLoad.userAsked { await provider.hints(for: context(code)) }
         #expect(hints.count == 1)
         #expect(hints.first?.replacement == "0..<items.count")
         #expect(hints.first?.source == "local:\(model.id)")
@@ -592,7 +593,7 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         let rt = FakeRuntime()
         let (engine, _) = try installedEngine(rt, family: "qwen3")
         let provider = try #require(await engine.makeProvider(model: nil))
-        _ = await provider.hints(for: context())
+        _ = await BuiltInLoad.userAsked { await provider.hints(for: context()) }
         #expect(rt.requests.value.first?.user.hasSuffix("/no_think") == true)
     }
 
@@ -602,7 +603,7 @@ final class FakeRuntime: BuiltInRuntime, @unchecked Sendable {
         let (engine, _) = try installedEngine(rt)
         let provider = try #require(await engine.makeProvider(model: nil))
         let clock = FakeClock()
-        let result = Task { await OwlScheduler.race(provider: provider, context: context(), clock: clock, timeout: 20) }
+        let result = Task { await BuiltInLoad.userAsked { await OwlScheduler.race(provider: provider, context: context(), clock: clock, timeout: 20) } }
         #expect(await eventually { rt.requests.value.count == 1 && clock.pendingSleepers == 1 })
         clock.advance(21)
         #expect(await result.value == nil)

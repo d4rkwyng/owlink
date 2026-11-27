@@ -119,6 +119,53 @@ func tempDir() -> URL {
         #expect(SessionStore(directory: dir).load() == nil)
     }
 
+    @Test func launchSetsATruncatedSessionAsideAndRecoversItsBuffers() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SessionStore(directory: dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        let b = SessionTab(path: "/tmp/edited.txt", hasBuffer: true)
+        try store.writeBuffer(a.id, text: "older text")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -60)], ofItemAtPath: store.bufferURL(a.id).path)
+        try store.writeBuffer(b.id, text: "newer text")
+        try store.save(Session(windows: [SessionWindow(tabs: [a, b])]))
+        let file = dir.appendingPathComponent("session.json")
+        let whole = try Data(contentsOf: file)
+        let truncated = whole.prefix(whole.count / 2)
+        try truncated.write(to: file)
+
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        guard case .recover(let aside, let buffers) = store.loadForLaunch(now: now) else {
+            Issue.record("a truncated session must be recovered"); return
+        }
+        let kept = try #require(aside)
+        #expect(kept.lastPathComponent == "session.unreadable-20270115-080000.json")
+        #expect(try Data(contentsOf: kept) == truncated)
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(buffers == [a.id, b.id])
+        #expect(store.readBuffer(a.id) == "older text")
+        #expect(store.readBuffer(b.id) == "newer text")
+
+        // A second bad file the same second gets its own name.
+        try Data("{".utf8).write(to: file)
+        guard case .recover(let second?, _) = store.loadForLaunch(now: now) else { Issue.record("second"); return }
+        #expect(second.lastPathComponent == "session.unreadable-20270115-080000-2.json")
+        #expect(try Data(contentsOf: kept) == truncated)
+    }
+
+    @Test func launchRecoversBuffersWrittenBeforeTheFirstSession() throws {
+        let dir = tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let store = SessionStore(directory: dir)
+        #expect(store.loadForLaunch() == .none)
+        let id = UUID()
+        try store.writeBuffer(id, text: "typed, then the app died")
+        #expect(store.loadForLaunch() == .recover(setAside: nil, buffers: [id]))
+        try store.save(Session(windows: [SessionWindow(tabs: [SessionTab(id: id, hasBuffer: true)])]))
+        guard case .session(let s, _) = store.loadForLaunch() else { Issue.record("a readable session"); return }
+        #expect(s.allTabs.map(\.id) == [id])
+    }
+
     @Test func newerVersionIsIgnored() throws {
         let dir = tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

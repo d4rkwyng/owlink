@@ -105,6 +105,9 @@ final class AISettingsSection: NSObject {
     let intervalPopup = NSPopUpButton()
     let automaticBox = NSButton(checkboxWithTitle: String(localized: "Check automatically when I pause typing"), target: nil, action: nil)
     let automaticNote = NSTextField(wrappingLabelWithString: "")
+    /// Built-in only: load the model when Owlink starts (off by default).
+    let launchBox = NSButton(checkboxWithTitle: String(localized: "Load model at launch"), target: nil, action: nil)
+    let launchNote = NSTextField(wrappingLabelWithString: LocalAISettings.loadModelAtLaunchNote)
 
     private(set) var settings: LocalAISettings
     private var grid: NSGridView?
@@ -149,7 +152,7 @@ final class AISettingsSection: NSObject {
     }
 
     private func build() {
-        for (b, a) in [(enabledBox, #selector(changed)), (automaticBox, #selector(changed)), (testButton, #selector(test))] {
+        for (b, a) in [(enabledBox, #selector(changed)), (automaticBox, #selector(changed)), (launchBox, #selector(changed)), (testButton, #selector(test))] {
             b.target = self; b.action = a
         }
         for p in [presetPopup, modelPopup, intervalPopup] { p.target = self; p.action = #selector(changed) }
@@ -175,8 +178,9 @@ final class AISettingsSection: NSObject {
         let privacy = privacyLabel
         privacy.font = small
         privacy.textColor = .secondaryLabelColor
-        for l in [statusLabel, modelsLabel, weakLabel, noteLabel, automaticNote] { l.font = small }
+        for l in [statusLabel, modelsLabel, weakLabel, noteLabel, automaticNote, launchNote] { l.font = small }
         automaticNote.textColor = .secondaryLabelColor
+        launchNote.textColor = .secondaryLabelColor
         noteLabel.textColor = .systemOrange
         modelsView.onChange = { [weak self] in self?.refresh() }
         weakLabel.textColor = .systemOrange
@@ -199,6 +203,8 @@ final class AISettingsSection: NSObject {
             [label(String(localized: "Check at most every:"), for: intervalPopup), intervalPopup],
             [NSGridCell.emptyContentView, automaticBox],
             [NSGridCell.emptyContentView, automaticNote],
+            [NSGridCell.emptyContentView, launchBox],
+            [NSGridCell.emptyContentView, launchNote],
         ])
         // The checkbox says what it does; VoiceOver reads its own title.
         enabledBox.setAccessibilityLabel(nil)
@@ -213,7 +219,7 @@ final class AISettingsSection: NSObject {
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         urlField.widthAnchor.constraint(equalToConstant: 380).isActive = true
-        for l in [privacy, modelsLabel, statusLabel, noteLabel, automaticNote] {
+        for l in [privacy, modelsLabel, statusLabel, noteLabel, automaticNote, launchNote] {
             l.preferredMaxLayoutWidth = 380
             // Without a hard cap a wrapping label in a grid column takes its
             // one-line width and runs into the window's edge.
@@ -236,6 +242,7 @@ final class AISettingsSection: NSObject {
         urlField.stringValue = settings.baseURL.absoluteString
         intervalPopup.selectItem(at: intervals.firstIndex(of: settings.minInterval) ?? 0)
         automaticBox.state = settings.automaticChecks ? .on : .off
+        launchBox.state = settings.loadModelAtLaunch ? .on : .off
         refresh()
     }
 
@@ -277,6 +284,7 @@ final class AISettingsSection: NSObject {
         presetPopup.selectItem(at: LocalAISettings.Backend.allCases.firstIndex(of: settings.backend) ?? 0)
         intervalPopup.selectItem(at: intervals.firstIndex(of: settings.minInterval) ?? 0)
         automaticBox.state = settings.automaticChecks ? .on : .off
+        launchBox.state = settings.loadModelAtLaunch ? .on : .off
         let custom = settings.backend == .custom
         let needsAddress = engine.needsAddress
         grid?.cell(for: urlField)?.row?.isHidden = !needsAddress
@@ -289,6 +297,9 @@ final class AISettingsSection: NSObject {
         let builtIn = settings.backend == .builtIn
         let apple = settings.backend == .apple
         grid?.cell(for: modelsView)?.row?.isHidden = !builtIn
+        // Only the built-in engine loads a model into Owlink itself.
+        grid?.cell(for: launchBox)?.row?.isHidden = !builtIn
+        grid?.cell(for: launchNote)?.row?.isHidden = !builtIn
         // Apple Intelligence has one model and no server: no model menu,
         // no Test Connection, just whether it's ready.
         enabledBox.title = apple ? String(localized: "Ask Apple Intelligence for hints") : String(localized: "Ask a local model for hints")
@@ -380,7 +391,8 @@ final class AISettingsSection: NSObject {
               addressText: urlField.stringValue,
               model: modelPopup.selectedItem?.representedObject as? String,
               minInterval: intervals[max(0, intervalPopup.indexOfSelectedItem)],
-              automaticChecks: automaticBox.state == .on)
+              automaticChecks: automaticBox.state == .on,
+              loadModelAtLaunch: launchBox.state == .on)
     }
 
     private func adopt(_ next: LocalAISettings) {

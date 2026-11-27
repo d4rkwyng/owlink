@@ -89,7 +89,13 @@ public final class FileSearch: @unchecked Sendable {
     private let lock = NSLock()
     private var _cancelled = false
 
-    public init(_ options: FileSearchOptions) { self.options = options }
+    /// Tests only: run around each file's read (TextCodec.ReadHooks).
+    public let readHooks: TextCodec.ReadHooks?
+
+    public init(_ options: FileSearchOptions, readHooks: TextCodec.ReadHooks? = nil) {
+        self.options = options
+        self.readHooks = readHooks
+    }
 
     public var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return _cancelled }
     public func cancel() { lock.lock(); _cancelled = true; lock.unlock() }
@@ -128,7 +134,6 @@ public final class FileSearch: @unchecked Sendable {
         let re = try FindEngine.regex(options.query, FindOptions(regex: options.regex, caseSensitive: options.caseSensitive))
         var summary = FileSearchSummary()
         let root = options.root.standardizedFileURL.resolvingSymlinksInPath()
-        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey, .contentModificationDateKey]
         let ignore = options.respectGitIgnore ? GitIgnore(folder: root) : nil
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys, options: [],
@@ -140,7 +145,12 @@ public final class FileSearch: @unchecked Sendable {
             if isCancelled { summary.cancelled = true; return summary }
             guard let url = obj as? URL else { continue }
             let path = url.resolvingSymlinksInPath().path
-            let rel = path.hasPrefix(rootPath) ? String(path.dropFirst(rootPath.count)) : url.lastPathComponent
+            // Its place in the root by the path bytes (FolderTree.relativePath):
+            // a text prefix test fused "root/" with a name starting with a
+            // combining mark and fell back to the basename, so two files
+            // showed as one name and filters saw the wrong string. One that
+            // resolves outside the root is skipped.
+            guard let rel = FolderTree.relativePath(of: URL(fileURLWithPath: path), in: root), !rel.isEmpty else { continue }
             guard let v = try? url.resourceValues(forKeys: Set(keys)) else { continue }
             if isExcluded(rel) || ignore?.isIgnored(URL(fileURLWithPath: path), isDirectory: v.isDirectory == true) == true {
                 if v.isDirectory == true { walker.skipDescendants() }
@@ -159,7 +169,21 @@ public final class FileSearch: @unchecked Sendable {
                 summary.skippedFiles.append(SkippedFile(url: url, relativePath: rel, reason: reason))
             }
             if size > options.maxFileSize { skip(.tooLarge); continue }
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { continue }
+            // Bytes of its own, not mapped: a file rewritten in place while
+            // it's decoded gave text and line endings from other bytes. And
+            // a regular file still: one swapped for a FIFO since the walk
+            // blocked the search for good.
+            // The size limit again on the file as opened and as read: it
+            // may have grown, or been replaced, since the walk.
+            readHooks?.before?(url)
+            let data: Data
+            do {
+                data = try TextCodec.snapshot(of: url, maxBytes: options.maxFileSize)
+            } catch {
+                if TextCodec.isTooLarge(error) { skip(.tooLarge) }
+                continue
+            }
+            readHooks?.after?(url)
             if Self.looksBinary(data) { skip(.binary); continue }
             guard let decoded = TextCodec.decode(data) else { skip(.binary); continue }
             summary.filesSearched += 1
@@ -221,12 +245,14 @@ public final class FileSearch: @unchecked Sendable {
         return head.contains(0)
     }
 
+    /// Filters split at the "/" bytes (FolderTree.components): a slash
+    /// before a combining mark is one Swift character.
     func isExcluded(_ rel: String) -> Bool {
-        let comps = rel.split(separator: "/")
+        let comps = FolderTree.components(rel)
         for g in options.exclude {
-            if g.contains("/") {
+            if g.utf8.contains(0x2f) {
                 if Self.glob(g, rel) { return true }
-            } else if comps.contains(where: { Self.glob(g, String($0)) }) {
+            } else if comps.contains(where: { Self.glob(g, $0) }) {
                 return true
             }
         }
@@ -235,17 +261,19 @@ public final class FileSearch: @unchecked Sendable {
 
     func isIncluded(_ rel: String) -> Bool {
         guard !options.include.isEmpty else { return true }
-        let name = (rel as NSString).lastPathComponent
-        return options.include.contains { g in g.contains("/") ? Self.glob(g, rel) : Self.glob(g, name) }
+        let name = FolderTree.components(rel).last ?? rel
+        return options.include.contains { g in g.utf8.contains(0x2f) ? Self.glob(g, rel) : Self.glob(g, name) }
     }
 
     /// Shell-style glob (`*`, `?`, `[...]`), via fnmatch(3). `**/` in a
-    /// path glob matches any number of folders.
+    /// path glob matches any number of folders. `**/` and the folders are
+    /// found by the "/" bytes, so a name starting with a combining mark
+    /// after them is still its own.
     public static func glob(_ pattern: String, _ s: String) -> Bool {
-        if pattern.hasPrefix("**/") {
-            let rest = String(pattern.dropFirst(3))
+        if pattern.utf8.starts(with: "**/".utf8) {
+            let rest = String(decoding: pattern.utf8.dropFirst(3), as: UTF8.self)
             if glob(rest, s) { return true }
-            var parts = s.split(separator: "/")
+            var parts = FolderTree.components(s)
             while parts.count > 1 {
                 parts.removeFirst()
                 if glob(rest, parts.joined(separator: "/")) { return true }

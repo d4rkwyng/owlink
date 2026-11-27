@@ -26,7 +26,8 @@ extension DevChecks {
         sized(tab)
         let queriesAtOpen = hub.coordinator.queryCount
         var typed: [Double] = []
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 tab.window?.makeKeyAndOrderFront(nil)
                 expect(openMs < 300, "opens in under 300 ms", String(format: "%.0f ms", openMs))
@@ -82,6 +83,9 @@ extension DevChecks {
                 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() }
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 expect(hub.coordinator.queryCount == queriesAtOpen + 1, "clicking the owl runs the rules once",
                        "\(hub.coordinator.queryCount - queriesAtOpen)")
@@ -118,6 +122,8 @@ extension DevChecks {
                 }
             },
             snapshot("large-pasted.png"),
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

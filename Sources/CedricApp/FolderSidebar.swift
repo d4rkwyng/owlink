@@ -55,6 +55,7 @@ extension AppDelegate {
         case #selector(openEnclosingFolderMenu(_:)):
             return FolderTree.enclosingFolder(of: currentFileURL) != nil && (currentTab ?? tabs.last) != nil
         case #selector(revealFileInFinderMenu(_:)): return currentFileURL != nil
+        case #selector(openInTerminalMenu(_:)): return TerminalHere.folder(forDocument: currentFileURL) != nil
         case #selector(toggleFolderSidebarMenu(_:)):
             setShowHide(item, shown: FolderSidebar.shared?.isShown == true,
                         show: String(localized: "Show Folder Sidebar"), hide: String(localized: "Hide Folder Sidebar"))
@@ -104,6 +105,10 @@ extension AppDelegate {
             self.findInFiles?.folderField.stringValue = dir.path
         }
         if state?.visible ?? true { s.show(in: tab) }
+        // Backlinks and Tags panes follow the new folder (the notification);
+        // an open `[[` list goes (wikiFolderChanged).
+        NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
+        tabs.forEach { $0.wikiFolderChanged() }
         scheduleSessionSave()
     }
 
@@ -111,19 +116,26 @@ extension AppDelegate {
         FolderSidebar.shared?.close()
         FolderSidebar.shared = nil
         FolderSidebar.pendingFolder = nil
+        NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
+        tabs.forEach { $0.wikiFolderChanged() }
         if let t = currentTab { t.window?.makeFirstResponder(t.textView) }
         scheduleSessionSave()
     }
 
     func openFromFolder(_ node: FolderNode, asText: Bool = false) {
         guard let s = FolderSidebar.shared else { return }
-        let tab = open(node.url, asText: asText)
         // Keep the tree beside the file it opened (the tab may not become
-        // key when the app isn't active).
-        if let tab, s.isShown {
+        // key when the app isn't active). A big file is read in the
+        // background: the same when its tab comes.
+        let beside: (EditorWindowController) -> Void = { tab in
+            guard FolderSidebar.shared === s, s.isShown else { return }
             s.show(in: tab)
             s.reveal(tab.doc.fileURL)
             tab.window?.makeFirstResponder(s.outline)
+        }
+        let tab = open(node.url, asText: asText, background: true, then: beside)
+        if tab != nil || backgroundOpens[node.url.standardizedFileURL] != nil {
+            return
         } else if s.isShown, let viewer = viewerTab(for: node.url) {
             s.show(in: viewer)
             s.reveal(viewer.fileURL)
@@ -234,6 +246,10 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     let root: FolderNode
     /// The root's real path (symbolic links resolved): FSEvents report those.
     let realRoot: String
+    /// The root, pinned by descriptor when the folder is opened: a note
+    /// made from a wiki link is created beneath it (nil: it couldn't be
+    /// opened, and no note is created).
+    let folderRoot: FolderRoot?
     let outline = FolderOutlineView()
     let scroll = NSScrollView()
     let title = NSTextField(labelWithString: "")
@@ -244,6 +260,8 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     private(set) var watcher: FolderWatcher?
     /// File › Open Quickly's index of this folder, once used (QuickOpenFiles.swift).
     var quickOpen: QuickOpenFiles?
+    /// The `[[` note names and Backlinks of this folder, once used (WikiLinksApp.swift).
+    var wikiNotes: WikiNotes?
     /// Dims git-ignored entries: reads a .gitignore only when a listing
     /// reaches its folder (FolderIgnore), never walks the tree.
     let ignore: FolderIgnore
@@ -277,6 +295,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         rootURL = url
         root = FolderNode(root: url)
         realRoot = Self.realPath(url.path)
+        folderRoot = try? FolderRoot(url)
         ignore = FolderIgnore(root: url)
         width = state?.width.map { CGFloat($0) } ?? Self.defaultWidth
         showHidden = state?.showHidden ?? false
@@ -454,6 +473,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         watcher?.stop()
         watcher = nil
         quickOpen?.markStale()
+        wikiNotes?.markAllDirty()
         let w = window
         undock()
         if let w, let tab = (NSApp.delegate as? AppDelegate)?.tabs.first(where: { $0.window === w }) { w.makeFirstResponder(tab.textView) }
@@ -587,17 +607,29 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     /// FSEvents (FolderWatcher): re-list the loaded folders that changed;
     /// events under folders never expanded cost a path walk.
     func handle(_ changes: [FolderWatcher.Change]) {
+        wikiNotes?.handle(changes)
         quickOpen?.handle(changes)
         guard isShown, root.isLoaded else { return }
         // A .gitignore (or info/exclude) may have changed: read them again,
         // as each folder is listed again.
         ignore.invalidate()
         var toList: [FolderNode] = []
+        // The event's folder as the tree lists it: by the bytes, else by
+        // identity from the root down (a case or normalization variant of
+        // a listed name, or of the root, is that folder); one gone under
+        // another spelling lists its nearest listed ancestor again. A miss
+        // alone never leaves a loaded folder stale.
+        let root = root, rootURL = rootURL
         func node(for path: String) -> FolderNode? {
-            let u = URL(fileURLWithPath: path)
-            guard let rel = FolderTree.relativePath(of: u, in: URL(fileURLWithPath: realRoot))
-                ?? FolderTree.relativePath(of: u, in: rootURL) else { return nil }
-            return root.descendant(rel)
+            guard let e = FolderTree.eventRelativePath(path, roots: [URL(fileURLWithPath: realRoot), rootURL]) else { return nil }
+            if let n = root.listedDescendant(e.rel) { return n }
+            let found = FolderTree.listedFolder(e.rel, base: e.base, root: rootURL) { key in
+                root.listedDescendant(key)?.children?.filter(\.isDirectory).map(\.name)
+            }
+            switch found {
+            case .listed(let k), .ancestor(let k): return root.listedDescendant(k)
+            case .unlisted: return nil
+            }
         }
         for c in changes {
             switch c {
@@ -699,6 +731,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
             add(String(localized: "Move to Trash…"), #selector(trashItem(_:)))
             menu.addItem(.separator())
             add(String(localized: "Reveal in Finder"), #selector(revealInFinder(_:)))
+            add(String(localized: "Open in Terminal Here"), #selector(openInTerminal(_:)))
             // A file below the root: its own folder as the sidebar's root.
             if let n, !n.isDirectory, n.url.deletingLastPathComponent().standardizedFileURL.path != rootURL.standardizedFileURL.path {
                 add(String(localized: "Open Enclosing Folder"), #selector(openEnclosing(_:)))
@@ -757,6 +790,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         case .rename: String(localized: "Rename")
         case .moveToTrash: String(localized: "Move to Trash…")
         case .revealInFinder: String(localized: "Reveal in Finder")
+        case .openInTerminal: String(localized: "Open in Terminal Here")
         case .openEnclosingFolder: String(localized: "Open Enclosing Folder")
         case .copyPath: String(localized: "Copy Path")
         case .findInFolder: String(localized: "Find in Folder…")
@@ -775,6 +809,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
         case .rename: #selector(renameItem(_:))
         case .moveToTrash: #selector(trashItem(_:))
         case .revealInFinder: #selector(revealInFinder(_:))
+        case .openInTerminal: #selector(openInTerminal(_:))
         case .openEnclosingFolder: #selector(openEnclosing(_:))
         case .copyPath: #selector(copyPath(_:))
         case .findInFolder: #selector(findInFolder(_:))
@@ -907,6 +942,13 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     @objc func revealInFinder(_ sender: Any?) {
         NSWorkspace.shared.activateFileViewerSelecting([target(sender).url])
+    }
+
+    /// Open in Terminal Here: a folder row's folder, a file row's own folder.
+    @objc func openInTerminal(_ sender: Any?) {
+        let n = target(sender)
+        guard let folder = TerminalHere.folder(forItem: n.url, isDirectory: n.isDirectory) else { NSSound.beep(); return }
+        TerminalOpener.open(folder)
     }
 
     @objc func openEnclosing(_ sender: Any?) {

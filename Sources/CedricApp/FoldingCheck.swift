@@ -91,7 +91,8 @@ extension DevChecks {
         var foldAllCount = 0
         var dirtyBefore = false
         var copy: EditorWindowController?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 for (sel, name, key, mods) in [(#selector(AppDelegate.foldMenu(_:)), "Fold", left, NSEvent.ModifierFlags([.option, .command])),
@@ -164,6 +165,9 @@ extension DevChecks {
                 tv.needsDisplay = true
                 tv.displayIfNeeded()
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // A click on the pill unfolds.
                 guard let pill = tv.foldPills.first else { expect(false, "a pill to click"); return }
@@ -232,6 +236,9 @@ extension DevChecks {
                 caretAt(start(18) + 2)
                 key("g", [.control, .command])
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 expect((tv.multiCarets?.count ?? 0) == 2, "⌃⌘G: a caret at each print", "\(tv.multiCarets?.count ?? 0)")
                 expect(folds.isEmpty, "a caret in a fold opens it", "\(folds)")
@@ -289,6 +296,9 @@ extension DevChecks {
                 focus(tab)
                 tab.unfoldAll()
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             sync {
                 // Markdown headings, Python indentation.
                 let md = app.open(write("folding.md", "# Title\nintro\n## One\ntext\n```\n# code\n```\n## Two\nmore\n"))!
@@ -339,6 +349,8 @@ extension DevChecks {
                 }
                 tab.doc.markSaved()
             },
-        ])
+        ]
+        steps += steps4
+        run(steps)
     }
 }

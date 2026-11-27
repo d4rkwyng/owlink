@@ -6,7 +6,7 @@ import CedricCore
 /// through the menus' key equivalents and the text view, then the text,
 /// the state and the drawn pixels are checked.
 ///
-///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
+///   CEDRIC_CHECK=highlight|lineops|bookmarks|closedtab|closefail|quitfail|quitjournalfail|saveasflushfail|quitsyncfail|backupfail|reopenfail|closedmemory|closedraw|jsonwhole|colours|autoedit|counts|editedtitle
 @MainActor
 extension DevChecks {
     static func editingCheck(_ name: String, _ app: AppDelegate) -> Bool {
@@ -16,6 +16,14 @@ extension DevChecks {
         case "bookmarks": bookmarks(app)
         case "closedtab": closedTab(app)
         case "closefail": closeAfterFailedSave(app)
+        case "quitfail": quitAfterFailedSave(app)
+        case "quitsyncfail": quitAfterFailedFlush(app)
+        case "quitjournalfail": quitAfterFailedJournal(app)
+        case "saveasflushfail": saveAsAfterFailedFlush(app)
+        case "backupfail": backupFailureNotice(app)
+        case "reopenfail": reopenUnreadableClosedTab(app)
+        case "closedmemory": closedTextOnlyInMemory(app)
+        case "sessionlatency": sessionLatency(app)
         case "closedraw": closedTabsStillDrawn(app)
         case "jsonwhole": formatWholeJSONCheck(app)
         case "colours": colourConsistency(app)
@@ -233,7 +241,8 @@ extension DevChecks {
         sized(tab)
         func caretTo(line: Int) { tab.textView.setSelectedRange(NSRange(location: tab.lineIndex.starts[line] + 1, length: 0)) }
         var marks: [Int] { tab.editing.bookmarks.lines }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 caretTo(line: 1)
@@ -287,6 +296,9 @@ extension DevChecks {
                 key(down, [.control, .command])
                 expect(marks == [5], "⌃⌘↓ takes the bookmark along", "\(marks)")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // Bookmark All Matches on the word under the caret ("todo").
                 key(f2Key, [.command, .shift])
@@ -321,7 +333,10 @@ extension DevChecks {
                 click(g, at: NSPoint(x: g.bounds.width - 10, y: p.y))
                 expect(marks.isEmpty, "and a second click removes it", "\(marks)")
             },
-        ] + bookmarksThroughBigEdits(app))
+        ]
+        steps += steps2
+        steps += bookmarksThroughBigEdits(app)
+        run(steps)
     }
 
     /// Edits made in one go keep the bookmarks on lines whose text
@@ -455,6 +470,623 @@ extension DevChecks {
         ])
     }
 
+    /// Quit while every session write fails (SessionStore.checkFailWrites,
+    /// as on a full disk): the app stays open, the user is asked (here
+    /// answered by `checkQuitSaveChoice`), and Try Again once the disk
+    /// works writes the latest text and lets the quit go on. Needs
+    /// session saving on (run like closefail).
+    static func quitAfterFailedSave(_ app: AppDelegate) {
+        let file = app.open(write("quit-fail.txt", "on disk\n"))!
+        sized(file)
+        func buffer() -> String? { app.store.readBuffer(file.doc.id) }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                app.saveSession(sync: true)
+                expect(buffer() == "on disk one\n", "a save writes the buffer", buffer() ?? "-")
+                type(" two")
+                app.store.checkFailWrites = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                let reply = app.applicationShouldTerminate(NSApp)
+                expect(reply == .terminateCancel, "a quit whose session save fails is cancelled")
+                expect(asked.count == 1, "the user is asked once", "\(asked)")
+                expect(!app.terminating, "the app isn't quitting")
+                expect(app.tabs.contains { $0 === file } && file.doc.isDirty, "the tab is still open, unsaved")
+                expect(buffer() == "on disk one\n", "nothing newer reached the disk", buffer() ?? "-")
+                // Try Again, with the disk working again: the quit goes on.
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { why in
+                    asked.append(why)
+                    app.store.checkFailWrites = false
+                    return .retry
+                }
+                let again = app.applicationShouldTerminate(NSApp)
+                expect(asked.count == 1, "asked once more", "\(asked)")
+                expect(again == .terminateNow, "after a save that worked, the quit goes on")
+                expect(buffer() == "on disk one two\n", "the latest text is in its buffer", buffer() ?? "-")
+                expect(app.store.load()?.allTabs.contains { $0.id == file.doc.id && $0.hasBuffer } == true, "and the session names it")
+                AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// Quit while only the journal can't be written (SessionStore.checkFailJournal):
+    /// a new untitled tab's text needs a journal entry before its buffer,
+    /// so the final save fails. Keep Owlink Open and Save As cancel the
+    /// quit, Try Again asks again while it still fails, and only Quit
+    /// Anyway lets it go on. Then, with only a closed tab's text at risk
+    /// (kept in memory, its close couldn't write it), Save As reopens that
+    /// tab and saves it. Needs session saving on (run like closefail).
+    static func quitAfterFailedJournal(_ app: AppDelegate) {
+        app.newTab(nil)
+        let fresh = app.tabs.last!
+        let savedAs = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("quit-journal-saved-\(getpid()).txt")
+        try? FileManager.default.removeItem(at: savedAs)
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(fresh)
+                type("never journaled")
+                app.store.checkFailJournal = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "a journal failure at quit: Keep Owlink Open cancels it")
+                expect(asked.count == 1 && !app.terminating, "asked once, not quitting", "\(asked)")
+                expect(app.store.readBuffer(fresh.doc.id) == nil, "no buffer without its journal entry")
+                // Try Again while it still fails: asked again, never quits on its own.
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return asked.count < 3 ? .retry : .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "Try Again while it fails: still not quitting")
+                expect(asked.count == 3 && !app.terminating, "asked after every try", "\(asked.count)")
+                // Closed now, its write failing: the text is only in memory.
+                fresh.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[fresh.doc.id] == "never journaled", "closed: its text kept in memory",
+                       app.closedTexts[fresh.doc.id] ?? "-")
+                expect(!app.tabs.contains { $0.doc.isDirty || $0.doc.fileURL == nil && !$0.text.isEmpty },
+                       "no open tab has unsaved text")
+                asked = []
+                EditorWindowController.checkSaveAsURL = savedAs
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .saveAs }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel && asked.count == 1, "Save As cancels the quit")
+                let back = app.tabs.first { $0.doc.id == fresh.doc.id }
+                expect(back?.text == "never journaled", "and reopens the closed tab from memory", back?.text ?? "-")
+            },
+            sync {
+                expect(EditorWindowController.checkSaveAsURL == nil, "Save As… ran on it")
+                expect((try? String(contentsOf: savedAs, encoding: .utf8)) == "never journaled", "and wrote its text",
+                       (try? String(contentsOf: savedAs, encoding: .utf8)) ?? "-")
+                try? FileManager.default.removeItem(at: savedAs)
+                // Unsaved text again, the journal still failing: only Quit Anyway quits.
+                app.newTab(nil)
+                if let another = app.tabs.last { focus(another); type("left by Quit Anyway") }
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .quitAnyway }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow && asked.count == 1, "Quit Anyway, asked: the quit goes on")
+                AppDelegate.checkQuitSaveChoice = nil
+                app.store.checkFailJournal = false
+            },
+        ])
+    }
+
+    /// Save As whose new file, or whose folder after the rename, couldn't
+    /// be flushed to the disk (DocumentWrite.Faults failFileFlush /
+    /// failFolderFlush, Astra 27e #5): the save fails, the tab stays
+    /// untitled with its text unsaved, and its session buffer stays, past
+    /// a session save and prune, a close (kept for ⇧⌘T), quit's Save As
+    /// on the closed tab (failing the same way) and the quit itself.
+    /// Needs session saving on (run like closefail).
+    static func saveAsAfterFailedFlush(_ app: AppDelegate) {
+        app.newTab(nil)
+        let tab = app.tabs.last!
+        let id = tab.doc.id
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        let dests = (1...3).map { tmp.appendingPathComponent("saveas-flush-\(getpid())-\($0).txt") }
+        for d in dests { try? FileManager.default.removeItem(at: d) }
+        func buffer() -> String? { app.store.readBuffer(id) }
+        func dismissSheets() { for w in NSApp.windows { if let s = w.attachedSheet { w.endSheet(s) } } }
+        func named() -> Bool {
+            guard let s = app.store.load() else { return false }
+            return (s.allTabs + (s.closedTabs ?? [])).contains { $0.id == id && $0.hasBuffer }
+        }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(tab)
+                type("flush me")
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me", "backed up first", buffer() ?? "-")
+                // The new file's flush fails: nothing renamed into place.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFileFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[0]
+                expect(tab.saveAs() == false, "Save As whose file flush fails fails")
+                expect(EditorDocument.checkWriteFaults == nil, "the fault was hit")
+                expect(tab.doc.fileURL == nil, "the tab is still untitled")
+                expect(!FileManager.default.fileExists(atPath: dests[0].path), "nothing at the destination")
+            },
+            sync {
+                dismissSheets()
+                // The folder's flush after the rename fails.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFolderFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[1]
+                expect(tab.saveAs() == false, "Save As whose folder flush fails fails")
+                expect(tab.doc.fileURL == nil && tab.text == "flush me", "the tab is still untitled, its text unsaved")
+            },
+            sync {
+                dismissSheets()
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me", "its buffer survives a session save and prune", buffer() ?? "-")
+                expect(named(), "the session still names it")
+                tab.window?.close()
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "closed: kept for ⇧⌘T with its text")
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me" && named(), "its buffer survives the close", buffer() ?? "-")
+                // Quit's Save As route on the closed tab, failing the same way.
+                EditorDocument.checkWriteFaults = DocumentWrite.Faults(failFolderFlush: true)
+                EditorWindowController.checkSaveAsURL = dests[2]
+                app.saveAsClosedTab(id)
+            },
+            sync {
+                expect(EditorWindowController.checkSaveAsURL == nil && EditorDocument.checkWriteFaults == nil, "quit's Save As ran and hit the fault")
+                let back = app.tabs.first { $0.doc.id == id }
+                expect(back?.doc.fileURL == nil && back?.text == "flush me", "reopened, still untitled and unsaved", back?.text ?? "-")
+                dismissSheets()
+                app.saveSession(sync: true)
+                expect(buffer() == "flush me" && named(), "its buffer survives", buffer() ?? "-")
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow && asked.isEmpty, "the quit goes on, its text backed up")
+                AppDelegate.checkQuitSaveChoice = nil
+                expect(buffer() == "flush me" && named(), "the quit's session keeps the buffer", buffer() ?? "-")
+                for d in dests { try? FileManager.default.removeItem(at: d) }
+            },
+        ])
+    }
+
+    /// ⇧⌘T on a closed tab whose buffer is there but can't be read: the
+    /// tab isn't reopened (not from its file without the text either),
+    /// the entry stays on the closed list and the buffer is held (kept,
+    /// never pruned). Readable again, ⇧⌘T brings the text back. Needs
+    /// session saving on (run like closefail).
+    static func reopenUnreadableClosedTab(_ app: AppDelegate) {
+        let file = app.open(write("reopen-fail.txt", "on disk\n"))!
+        sized(file)
+        let id = file.doc.id
+        let path = app.store.bufferURL(id).path
+        let fm = FileManager.default
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" edited")
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "⌘W keeps the edit for ⇧⌘T")
+                expect(app.store.readBuffer(id) == "on disk edited\n", "in its buffer", app.store.readBuffer(id) ?? "-")
+                try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+                key("t", [.command, .shift])
+            },
+            sync {
+                expect(!app.tabs.contains { $0.doc.id == id || $0.doc.fileURL?.lastPathComponent == "reopen-fail.txt" },
+                       "an unreadable buffer: the tab isn't reopened", app.tabs.map(\.doc.displayName).joined(separator: ","))
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "the entry stays on the closed list")
+                expect(app.store.heldBuffers.contains(id), "its buffer is held")
+                app.saveSession(sync: true)
+                expect(fm.fileExists(atPath: path), "and survives a save and its prune")
+                expect(app.store.load()?.heldBuffers?.contains(id) == true, "the session names it as held")
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+                key("t", [.command, .shift])
+            },
+            sync {
+                let back = app.tabs.first { $0.doc.id == id }
+                expect(back?.text == "on disk edited\n" && back?.doc.isDirty == true, "readable again: ⇧⌘T brings the edit back, unsaved",
+                       back?.text ?? "-")
+                expect(!app.closedTabs.contains { $0.id == id }, "and it leaves the closed list")
+                expect(!app.store.heldBuffers.contains(id), "no longer held")
+                // Closed again; then ⇧⌘T while the store can't be written:
+                // the reopen isn't journaled, and the tab says so.
+                if let back { focus(back) }
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id, "closed again")
+                app.store.checkFailWrites = true
+                key("t", [.command, .shift])
+            },
+            sync {
+                let back = app.tabs.first { $0.doc.id == id }
+                let bar = back?.noticeBar
+                expect(back?.text == "on disk edited\n", "the store can't be written: ⇧⌘T still reopens the text", back?.text ?? "-")
+                expect(bar?.isHidden == false && bar?.label.stringValue.contains("couldn’t record that") == true,
+                       "and the tab says the reopen wasn't recorded", bar?.label.stringValue ?? "-")
+                expect(bar?.button("Save As…")?.isEnabled == true, "with Save As")
+                app.store.checkFailWrites = false
+                app.saveSession(sync: true)
+                // Closed once more; then its buffer's place holds a folder,
+                // not a file: the commit can't count it as on disk, but it
+                // must not block every later commit either.
+                if let back { focus(back) }
+                key("w", [.command])
+            },
+            sync {
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "closed with its buffer")
+                try? fm.removeItem(atPath: path)
+                try? fm.createDirectory(atPath: path, withIntermediateDirectories: false)
+                let first = app.saveSession(sync: true)
+                expect(first != nil, "a commit that needs it on disk is refused once", first ?? "-")
+                let second = app.saveSession(sync: true)
+                expect(second == nil, "then it is held and the next commit goes through", second ?? "-")
+                expect(app.store.load()?.heldBuffers?.contains(id) == true, "the session names it as held")
+                expect(app.closedTabs.last?.id == id && app.closedTabs.last?.hasBuffer == true, "it stays on the closed list")
+                var isDir: ObjCBool = false
+                expect(fm.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue, "and its place is left as it is")
+                try? fm.removeItem(atPath: path)
+                // An older closed tab, then a newer one whose buffer stays
+                // unreadable: ⇧⌘T must get past the newer one.
+                if let older = app.open(write("reopen-older.txt", "older\n")) {
+                    sized(older)
+                    focus(older)
+                    older.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                    type(" edited")
+                    key("w", [.command])
+                }
+            },
+            sync {
+                if let newer = app.open(write("reopen-newer.txt", "newer\n")) {
+                    sized(newer)
+                    focus(newer)
+                    newer.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                    type(" edited")
+                    key("w", [.command])
+                }
+            },
+            sync {
+                guard let newer = app.closedTabs.last, newer.path?.hasSuffix("reopen-newer.txt") == true,
+                      let older = app.closedTabs.dropLast().last, older.path?.hasSuffix("reopen-older.txt") == true else {
+                    expect(false, "two closed tabs, newer last", app.closedTabs.compactMap(\.path).joined(separator: ","))
+                    return
+                }
+                expect(app.store.readBuffer(newer.id) == "newer edited\n", "the newer one's edit is in its buffer")
+                try? fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: app.store.bufferURL(newer.id).path)
+                key("t", [.command, .shift])
+                expect(!app.tabs.contains { $0.doc.id == newer.id }, "⇧⌘T: the unreadable newest isn't reopened")
+                expect(app.store.heldBuffers.contains(newer.id), "and is held")
+                key("t", [.command, .shift])
+                let back = app.tabs.first { $0.doc.id == older.id }
+                expect(back?.text == "older edited\n" && back?.doc.isDirty == true, "⇧⌘T again: the tab closed before it comes back",
+                       back?.text ?? "-")
+                expect(app.closedTabs.last?.id == newer.id && app.closedTabs.last?.hasBuffer == true,
+                       "the unreadable one stays on the closed list")
+                app.saveSession(sync: true)
+                expect(app.store.load()?.heldBuffers?.contains(newer.id) == true, "held in the session")
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: app.store.bufferURL(newer.id).path)
+                expect(app.store.readBuffer(newer.id) == "newer edited\n", "its bytes are kept",
+                       app.store.readBuffer(newer.id) ?? "-")
+                // Once every other entry has been tried, ⇧⌘T tries it again (readable now).
+                for _ in 0..<app.closedTabs.count where !app.tabs.contains(where: { $0.doc.id == newer.id }) {
+                    key("t", [.command, .shift])
+                }
+                let again = app.tabs.first { $0.doc.id == newer.id }
+                expect(again?.text == "newer edited\n", "readable again: ⇧⌘T brings it back", again?.text ?? "-")
+            },
+        ])
+    }
+
+    /// A closed tab whose text couldn't be written when it closed (kept in
+    /// memory, `closedTexts`): a timed save writes it once the disk works
+    /// again, not only quit. Reopened while still only in memory, the tab
+    /// isn't counted as written (it was, before: quit then skipped it and
+    /// let the app go with the text nowhere on disk). Needs session saving
+    /// on (run like closefail).
+    static func closedTextOnlyInMemory(_ app: AppDelegate) {
+        let first = app.open(write("memory-one.txt", "on disk\n"))!
+        let second = app.open(write("memory-two.txt", "on disk\n"))!
+        sized(first)
+        let one = first.doc.id, two = second.doc.id
+        func buffer(_ id: UUID) -> String? { app.store.readBuffer(id) }
+        func waitForSaves() { app.sessionQueue.sync {}; RunLoop.main.run(until: Date().addingTimeInterval(0.2)); app.sessionQueue.sync {} }
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(first)
+                first.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                focus(second)
+                second.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" two")
+                app.store.checkFailWrites = true
+                first.window?.close()
+                second.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[one] == "on disk one\n" && app.closedTexts[two] == "on disk two\n",
+                       "the closes couldn't write: both texts kept in memory")
+                expect(buffer(one) == nil && buffer(two) == nil, "nothing on disk")
+                app.store.checkFailWrites = false
+                app.saveSession(sync: false)
+                waitForSaves()
+            },
+            sync {
+                expect(buffer(one) == "on disk one\n" && buffer(two) == "on disk two\n", "a timed save writes them once it can",
+                       "\(buffer(one) ?? "-") / \(buffer(two) ?? "-")")
+                expect(app.closedTexts.isEmpty, "and lets the memory copies go")
+                expect(app.store.load()?.closedTabs?.filter(\.hasBuffer).count == 2, "the session names both")
+                // Again, closed and reopened while the disk still fails.
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == two }) else { expect(false, "⇧⌘T reopens the second tab"); return }
+                focus(back)
+                type(" more")
+                app.store.checkFailWrites = true
+                back.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[two] == "on disk two more\n", "closed again with the write failing: in memory",
+                       app.closedTexts[two] ?? "-")
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == two }) else { expect(false, "⇧⌘T reopens it"); return }
+                expect(back.text == "on disk two more\n" && back.doc.isDirty, "reopened from memory with its text", back.text)
+                expect(back.doc.sessionChangeCount != back.doc.changeCount, "and not counted as written: it isn't on disk")
+                expect(buffer(two) == "on disk two\n", "the disk still has the older text", buffer(two) ?? "-")
+                app.store.checkFailWrites = false
+                // An older copy's write finishing after a newer one is kept:
+                // the first tab, closed with its write failing (in memory)...
+                key("t", [.command, .shift])
+            },
+            sync {
+                guard let back = app.tabs.first(where: { $0.doc.id == one }) else { expect(false, "⇧⌘T reopens the first tab"); return }
+                focus(back)
+                type(" A")
+                app.store.checkFailWrites = true
+                back.window?.close()
+            },
+            sync {
+                expect(app.closedTexts[one] == "on disk one A\n", "the first tab closed with its write failing: in memory",
+                       app.closedTexts[one] ?? "-")
+                // ...a timed save writes that copy; its completion waits
+                // for the main thread, which meanwhile reopens the tab,
+                // edits it and closes it again with the write failing.
+                app.store.checkFailWrites = false
+                app.saveSession(sync: false)
+                app.sessionQueue.sync {}
+                expect(buffer(one) == "on disk one A\n", "the timed save wrote the older copy", buffer(one) ?? "-")
+                app.reopenClosedTab(nil)
+                guard let back = app.tabs.first(where: { $0.doc.id == one }) else { expect(false, "reopened again"); return }
+                focus(back)
+                type(" B")
+                app.store.checkFailWrites = true
+                back.window?.close()
+                expect(app.closedTexts[one] == "on disk one A B\n", "closed again, failing: the newer text in memory",
+                       app.closedTexts[one] ?? "-")
+            },
+            sync {
+                // The older save's completion has run by now.
+                expect(app.closedTexts[one] == "on disk one A B\n", "an older save's completion doesn't clear newer text",
+                       app.closedTexts[one] ?? "-")
+                app.store.checkFailWrites = false
+            },
+            sync {
+                var asked: [String] = []
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                let reply = app.applicationShouldTerminate(NSApp)
+                expect(reply == .terminateNow && asked.isEmpty, "quit saves without a failure", "\(asked)")
+                expect(buffer(two) == "on disk two more\n", "and quit wrote the reopened text", buffer(two) ?? "-")
+                expect(buffer(one) == "on disk one A B\n", "and the newer closed text, not the older copy", buffer(one) ?? "-")
+                AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// How long the main thread waits on the session store for ⌘W (the
+    /// buffer write and the commit), ⇧⌘T (the reopen's journal and the
+    /// commit) and quit (queued timed saves drained, then the final
+    /// commit), with a 200 KB file edited. Prints "session-timing:" lines
+    /// (median and max over the runs, ms). Measures only; needs session
+    /// saving on (run like closefail). Not part of tools-check.
+    static func sessionLatency(_ app: AppDelegate) {
+        let line = "a line of a document of some size, to make each buffer write real work\n"
+        let body = String(repeating: line, count: 200_000 / line.utf8.count)
+        let file = app.open(write("latency.txt", body))!
+        sized(file)
+        let id = file.doc.id
+        var closes: [Double] = [], reopens: [Double] = []
+        func ms(_ f: () -> Void) -> Double { let t = DispatchTime.now().uptimeNanoseconds; f(); return Double(DispatchTime.now().uptimeNanoseconds - t) / 1e6 }
+        func report(_ name: String, _ v: [Double]) {
+            let s = v.sorted()
+            print(String(format: "session-timing: %@ median=%.1f ms max=%.1f ms n=%d", name, s[s.count / 2], s.last ?? 0, s.count))
+        }
+        var steps: [(@escaping () -> Void) -> Void] = [sync {
+            expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+        }]
+        for _ in 0..<9 {
+            steps.append(sync {
+                guard let t = app.tabs.first(where: { $0.doc.id == id }) else { expect(false, "the tab is open"); return }
+                focus(t)
+                t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                type("x")
+                app.sessionQueue.sync {}
+                closes.append(ms { key("w", [.command]) })
+            })
+            steps.append(sync { reopens.append(ms { key("t", [.command, .shift]) }) })
+        }
+        steps.append(sync {
+            expect(closes.count == 9 && reopens.count == 9, "nine closes and reopens")
+            expect(app.store.readBuffer(id)?.hasPrefix(String(repeating: "x", count: 9)) == true, "each close wrote the edit")
+            report("close (⌘W, edited 200 KB file)", closes)
+            report("reopen (⇧⌘T)", reopens)
+            // Timed saves queued behind each other: one commit, not four.
+            func generation() -> Int? {
+                let url = app.store.directory.appendingPathComponent("session.json")
+                return ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any])?["generation"] as? Int
+            }
+            guard let t = app.tabs.first(where: { $0.doc.id == id }) else { return }
+            focus(t)
+            t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            let before = generation()
+            let gate = DispatchSemaphore(value: 0)
+            app.sessionQueue.async { gate.wait() }
+            for _ in 0..<4 { type("c"); app.saveSession(sync: false) }
+            gate.signal()
+            app.sessionQueue.sync {}
+            let after = generation()
+            expect(before != nil && after == before.map { $0 + 1 }, "four queued timed saves: one commit", "\(before ?? -1) → \(after ?? -1)")
+            expect(app.store.readBuffer(id)?.hasPrefix("cccc") == true, "with the latest text", String(app.store.readBuffer(id)?.prefix(12) ?? "-"))
+            // Quit with timed saves queued behind each other (typing).
+            focus(t)
+            t.textView.setSelectedRange(NSRange(location: 0, length: 0))
+            for _ in 0..<4 { type("q"); app.saveSession(sync: false) }
+            var reply: NSApplication.TerminateReply?
+            let quit = ms { reply = app.applicationShouldTerminate(NSApp) }
+            expect(reply == .terminateNow, "quit saves")
+            expect(app.store.readBuffer(id)?.hasPrefix("qqqq") == true, "with the last text")
+            print(String(format: "session-timing: quit (4 timed saves queued) %.1f ms", quit))
+        })
+        run(steps)
+    }
+
+    /// Quit while the disk takes the session's writes but won't confirm
+    /// them (each flush fails: SessionStore.checkFailSync): the save fails,
+    /// so the app stays open and asks, as for a write that fails. Needs
+    /// session saving on (run like closefail).
+    static func quitAfterFailedFlush(_ app: AppDelegate) {
+        let file = app.open(write("quit-sync-fail.txt", "on disk\n"))!
+        sized(file)
+        func buffer() -> String? { app.store.readBuffer(file.doc.id) }
+        var asked: [String] = []
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" one")
+                app.saveSession(sync: true)
+                expect(buffer() == "on disk one\n", "a save writes the buffer", buffer() ?? "-")
+                type(" two")
+                app.store.checkFailSync = true
+                AppDelegate.checkQuitSaveChoice = { asked.append($0); return .keepOpen }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateCancel, "a quit whose flush fails is cancelled")
+                expect(asked.count == 1, "the user is asked", "\(asked)")
+                expect(app.tabs.contains { $0 === file } && file.doc.isDirty, "the tab is still open, unsaved")
+                expect(file.doc.sessionChangeCount != file.doc.changeCount, "its text isn't counted as written")
+                expect(buffer() == "on disk one\n", "the older buffer stays", buffer() ?? "-")
+                asked = []
+                AppDelegate.checkQuitSaveChoice = { why in
+                    asked.append(why)
+                    app.store.checkFailSync = false
+                    return .retry
+                }
+                expect(app.applicationShouldTerminate(NSApp) == .terminateNow, "flushes confirmed: the quit goes on")
+                expect(buffer() == "on disk one two\n", "with the latest text on disk", buffer() ?? "-")
+                AppDelegate.checkQuitSaveChoice = nil
+            },
+        ])
+    }
+
+    /// Timed session saves failing (SessionStore.checkFailWrites, as on a
+    /// full disk): the first failure is tried again quietly; once the
+    /// retry fails too, every text tab shows a notice that unsaved work
+    /// isn't being backed up, with Save As, and it stays until a save
+    /// writes everything. Needs session saving on and a short retry
+    /// (CEDRIC_SESSION_RETRY_DELAY=2: longer than the steps
+    /// between the first failure and its check; tools-check runs it so).
+    static func backupFailureNotice(_ app: AppDelegate) {
+        let file = app.open(write("backup-fail.txt", "on disk\n"))!
+        sized(file)
+        app.newTab(nil)
+        let untitled = app.tabs.last!
+        // A tab already showing another notice (a recovered tab's, say).
+        app.newTab(nil)
+        let other = app.tabs.last!
+        let otherNotice = "A notice this tab already shows."
+        let savedAs = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("backup-fail-saved-\(getpid()).txt")
+        // In either bar, on screen: not hidden itself, nor in a hidden view, laid out with some height.
+        func visible(_ bar: NoticeBar?) -> Bool {
+            guard let bar, !bar.isHiddenOrHasHiddenAncestor, bar.window != nil else { return false }
+            bar.window?.layoutIfNeeded()
+            return bar.frame.height > 0
+        }
+        func says(_ t: EditorWindowController) -> Bool {
+            [t.backupBar, t.noticeBar].contains { visible($0) && $0?.label.stringValue.contains("isn’t being backed up") == true }
+        }
+        func saysOnly(_ t: EditorWindowController) -> NoticeBar? {
+            [t.backupBar, t.noticeBar].compactMap { $0 }.first { visible($0) && $0.label.stringValue.contains("isn’t being backed up") }
+        }
+        run([
+            sync {
+                expect(DevEnvironment.values["CEDRIC_NO_SESSION_SAVE"] != "1", "session saving is on for this check")
+                expect(AppDelegate.sessionRetryDelay <= 3, "a short retry for this check", "\(AppDelegate.sessionRetryDelay)")
+                focus(other)
+                type("kept by Save As")
+                other.showNotice(otherNotice, buttons: [])
+                focus(untitled)
+                type("typed while the disk is full")
+                focus(file)
+                file.textView.setSelectedRange(NSRange(location: 7, length: 0))
+                type(" edited")
+            },
+            // The typing's own saves first, so the failures below are the
+            // only saves (no timer armed by an edit).
+            waitFor("the typing is saved", 5) {
+                app.store.readBuffer(file.doc.id) == "on disk edited\n" && app.store.readBuffer(untitled.doc.id) != nil
+            },
+            sync {
+                app.store.checkFailWrites = true
+                app.saveSession(sync: false)
+            },
+            waitFor("the first save fails") { app.sessionSaveFailures >= 1 },
+            sync {
+                expect(!app.backupNoticeShown && !says(file), "one failed save: no notice yet (it is tried again)", "failures \(app.sessionSaveFailures)")
+            },
+            waitFor("the retry fails too", 8) { app.sessionSaveFailures >= 2 },
+            sync {
+                expect(app.backupNoticeShown, "then unsaved work isn't being backed up")
+                expect(says(file) && says(untitled), "every text tab says so", file.noticeBar?.label.stringValue ?? "-")
+                expect(saysOnly(file)?.button("Save As…") != nil, "with Save As")
+                expect(saysOnly(file)?.button("Dismiss") != nil, "and Dismiss (it is not modal)")
+                focus(other)
+                expect(other.window?.isVisible == true && says(other), "a tab already showing another notice says so too, on screen",
+                       "backup bar: \(other.backupBar.map { "\($0.isHiddenOrHasHiddenAncestor ? "hidden" : "shown") \($0.frame.height)" } ?? "none")")
+                expect(visible(other.noticeBar) && other.noticeBar?.label.stringValue == otherNotice, "and still shows its own notice",
+                       other.noticeBar?.label.stringValue ?? "-")
+                // Its Save As works from there (the check chooses the place).
+                let button = saysOnly(other)?.button("Save As…")
+                expect(button?.isEnabled == true, "that tab's Save As is there and enabled")
+                EditorWindowController.checkSaveAsURL = savedAs
+                button?.performClick(nil)
+                expect(EditorWindowController.checkSaveAsURL == nil, "Save As… ran")
+                expect((try? String(contentsOf: savedAs, encoding: .utf8)) == "kept by Save As", "and wrote the tab's text",
+                       (try? String(contentsOf: savedAs, encoding: .utf8)) ?? "-")
+                EditorWindowController.checkSaveAsURL = nil
+                try? FileManager.default.removeItem(at: savedAs)
+            },
+            waitFor("more retries fail", 8) { app.sessionSaveFailures >= 3 },
+            sync {
+                expect(says(file) && says(untitled), "it stays while saves fail")
+                app.store.checkFailWrites = false
+            },
+            waitFor("a save that works clears it", 8) { !app.backupNoticeShown },
+            sync {
+                expect(app.store.readBuffer(file.doc.id) == "on disk edited\n", "a save that works writes the text",
+                       app.store.readBuffer(file.doc.id) ?? "-")
+                expect(app.store.load()?.allTabs.contains { $0.id == untitled.doc.id && $0.hasBuffer } == true, "and the session names both tabs")
+                expect(!says(file) && !says(untitled) && !says(other), "and the notice goes from every tab")
+                expect(visible(other.noticeBar) && other.noticeBar?.label.stringValue == otherNotice, "the other notice stays")
+            },
+        ])
+    }
+
     /// A timed session save whose buffer write fails, then a hot close:
     /// the close must still write the text (it used to trust the failed
     /// save and keep the older buffer). Needs session saving on (run
@@ -579,7 +1211,8 @@ extension DevChecks {
         let broken = app.open(write("broken.json", String(full.dropLast(3)) + "\n"))!
         sized(tab)
         var said: String?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let w = tab.owlContextWindow()
                 expect(!w.isWholeDocument, "the owl sees only the start of the file", "\((w.context.text as NSString).length)")
@@ -602,7 +1235,190 @@ extension DevChecks {
                 expect(broken.text == String(full.dropLast(3)) + "\n", "a file that isn't valid JSON as a whole is left alone")
                 expect(said != nil, "and the reason is given", said ?? "-")
             },
-        ], gap: 0.6)
+        ]
+        steps += steps1
+        steps += staleJSONHintSteps(app)
+        run(steps, gap: 0.6)
+    }
+
+    /// "Looks like JSON. Format it?" shown again from Recent hints after
+    /// the text changed (0.5.4 QA #12): still one-line JSON, the question
+    /// with a Fix it that formats the text as it is now; not JSON any
+    /// more, a past hint that asks nothing (OK, Don't show again).
+    static func staleJSONHintSteps(_ app: AppDelegate) -> [(@escaping () -> Void) -> Void] {
+        let first = #"{"a":1,"b":[1,2]}"#, second = #"{"a":2,"b":[3,4],"c":"x"}"#
+        var tab: EditorWindowController!
+        var shown: OwlCoordinator.Shown?
+        func titles() -> [String] { tab.owl?.bubble?.buttons.map(\.title) ?? [] }
+        func replace(_ text: String) {
+            tab.textView.setSelectedRange(NSRange(location: 0, length: (tab.text as NSString).length))
+            tab.textView.insertText(text, replacementRange: tab.textView.selectedRange())
+        }
+        var steps: [Step] = []
+        let steps1: [Step] = [
+            sync {
+                guard let t = app.open(write("stale.json", first)) else { expect(false, "stale JSON: opened stale.json"); return }
+                tab = t
+                sized(t)
+                t.setOwlVisible(true)
+                let w = t.owlContextWindow()
+                let hub = OwlHub.shared
+                guard let hint = RulesHintProvider().check(w.context, facts: t.owlFacts(wholeDocument: w.isWholeDocument))
+                        .first(where: { $0.id == RulesHintProvider.jsonID }) else { expect(false, "stale JSON: the rules offer to format it"); return }
+                hub.coordinator.markShown(hint, documentID: t.doc.id, context: w.context)
+                shown = hub.coordinator.recent.first { $0.hint.id == RulesHintProvider.jsonID && $0.documentID == t.doc.id }
+                expect(shown != nil && t.owl != nil, "stale JSON: the hint is under Recent hints")
+                focus(t)
+                replace(second)
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(tab.text == second, "stale JSON: the text changed, still one-line JSON", tab.text)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: checked again off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let owl = tab?.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: still JSON, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(titles().first == String(localized: "Fix it"), "stale JSON: …with a Fix it that works", "\(titles())")
+                owl.bubble?.buttons.first { $0.title == String(localized: "Fix it") }?.performClick(nil)
+            },
+            sync {
+                guard let tab else { return }
+                expect(tab.text == JSONFormatter.prettyIfMinified(second), "stale JSON: Fix it formatted the text as it is now", tab.text)
+                replace("not JSON any more\n")
+            },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (not JSON)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                let title = owl.presentedHint?.hint.title ?? "-"
+                expect(title == "Looked like JSON (the text has changed since).", "stale JSON: not JSON now, a past hint", title)
+                expect(!title.contains("?"), "stale JSON: …that asks nothing", title)
+                expect(titles() == [String(localized: "OK"), String(localized: "Don’t show again")], "stale JSON: …OK and Don’t show again",
+                       "\(titles())")
+                expect(owl.presentedHint?.documentRange == nil, "stale JSON: …and no range")
+                owl.bubble?.buttons.first { $0.title == String(localized: "OK") }?.performClick(nil)
+                expect(owl.bubble == nil, "stale JSON: OK closes it")
+                // Codex round 2: the JSON kept as the start of a longer,
+                // invalid text still matched its range and offered to format it.
+                replace(first + " and more")
+            },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (JSON then more)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: JSON then more text, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(!titles().contains(String(localized: "Fix it")), "stale JSON: …no Fix it for the start of it", "\(titles())")
+                owl.hideBubble()
+                // Still one-line JSON when asked, edited while it is checked: not offered for text that has gone.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+            },
+            waitFor("stale JSON: the check comes back (edited meanwhile)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: edited while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                expect(owl.presentedHint?.hint.replacement == nil, "stale JSON: …with nothing to apply")
+                owl.hideBubble()
+                // Sol round 3: the long one-line file's hint (no range),
+                // past the length checked again, had its shape checked over
+                // the whole file in the click. Off the main thread now too.
+                let longLine = OwlHint(id: RulesHintProvider.jsonID, kind: .fix, title: "Looks like JSON. Format it?", source: "rules")
+                OwlHub.shared.coordinator.markShown(longLine, documentID: tab.doc.id)
+                guard let rangeless = OwlHub.shared.coordinator.recent.first(where: {
+                    $0.hint.id == RulesHintProvider.jsonID && $0.documentID == tab.doc.id }) else {
+                    expect(false, "stale JSON: the long file's hint is under Recent hints"); return
+                }
+                expect(rangeless.hint.range == nil, "stale JSON: the long file's hint has no range")
+                replace("[" + Array(repeating: "1", count: 40_000).joined(separator: ",") + "]")
+                expect((tab.text as NSString).length > RulesHintProvider.replayJSONLimit, "stale JSON: the long file is past the recheck length")
+                owl.showAgain(rangeless, document: tab.text as NSString, own: true)
+                expect(owl.pendingRechecks == 1 && owl.bubble == nil, "stale JSON: the long file's hint is checked off the main thread, not in the click",
+                       "pending \(owl.pendingRechecks) bubble \(owl.bubble != nil)")
+            },
+            waitFor("stale JSON: the long file's check comes back") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: the long file still JSON-shaped, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // 0.5.4 QA review 3: the check coming back compared the
+                // whole text with its copy on the main thread. Now the
+                // tab's text revision: any change while it is checked,
+                // even one that ends at the same text, makes it a past hint.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                replace(second + " x")
+                replace(second)
+                expect(tab.text == second, "stale JSON: edited and back to the same text")
+            },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
+            waitFor("stale JSON: the check comes back (edited and back)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle,
+                       "stale JSON: edited while checked, even back to the same text, a past hint", owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Text added the way Follow File adds it (the storage, no
+                // user edit, the tab stays clean) while it is checked.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                let storage = tab.textView.textStorage!
+                storage.beginEditing()
+                storage.append(NSAttributedString(string: "\n", attributes: tab.baseAttributes()))
+                storage.endEditing()
+            },
+            waitFor("stale JSON: the check comes back (appended)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: appended to while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // The whole buffer replaced (a reload, a Follow reset) by the same text.
+                replace(second)
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+                tab.setText(second)
+                expect(tab.text == second, "stale JSON: the buffer replaced by the same text")
+            },
+            waitFor("stale JSON: the check comes back (replaced)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl, let shown else { return }
+                expect(owl.presentedHint?.hint.title == RulesHintProvider.staleJSONTitle, "stale JSON: buffer replaced while checked, a past hint",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                // Untouched while checked: still asks.
+                owl.showAgain(shown, document: tab.text as NSString, own: true)
+            },
+            waitFor("stale JSON: the check comes back (untouched)") { tab?.owl?.pendingRechecks == 0 && tab?.owl?.bubble != nil },
+            sync {
+                guard let tab, let owl = tab.owl else { return }
+                expect(owl.presentedHint?.hint.title == "Looks like JSON. Format it?", "stale JSON: untouched while checked, it asks",
+                       owl.presentedHint?.hint.title ?? "-")
+                owl.hideBubble()
+                tab.setOwlVisible(false)
+                tab.doc.markSaved()
+                tab.window?.performClose(nil)
+            },
+        ]
+        steps += steps3
+        return steps
     }
 
     // MARK: Colouring stays right after edits
@@ -826,7 +1642,8 @@ extension DevChecks {
         let big = app.open(write("big.txt", String(repeating: "lorem ipsum dolor\n", count: 70_000)))! // 1.26 M: lines only
         sized(tab)
         var label: String { tab.statusBar.counts.stringValue }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(tab)
                 tab.textView.setSelectedRange(NSRange(location: 0, length: 0))
@@ -845,7 +1662,9 @@ extension DevChecks {
                 mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
                 type("x")
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { next() } },
+            waitFor("a 72 K document is counted after a pause, in time", 5) {
+                mid.statusBar.counts.stringValue == "12,000 words · 6,000 lines · 72,001 characters"
+            },
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "12,000 words · 6,000 lines · 72,001 characters", "a 72 K document is counted after a pause", l)
@@ -861,7 +1680,12 @@ extension DevChecks {
                 let ms = Date().timeIntervalSince(t0) * 1000
                 expect(ms < 15, "counting ~1 M characters doesn't hold up the main thread", String(format: "%.1f ms", ms))
             },
-            { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { next() } },
+            waitFor("~1 M characters counted, in time", 10) {
+                mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters"
+            },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 let l = mid.statusBar.counts.stringValue
                 expect(l == "180,000 words · 36,000 lines · 972,000 characters", "and the counts arrive", l)
@@ -876,8 +1700,68 @@ extension DevChecks {
                 big.textView.setSelectedRange(NSRange(location: 0, length: 20 * 18))
                 let l3 = big.statusBar.counts.stringValue
                 expect(l3 == "Selected: 60 words · 20 lines · 360 characters", "a small selection in a big document is counted", l3)
+                // 0.5.4: lines-only and cached counts never read the text.
+                // Past the cap, the document's lines-only state is cached.
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                // (Review: the text read itself is counted, so the old eager
+                // bridge would fail these.) A small selection reads it: the
+                // counter is live.
+                var reads = big.editing.countsTextReads
+                big.textView.setSelectedRange(NSRange(location: 0, length: 18))
+                expect(big.editing.countsTextReads == reads + 1, "a small selection's count reads the text",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                big.editing.documentCounts = nil
+                reads = big.editing.countsTextReads
+                big.updateCounts()
+                var cachedLinesOnly = false
+                if case .some(.none) = big.editing.documentCounts { cachedLinesOnly = true }
+                expect(cachedLinesOnly && big.statusBar.counts.stringValue == "70,000 lines", "over the cap: lines only, cached as such",
+                       big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "over the cap, not cached: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
+                big.updateCounts()
+                big.textView.setSelectedRange(NSRange(location: 5, length: 0))
+                expect(big.editing.countsTextReads == reads && big.statusBar.counts.stringValue == "70,000 lines",
+                       "over the cap, cached: the text isn't read", "\(big.editing.countsTextReads - reads) reads")
+                // A selection over the cap: the lines it touches, from the index
+                // ("x" was typed at the start: line 1 is 19 units long).
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "a selection over the cap: its lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 0, length: 19 + 59_999 * 18 - 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,000 lines", "…ending before a newline: the same lines",
+                       big.statusBar.counts.stringValue)
+                big.textView.setSelectedRange(NSRange(location: 1, length: 19 + 59_999 * 18 + 1))
+                expect(big.statusBar.counts.stringValue == "Selected: 60,001 lines", "…one unit into the next line: one more",
+                       big.statusBar.counts.stringValue)
+                expect(big.editing.countsTextReads == reads, "selections over the cap: the text isn't read",
+                       "\(big.editing.countsTextReads - reads) reads")
+                // Exactly the cap: counted (after a pause, off the main thread).
+                big.textView.setSelectedRange(NSRange(location: 1, length: TextStats.maxCounted))
+                // The cached document counts come back at once with no selection.
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 27))
+                let midReads = mid.editing.countsTextReads
+                mid.textView.setSelectedRange(NSRange(location: 0, length: 0))
+                mid.updateCounts()
+                expect(mid.statusBar.counts.stringValue == "180,000 words · 36,000 lines · 972,000 characters", "cached counts, at once",
+                       mid.statusBar.counts.stringValue)
+                expect(mid.editing.countsTextReads == midReads, "cached counts: the text isn't read",
+                       "\(mid.editing.countsTextReads - midReads) reads")
+            },
+            // The cap-sized count runs off the main thread: wait for it (bounded).
+            waitFor("a selection of exactly the cap is counted, in time", 10) {
+                big.statusBar.counts.stringValue == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters"
+            },
+            sync {
+                // 1,000,000 units of "lorem ipsum dolor\n" (18 each): 55,555
+                // lines and "lorem ipsu", 166,667 words over 55,556 lines.
+                let l4 = big.statusBar.counts.stringValue
+                expect(l4 == "Selected: 166,667 words · 55,556 lines · 1,000,000 characters", "a selection of exactly the cap is counted", l4)
                 for t in [tab, mid, big] { t.doc.markSaved() }
             },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 }

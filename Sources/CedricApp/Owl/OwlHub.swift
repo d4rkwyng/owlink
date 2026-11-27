@@ -44,6 +44,10 @@ final class OwlHub {
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { OwlHub.shared.appActiveChanged() }
         }
+        NotificationCenter.default.addObserver(forName: .cedricBuiltInModelUnhealthy, object: nil, queue: .main) { n in
+            let seconds = n.userInfo?["seconds"] as? Int ?? Int(BuiltInWatchdog.seconds)
+            MainActor.assumeIsolated { OwlHub.shared.builtInModelUnhealthy(seconds: seconds) }
+        }
         ai.onThinking = { [weak self] id, on in self?.tab(for: id)?.owl?.setThinking(on) }
         ai.onHints = { [weak self] ctx, hints in self?.presentAI(hints, context: ctx) }
         ai.onStateChange = { [weak self] in self?.applySource() }
@@ -66,6 +70,23 @@ final class OwlHub {
         if source != Settings.shared.owlHintSource { Settings.shared.owlHintSource = source }
     }
 
+    /// Notices shown for a built-in load that hung (checks).
+    private(set) var unhealthyNotices = 0
+
+    /// The built-in model did not finish loading within the watchdog's
+    /// limit: say so once in the front tab's owl bubble (no alert, no
+    /// focus change). Automatic AI is already off (BuiltInSession); the
+    /// popover's status line says so too.
+    func builtInModelUnhealthy(seconds: Int) {
+        unhealthyNotices += 1
+        applySource()
+        let target = activeTab ?? tabs.first { $0.window?.isKeyWindow == true } ?? tabs.first
+        target?.owl?.showNotice(
+            id: OwlController.builtInUnhealthyID,
+            title: String(localized: "The built-in model didn’t finish loading"),
+            detail: String(localized: "It was still loading after \(seconds) seconds. Automatic AI is off for now; rules hints keep working. Ask Cedric or Review can try it once more, or restart Owlink."))
+    }
+
     func appActiveChanged() {
         ai.setAppActive(NSApp.isActive || OwlController.assumeVisible)
     }
@@ -80,10 +101,13 @@ final class OwlHub {
         ai.documentClosed(tab.doc.id)
     }
 
+    /// A context waiting for the feed timer is dropped (over the cap).
+    func dropPendingFeed(_ id: UUID) { aiPending[id] = nil }
+
     private func feedAI(_ tab: EditorWindowController) {
-        // Automatic checks off (Intel's default): nothing is fed, no context
-        // is built, except while an asked-for check runs for this tab (an
-        // edit cancels it).
+        // Automatic checks off (Intel's default), or the document over the
+        // auto-review cap: nothing is fed, no context is built, except
+        // while an asked-for check runs for this tab (an edit cancels it).
         guard ai.isActive, ai.wantsContext(for: tab.doc.id), !ai.isPaused, enabled, tab.owl != nil, !tab.owlIdleForSpeed else { return }
         aiPending[tab.doc.id] = WeakTab(tab: tab)
         guard aiFeedTimer?.isValid != true else { return }
@@ -134,12 +158,14 @@ final class OwlHub {
 
     /// "Ask AI Now" in the owl's popover: one AI check of what's in view,
     /// whatever the schedule (the only way the AI is asked when automatic
-    /// checks are off). Not in large mode.
+    /// checks are off). Not in large mode. Over the auto-review cap only
+    /// once the user confirmed (`confirmAskingCedric`).
     var canAskAI: Bool { enabled && ai.canCheckNow }
 
     @discardableResult
     func askAI(in tab: EditorWindowController) -> Bool {
         guard canAskAI, tab.owl != nil, !tab.owlIdleForSpeed else { return false }
+        guard !tab.autoReviewCapped || tab.autoReviewAskConfirmed else { return false }
         return ai.checkNow(tab.owlContextWindow().context)
     }
 

@@ -57,6 +57,16 @@ import CedricCore
         return OwlDocumentSnapshot(text: text, generation: 1, selection: NSRange(location: caret, length: 0), language: "python")
     }
 
+    /// UTF-16 units a call sends (what `contextBudget` limits).
+    static func size(_ messages: [OwlChatMessage]) -> Int {
+        messages.reduce(0) { total, m in
+            switch m {
+            case .system(let t), .user(let t), .assistant(let t): return total + (t as NSString).length
+            default: return total
+            }
+        }
+    }
+
     static func request(_ s: OwlDocumentSnapshot, action: OwlQuickAction?, question: String = "What does this script do?") -> OwlChatRequest {
         OwlChatRequest(question: question, action: action,
                        context: OwlChatContext.reviewPart(s, first: 1, last: s.countedLines),
@@ -67,7 +77,7 @@ import CedricCore
         let s = Self.snapshot(lines: 100)
         let budget = 1_000
         let plan = OwlChunkedReview.plan(s, budget: budget)
-        #expect(plan.parts.count > 1 && plan.isComplete && plan.uncappedCount == plan.parts.count)
+        #expect(plan.parts.count > 1 && plan.isComplete)
         var covered = IndexSet()
         for part in plan.parts {
             #expect((part.numbered as NSString).length <= budget)
@@ -78,32 +88,154 @@ import CedricCore
             #expect(a.last - b.first + 1 == OwlChunkedReview.overlapLines)
         }
         #expect(covered.contains(integersIn: 1...s.countedLines))
-        #expect(OwlChunkedReview.maxChunks == 8 && OwlChunkedReview.overlapLines == 2)
+        #expect(OwlChunkedReview.overlapLines == 2)
         let long = OwlDocumentSnapshot(text: String(repeating: "x", count: 300) + "\ny", generation: 1)
         let oversize = OwlChunkedReview.plan(long, budget: 50)
         #expect(oversize.parts.first?.last == 1 && oversize.parts.first?.fits == false && !oversize.isComplete)
     }
 
     @Test func findingDeduplicationPreservesLineNumbers() {
-        let merged = OwlChunkedReview.mergeFindings(["- Line 12: High: first.\n- Line 13: Medium: distinct.",
-                                                     "- Line 12: Low: duplicate.\n  Duplicate detail.\n- Line 98: High: another."])
-        #expect(merged.contains("Line 12: High: first"))
-        #expect(!merged.localizedCaseInsensitiveContains("duplicate"))
+        // A later part's finding is a duplicate when it says what an earlier
+        // one on its line said (here, in other case and severity).
+        let merged = OwlChunkedReview.mergeFindings(["- Line 12: High: pipes curl to sh.\n- Line 13: Medium: distinct.",
+                                                     "- Line 12: Low: Pipes curl to sh.\n  Pipes curl to sh.\n- Line 98: High: another."])
+        #expect(merged.contains("Line 12: High: pipes curl to sh"))
+        #expect(!merged.contains("Low") && !merged.contains("Pipes"))
         #expect(merged.contains("Line 13") && merged.contains("Line 98"))
-        let alternate = OwlChunkedReview.mergeFindings(["- 12: First", "- Line 12: Duplicate", "98| Other"])
-        #expect(alternate.contains("- 12: First") && !alternate.contains("Duplicate") && alternate.contains("98| Other"))
+        let alternate = OwlChunkedReview.mergeFindings(["- 12: Pipes curl to sh", "- Line 12: pipes curl to sh", "98| Other"])
+        #expect(alternate.contains("- 12: Pipes curl to sh") && !alternate.contains("- Line 12") && alternate.contains("98| Other"))
         let sameLine = OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.\n- Line 12: also writes /etc/hosts."])
         #expect(sameLine.contains("pipes curl to sh") && sameLine.contains("also writes /etc/hosts"))
     }
 
-    @Test func capAndVerdicts() {
+    /// Two parts each finding something different on the same line: both
+    /// are kept. 0.5.3's follow-up kept only the first, by line number.
+    @Test func distinctFindingsOnOneLineFromTwoPartsAreBothKept() {
+        let merged = OwlChunkedReview.mergeFindings(["- Line 40: missing signature.", "- Line 40: missing checksum."])
+        #expect(merged == "- Line 40: missing signature.\n- Line 40: missing checksum.")
+        // A different number, or a "not", is a different finding too.
+        let days = OwlChunkedReview.mergeFindings(["- Line 12: token expires after 90 days.",
+                                                   "- Line 12: token expires after 30 days."])
+        #expect(days.contains("90 days") && days.contains("30 days"))
+        let negated = OwlChunkedReview.mergeFindings(["- Line 7: checks the checksum.", "- Line 7: never checks the checksum."])
+        #expect(negated.contains("never"))
+        // The same finding again (in fewer words) is still left out.
+        let same = OwlChunkedReview.mergeFindings(["- Line 40: missing signature on the download.", "- Line 40: missing signature."])
+        #expect(same == "- Line 40: missing signature on the download.")
+    }
+
+    /// The same words in another order say something else: "Client
+    /// trusts server" and "Server trusts client" on one line are two
+    /// findings, and "1.25" is not "25.1". 0.5.4's follow-up 5 compared
+    /// word sets and kept only the first of each.
+    @Test func findingsWithTheSameWordsInAnotherOrderAreBothKept() {
+        let trust = OwlChunkedReview.mergeFindings(["- Line 5: Client trusts server.", "- Line 5: Server trusts client."])
+        #expect(trust == "- Line 5: Client trusts server.\n- Line 5: Server trusts client.")
+        let decimal = OwlChunkedReview.mergeFindings(["- Line 8: timeout is 1.25 seconds.", "- Line 8: timeout is 25.1 seconds."])
+        #expect(decimal == "- Line 8: timeout is 1.25 seconds.\n- Line 8: timeout is 25.1 seconds.")
+        #expect(OwlChunkedReview.substance("timeout is 1.25 seconds") != OwlChunkedReview.substance("timeout is 25.1 seconds"))
+        #expect(OwlChunkedReview.substance("timeout is 1.25 seconds").contains("1.25"))
+        // The same finding again, in the same order, is still left out.
+        #expect(OwlChunkedReview.mergeFindings(["- Line 5: Client trusts server.", "- Line 5: the client trusts the server."])
+                == "- Line 5: Client trusts server.")
+        #expect(OwlChunkedReview.mergeFindings(["- Line 8: timeout is 1.25 seconds.", "- Line 8: Timeout is 1.25 seconds."])
+                == "- Line 8: timeout is 1.25 seconds.")
+        // The combined answer keeps a finding only by saying it in its order.
+        for (items, answer) in [("- Line 5: Client trusts server.", "Line 5: Server trusts client."),
+                                ("- Line 8: timeout is 1.25 seconds.", "Line 8: timeout is 25.1 seconds."),
+                                ("- Client trusts server.", "Server trusts client.")] {
+            let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+            #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items, "\(items)")
+        }
+        let items = "- Line 5: Client trusts server."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        let same = "Line 5: the client trusts the server it connects to."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+    }
+
+    /// A word said again is part of what a finding says: "Client trusts
+    /// server and server trusts client" says more than "Client trusts
+    /// server", so neither merging nor the combined answer loses it.
+    /// 0.5.4's follow-up 6 read each word only from its first use.
+    @Test func aFindingThatSaysAWordAgainIsReadWhole() {
+        let both = "- Line 5: Client trusts server and server trusts client."
+        let one = "- Line 5: Client trusts server."
+        #expect(OwlChunkedReview.mergeFindings([one, both]) == one + "\n" + both)
+        #expect(OwlChunkedReview.mergeFindings([both, one]) == both)
+        let findings = OwlChunkedReviewRunner.Findings(text: both, items: both, verdict: nil)
+        for answer in ["Line 5: Client trusts server.", "Line 5: the client trusts the server it connects to."] {
+            #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + both, "\(answer)")
+        }
+        let restated = "Line 5: the client trusts the server, and the server trusts the client."
+        #expect(OwlChunkedReviewRunner.keepFindings(restated, findings) == restated)
+        // A finding that is one claim said over is still that claim once.
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.", "- Line 12: Pipes curl to sh. Pipes curl to sh."])
+                == "- Line 12: pipes curl to sh.")
+        #expect(OwlChunkedReview.claim("- Line 12: Low: Pipes curl to sh.\n  Pipes curl to sh.") == ["pipes", "curl"])
+        #expect(!OwlChunkedReview.says(["pipes", "curl", "pipes", "curl"], in: ["pipes", "curl"]))
+        #expect(!OwlChunkedReview.says(["clien", "trust", "serve", "serve", "trust", "clien"], in: ["clien", "trust", "serve"]))
+    }
+
+    /// A claim said twice over, with a word between ("then") that isn't
+    /// counted, is two claims: "Worker retries 3 times, then worker
+    /// retries 3 times" says more than "Worker retries 3 times", in
+    /// merging and in the combined answer. 0.5.4's follow-up 7 read any
+    /// finding that was a run said over as that run once.
+    @Test func aFindingThatSaysAClaimTwiceIsNotThatClaimOnce() {
+        let one = "- Line 7: Worker retries 3 times."
+        for both in ["- Line 7: Worker retries 3 times, then worker retries 3 times.",
+                     "- Line 7: Worker retries 3 times. Then worker retries 3 times."] {
+            #expect(OwlChunkedReview.mergeFindings([one, both]) == one + "\n" + both, "\(both)")
+            #expect(OwlChunkedReview.mergeFindings([both, one]) == both, "\(both)")
+            let findings = OwlChunkedReviewRunner.Findings(text: both, items: both, verdict: nil)
+            for answer in ["Line 7: Worker retries 3 times.", "Line 7: the worker retries 3 times on failure."] {
+                #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + both, "\(answer)")
+            }
+            let restated = "Line 7: the worker retries 3 times, and then the worker retries 3 times again."
+            #expect(OwlChunkedReviewRunner.keepFindings(restated, findings) == restated, "\(both)")
+        }
+        // One claim said over whole is still that claim once.
+        let pipes = "- Line 12: Pipes curl to sh. Pipes curl to sh."
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: pipes curl to sh.", pipes]) == "- Line 12: pipes curl to sh.")
+        let findings = OwlChunkedReviewRunner.Findings(text: pipes, items: pipes, verdict: nil)
+        #expect(OwlChunkedReviewRunner.keepFindings("Line 12 pipes curl to sh.", findings) == "Line 12 pipes curl to sh.")
+    }
+
+    /// "L2" and "L3" are what a finding says, not digits to strip: "Line
+    /// 12: L3 regularization is enabled" doesn't say "Line 12: L2
+    /// regularization is enabled". 0.5.4's follow-up 4 read both as
+    /// "regularization is enabled". Neither is a line citation.
+    @Test func letterDigitTermsTellFindingsApart() {
+        #expect(OwlChunkedReview.substance("Line 12: L2 regularization is enabled.")
+                != OwlChunkedReview.substance("Line 12: L3 regularization is enabled."))
+        #expect(OwlChunkedReview.substance("Line 12: L2 regularization").contains("l2"))
+        // The citation's own number is still left out.
+        #expect(!OwlChunkedReview.substance("Line 12: L2 regularization").contains("12"))
+        #expect(OwlCitations.find("L2 regularization, an L3 cache").isEmpty)
+        let merged = OwlChunkedReview.mergeFindings(["- Line 2: setup.\n- Line 12: L3 regularization is enabled.",
+                                                     "- Line 12: L2 regularization is enabled."])
+        #expect(merged.contains("L3 regularization") && merged.contains("L2 regularization"))
+        let items = "- Line 12: L2 regularization is enabled."
+        let findings = OwlChunkedReviewRunner.Findings(text: items, items: items, verdict: nil)
+        let answer = "Line 12: L3 regularization is enabled."
+        #expect(OwlChunkedReviewRunner.keepFindings(answer, findings) == answer + "\n\n" + items)
+        let same = "Line 12 has L2 regularization enabled."
+        #expect(OwlChunkedReviewRunner.keepFindings(same, findings) == same)
+        // "line12" is still a citation, left out of what a finding says.
+        #expect(OwlChunkedReview.substance("- line12: missing signature.") == OwlChunkedReview.substance("- Line 12: missing signature."))
+        #expect(OwlChunkedReview.mergeFindings(["- Line 12: missing signature.", "- line12: missing signature."])
+                == "- Line 12: missing signature.")
+    }
+
+    @Test func noCapAndVerdicts() {
         let s = Self.snapshot(lines: 500)
         let plan = OwlChunkedReview.plan(s, budget: 400)
-        #expect(plan.uncappedCount > OwlChunkedReview.maxChunks)
-        #expect(plan.parts.count == OwlChunkedReview.maxChunks && !plan.isComplete)
+        // Every part is planned (0.5.2 kept a window of 8 around the caret).
+        #expect(plan.parts.count > 8 && plan.isComplete)
         #expect(plan.parts.contains { $0.first <= 132 && $0.last >= 132 })
+        #expect(plan.parts.first?.first == 1 && plan.parts.last?.last == 500)
         var covered = IndexSet()
-        for part in plan.parts { covered.insert(integersIn: part.first...part.last) }
+        for part in plan.parts.prefix(8) { covered.insert(integersIn: part.first...part.last) }
         #expect(OwlChunkedReview.forcedVerdict(scanHasHigh: false, scanTruncated: false, covered: covered, totalLines: 500) == .truncated)
         let all = IndexSet(integersIn: 1...500)
         #expect(OwlChunkedReview.forcedVerdict(scanHasHigh: false, scanTruncated: false, covered: all, totalLines: 500) == nil)
@@ -162,10 +294,12 @@ import CedricCore
 
     @Test func scopeAndActionExclusions() {
         let s = Self.snapshot()
-        for action in [OwlQuickAction.rewrite, .addComments, .explainLine, .summarise] {
+        // Summarise reads the whole document in parts now (0.5.2 trimmed it to fit).
+        for action in [OwlQuickAction.rewrite, .addComments, .explainLine] {
             #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: action), engine: Engine()) == nil)
         }
         #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: nil, question: "Please rewrite this file"), engine: Engine()) == nil)
+        #expect(OwlChunkedReviewRunner.plan(Self.request(s, action: .summarise), engine: Engine()) != nil)
         for scope in [OwlChatScope.visible, .selection] {
             let selected = OwlDocumentSnapshot(text: s.text, generation: 1, selection: NSRange(location: 0, length: 10), language: "python")
             let context = OwlChatContext.build(selected, scope: scope, budget: 200)!
@@ -175,19 +309,27 @@ import CedricCore
         }
     }
 
-    @Test func largeSummariesFallBackWithoutPartLabelsWhenCombineDoesNotFit() async throws {
-        let engine = Engine(reply: String(repeating: "summary ", count: 800))
+    @Test func largeSummariesAreCombinedInRoundsWithoutPartLabels() async throws {
+        // Long part answers; a combine call answers briefly. (A combine
+        // that never shortens the notes now fails rather than clipping them:
+        // OwlWholeDocSynthesisTests.notesThatNeverShortenFailHonestlyAndKeepTheNotes.)
         let req = Self.request(Self.snapshot(), action: .explain)
+        let parts = try #require(OwlChunkedReviewRunner.plan(req, engine: Engine())).parts.count
+        let long = String(repeating: "summary ", count: 800)
+        let engine = Engine(reply: "A short summary.", replies: Dictionary(uniqueKeysWithValues: (1...parts).map { ($0, long) }))
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == plan.parts.count)
+        // Notes too long for one combine call are merged in groups first,
+        // then combined: one answer, never the parts stacked.
+        #expect(result.error == nil && !result.stopped)
+        #expect(result.reduceCalls > 1 && engine.calls == plan.parts.count + result.reduceCalls)
         #expect(result.outcome.answer.contains("summary"))
-        #expect(result.outcome.answer.contains("The reviewed answers are shown separately."))
-        #expect(!result.stopped && result.error == nil)
-        #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == plan.parts.count)
+        #expect(result.outcome.answer.components(separatedBy: "\n\n").filter { $0.contains("summary") }.count == 1)
+        #expect(result.outcome.sections.count == plan.parts.count)
         #expect(!result.outcome.answer.contains("Part 1 (lines"))
         #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
+        for messages in engine.messages { #expect(Self.size(messages) <= engine.contextBudget) }
     }
 
     @Test func chunkedScriptVerdictRespectsScan() async throws {
@@ -201,27 +343,30 @@ import CedricCore
         #expect(!result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
     }
 
-    @Test func cappedScriptReviewReportsCoverageAndForcedVerdict() async throws {
+    @Test func longScriptReviewCoversEveryLineWithoutForcingTheVerdict() async throws {
         let engine = Engine(budget: 3_000)
         let req = Self.request(Self.snapshot(lines: 500), action: .scriptSafety)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-        #expect(plan.parts.count == 8 && plan.uncappedCount > 8 && !plan.isComplete)
+        #expect(plan.parts.count > 8 && plan.isComplete)
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == 8)
-        #expect(result.outcome.answer.contains("Reviewed lines \(plan.parts.first!.first)–\(plan.parts.last!.last) of 500; the rest was not reviewed."))
-        #expect(result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
+        // Every part, then the combine step (Check for Risks is synthesized too).
+        #expect(result.reduceCalls >= 1 && engine.calls == plan.parts.count + result.reduceCalls)
+        #expect(!result.outcome.answer.contains("rest was not reviewed"))
+        #expect(!result.outcome.answer.contains(ScriptVerdict.Reason.truncated.note))
+        #expect(result.outcome.answer.contains("Line 10"))
     }
 
-    @Test func cappedExplanationCombinesAndKeepsCoverageNote() async throws {
+    @Test func longExplanationCoversEveryLineAndCombines() async throws {
         let engine = Engine(budget: 3_000, reply: "A brief part.")
         let req = Self.request(Self.snapshot(lines: 1_000), action: .explain)
         let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-        #expect(!plan.isComplete && plan.parts.count == 8)
+        #expect(plan.isComplete && plan.parts.count > 8)
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == 9)
-        #expect(result.outcome.answer.contains("rest was not reviewed"))
+        #expect(engine.calls == plan.parts.count + result.reduceCalls && result.reduceCalls >= 1)
+        #expect(!result.outcome.answer.contains("rest was not reviewed"))
+        #expect(result.outcome.answer == "A brief part.")
     }
 
     @Test func scriptPartsReceiveOnlyTheirScanFindings() async throws {
@@ -261,7 +406,8 @@ import CedricCore
             let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
                                                           describeError: { String(describing: $0) }) { _, _ in }
             #expect(!result.stopped && result.error == nil)
-            #expect(engine.calls == (action == .explain || action == nil ? 4 : 3))
+            // Three parts and one combine call, for every action (findings too).
+            #expect(engine.calls == 4)
             #expect(!result.outcome.answer.contains("Part 1"))
             #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
             for (index, part) in plan.parts.enumerated() {
@@ -286,7 +432,7 @@ import CedricCore
         for action in [OwlQuickAction?.some(.scriptSafety), nil] {
             let req = Self.request(s, action: action, question: action == nil ? "What does this script do?" : "Check this script for risks.")
             let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-            #expect(plan.parts.count > 1 && plan.parts.count <= 8 && plan.isComplete && plan.uncappedCount <= 8)
+            #expect(plan.parts.count > 1 && plan.isComplete)
             for part in plan.parts {
                 var r = req
                 r.context = OwlChatContext.reviewPart(s, first: part.first, last: part.last)
@@ -316,23 +462,6 @@ import CedricCore
         #expect(!result.outcome.answer.localizedCaseInsensitiveContains("part 1 of"))
     }
 
-    @Test func explainQuickActionIncludesItsRequestInCombinePrompt() async throws {
-        let engine = Engine(reply: "A brief explanation.")
-        var req = Self.request(Self.snapshot(), action: .explain, question: "")
-        req.context = OwlChatContext.reviewPart(req.snapshot, first: 1, last: 10)
-        let plan = try #require(OwlChunkedReviewRunner.plan(req, engine: engine))
-        _ = await OwlChunkedReviewRunner.run(req, plan: plan, engine: engine,
-                                             describeError: { String(describing: $0) }) { _, _ in }
-        #expect(engine.calls == plan.parts.count + 1)
-        guard case .user(let prompt)? = engine.messages.last?.last else {
-            Issue.record("Missing combine prompt")
-            return
-        }
-        #expect(prompt.contains("User's request: Explain what this code"))
-        #expect(prompt.contains("lines 1-\(req.snapshot.countedLines)"))
-        #expect(!prompt.contains("User's request: \n"))
-    }
-
     @Test func chunkingOnlyWhenWholeDocumentExceedsBudget() throws {
         let s = Self.snapshot()
         #expect(s.length == 9_519 && s.countedLines == 263)
@@ -357,7 +486,8 @@ import CedricCore
         ])
         let result = await OwlChunkedReviewRunner.run(req, plan: plan, engine: mixed,
                                                       describeError: { String(describing: $0) }) { _, _ in }
-        #expect(mixed.calls == 2)
+        // Two parts, then one combine call; it answers with a reassuring verdict (the default reply).
+        #expect(mixed.calls == 3)
         #expect(result.outcome.answer.localizedCaseInsensitiveContains("don’t run")
                || result.outcome.answer.localizedCaseInsensitiveContains("don't run"))
         #expect(!result.outcome.answer.contains(ScriptVerdict.noRedFlags))

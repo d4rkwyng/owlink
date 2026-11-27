@@ -73,7 +73,8 @@ extension DevChecks {
         func covered(_ r: NSRange) -> Bool { dims().contains { NSIntersectionRange($0, r) == r } }
         func touched(_ r: NSRange) -> Bool { dims().contains { NSIntersectionRange($0, r).length > 0 } }
 
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 focus(essay)
                 expect(essay.editing.writing.isOff && focusTab.editing.writing.isOff, "Writing Mode is off by default")
@@ -147,6 +148,9 @@ extension DevChecks {
                        String(format: "%.1f pt off right after the click", off))
                 WritingMode.reduceMotionOverride = nil
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // View › Split Editor: typing in the second pane keeps its caret line centred.
                 focus(essay)
@@ -218,6 +222,9 @@ extension DevChecks {
                 send(focusSel)
                 expect(focusTab.editing.writing.focus && !essay.editing.writing.focus, "Focus is on for this tab only")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 expect(covered(p1) && covered(p3), "Focus dims the other paragraphs", "\(dims())")
                 expect(!touched(p2), "and not the caret's paragraph", "\(dims())")
@@ -284,6 +291,9 @@ extension DevChecks {
                        "with a selection: its counts beside the document's", "\(p?.values ?? [:])")
                 p?.popover.close()
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             { next in DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } },
             sync {
                 // UX review #5: View › Show Statistics opens the same popover from the keyboard.
@@ -337,7 +347,9 @@ extension DevChecks {
             },
             { next in snapshot("writing-stats-popover.png", window: essay.editing.statsPopover?.goalField.window)(next) },
             sync { essay.editing.statsPopover?.popover.close() },
-        ], quit: true)
+        ]
+        steps += steps4
+        run(steps, quit: true)
     }
 
     /// The second launch: the session from `writingCheck` restored.

@@ -171,6 +171,8 @@ func buildMainMenu() -> NSMenu {
     let services = submenu(String(localized: "Services"), [])
     main.addItem(submenu(app, [
         item(String(localized: "About Owlink"), #selector(AppDelegate.showAbout(_:)), ""),
+        // Sparkle 2 (Updater.swift): on in a release build, disabled in a check build.
+        item(String(localized: "Check for Updates…"), #selector(AppDelegate.checkForUpdates(_:)), ""),
         .separator(),
         item(String(localized: "Settings…"), #selector(AppDelegate.showSettings(_:)), ","),
         .separator(),
@@ -199,6 +201,8 @@ func buildMainMenu() -> NSMenu {
         // The tab's file: its folder in the sidebar, or in Finder.
         item(String(localized: "Open Enclosing Folder"), #selector(AppDelegate.openEnclosingFolderMenu(_:)), "o", [.command, .shift, .option]),
         item(String(localized: "Reveal in Finder"), #selector(AppDelegate.revealFileInFinderMenu(_:))),
+        // Terminal at the tab's folder (OpenInTerminal.swift).
+        item(String(localized: "Open in Terminal Here"), #selector(AppDelegate.openInTerminalMenu(_:))),
         // A PDF tab's text in a new editable tab (PDFTab.swift).
         item(String(localized: "Open as Text"), #selector(PDFTabController.openAsText(_:))),
         // Viewer tabs: the file in its default app ("Open in Default App"; ViewerTabs.swift).
@@ -311,6 +315,10 @@ func buildMainMenu() -> NSMenu {
         // "Hide Context Bar" while shown (AppDelegate.validateMenuItem).
         item(String(localized: "Show Context Bar"), #selector(AppDelegate.toggleContextBarMenu(_:))),
         item(String(localized: "Show Outline"), #selector(AppDelegate.toggleOutlineMenu(_:)), "o", [.control, .command]),
+        // The notes in the open folder that link here (BacklinksSidebar.swift).
+        item(String(localized: "Show Backlinks"), #selector(AppDelegate.toggleBacklinksMenu(_:))),
+        // Every #tag in the open folder's notes (TagsSidebar.swift).
+        item(String(localized: "Show Tags"), #selector(AppDelegate.toggleTagsMenu(_:))),
         item(String(localized: "Show Folder Sidebar"), #selector(AppDelegate.toggleFolderSidebarMenu(_:)), "1", [.control, .command]),
         // The status bar word count's popover, from the keyboard and the palette (StatsPopover.swift).
         item(String(localized: "Show Statistics"), #selector(AppDelegate.showStatisticsMenu(_:))),
@@ -348,6 +356,9 @@ func buildMainMenu() -> NSMenu {
         submenu(String(localized: "Encoding"), TextEncoding.allCases.map {
             item($0.displayName, #selector(AppDelegate.pickEncodingMenu(_:)), represented: $0.rawValue)
         }),
+        // The encodings to read the file as again (FileNotices.swift): the
+        // same picker as the "isn’t valid UTF-8" bar's button.
+        item(String(localized: "Reopen with Encoding…"), #selector(AppDelegate.reopenWithEncodingMenu(_:)), "r", [.command, .option, .shift]),
         submenu(String(localized: "Line Endings"), LineEnding.allCases.map {
             item($0.displayName, #selector(AppDelegate.pickLineEndingMenu(_:)), represented: $0.rawValue)
         }),
@@ -382,6 +393,7 @@ func buildMainMenu() -> NSMenu {
 @MainActor
 func runApp() {
     LaunchTrace.mark("main")
+    DevHooks.verifyDisposableStore()
     let app = NSApplication.shared
     LaunchTrace.mark("nsapp")
     let delegate = AppDelegate()

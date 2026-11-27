@@ -8,6 +8,7 @@ public enum FolderSidebarMenu {
         case rename
         case moveToTrash
         case revealInFinder
+        case openInTerminal
         case openEnclosingFolder
         case copyPath
         case findInFolder
@@ -58,6 +59,7 @@ public enum FolderSidebarMenu {
             .command(.moveToTrash, isEnabled: hasSelection),
             .separator,
             .command(.revealInFinder, isEnabled: true),
+            .command(.openInTerminal, isEnabled: true),
             .command(.openEnclosingFolder, isEnabled: canOpenEnclosing),
             .command(.copyPath, isEnabled: true),
             .command(.findInFolder, isEnabled: true),

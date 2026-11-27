@@ -56,9 +56,13 @@ final class SyntaxColorizer {
             storage.beginEditing()
             storage.addAttribute(.foregroundColor, value: foreground, range: NSRange(location: 0, length: storage.length))
             storage.endEditing()
+            fullPasses &+= 1
         }
         colorViewport()
     }
+
+    /// For the checks: whole-text recolour passes made.
+    private(set) var fullPasses = 0
 
     /// After an edit: lines `firstLine...lastLine` (after the edit) changed;
     /// `lineDelta` lines were added (+) or removed (−). A replacement of

@@ -57,7 +57,9 @@ public enum ContextBarSet {
         ContextBarItem("quote", "text.quote", "markdownQuoteMenu:"),
         ContextBarItem("codeBlock", "curlybraces.square", "markdownCodeBlockMenu:"),
         ContextBarItem("table", "tablecells", "markdownTableMenu:"),
-        ContextBarItem("image", "photo", "markdownImageMenu:"),
+        // Picks image files and copies them in as paste and drop do
+        // (Format › Markdown › Insert Image…); Image Link stays in the menu.
+        ContextBarItem("image", "photo", "markdownInsertImageFileMenu:"),
         // An eye, not "sidebar.right" (read as a sidebar toggle, UX review #21).
         ContextBarItem("preview", "eye", "togglePreview:", trailing: true, toggle: true),
         ContextBarItem("explain", "text.magnifyingglass", "explainSelectionMenu:", trailing: true),

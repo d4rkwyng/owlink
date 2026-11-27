@@ -182,7 +182,7 @@ final class LineCommandsTests: XCTestCase {
         editor.document.lineEnding = decoded.lineEnding
         editor.duplicateLine(nil)
         let encoded = try XCTUnwrap(TextCodec.encode(editor.textView.text, encoding: .utf8,
-                                                      lineEnding: editor.document.lineEnding, includeBOM: false))
+                                                      lineEnding: editor.document.lineEnding))
         XCTAssertEqual(String(data: encoded, encoding: .utf8), "one\r\none\r\ntwo\r\n")
     }
 

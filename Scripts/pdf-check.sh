@@ -26,9 +26,12 @@ while [ $# -gt 0 ]; do
 done
 BIN="$APP/Contents/MacOS/Cedric"
 [ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+cedric_require_check_build "$APP"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
+cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_PDF_DIR="$W/pdf" CEDRIC_CHECK_OUT="$OUT" CEDRIC_THEME=${CEDRIC_THEME:-dark}
 fail=0
 run() { # name, extra env...

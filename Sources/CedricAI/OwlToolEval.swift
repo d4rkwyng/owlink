@@ -167,7 +167,8 @@ public enum OwlToolEval {
     /// One case: the first move the model makes.
     public static func run(_ c: Case, engine: any OwlChatEngine) async -> Result {
         let t0 = Date()
-        var r = await firstMove(c, engine: engine)
+        // Run on purpose (Scripts/owl-tools-eval.sh): may load the built-in model.
+        var r = await BuiltInLoad.userAsked { await firstMove(c, engine: engine) }
         r.seconds = Date().timeIntervalSince(t0)
         return r
     }

@@ -4,20 +4,25 @@ import CedricCore
 /// The preview for CSV and TSV: a read-only grid. The first record is the
 /// header; row numbers stay at the left when scrolling sideways; columns
 /// resize; clicking a header sorts the grid (never the text); clicking a
-/// cell puts the editor's caret in that field.
+/// cell puts the editor's caret in that field. The "#" cell above the row
+/// numbers puts the rows back in file order (lit while the grid is sorted).
 ///
 /// The table is view-based and virtual (cells are made for the rows on
 /// screen only). Parsing (CSV in CedricCore) and sorting run on a
 /// background queue from a copy of the text taken on the main thread;
-/// a newer render drops an older result. At most `maxRows` records are
-/// shown (with a note), and in large mode only the first `largeMaxChars`
-/// characters are read.
+/// a newer render drops an older result. Parses and sorts are counted
+/// apart: every sort sorts the newest parsed table (kept apart from the
+/// one shown, which may still wait for a sort), and a sort picked while
+/// a parse is under way is applied to that parse's table when it lands.
+/// At most `maxRows` records are shown (with a note), and in large mode
+/// only the first `largeMaxChars` characters are read.
 @MainActor
 final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTableViewDelegate {
     static let maxRows = 50_000
     static let maxChars = 16_000_000
     static let largeMaxChars = 2_000_000
-    private static let queue = DispatchQueue(label: "cedric.csv-preview", qos: .userInitiated)
+    /// Serial: the checks hold it to keep a parse under way.
+    static let queue = DispatchQueue(label: "cedric.csv-preview", qos: .userInitiated)
 
     let container = CSVContainer()
     let scroll = NSScrollView()
@@ -27,7 +32,15 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
     /// What is shown: the parsed records and the data rows' order (indexes into `rows`).
     private(set) var data = CSV.Table()
     private(set) var order: [Int] = []
-    private var generation = 0
+    /// The newest parse started (render) and the newest sort picked. A
+    /// parse's result is applied only while it is the newest; a sort's
+    /// only while its table is still the newest parse and no other sort
+    /// was picked since.
+    private(set) var parseRevision = 0
+    private var sortRevision = 0
+    /// The newest parse that finished and its table: what every sort
+    /// sorts. It is ahead of `data` while its table waits for a sort.
+    private var parsed = (revision: 0, table: CSV.Table())
     private var font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
     private var textColor = NSColor.textColor
     /// Set by the tab: large mode, the text now, and where a click goes.
@@ -55,7 +68,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         PreviewBarItem.rowCountText(rows: min(order.count, Self.maxRows), capped: data.truncated || order.count > Self.maxRows)
     }
 
-    /// The preview bar's Unsort: back to file order.
+    /// The preview bar's Unsort (and the "#" cell): back to file order.
     func resetSort() { table.sortDescriptors = [] }
 
     var view: NSView { container }
@@ -83,6 +96,7 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
             guard let self, row < self.order.count else { return nil }
             return self.order[row] // the record's index: its line in a file without quoted line breaks
         }
+        ruler.header.onClick = { [weak self] in self?.resetSort() }
         scroll.verticalRulerView = ruler
         scroll.hasVerticalRuler = true
         scroll.rulersVisible = true
@@ -99,8 +113,8 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
 
     func render(text: String, language: Language, palette: EditorPalette, baseURL: URL?, fileName: String?) {
         applyPalette(palette)
-        generation += 1
-        let gen = generation
+        parseRevision += 1
+        let gen = parseRevision, sortGen = sortRevision
         // An immutable copy (the storage keeps changing), cut at a line end.
         let ns = text as NSString
         let limit = isLarge() ? Self.largeMaxChars : Self.maxChars
@@ -122,7 +136,24 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
             let order = Self.order(t.rows, sort)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard gen == self.generation else { return }
+                    guard gen == self.parseRevision else { return }
+                    self.parsed = (gen, t)
+                    // A sort picked while this parsed: sort this table by it.
+                    if sortGen == self.sortRevision { self.apply(t, order: order) } else { self.sort(t, parse: gen) }
+                }
+            }
+        }
+    }
+
+    /// Sorts `t` (the table of parse `parse`) by the current sort off the
+    /// main thread, then shows it, unless a newer parse or sort came first.
+    private func sort(_ t: CSV.Table, parse: Int) {
+        let rows = t.rows, sort = table.sortDescriptors.first, sortGen = sortRevision
+        Self.queue.async {
+            let order = Self.order(rows, sort)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard parse == self.parseRevision, sortGen == self.sortRevision else { return }
                     self.apply(t, order: order)
                 }
             }
@@ -158,6 +189,9 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
         table.reloadData()
         ruler.ruleThickness = max(28, CGFloat(String(t.rows.count).count) * 7.5 + 12)
         ruler.needsDisplay = true
+        ruler.needsLayout = true
+        ruler.header.isActive = isSorted
+        ruler.header.needsDisplay = true
         let shown = min(order.count, Self.maxRows)
         var notes: [String] = []
         if let line = t.unclosedQuoteLine {
@@ -227,18 +261,12 @@ final class CSVPreview: NSObject, PreviewRenderer, NSTableViewDataSource, NSTabl
     }
 
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
-        let rows = data.rows, sort = tableView.sortDescriptors.first
-        generation += 1
-        let gen = generation, t = data
-        Self.queue.async {
-            let order = Self.order(rows, sort)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard gen == self.generation else { return }
-                    self.apply(t, order: order)
-                }
-            }
-        }
+        ruler.header.isActive = isSorted
+        sortRevision += 1
+        // The newest parsed table (not the one shown, which may still wait
+        // for an older sort). If a newer parse is under way, this is
+        // dropped and that parse sorts its own table when it lands.
+        sort(parsed.table, parse: parsed.revision)
     }
 
     /// A click on a cell: the caret goes to that field in the text.
@@ -296,6 +324,7 @@ final class CSVContainer: NSView {
         super.layout()
         let noteH: CGFloat = (note?.isHidden ?? true) ? 0 : 22
         scroll?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - noteH))
+        (scroll?.verticalRulerView as? RowNumberRuler)?.needsLayout = true
         note?.frame = NSRect(x: 8, y: bounds.height - noteH + 3, width: max(0, bounds.width - 16), height: 16)
     }
 }
@@ -305,8 +334,10 @@ final class RowNumberRuler: NSRulerView {
     weak var table: NSTableView?
     /// The number shown for a row (in view order), 1-based is added here.
     var number: ((Int) -> Int?)?
-    var background = NSColor.windowBackgroundColor
+    var background = NSColor.windowBackgroundColor { didSet { header.background = background } }
     var textColor = NSColor.secondaryLabelColor
+    /// The "#" cell at the top, beside the table's header row.
+    let header = RowNumberHeader()
 
     init(scrollView: NSScrollView, table: NSTableView) {
         self.table = table
@@ -315,11 +346,32 @@ final class RowNumberRuler: NSRulerView {
         ruleThickness = 36
         reservedThicknessForMarkers = 0
         reservedThicknessForAccessoryView = 0
+        header.table = table
+        addSubview(header)
     }
 
     required init(coder: NSCoder) { fatalError("not used") }
 
     override var requiredThickness: CGFloat { ruleThickness }
+
+    override func layout() {
+        super.layout()
+        placeHeader()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        needsLayout = true
+    }
+
+    /// The "#" cell level with the table's header row: the header's own
+    /// frame, seen from here (it doesn't scroll up and down).
+    func placeHeader() {
+        guard let hv = table?.headerView, hv.window != nil, hv.window === window else { header.isHidden = true; return }
+        let r = convert(hv.bounds, from: hv)
+        header.isHidden = r.height <= 0
+        header.frame = NSRect(x: 0, y: r.minY, width: bounds.width, height: r.height)
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         // macOS 14: dirtyRect can extend past the bounds. Never draw outside them.
@@ -348,5 +400,85 @@ final class RowNumberRuler: NSRulerView {
             let size = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: bounds.width - size.width - 6, y: rr.minY + (rr.height - size.height) / 2), withAttributes: attrs)
         }
+    }
+}
+
+/// The "#" cell above the row numbers: the table header's look (its own
+/// header cell draws the "#"), lit in the accent colour while the grid is
+/// sorted. A click, or VoiceOver's press, puts the rows back in file order.
+final class RowNumberHeader: NSView {
+    weak var table: NSTableView?
+    /// The grid is sorted: the cell is lit.
+    var isActive = false {
+        didSet { if isActive != oldValue { needsDisplay = true } }
+    }
+    var onClick: (() -> Void)?
+    var background = NSColor.windowBackgroundColor { didSet { needsDisplay = true } }
+    private var pressed = false
+
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The cell that draws the "#": a copy of the first column's header
+    /// cell (its font and colours, in this appearance).
+    func titleCell() -> NSTableHeaderCell {
+        let cell = (table?.tableColumns.first?.headerCell.copy() as? NSTableHeaderCell) ?? NSTableHeaderCell(textCell: "")
+        let font = cell.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let para = NSMutableParagraphStyle()
+        para.alignment = .center
+        let color: NSColor = isActive ? .controlAccentColor : .headerTextColor
+        let weight: NSFont = isActive ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : font
+        cell.attributedStringValue = NSAttributedString(string: "#", attributes: [.font: weight, .foregroundColor: color, .paragraphStyle: para])
+        return cell
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        background.setFill()
+        bounds.fill()
+        if isActive || pressed {
+            NSColor.controlAccentColor.withAlphaComponent(pressed ? 0.28 : 0.16).setFill()
+            bounds.fill()
+        }
+        // Centred on the header row's titles, right-aligned as the numbers below.
+        let title = titleCell().attributedStringValue
+        let size = title.size()
+        title.draw(at: NSPoint(x: bounds.width - size.width - 6, y: ((bounds.height - 1 - size.height) / 2).rounded()))
+        // The line under the header row, as the table draws it.
+        (table?.gridColor ?? .separatorColor).setFill()
+        NSRect(x: 0, y: bounds.maxY - 1, width: bounds.width, height: 1).fill()
+    }
+
+    /// Tracks the press as a button does: pressed while the mouse is
+    /// over it, a click if it is let go there.
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        var inside = true
+        pressed = true
+        display()
+        while let e = window.nextEvent(matching: [.leftMouseUp, .leftMouseDragged]) {
+            inside = bounds.contains(convert(e.locationInWindow, from: nil))
+            if pressed != inside {
+                pressed = inside
+                display()
+            }
+            if e.type == .leftMouseUp { break }
+        }
+        pressed = false
+        needsDisplay = true
+        if inside { onClick?() }
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { String(localized: "Row number, click to restore file order") }
+    override func accessibilityValue() -> Any? { isActive ? String(localized: "Sorted") : String(localized: "File order") }
+    override func accessibilityPerformPress() -> Bool {
+        onClick?()
+        return true
     }
 }

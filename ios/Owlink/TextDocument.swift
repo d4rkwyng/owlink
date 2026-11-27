@@ -33,8 +33,8 @@ final class TextDocument: UIDocument {
     var encoding: TextEncoding = .utf8
     var lineEnding: LineEnding = .lf
     var mixedLineEndings = false
-    /// The line endings as read, while the file mixes them.
-    private var lineEndingLayout: LineEndingLayout?
+    /// The line endings as read, while the file mixes them (0.6.0 LineBreaks).
+    private var lineBreaks: LineBreaks?
     /// What is on disk: as read, then as last written.
     private(set) var onDisk: DiskState? {
         didSet { onDiskUTF16Length = onDisk?.text.utf16.count }
@@ -47,7 +47,7 @@ final class TextDocument: UIDocument {
         savesInFlight == 0 && !diskStateStale && !externalChangePending && !documentState.contains(.inConflict)
     }
     /// What the save in progress writes (becomes `onDisk` if it succeeds).
-    private var writing: (state: DiskState, layout: LineEndingLayout?, bytes: Data?)?
+    private var writing: (state: DiskState, breaks: LineBreaks?, bytes: Data?)?
     /// The bytes as read or last written, unless over the copy store's cap.
     private var bytesOnDisk: Data?
     private var readHistory = ReadHistory()
@@ -97,25 +97,26 @@ final class TextDocument: UIDocument {
     /// The bytes a save writes for `text`: in the document's encoding,
     /// with its BOM, and with mixed line endings each unchanged line's own.
     /// Pure: no save bookkeeping (Share… sends exactly this).
-    func serialized(_ text: String) throws -> (data: Data, endings: [LineEnding]?) {
-        // Mixed line endings: unchanged lines keep their own.
-        var endings: [LineEnding]?
-        if mixedLineEndings, let layout = lineEndingLayout {
-            endings = TextCodec.lineEndings(for: text, keeping: layout, fallback: lineEnding)
-        }
-        guard let data = TextCodec.encode(text, encoding: encoding, lineEnding: lineEnding,
-                                          includeBOM: DiskState.includeBOM(encoding: encoding, onDisk: onDisk),
-                                          endings: endings) else {
+    func serialized(_ text: String) throws -> Data {
+        // Mixed line endings: LineBreaks writes each remaining break as it was.
+        guard let data = TextCodec.encodeDocument(text, encoding: encoding, lineEnding: lineEnding,
+                                                  lineBreaks: mixedLineEndings ? lineBreaks : nil) else {
             throw OpenError.unencodable(encoding)
         }
-        return (data, endings)
+        return data
+    }
+
+    /// Keep mixed endings lined up with an edit (`LineBreaks.replace`).
+    func noteTextReplacement(_ old: NSRange, newLength: Int) {
+        guard lineBreaks != nil else { return }
+        _ = lineBreaks?.replace(old, newLength: newLength)
     }
 
     override func contents(forType typeName: String) throws -> Any {
         if let t = currentText?() { text = t }
         let state = currentState
-        let (data, endings) = try serialized(text)
-        writing = (state, endings.map { LineEndingLayout(text: text, endings: $0) },
+        let data = try serialized(text)
+        writing = (state, mixedLineEndings ? lineBreaks : nil,
                    data.count <= SafetyCopyStore.maxBytes ? data : nil)
         return data
     }
@@ -133,10 +134,10 @@ final class TextDocument: UIDocument {
         encoding = decoded.encoding
         lineEnding = decoded.lineEnding
         mixedLineEndings = decoded.mixedLineEndings
-        lineEndingLayout = decoded.lineEndingLayout
+        lineBreaks = decoded.lineBreaks
         onDisk = DiskState(text: decoded.text, format: .init(encoding: decoded.encoding, lineEnding: decoded.lineEnding,
                                                              mixedLineEndings: decoded.mixedLineEndings),
-                           hasBOM: decoded.hasBOM)
+                           hasBOM: !decoded.encoding.bom.isEmpty)
         diskStateStale = false
         if !language.isManual { language = .forFile(named: fileURL.lastPathComponent, content: decoded.text) }
         firstUnsavedEdit = nil
@@ -204,7 +205,7 @@ final class TextDocument: UIDocument {
                     self.onDisk = w.state
                     self.bytesOnDisk = w.bytes
                     self.diskStateStale = false
-                    if let layout = w.layout { self.lineEndingLayout = layout }
+                    if let breaks = w.breaks { self.lineBreaks = breaks }
                 }
             }
             self.writing = nil

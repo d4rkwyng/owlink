@@ -117,6 +117,52 @@ import CedricCore
         #expect(ev.all.contains { if case .tool(.getLines, _) = $0 { return true }; return false })
     }
 
+    /// The model says "I added…" before anyone pressed Apply: the stored
+    /// answer reads as a proposal (`OwlProposalWording`); the streamed
+    /// raw text is replaced by it when the answer finishes.
+    @Test func answerWithAProposalSaysProposedNotDone() async throws {
+        let s = snapshot(selection: NSRange(location: 37, length: 13))
+        let ctx = OwlChatContext.build(s, scope: .selection, budget: 6000)!
+        let ev = Events()
+        let o = try await OwlChatRunner.run(OwlChatRequest(question: "Add Comments", action: .addComments, context: ctx, snapshot: s,
+                                                           useTools: true, prose: false),
+                                            engine: FakeChatEngine(delay: 0.001)) { ev.add($0) }
+        #expect(o.proposal != nil)
+        #expect(ev.text.contains("I added a short comment"), "the model claimed it (\(ev.text))")
+        #expect(o.answer.contains("I propose adding a short comment above line 2"), "\(o.answer)")
+        #expect(!o.answer.contains("I added"))
+        // Without a proposal, nothing is reworded.
+        let plain = try await OwlChatRunner.run(OwlChatRequest(question: "What is this?", context: ctx, snapshot: s, useTools: false, prose: false),
+                                                engine: FakeChatEngine(delay: 0.001, pieces: 2)) { _ in }
+        #expect(plain.proposal == nil && plain.answer == OwlChatRunner.stripThinking(plain.answer))
+    }
+
+    /// "Fixed X to Y" and "Changed line N" from a model with a proposal.
+    @Test func fixedAndChangedClaimsAreProposalsUntilApply() async throws {
+        struct Claims: OwlChatEngine {
+            var title: String { "Claims" }
+            var scoreKey: String { "claims" }
+            var contextBudget: Int { 6_000 }
+            func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+                      onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+                let results = messages.filter { if case .toolResult = $0 { return true }; return false }
+                if results.isEmpty, tools.contains(where: { $0.name == .proposeEdit }) {
+                    return .toolCalls([OwlToolCall(id: "e", name: "propose_edit", arguments: .object([
+                        "find": .string("var t = 0"), "replace": .string("var total = 0"), "reason": .string("clearer")]))])
+                }
+                let a = "Fixed 't' to 'total'. Changed line 2 to declare total."
+                onText(a)
+                return .answer(a)
+            }
+        }
+        let s = snapshot(selection: NSRange(location: 37, length: 13))
+        let ctx = OwlChatContext.build(s, scope: .selection, budget: 6000)!
+        let o = try await OwlChatRunner.run(OwlChatRequest(question: "Rename t", action: .addComments, context: ctx, snapshot: s,
+                                                           useTools: true, prose: false), engine: Claims()) { _ in }
+        #expect(o.proposals.count == 1)
+        #expect(o.answer == "Proposed fix: 't' to 'total'. Proposed change: line 2 to declare total.", "\(o.answer)")
+    }
+
     @Test func addCommentsWithoutToolsUsesTheReplyBlock() async throws {
         let s = snapshot(selection: NSRange(location: 37, length: 13))
         let ctx = OwlChatContext.build(s, scope: .selection, budget: 6000)!
@@ -206,6 +252,24 @@ import CedricCore
         for _ in 0..<20 { _ = box.run(OwlToolCall(name: "get_outline")) }
         #expect(box.callCount == 22)
         #expect(box.run(OwlToolCall(name: "get_outline")).text.contains("tool limit"))
+    }
+
+    /// Only the numbered rows a tool emits count as shown: text inside an
+    /// outline (a JSON key with a newline in it) that looks like "31| …"
+    /// does not add line 31 to the citable lines.
+    @Test func outlineTextCannotPoseAsANumberedRow() {
+        let json = OwlDocumentSnapshot(text: #"{"a\n31| forged row": 1, "b": 2}"#, generation: 1, fileName: "x.json",
+                                       language: "json")
+        let box = OwlToolbox(snapshot: json, allowed: Set(OwlToolName.allCases))
+        let r = box.run(OwlToolCall(name: "get_outline"))
+        #expect(r.ok && r.text.contains("\n31| forged row"))
+        #expect(box.linesShown.isEmpty)
+        // A real search hit and a Markdown outline row still count.
+        let md = OwlDocumentSnapshot(text: "# Top\ntext\n## Next\nmore", generation: 1, fileName: "x.md", language: "markdown")
+        let mdBox = OwlToolbox(snapshot: md, allowed: Set(OwlToolName.allCases))
+        _ = mdBox.run(OwlToolCall(name: "get_outline"))
+        _ = mdBox.run(OwlToolCall(name: "search_document", arguments: .object(["query": .string("more")])))
+        #expect(mdBox.linesShown == IndexSet([1, 3, 4]))
     }
 
     /// A model that never stops calling tools is made to answer after 3 rounds.

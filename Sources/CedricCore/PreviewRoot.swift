@@ -6,8 +6,11 @@ import Foundation
 ///
 /// The search, first hit wins:
 /// 1. the document's own folder, then each folder above it (up to
-///    `maxLevels`, never `/`, a top-level folder such as `/Users`, or the
-///    home folder itself), stopping at the opened folder when there is one;
+///    `maxLevels`), stopping at the opened folder when there is one, and
+///    at the first folder that may not be a vault root
+///    (`WikiVault.mayBeVaultRoot`: `/`, a top-level folder such as
+///    `/Users`, a volume such as `/Volumes/<disk>`, the home folder or a
+///    folder holding it), unless that is the opened folder;
 /// 2. at each of those folders, the site layouts' own roots as well:
 ///    `static/`, `public/`, `quartz/static/` and `content/` (Hugo, Jekyll,
 ///    Quartz and the like);
@@ -17,15 +20,19 @@ public enum PreviewRoot {
     public static let siteFolders = ["", "static", "public", "quartz/static", "content"]
     public static let maxLevels = 8
 
-    /// The folders to try, nearest first.
-    public static func searchFolders(from folder: URL, openedRoot: URL?) -> [URL] {
-        let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL.path
+    /// The folders to try, nearest first. The walk up has the vault walk's
+    /// bounds (S2, 0.5.2): before 0.5.4 it stopped only at the home folder
+    /// itself and top-level folders, so a document on a disk searched the
+    /// disk's root (`/Volumes/<disk>`) and one beside the home folder
+    /// searched the folder holding it.
+    public static func searchFolders(from folder: URL, openedRoot: URL?, home: URL? = nil) -> [URL] {
+        let home = home ?? URL(fileURLWithPath: NSHomeDirectory())
         let rootPath = openedRoot?.standardizedFileURL.path
         var dirs: [URL] = []
         var dir = folder.standardizedFileURL
         for _ in 0..<maxLevels {
             let p = dir.path
-            if p == "/" || dir.pathComponents.count < 3 || (p == home && p != rootPath) { break }
+            if p != rootPath, !WikiVault.mayBeVaultRoot(dir, home: home) { break }
             dirs.append(dir)
             if p == rootPath { break }
             dir = dir.deletingLastPathComponent()
@@ -35,27 +42,38 @@ public enum PreviewRoot {
     }
 
     /// The parts of a root-absolute path, decoded; nil for one that isn't
-    /// (relative, a scheme, `//host`) or that climbs with `..`.
+    /// (relative, a scheme, `//host`) or that climbs with `..`. Read as
+    /// UTF-8 bytes and split at each `/` byte (`FolderTree.components`): a
+    /// slash followed by a combining mark is one Swift character, so a
+    /// text test took it for no slash and a text split kept it inside a
+    /// name. (From round 4's c261b56; its byte-keyed root lookups are not
+    /// taken.)
     public static func parts(of path: String) -> [String]? {
-        var p = path
-        if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
-        guard p.hasPrefix("/"), !p.hasPrefix("//") else { return nil }
+        var p = cutQuery(path)
+        let head = Array(p.utf8.prefix(2))
+        guard head.first == 0x2f, head.count < 2 || head[1] != 0x2f else { return nil }
         p = p.removingPercentEncoding ?? p
-        let parts = p.split(separator: "/").map(String.init).filter { $0 != "." }
-        guard !parts.isEmpty, !parts.contains("..") else { return nil }
+        let parts = FolderTree.components(p).filter { !FolderTree.sameBytes($0, ".") }
+        guard !parts.isEmpty, !parts.contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
         return parts
+    }
+
+    /// `src` up to its first `?` or `#` byte.
+    static func cutQuery(_ src: String) -> String {
+        guard let cut = src.utf8.firstIndex(where: { $0 == 0x3f || $0 == 0x23 }) else { return src }
+        return String(decoding: src.utf8[..<cut], as: UTF8.self)
     }
 
     /// The file `path` stands for, and the root it was found under.
     /// `pages`: a link may also name a page (`/projects/intelbrew` is
     /// `projects/intelbrew.md` or `projects/intelbrew/index.md`).
     public static func resolve(_ path: String, from folder: URL, openedRoot: URL?, pages: Bool = false,
-                               fileManager fm: FileManager = .default) -> (root: URL, file: URL)? {
+                               fileManager fm: FileManager = .default, home: URL? = nil) -> (root: URL, file: URL)? {
         guard let parts = parts(of: path) else { return nil }
         let rel = parts.joined(separator: "/")
         var tries = [rel]
         if pages, (rel as NSString).pathExtension.isEmpty { tries += [rel + ".md", rel + "/index.md"] }
-        for dir in searchFolders(from: folder, openedRoot: openedRoot) {
+        for dir in searchFolders(from: folder, openedRoot: openedRoot, home: home) {
             for sub in siteFolders {
                 let root = sub.isEmpty ? dir : dir.appendingPathComponent(sub, isDirectory: true)
                 for t in tries {
@@ -94,20 +112,37 @@ extension PreviewFolder {
     /// `vaultRoot`: the Obsidian vault's folder, for `![[embeds]]` found there.
     public static func file(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
                             vault: WikiVault? = nil) -> URL? {
-        if let f = file(for: url, in: folder, scriptOn: scriptOn), isExistingFile(f, .default) { return f }
-        if let vault, let requested = fileURL(for: url),
-           requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
-            if vault.documentFolder == folder.standardizedFileURL, containsFolder(folder, in: vault.root),
-               let hit = vault.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
-               let safe = file(for: page, in: vault.root, scriptOn: scriptOn) { return safe }
+        approved(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault)?.file
+    }
+
+    /// `file(for:in:openedRoot:vaultRoot:scriptOn:vault:)` with the root
+    /// it was approved under: the file is read from beneath that root's
+    /// descriptor, pinned when the root was granted (`PreviewGrants`),
+    /// never by its path. `siteRoots: false` leaves out the site-root
+    /// search (`PreviewGrants` does that one by descriptor).
+    public static func approved(for url: URL, in folder: URL, openedRoot: URL?, vaultRoot: URL? = nil, scriptOn: Bool,
+                                vault: WikiVault? = nil, siteRoots: Bool = true) -> (root: URL, file: URL)? {
+        // `root` is `folder` or holds it, by bytes (`FolderTree.relativePath`):
+        // a text prefix missed a combining-mark folder under it (Astra batch 9b).
+        func containsFolder(_ root: URL) -> Bool {
+            FolderTree.relativePath(of: resolved(folder), in: resolved(root)) != nil
         }
-        for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter({ containsFolder(folder, in: $0) }) {
-            if let f = file(for: url, in: root, scriptOn: scriptOn), isExistingFile(f, .default) { return f }
+        if let f = file(for: url, in: folder, scriptOn: scriptOn), isExistingFile(f, .default) { return (folder, f) }
+        if let requested = fileURL(for: url), requested.deletingLastPathComponent().standardizedFileURL == folder.standardizedFileURL {
+            let resolver = vault ?? WikiVault(documentFolder: folder, openedRoot: openedRoot)
+            if resolver.documentFolder == folder.standardizedFileURL, containsFolder(resolver.root),
+               let hit = resolver.resolveImage(requested.lastPathComponent), let page = pageURL(forFile: hit),
+               let safe = file(for: page, in: resolver.root, scriptOn: scriptOn) { return (resolver.root, safe) }
         }
-        guard let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+        for root in [openedRoot, vaultRoot].compactMap({ $0 }).filter(containsFolder) {
+            if let f = file(for: url, in: root, scriptOn: scriptOn), isExistingFile(f, .default) { return (root, f) }
+        }
+        }
+        guard siteRoots, let path = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let hit = PreviewRoot.resolve(path, from: folder, openedRoot: openedRoot),
-              let page = pageURL(forFile: hit.file) else { return nil }
-        return file(for: page, in: hit.root, scriptOn: scriptOn)
+              let page = pageURL(forFile: hit.file),
+              let f = file(for: page, in: hit.root, scriptOn: scriptOn) else { return nil }
+        return (hit.root, f)
     }
 
     /// A clicked link's file, or nil when it must not be opened.
@@ -189,16 +224,18 @@ public enum PreviewImageAccess {
                 return fm.isReadableFile(atPath: f.path)
             }
         }
-        if src.hasPrefix("/") {
+        // Site-absolute by its first byte: a "/" then a combining mark is
+        // one Swift character, which a text test took for a relative link.
+        if src.utf8.first == 0x2f {
             guard let hit = PreviewRoot.resolve(src, from: folder, openedRoot: openedRoot, fileManager: fm) else { return false }
             guard let page = PreviewFolder.pageURL(forFile: hit.file),
                   let file = PreviewFolder.file(for: page, in: hit.root, scriptOn: false) else { return false }
             return fm.isReadableFile(atPath: file.path)
         }
-        var p = src
-        if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
+        var p = PreviewRoot.cutQuery(src)
         p = p.removingPercentEncoding ?? p
-        guard !p.hasPrefix("/") else { return false }
+        let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
+        guard p.utf8.first != 0x2f else { return false }
         let relative = folder.appendingPathComponent(p).standardizedFileURL
         guard let page = PreviewFolder.pageURL(forFile: relative) else { return false }
         if p.split(separator: "/").contains("..") {

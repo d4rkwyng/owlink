@@ -175,8 +175,8 @@ public enum OwlPrompts {
         let what = prose ? "text" : "code"
         let edit = toolsOn
             ? "For each change call propose_edit with find (the exact text from \(lines), copied without the line numbers) and replace (the new text), "
-                + "at most \(OwlTools.maxProposals) calls, then say in one sentence what you changed."
-            : "Reply with only the new text for \(lines) in one ``` block, without line numbers, then one sentence on what you changed."
+                + "at most \(OwlTools.maxProposals) calls, then say in one sentence what you propose; nothing is applied until the user presses Apply."
+            : "Reply with only the new text for \(lines) in one ``` block, without line numbers, then one sentence on what you propose; nothing is applied until the user presses Apply."
         switch action {
         case .explain:
             return "Explain what this \(what) (\(lines)) does or says, in plain words, in at most 5 sentences."
@@ -263,6 +263,15 @@ public enum OwlPrompts {
 
     /// The history exactly as `chatMessages` keeps it.
     public static func chatHistoryMessages(_ history: [OwlChatEntry]) -> [OwlChatMessage] {
+        retainedHistory(history).map {
+            let text = sentText($0)
+            return $0.role == .user ? .user(text) : .assistant(text)
+        }
+    }
+
+    /// The entries `chatHistoryMessages` keeps: the last two questions and
+    /// what was answered to them.
+    static func retainedHistory(_ history: [OwlChatEntry]) -> [OwlChatEntry] {
         var kept: [OwlChatEntry] = []
         var users = 0
         for e in history.reversed() where e.role == .user || e.role == .owl {
@@ -270,10 +279,29 @@ public enum OwlPrompts {
             kept.insert(e, at: 0)
         }
         while kept.first?.role == .owl { kept.removeFirst() }
-        return kept.map {
-            let text = String($0.text.prefix(1200))
-            return $0.role == .user ? .user(text) : .assistant(text)
+        return kept
+    }
+
+    private static func sentText(_ entry: OwlChatEntry) -> String { String(entry.text.prefix(1200)) }
+
+    /// The lines the conversation sent with a request names, which an
+    /// answer may cite too: any a question names, and any an earlier answer
+    /// cites as read. A citation that answer flagged as unread
+    /// (`OwlCitations.flag`) stays unverified, even where the history sent
+    /// is cut between the citation and its flag, and even where the same
+    /// line is cited again, unflagged, past the cut: each citation sent is
+    /// judged by its own flag. A whole-document review's note about lines
+    /// it did not review ("Line 3 was too long for this model and was not
+    /// reviewed.", `OwlChunkedReview.withoutStatusNotes`) vouches for none.
+    public static func historyCitations(_ history: [OwlChatEntry]) -> IndexSet {
+        var s = IndexSet()
+        for e in retainedHistory(history) {
+            let sent = sentText(e)
+            s.formUnion(e.role == .user ? OwlCitations.lines(in: sent)
+                        : OwlCitations.evidence(in: OwlChunkedReview.withoutStatusNotes(e.text),
+                                                retained: (sent as NSString).length))
         }
+        return s
     }
 
     /// The start of an image document's "File kind:" line (the test engine

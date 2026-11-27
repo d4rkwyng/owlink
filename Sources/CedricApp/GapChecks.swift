@@ -264,7 +264,8 @@ extension DevChecks {
         var settings: SettingsWindowController? { SettingsWindowController.shared }
         func allSubviews(_ v: NSView?) -> [NSView] { guard let v else { return [] }; return v.subviews + v.subviews.flatMap { allSubviews($0) } }
         func disk(_ t: EditorWindowController) -> String { (try? String(contentsOf: t.doc.fileURL!, encoding: .utf8)) ?? "-" }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 let appMenu = NSApp.mainMenu?.items.first?.submenu
                 let services = appMenu?.items.first { $0.title == "Services" }
@@ -335,6 +336,9 @@ extension DevChecks {
                 s.changed(s.theme)
                 expect(UserDefaults.standard.string(forKey: EditorTheme.defaultsKey) == EditorTheme.light.rawValue, "the theme popup sets the theme")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             snapshot("settings.png", window: settings?.window),
             sync {
                 settings?.window?.close()
@@ -387,6 +391,9 @@ extension DevChecks {
                 type("q")
                 _ = a.save()
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             sync {
                 key("z", [.command])
             },
@@ -413,7 +420,9 @@ extension DevChecks {
                 expect(app.tabs.count == before - 2, "⇧⌘W closes the window's tabs", "\(before) → \(app.tabs.count)")
                 expect(a.window?.isVisible == true && b.window != nil, "the other window stays")
             },
-        ])
+        ]
+        steps += steps3
+        run(steps)
     }
 
     // MARK: Keep / Delete Lines Matching, bookmarked lines
@@ -497,13 +506,22 @@ extension DevChecks {
     static func encodings(_ app: AppDelegate) {
         let url = dir.appendingPathComponent("mac.txt")
         // "café, don’t" in Mac Roman.
-        try? (Data("caf".utf8) + Data([0x8E]) + Data(", don".utf8) + Data([0xD5]) + Data("t\n".utf8)).write(to: url)
+        // Appended in parts: as one `Data + Data + ...` it took 150-170 ms to type-check.
+        var macRoman = Data("caf".utf8)
+        macRoman.append(0x8E)
+        macRoman.append(contentsOf: Data(", don".utf8))
+        macRoman.append(0xD5)
+        macRoman.append(contentsOf: Data("t\n".utf8))
+        try? macRoman.write(to: url)
         let tab = app.open(url)!
         sized(tab)
         run([
             sync {
                 focus(tab)
                 expect(tab.text == "café, don’t\n", "a Mac Roman file opens as such", tab.text)
+                // Not UTF-8: a guess until kept (FileNotices.swift); Keep on its bar.
+                expect(tab.statusBar.encodingButton.title == "Mac Roman (guessed)", "…marked as a guess", tab.statusBar.encodingButton.title)
+                if let b = tab.encodingBar?.button("Keep") { click(b, at: NSPoint(x: b.bounds.midX, y: b.bounds.midY)) }
                 expect(tab.doc.encoding == .macRoman && tab.statusBar.encodingButton.title == "Mac Roman",
                        "the status bar says Mac Roman", tab.statusBar.encodingButton.title)
                 choose(#selector(AppDelegate.pickEncodingMenu(_:)), TextEncoding.windows1252.rawValue)
@@ -549,7 +567,8 @@ extension DevChecks {
         let outside = dir.appendingPathComponent("cedric-wait.outside").path
         FileManager.default.createFile(atPath: outside, contents: nil)
         var tab: EditorWindowController?
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 openURL(app, "cedric://open?path=\(enc(file.path))&line=3&col=7&wait=\(enc(marker))")
                 tab = app.tabs.first { $0.doc.fileURL?.standardizedFileURL == file.standardizedFileURL }
@@ -617,6 +636,18 @@ extension DevChecks {
                 expect(FileManager.default.fileExists(atPath: hard) && (try? String(contentsOf: victim, encoding: .utf8)) == "precious\n"
                        && app.tabs.count == before, "a hard link to the victim is refused: nothing read, nothing deleted")
                 try? FileManager.default.removeItem(atPath: hard)
+                // An absolute path whose first name starts with a combining mark:
+                // "/" then the mark is one Swift character, but its first byte is
+                // "/", so it is absolute (asked about, then declined here), not
+                // refused as relative (Astra batch 17v must 6).
+                AppDelegate.linkAnswerForChecks = false
+                AppDelegate.lastURLRefusal = nil
+                openURL(app, "cedric://open?path=" + enc("/\u{301}cedric-check-\(getpid()).txt"), token: false)
+                expect(AppDelegate.lastURLRefusal?.utf8.starts(with: "declined: /".utf8) == true,
+                       "a path starting with a slash then a combining mark is absolute", AppDelegate.lastURLRefusal ?? "-")
+                AppDelegate.lastURLRefusal = nil
+                openURL(app, "cedric://open?path=" + enc("relative/x.txt"), token: false)
+                expect(AppDelegate.lastURLRefusal == "path isn’t absolute", "a relative path is still refused", AppDelegate.lastURLRefusal ?? "-")
                 // A tokenless path= (a link): asked first; declined here (CEDRIC_URL_ASK_ANSWER=no), nothing opens.
                 AppDelegate.linkAnswerForChecks = false
                 openURL(app, "cedric://open?path=" + enc(victim.path), token: false)
@@ -630,6 +661,9 @@ extension DevChecks {
                        app.tabs.last?.text ?? "-")
                 expect(!FileManager.default.fileExists(atPath: tmp), "and deletes its temp file")
             },
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             sync {
                 // The token travels in a 0600 hand-off file, never on argv
                 // (security review 0.2.1), and rotates.
@@ -663,7 +697,9 @@ extension DevChecks {
                        "the token rotates (new value, still 0600)")
             },
             sync { cliScriptWithCustomTMPDIR(app) },
-        ])
+        ]
+        steps += steps2
+        run(steps)
     }
 
     /// The bundled `cedric` script itself, run with TMPDIR pointing
@@ -673,6 +709,17 @@ extension DevChecks {
     /// records the URL, which is then handed to the app as Launch Services
     /// would; HOME is the check's folder, so the script makes the check's
     /// token, not the user's.
+    ///
+    /// The script must never reach the system `open`: it would start or
+    /// message the registered Owlink (maybe an installed release, with the
+    /// user's data). So its PATH is only the check's own bin folder: the
+    /// recorder as `open`, plus links to the few tools the script runs,
+    /// with neither /usr/bin nor /bin on it. Every setup step is checked,
+    /// and a probe must resolve `open` to the recorder and see it record
+    /// before the script runs. If any of that fails, the check fails
+    /// without running the script. Not a dry run: the check needs the real
+    /// hand-off file (the shell-level CLI checks in tools-check.sh are the
+    /// dry runs).
     static func cliScriptWithCustomTMPDIR(_ app: AppDelegate) {
         guard let script = Bundle.main.url(forResource: "cedric", withExtension: nil) else {
             expect(false, "the cedric script is in the app's Resources"); return
@@ -682,24 +729,62 @@ extension DevChecks {
         let custom = "/tmp/custom.cedric-check\(getpid())"
         let log = dir.appendingPathComponent("cli-open.log")
         let fm = FileManager.default
-        try? fm.createDirectory(at: bin, withIntermediateDirectories: true)
-        try? fm.createDirectory(at: home, withIntermediateDirectories: true)
-        try? fm.createDirectory(atPath: custom, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(atPath: custom) }
         let fakeOpen = bin.appendingPathComponent("open")
-        try? "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$CEDRIC_CHECK_OPEN_LOG\"\n".write(to: fakeOpen, atomically: true, encoding: .utf8)
-        chmod(fakeOpen.path, 0o755)
+        // What Scripts/cedric runs besides bash builtins, linked in by absolute path.
+        let tools = ["dirname", "readlink", "getconf", "mkdir", "stat", "chmod", "date", "mktemp", "head", "xxd",
+                     "tr", "ln", "rm", "sleep", "python3", "cat", "sed"]
+        do {
+            if fm.fileExists(atPath: bin.path) { try fm.removeItem(at: bin) }
+            try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+            try fm.createDirectory(at: home, withIntermediateDirectories: true)
+            try fm.createDirectory(atPath: custom, withIntermediateDirectories: true)
+            try "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$CEDRIC_CHECK_OPEN_LOG\"\n"
+                .write(to: fakeOpen, atomically: true, encoding: .utf8)
+            guard chmod(fakeOpen.path, 0o755) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EPERM) }
+            for t in tools {
+                guard let src = ["/usr/bin/\(t)", "/bin/\(t)"].first(where: { fm.isExecutableFile(atPath: $0) }) else {
+                    throw CocoaError(.fileNoSuchFile, userInfo: [NSFilePathErrorKey: t])
+                }
+                try fm.createSymbolicLink(atPath: bin.appendingPathComponent(t).path, withDestinationPath: src)
+            }
+        } catch {
+            expect(false, "the cli check's recorder and bin folder are set up (else the script is not run)", "\(error)")
+            try? fm.removeItem(atPath: custom)
+            return
+        }
+        defer { try? fm.removeItem(atPath: custom) }
+        try? fm.removeItem(at: log)
+        var env = ProcessInfo.processInfo.environment
+        env["TMPDIR"] = custom + "/"
+        env["HOME"] = home.path
+        env["PATH"] = bin.path  // only the check's folder: no /usr/bin (the system open), no /bin
+        env["CEDRIC_CHECK_OPEN_LOG"] = log.path
+        env.removeValue(forKey: "CEDRIC_DRY_RUN")
+        // The probe: with this environment `open` is the recorder, and it records.
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/bin/bash")
+        probe.arguments = ["-c", "command -v open; open cedric-check-probe"]
+        probe.environment = env
+        let probeOut = Pipe()
+        probe.standardOutput = probeOut
+        do { try probe.run() } catch {
+            expect(false, "the cli check's probe runs (else the script is not run)", "\(error)"); return
+        }
+        let resolved = String(decoding: probeOut.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        probe.waitUntilExit()
+        let recorded = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+        guard probe.terminationStatus == 0, resolved == fakeOpen.path, recorded == "cedric-check-probe\n" else {
+            expect(false, "with the check's PATH, open is the recorder and records (else the script is not run)",
+                   "status \(probe.terminationStatus), open: \(resolved), log: \(recorded.debugDescription)")
+            return
+        }
+        expect(true, "the cli check's open is its recorder (PATH has no /usr/bin)", resolved)
         try? fm.removeItem(at: log)
         let victim = write("cli-custom-tmp.txt", "from a custom TMPDIR\n")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/bash")
         p.arguments = [script.path, victim.path]
-        var env = ProcessInfo.processInfo.environment
-        env["TMPDIR"] = custom + "/"
-        env["HOME"] = home.path
-        env["PATH"] = bin.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
-        env["CEDRIC_CHECK_OPEN_LOG"] = log.path
-        env.removeValue(forKey: "CEDRIC_DRY_RUN")
         p.environment = env
         do { try p.run() } catch { expect(false, "the cedric script runs", "\(error)"); return }
         p.waitUntilExit()

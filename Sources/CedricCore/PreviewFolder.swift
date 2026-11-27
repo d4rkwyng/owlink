@@ -26,10 +26,18 @@ public enum PreviewFolder {
 
     /// `url`'s file, if it lies inside `folder` (after `..` and symbolic links).
     public static func file(for url: URL, in folder: URL) -> URL? {
-        guard let file = fileURL(for: url) else { return nil }
-        let root = resolved(folder.standardizedFileURL).path
-        let target = resolved(file).path
-        return target.hasPrefix(root.hasSuffix("/") ? root : root + "/") ? file : nil
+        guard let file = fileURL(for: url), isInside(resolved(file), resolved(folder.standardizedFileURL)) else { return nil }
+        return file
+    }
+
+    /// Whether `target` lies below `root` (not `root` itself), both already
+    /// resolved: compared by UTF-8 bytes with a `/` byte at the boundary
+    /// (`FolderTree.relativePath`), not as Swift text, which makes a slash
+    /// and a following combining mark one character and calls canonically
+    /// equivalent but byte-distinct names equal (Astra batch 9b).
+    static func isInside(_ target: URL, _ root: URL) -> Bool {
+        guard let rel = FolderTree.relativePath(of: target, in: root) else { return false }
+        return !rel.isEmpty
     }
 
     /// What a page with JavaScript on may still load from its folder:
@@ -49,17 +57,17 @@ public enum PreviewFolder {
     public static func file(for url: URL, in folder: URL, scriptOn: Bool) -> URL? {
         guard let file = file(for: url, in: folder) else { return nil }
         guard scriptOn else { return file }
-        let root = resolved(folder.standardizedFileURL).path
-        let target = resolved(file).path
-        let folderPath = folder.standardizedFileURL.path
-        func ok(_ path: String, under base: String) -> Bool {
-            let rel = path.hasPrefix(base) ? String(path.dropFirst(base.count)) : path
-            let parts = rel.split(separator: "/")
-            guard let last = parts.last, !parts.contains(where: { $0.hasPrefix(".") }) else { return false }
-            let ext = (String(last) as NSString).pathExtension.lowercased()
+        // The names below `base` (the whole path when it isn't below it),
+        // split at "/" bytes, none starting with a "." byte: as Swift
+        // text a dot followed by a combining mark isn't a "." prefix, and
+        // a slash followed by one doesn't split (Astra batch 9b).
+        func ok(_ path: URL, under base: URL) -> Bool {
+            let parts = FolderTree.components(FolderTree.relativePath(of: path, in: base) ?? path.path)
+            guard let last = parts.last, !parts.contains(where: { $0.utf8.first == 0x2e }) else { return false }
+            let ext = (last as NSString).pathExtension.lowercased()
             return scriptSafeExtensions.contains(ext)
         }
-        return ok(file.path, under: folderPath) && ok(target, under: root) ? file : nil
+        return ok(file, under: folder.standardizedFileURL) && ok(resolved(file), under: resolved(folder.standardizedFileURL)) ? file : nil
     }
 
     /// `url` with symbolic links resolved, also when its last parts don't
@@ -155,8 +163,7 @@ public enum PreviewLinkAction: Equatable, Sendable {
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: target.path, isDirectory: &isDir) else { return .ignore("missing") }
         guard let folder else { return .revealInFinder(file) }
-        let root = PreviewFolder.resolved(folder.standardizedFileURL).path
-        let inside = target.path.hasPrefix(root.hasSuffix("/") ? root : root + "/")
+        let inside = PreviewFolder.isInside(target, PreviewFolder.resolved(folder.standardizedFileURL))
         // A folder (an .app bundle is one) is never opened, only shown.
         if inside, !isDir.boolValue, isText(target) { return .openInCedric(file) }
         return .revealInFinder(file)

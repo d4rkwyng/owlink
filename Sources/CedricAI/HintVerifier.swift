@@ -570,11 +570,13 @@ public enum BracketScan {
 
 /// How the bubble names where a hint came from.
 public enum HintSource {
-    /// "rules" → nil (the owl's own rules need no label); "apple" → "AI
+    /// "rules" and "notice" → nil (the owl's own rules and notices need no
+    /// label); "apple" → "AI
     /// suggestion · Apple Intelligence"; "local:qwen2.5-coder-3b-instruct-q4_k_m"
     /// → "AI suggestion · Qwen2.5 Coder 3B".
     public static func displayName(_ source: String, catalog: ModelCatalog? = nil) -> String? {
-        if source == "rules" || source.isEmpty { return nil }
+        // "notice": Owlink's own notices (the built-in model didn't load).
+        if source == "rules" || source == "notice" || source.isEmpty { return nil }
         if source == "apple" { return "AI suggestion · Apple Intelligence" }
         guard source.hasPrefix("local:") else { return "AI suggestion" }
         let id = String(source.dropFirst(6))

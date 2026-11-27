@@ -85,6 +85,22 @@ public struct LocalModelClient: Sendable {
     /// measured on (monotonic seconds). Tests put a virtual one in, so a
     /// stalled CI runner can't make a dribble look like a stall.
     var streamClock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Streams only, tests only (nil in the app): told after each touch of
+    /// the watch has been stored, with the time stored and the bytes read
+    /// so far, so a virtual-time stub moves on only once the client has
+    /// both read a chunk and reset its idle deadline on it.
+    var streamTouched: (@Sendable (_ at: TimeInterval, _ bytesRead: Int) -> Void)? = nil
+    /// `withDeadline`'s wait for `timeout` seconds. Tests whose point isn't
+    /// the deadline put in one that never ends on its own, so a stalled CI
+    /// runner can't make an answer in time look late.
+    var deadlineSleep: @Sendable (TimeInterval) async throws -> Void = {
+        try await Task.sleep(nanoseconds: UInt64(max(0, $0) * 1_000_000_000))
+    }
+    /// What every request gives URLSession as its own timeout (the wait
+    /// between packets); nil: each request's usual one (`timeout`, or 2 s
+    /// for `enrich`'s best-effort lookups). Tests that take the overall
+    /// deadline off the wall clock take this one off too.
+    var requestTimeout: TimeInterval? = nil
 
     public init(baseURL: URL, timeout: TimeInterval = 20, session: URLSession? = nil) {
         self.baseURL = baseURL
@@ -189,12 +205,12 @@ public struct LocalModelClient: Sendable {
     /// cover the lookup; this does. At the deadline the work is cancelled
     /// (which cancels its URLSession task) and `.timedOut` is thrown.
     func withDeadline<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
-        let seconds = timeout
+        let seconds = timeout, sleep = deadlineSleep
         do {
             return try await withThrowingTaskGroup(of: T?.self) { group in
                 group.addTask { try await work() }
                 group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                    try await sleep(seconds)
                     return nil
                 }
                 defer { group.cancelAll() }
@@ -281,7 +297,7 @@ public struct LocalModelClient: Sendable {
     }
 
     /// GET or POST with the redirect guard and the size cap.
-    private func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
+    func fetch(_ request: URLRequest) async throws -> (Data, URLResponse) {
         let guardian = RedirectGuard()
         let (bytes, response) = try await session.bytes(for: request, delegate: guardian)
         if response.expectedContentLength > Int64(Self.maxResponseBytes) {
@@ -306,7 +322,7 @@ public struct LocalModelClient: Sendable {
 
     private func send(_ request: URLRequest) async throws -> Data {
         var request = request
-        request.timeoutInterval = timeout
+        request.timeoutInterval = requestTimeout ?? timeout
         do {
             let (data, response) = try await fetch(request)
             guard let http = response as? HTTPURLResponse else { throw LocalAIError.badResponse }
@@ -343,7 +359,7 @@ public struct LocalModelClient: Sendable {
     /// quantization and load state; Ollama's adds bytes and parameter size.
     private func enrich(_ models: inout [LocalModelInfo], pin: Pin) async {
         var quick = pin.apply(URLRequest(url: serverRoot.appendingPathComponent("api/v0/models")))
-        quick.timeoutInterval = 2
+        quick.timeoutInterval = requestTimeout ?? 2
         if let data = try? await fetch(quick).0,
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = obj["data"] as? [[String: Any]] {
@@ -356,7 +372,7 @@ public struct LocalModelClient: Sendable {
             return
         }
         var tags = pin.apply(URLRequest(url: serverRoot.appendingPathComponent("api/tags")))
-        tags.timeoutInterval = 2
+        tags.timeoutInterval = requestTimeout ?? 2
         if let data = try? await fetch(tags).0,
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let list = obj["models"] as? [[String: Any]] {

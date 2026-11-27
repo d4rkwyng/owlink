@@ -71,85 +71,6 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     private(set) var lastAnchor: (fragment: String, found: Bool)?
     /// Bumped by each render; a result for an older one is dropped.
     private var generation = 0
-    /// The page loaded now (counted per load) and its front matter block's
-    /// state as the app last left it (nil: no block). A state read from the
-    /// page counts only for that page, and only a change from this one is
-    /// the reader's (FrontMatterDisclosure.change).
-    private var pageCount = 0
-    private var pageFrontMatterOpen: Bool?
-    /// The page loaded now: the document it shows (`pageKey`: the live
-    /// document's `documentKey`, or a linked document's path) and the
-    /// reader's clicks on its block the app has seen (frontMatterRead).
-    private var pageKey: String?
-    private var pageClicksSeen = 0
-
-    /// Whether the preview opens the front matter block, as the reader
-    /// last left it (a click on its summary), across documents and
-    /// launches. Off: one collapsed line.
-    static var frontMatterExpanded: Bool {
-        get { UserDefaults.standard.bool(forKey: FrontMatterDisclosure.preferenceKey) }
-        set { UserDefaults.standard.set(newValue, forKey: FrontMatterDisclosure.preferenceKey) }
-    }
-    /// The front matter block as the reader leaves it, one model for every
-    /// read (an edit's body swap, a reload, the preview closing):
-    /// - A read is the reader's change when they clicked the block's summary
-    ///   since the last read of that page (an app-world listener counts the
-    ///   clicks and stamps the last, so two clicks count too) or the block
-    ///   isn't as the app left it. The change is stamped with the time of
-    ///   the reader's click (else the time the read started).
-    /// - The preference takes the newest change of any page (`preferenceAt`).
-    /// - A close-time read may come back after the preview was reopened at
-    ///   once (nothing waits for it): it is then set on the live previews
-    ///   showing the same page (`pageKey`), if it is the newest change kept
-    ///   for that page (`pageChangeAt`) and the reader hasn't clicked that
-    ///   page's block since (adoptScript). A close that saw no change
-    ///   stamps nothing, so it drops no earlier read.
-    private static var preferenceAt: Double = 0
-    private static var pageChangeAt: [String: Double] = [:]
-    /// Close-time reads still out, per page key.
-    private static var readsOut: [String: Int] = [:]
-    /// Drops the change times of pages no live preview shows (or holds a
-    /// late read for) and no close-time read is out for (a page closed
-    /// for good keeps nothing).
-    private static func dropUnusedPageChanges() {
-        var used = Set(readsOut.keys)
-        for p in alive.allObjects where !p.closed {
-            if let k = p.pageKey { used.insert(k) }
-            used.formUnion(p.adoptedFrontMatter.keys)
-        }
-        pageChangeAt = pageChangeAt.filter { used.contains($0.key) }
-    }
-    /// Every preview alive (weakly), for close-time reads that come back late.
-    private static let alive = NSHashTable<PreviewController>.weakObjects()
-    /// The live document (set by its tab on each render): its page's key.
-    var documentKey: String?
-    /// This preview has been closed (its close-time read may still be out).
-    private var closed = false
-    /// Checks only: how long a close-time read's answer is held back
-    /// (a WebKit callback that comes back late). 0 in the app.
-    static var closeReadDelayForChecks: TimeInterval = 0
-    /// Checks only: page loads that finish are held (still loading, as far
-    /// as the preview knows) until `releaseFinishesForChecks`.
-    static var holdFinishForChecks = false
-    private static var heldFinishes: [() -> Void] = []
-    /// Checks only: the pages a change time is kept for.
-    static var pageChangeKeysForChecks: [String] { Array(pageChangeAt.keys) }
-    /// Checks only: run once a linked document has been resolved and read,
-    /// before its page renders (a symlink retargeted in between).
-    static var afterLinkedReadForChecks: (() -> Void)?
-    /// Checks only: the page loaded now.
-    var pageKeyForChecks: String? { pageKey }
-    static func releaseFinishesForChecks() {
-        holdFinishForChecks = false
-        let held = heldFinishes
-        heldFinishes = []
-        held.forEach { $0() }
-    }
-    /// Late close-time reads that came back while a page was loading (or
-    /// none was loaded yet), one per page key, so another page's read
-    /// can't displace this page's: the page that loads takes its own
-    /// (load, didFinish).
-    private var adoptedFrontMatter: [String: FrontMatterChange] = [:]
     private let latest = RenderTicket()
     /// Called after a whole page load (the tab scrolls it in step).
     var onLoaded: (() -> Void)?
@@ -165,6 +86,17 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     /// Rendering for a PDF export: wikilinks and embeds by relative path
     /// (Markdown.Options.exportLinks), not `cedric-doc:` links.
     var exportLinks = false
+    /// A PDF export with Allow JavaScript on: the bundled Mermaid and KaTeX
+    /// may run, the page's own script may not (PreviewRich.csp's `pageScripts`).
+    var bundledScriptsOnly = false
+    /// What the page loaded last needed of Mermaid and KaTeX (none with
+    /// JavaScript off).
+    private(set) var lastNeeds: PreviewRich.Needs = []
+    /// The HTML of the page loaded last, as handed to WebKit (for checks;
+    /// kept in a check build only).
+    private(set) var lastPageHTML: String?
+    /// The live document's Allow JavaScript, whichever entry is showing.
+    var liveDocumentJavaScript: Bool { homeJavaScript }
 
     /// The folder open in the sidebar, when it holds `folder`.
     static func openedRoot(for folder: URL?) -> URL? {
@@ -204,6 +136,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Serves the document's folder (and nothing else) to the page.
     private let folderFiles = DocumentFolderFiles()
+    /// Serves the bundled Mermaid and KaTeX (and nothing else), with JavaScript on.
+    let assets = PreviewAssets()
 
     /// For the checks: renders applied, whole loads, and main-thread time.
     private(set) var bodySwaps = 0
@@ -216,9 +150,9 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(folderFiles, forURLScheme: DocumentFolderFiles.scheme)
+        config.setURLSchemeHandler(assets, forURLScheme: PreviewRich.scheme)
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
-        Self.alive.add(self)
         let ucc = config.userContentController
         ucc.addUserScript(WKUserScript(source: Self.appScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: .defaultClient))
         ucc.add(ScrollMessages(self), contentWorld: .defaultClient, name: "cedricScroll")
@@ -317,12 +251,8 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             let language = LanguageDetector.language(forFileName: target.lastPathComponent) ?? .markdown
             // Scrolled to after the page has loaded (didFinish), also on Back/Forward.
             pendingAnchor = fragment
-            if let hook = Self.afterLinkedReadForChecks { Self.afterLinkedReadForChecks = nil; hook() }
-            // The page is keyed by the file just read (`target`, already
-            // resolved), never by resolving the entry's URL again: a symlink
-            // retargeted before the page loads must not give it another key.
             show(text: text, language: language, palette: home.2, baseURL: target.deletingLastPathComponent(),
-                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL), pageKey: target.standardizedFileURL.path)
+                 rootOverride: PreviewFolder.resolved(root.standardizedFileURL))
         }
         onNavigationChange?()
     }
@@ -351,10 +281,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     /// Renders the document. `baseURL` is the file's folder, for relative
     /// images (the page may read files in that folder only).
-    /// `pageKey`: a linked document's key, from the file read (nil: the
-    /// live document's `documentKey`).
-    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil,
-              pageKey: String? = nil) {
+    func show(text: String, language: Language, palette: EditorPalette, baseURL folder: URL?, rootOverride: URL? = nil) {
         folderFiles.folder = folder
         // The folder open in the sidebar, when the document is inside it:
         // the last place a site-root path (`/images/x.webp`) is looked for.
@@ -369,6 +296,7 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         }
         folderFiles.vaultRoot = vault?.root
         folderFiles.vault = vault
+        folderFiles.grantRoots()
         let vault = self.vault
         let exportLinks = self.exportLinks
         let baseURL = folder.flatMap(DocumentFolderFiles.pageURL(for:))
@@ -377,30 +305,33 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         latest.set(gen)
         let csp = self.csp
         let key = "\(language.rawValue)|\(palette.name)|\(palette.isDark)|\(csp)|\(baseURL?.absoluteString ?? "-")|\(allowJavaScript)|\(allowNetwork)"
+        // Diagrams and math only with JavaScript on (PreviewRich).
+        let js = allowJavaScript, net = allowNetwork, pageScripts = !bundledScriptsOnly
         guard language == .markdown else {
             shellKey = nil
-            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL, pageKey: pageKey)
+            lastNeeds = []
+            load(Self.injectCSP(csp, into: text), key: nil, baseURL: baseURL)
             return
         }
         let ticket = latest
         // An immutable copy, whatever `text` is backed by (the storage keeps changing).
         let text = (text as NSString).copy() as! NSString as String
-        // The preference as it is now: a close-time read still out
-        // corrects the page when it comes back (adoptFrontMatter).
-        let frontMatterExpanded = Self.frontMatterExpanded
         Self.queue.async {
             // Skip a render a newer one has already replaced.
             guard ticket.value == gen else { return }
             let t0 = DispatchTime.now()
-            let body = Markdown.render(text, options: exportLinks ? .export(vault: vault)
-                                                                  : .preview(vault: vault, frontMatterExpanded: frontMatterExpanded))
+            var options: Markdown.Options = exportLinks ? .export(vault: vault) : .preview(vault: vault)
+            options.math = js
+            let body = Markdown.render(text, options: options)
+            let needs = js ? PreviewRich.needs(body: body) : []
+            let pageCSP = needs.isEmpty ? csp : PreviewRich.csp(allowJavaScript: js, allowNetwork: net, needs: needs, pageScripts: pageScripts)
             let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard gen == self.generation else { return }
                     let applyStart = DispatchTime.now()
                     self.lastRenderMs = ms
-                    self.apply(body: body, key: key, palette: palette, csp: csp, baseURL: baseURL, pageKey: pageKey)
+                    self.apply(body: body, key: key, palette: palette, csp: pageCSP, baseURL: baseURL, needs: needs)
                     self.noteMainThread(applyStart)
                 }
             }
@@ -425,185 +356,21 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// Swaps the body into the loaded page, or loads the page.
-    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, pageKey: String?) {
+    private func apply(body: String, key: String, palette: EditorPalette, csp: String, baseURL: URL?, needs: PreviewRich.Needs) {
+        lastNeeds = needs
         if key == shellKey, !allowJavaScript {
             if loadingShell { pendingBody = body; return }
-            swapBody(body)
+            bodySwaps += 1
+            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
+                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
             return
         }
-        // A whole new page (Refresh, a theme change…): the front matter
-        // block as the reader has it on the page now goes into the new one.
-        let gen = generation
-        readFrontMatter { [weak self] open in
-            guard let self, self.generation == gen else { return }
-            let body = open.map { FrontMatterDisclosure.setting(open: $0, in: body) } ?? body
-            self.load(Self.page(body: body, palette: palette, csp: csp), key: key, baseURL: baseURL, pageKey: pageKey)
-        }
+        load(Self.page(body: body, palette: palette, csp: csp, head: PreviewRich.headTags(needs),
+                       tail: PreviewRich.tailTags(needs, dark: palette.isDark)), key: key, baseURL: baseURL)
     }
 
-    /// The patch in the app's content world, keeping the front matter
-    /// block as the reader has it: `__cedricPatch` compares whole blocks,
-    /// `open` included, so a block the reader had opened was replaced by
-    /// the render's collapsed one on the next keystroke. Returns [the state
-    /// before, the state after] (null: no block).
-    static let swapScript = """
-    const d = document.querySelector('details.frontmatter');
-    const was = d ? d.open : null;
-    const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
-    if (was !== null) html = html.replace(/<details class="frontmatter"([^>]*?)( open)?>/, (m, a) => '<details class="frontmatter"' + a + (was ? ' open' : '') + '>');
-    window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html);
-    const n = document.querySelector('details.frontmatter');
-    return [was, c.count, c.at, n ? n.open : null];
-    """
-
-    private func swapBody(_ body: String) {
-        bodySwaps += 1
-        let page = pageCount
-        let started = Self.now
-        webView.callAsyncJavaScript(Self.swapScript, arguments: ["html": body], in: nil, in: .defaultClient) { [weak self] result in
-            guard let self, case .success(let value) = result, let states = value as? [Any], states.count == 4 else { return }
-            self.recordFrontMatter(Self.frontMatterRead(states), page: page, started: started)
-            if page == self.pageCount { self.pageFrontMatterOpen = states[3] as? Bool }
-        }
-    }
-
-    /// The page's front matter block state now (nil: no block, or no
-    /// page), kept as the preference when the reader changed it.
-    private func readFrontMatter(_ then: @escaping (Bool?) -> Void) {
-        guard pageFrontMatterOpen != nil, !loadingShell else { then(nil); return }
-        let page = pageCount
-        let started = Self.now
-        webView.callAsyncJavaScript(Self.readScript,
-                                    arguments: [:], in: nil, in: .defaultClient) { [weak self] result in
-            guard let self, page == self.pageCount, case .success(let value) = result,
-                  let read = Self.frontMatterRead(value as? [Any]) else { then(nil); return }
-            self.recordFrontMatter(read, page: page, started: started)
-            then(read.open)
-        }
-    }
-
-    /// The preview is closing: the front matter block as the reader left
-    /// it is kept (Codex review of the 0.5.2 (17) fixes: opened, then
-    /// closed with no edit or refresh between, the change was lost). The
-    /// same read in the app's own world; the read holds this controller
-    /// (and its web view) until it comes back, then sets the block on the
-    /// live previews showing the same page (a preview reopened at once
-    /// rendered with the preference from before; Codex rounds 2 and 3).
-    /// Nothing waits. See `preferenceAt` for which change stands.
-    func keepFrontMatterState() {
-        closed = true
-        guard pageFrontMatterOpen != nil, !loadingShell else { Self.dropUnusedPageChanges(); return }
-        let key = pageKey
-        if let key { Self.readsOut[key, default: 0] += 1 }
-        let page = pageCount
-        let started = Self.now
-        let delay = Self.closeReadDelayForChecks
-        webView.callAsyncJavaScript(Self.readScript, arguments: [:], in: nil, in: .defaultClient) { [self] result in
-            let land = { [self] in
-                defer {
-                    if let key { Self.readsOut[key] = Self.readsOut[key].flatMap { $0 > 1 ? $0 - 1 : nil } }
-                    Self.dropUnusedPageChanges()
-                }
-                guard case .success(let value) = result,
-                      let change = recordFrontMatter(Self.frontMatterRead(value as? [Any]), page: page, started: started) else { return }
-                for other in Self.alive.allObjects where other !== self && !other.closed {
-                    other.adoptFrontMatter(change)
-                }
-            }
-            if delay > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { MainActor.assumeIsolated { land() } }
-            } else {
-                land()
-            }
-        }
-    }
-
-    /// The block's state and the reader's clicks on it so far (their
-    /// count and the time of the last): [open, count, at], null without one.
-    static let readScript = """
-    const d = document.querySelector('details.frontmatter');
-    const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
-    return d ? [d.open, c.count, c.at] : null;
-    """
-
-    /// Sets the block (in the app's world) as a late close-time read left
-    /// it, unless the reader has changed it on this page since: clicked it
-    /// after the read's change, or left it other than the app gave it.
-    static let adoptScript = """
-    const d = document.querySelector('details.frontmatter');
-    const c = window.__cedricFrontMatterClicks;
-    if (!d || d.open !== applied || (c && c.at >= at)) return null;
-    d.open = want;
-    return d.open;
-    """
-
-    /// A reader's change kept from one page: the page, the state, and when.
-    struct FrontMatterChange {
-        let key: String
-        let open: Bool
-        let at: Double
-    }
-
-    /// A read's answer: [open, clicks, last click time] (readScript).
-    private static func frontMatterRead(_ value: [Any]?) -> (open: Bool, clicks: Int, at: Double)? {
-        guard let value, value.count >= 3, let open = value[0] as? Bool else { return nil }
-        return (open, (value[1] as? NSNumber)?.intValue ?? 0, (value[2] as? NSNumber)?.doubleValue ?? 0)
-    }
-
-    /// Milliseconds since 1970, as the page's Date.now().
-    private static var now: Double { Date().timeIntervalSince1970 * 1000 }
-
-    /// Sets a late close-time read's change on this preview, if it shows
-    /// (or is loading) that page.
-    private func adoptFrontMatter(_ change: FrontMatterChange) {
-        // No page yet, or one loading (built before this came back): the
-        // next page loaded takes it if it's the read's page (load), and is
-        // checked when it's in (didFinish).
-        if pageCount == 0 || loadingShell { adoptedFrontMatter[change.key] = change; return }
-        guard pageKey == change.key, !allowJavaScript, let applied = pageFrontMatterOpen, applied != change.open else { return }
-        let page = pageCount
-        webView.callAsyncJavaScript(Self.adoptScript, arguments: ["want": change.open, "applied": applied, "at": change.at],
-                                    in: nil, in: .defaultClient) { [weak self] result in
-            guard let self, page == self.pageCount, case .success(let value) = result, let now = value as? Bool else { return }
-            self.pageFrontMatterOpen = now
-        }
-    }
-
-    /// Keeps a read of the page still shown as the preference when it is
-    /// the reader's change and the newest one (with page JavaScript off:
-    /// with it on, the page's own script could have changed it). Returns
-    /// the change when it is also the newest kept for its page.
-    @discardableResult
-    private func recordFrontMatter(_ read: (open: Bool, clicks: Int, at: Double)?, page: Int, started: Double) -> FrontMatterChange? {
-        guard !allowJavaScript, let read, page == pageCount else { return nil }
-        let clicked = read.clicks > pageClicksSeen
-        guard clicked || FrontMatterDisclosure.change(read: read.open, applied: pageFrontMatterOpen, readFor: page, shown: pageCount) != nil
-        else { return nil }
-        pageClicksSeen = read.clicks
-        pageFrontMatterOpen = read.open
-        let at = clicked ? read.at : started
-        if at > Self.preferenceAt {
-            Self.preferenceAt = at
-            Self.frontMatterExpanded = read.open
-        }
-        guard let key = pageKey, at > Self.pageChangeAt[key, default: 0] else { return nil }
-        Self.pageChangeAt[key] = at
-        return FrontMatterChange(key: key, open: read.open, at: at)
-    }
-
-    /// A file's page key: the file it resolves to, standardized.
-    static func pageKey(for url: URL) -> String { url.resolvingSymlinksInPath().standardizedFileURL.path }
-
-    /// `linkedKey`: the linked document's key, from the file displayEntry
-    /// read (nil: the live document).
-    private func load(_ html: String, key: String?, baseURL: URL?, pageKey linkedKey: String?) {
+    private func load(_ html: String, key: String?, baseURL: URL?) {
         pendingBody = nil
-        // The document the page shows: the live one, or the linked file
-        // read, by the file it really is (symlinks resolved, as
-        // `documentKey`), so a page reached through a link and one opened
-        // on its target match. A late close-time read's state, for it.
-        let pageKey = linkedKey ?? (isHome ? documentKey : nil)
-        let html = pageKey.flatMap { adoptedFrontMatter[$0] }.flatMap { FrontMatterDisclosure.setting(open: $0.open, in: html) } ?? html
         let gen = generation
         let go = { [weak self] in
             guard let self, self.generation == gen else { return }
@@ -612,39 +379,88 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
             if !self.allowNetwork, let rules = Self.blockRules { ucc.add(rules) }
             self.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript = self.allowJavaScript
             self.folderFiles.scriptOn = self.allowJavaScript
+            self.assets.scriptOn = self.allowJavaScript
             self.shellKey = key
             self.loadingShell = true
             self.expectedPageURL = baseURL ?? URL(string: "about:blank")
             self.pageLoads += 1
-            self.pageCount += 1
-            self.pageFrontMatterOpen = FrontMatterDisclosure.isOpen(in: html)
-            self.pageKey = pageKey
-            self.pageClicksSeen = 0
-            Self.dropUnusedPageChanges()
+            if DevEnvironment.checksEnabled { self.lastPageHTML = html }
             self.shellNavigation = self.webView.loadHTMLString(html, baseURL: baseURL)
         }
         if allowNetwork { go() } else { Self.withRules(go) }
     }
 
-    var csp: String {
-        let net = allowNetwork ? " https: http:" : ""
-        let doc = " \(DocumentFolderFiles.scheme): file:"
-        let script = allowJavaScript ? "'unsafe-inline'\(doc)\(net)" : "'none'"
-        return "default-src 'none'; img-src\(doc) data:\(net); media-src\(doc) data:\(net); style-src 'unsafe-inline'\(doc)\(net); font-src\(doc) data:\(net); script-src \(script); connect-src \(allowNetwork ? "*" : "'none'")"
-    }
+    /// The page's policy before Mermaid or KaTeX (PreviewRich.csp adds them when a body needs them).
+    var csp: String { PreviewRich.csp(allowJavaScript: allowJavaScript, allowNetwork: allowNetwork, pageScripts: !bundledScriptsOnly) }
 
     nonisolated static func injectCSP(_ csp: String, into html: String) -> String {
         "<meta http-equiv=\"Content-Security-Policy\" content=\"\(csp)\">\n" + html
     }
 
-    nonisolated static func hex(_ c: UInt32) -> String { PreviewHTML.hex(c) }
+    nonisolated static func hex(_ c: UInt32) -> String { String(format: "#%06x", c) }
 
-    /// The whole page (built in CedricCore, shared with the iOS app). `csp` nil: none (an exported file).
-    nonisolated static func page(body: String, palette p: EditorPalette, csp: String?, title: String? = nil) -> String {
-        PreviewHTML.page(body: body, palette: p, csp: csp, title: title)
+    /// The whole page. `csp` nil: none (an exported file). `head` and
+    /// `tail` go at the end of `<head>` and `<body>` (PreviewRich's tags;
+    /// empty, the page is as it always was).
+    nonisolated static func page(body: String, palette p: EditorPalette, csp: String?, title: String? = nil,
+                                 head: String = "", tail: String = "") -> String {
+        let meta = csp.map { "<meta http-equiv=\"Content-Security-Policy\" content=\"\($0)\">\n" } ?? ""
+        let titleTag = title.map { "<title>\(Markdown.escape($0))</title>\n" } ?? ""
+        return """
+        <!doctype html><html><head><meta charset="utf-8">
+        \(meta)\(titleTag)<style>
+        \(styles(p))
+        </style>\(head)</head><body>
+        \(body)
+        \(tail)</body></html>
+        """
     }
 
-    nonisolated static func styles(_ p: EditorPalette) -> String { PreviewHTML.styles(p) }
+    nonisolated static func styles(_ p: EditorPalette) -> String {
+        """
+        :root { color-scheme: \(p.isDark ? "dark" : "light"); }
+        body { font: 15px/1.55 -apple-system, system-ui, sans-serif; color: \(hex(p.foreground)); background: \(hex(p.background));
+               max-width: 820px; margin: 0 auto; padding: 18px 24px 60px; }
+        h1, h2 { border-bottom: 1px solid \(hex(p.currentLine)); padding-bottom: .25em; }
+        h1, h2, h3, h4, h5, h6 { color: \(hex(p.color(for: .heading))); line-height: 1.25; margin: 1.2em 0 .5em; }
+        a { color: \(hex(p.color(for: .link))); }
+        code, pre { font: 13px ui-monospace, "SF Mono", Menlo, monospace; background: \(hex(p.currentLine)); border-radius: 4px; }
+        code { padding: .1em .35em; }
+        pre { padding: 10px 12px; overflow-x: auto; }
+        pre code { padding: 0; background: none; }
+        blockquote { margin: 0; padding: 0 1em; color: \(hex(p.color(for: .comment))); border-left: 4px solid \(hex(p.currentLine)); }
+        table { border-collapse: collapse; }
+        th, td { border: 1px solid \(hex(p.currentLine)); padding: 4px 10px; }
+        img { max-width: 100%; }
+        hr { border: 0; border-top: 1px solid \(hex(p.currentLine)); }
+        table.frontmatter { font-size: 12px; margin: 0 0 1.2em; color: \(hex(p.color(for: .comment))); }
+        table.frontmatter th { text-align: left; font-weight: 600; color: \(hex(p.color(for: .key))); vertical-align: top; }
+        table.frontmatter td { white-space: pre-wrap; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+        li:has(> input[type=checkbox]) { list-style: none; }
+        li > input[type=checkbox] { margin: 0 .4em 0 -1.3em; }
+        .markdown-alert { padding: .1em 1em; margin: 1em 0; border-left: 4px solid var(--alert); }
+        .markdown-alert-title { font-weight: 600; color: var(--alert); margin: .5em 0; }
+        .markdown-alert-note { --alert: #4493f8; } .markdown-alert-tip { --alert: #3fa34d; }
+        .markdown-alert-important { --alert: #a371f7; } .markdown-alert-warning { --alert: #d29922; }
+        .markdown-alert-caution { --alert: #e5534b; }
+        .markdown-alert-abstract, .markdown-alert-info, .markdown-alert-todo { --alert: #4493f8; }
+        .markdown-alert-success { --alert: #3fa34d; } .markdown-alert-question { --alert: #d29922; }
+        .markdown-alert-failure, .markdown-alert-danger, .markdown-alert-bug { --alert: #e5534b; }
+        .markdown-alert-example { --alert: #a371f7; } .markdown-alert-quote { --alert: #8b949e; }
+        details.callout > summary { cursor: pointer; } .callout-icon { font-style: normal; }
+        a.wikilink { text-decoration: none; border-bottom: 1px solid; }
+        a.wikilink.is-unresolved { opacity: .6; border-bottom-style: dashed; cursor: default; }
+        mark { background: #f2cc6066; color: inherit; border-radius: 2px; padding: 0 .1em; }
+        span.tag { color: \(hex(p.color(for: .link))); background: \(hex(p.currentLine)); border-radius: 1em; padding: 0 .5em; font-size: .9em; }
+        blockquote.embed { border-left-color: \(hex(p.color(for: .link))); }
+        .embed-title { font-size: 12px; margin: .5em 0; }
+        p.preview-hint { font-size: 12px; color: \(hex(p.color(for: .comment))); text-align: center; margin: 0 0 1em; }
+        sup.footnote-ref a { text-decoration: none; }
+        section.footnotes { font-size: 13px; color: \(hex(p.color(for: .comment))); }
+        \(TokenKind.allCases.filter { $0 != .plain }.map { ".tk-\($0) { color: \(hex(p.color(for: $0))); }" }.joined(separator: " "))
+        .tk-comment { font-style: italic; }
+        """
+    }
 
     /// Cedric's own script, in the app's content world (it runs with page
     /// JavaScript off; the page can't see or call it). `__cedricPatch`
@@ -665,14 +481,6 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
         for (let i = 0; i < a.length && i < b.length; i++) a[i].setAttribute('data-line', b[i].getAttribute('data-line'));
       };
       const quiet = () => { window.__cedricQuietUntil = Date.now() + 250; };
-      // The reader's clicks on the front matter block's summary (mouse or
-      // keyboard), counted with the time of the last: reads tell the
-      // reader's change from the app's (frontMatterRead).
-      document.addEventListener('click', e => {
-        if (!(e.target instanceof Element) || !e.target.closest('details.frontmatter > summary')) return;
-        const c = window.__cedricFrontMatterClicks || {count: 0, at: 0};
-        window.__cedricFrontMatterClicks = {count: c.count + 1, at: Date.now()};
-      }, true);
       const pin = () => { window.__cedricSetY = window.scrollY; };
       window.__cedricPatch = function(html) {
         const b = document.body; if (!b) return -1;
@@ -778,24 +586,16 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard navigation === shellNavigation else { return }
-        if Self.holdFinishForChecks {
-            Self.heldFinishes.append { [weak self, weak webView] in
-                if let self, let webView { self.webView(webView, didFinish: navigation) }
-            }
-            return
-        }
         shellNavigation = nil
         loadingShell = false
         expectedPageURL = nil
         let anchor = pendingAnchor
         pendingAnchor = nil
-        // A late close-time read that came back while this page loaded.
-        let adopted = pageKey.flatMap { adoptedFrontMatter[$0] }
-        adoptedFrontMatter = [:]
-        if let adopted { adoptFrontMatter(adopted) }
         if let body = pendingBody {
             pendingBody = nil
-            swapBody(body)
+            bodySwaps += 1
+            webView.callAsyncJavaScript("return window.__cedricPatch ? window.__cedricPatch(html) : (document.body.innerHTML = html, -1)",
+                                        arguments: ["html": body], in: nil, in: .defaultClient) { _ in }
         }
         // (Evaluated after the patch above: one content world, in order.)
         if let anchor { scroll(toAnchor: anchor, follow: false) }
@@ -857,11 +657,14 @@ final class PreviewController: NSObject, WKNavigationDelegate, WKUIDelegate {
     }
 
     /// A navigation response the policy above let through must still be
-    /// the preview's own page: never a web page (a redirect is a new
+    /// the page being loaded (`expectedPageURL`, set until it finishes or
+    /// fails): never a web page or another document (a redirect is a new
     /// navigation action, so this is a second line, failing closed).
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
-        decisionHandler(PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame) ? .allow : .cancel)
+        let ours = PreviewNavigation.allowsResponse(url: response.response.url, mainFrame: response.isForMainFrame,
+                                                    expectedPage: expectedPageURL)
+        decisionHandler(ours ? .allow : .cancel)
     }
 
     /// No new windows: `target=_blank` and `window.open` clicks come through
@@ -933,6 +736,16 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
     /// The page may run JavaScript: serve only images, fonts and CSS.
     var scriptOn = false
     private var stopped: Set<ObjectIdentifier> = []
+    /// The granted roots, held open by descriptor (`grantRoots`).
+    let grants = PreviewGrants()
+
+    /// Pins the document's, the opened and the vault's folders as granted
+    /// now; when they changed, the earlier pins (site roots too) close.
+    /// No folder: every grant is withdrawn.
+    func grantRoots() {
+        guard folder != nil else { grants.revoke(); return }
+        grants.grant([folder, openedRoot, vaultRoot])
+    }
 
     nonisolated static func pageURL(for folder: URL) -> URL? { PreviewFolder.pageURL(for: folder) }
     nonisolated static func fileURL(for url: URL) -> URL? { PreviewFolder.fileURL(for: url) }
@@ -942,14 +755,22 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         stopped.remove(id)
         // With JavaScript on, only images, fonts and CSS (no dotfiles):
         // page script must not be able to read the folder's other files.
+        // The file is read from beneath the root it was approved under, by
+        // descriptor (PreviewRead), so a folder or link swapped after this
+        // check can't hand the page another file's bytes.
+        // The root is the descriptor pinned when it was granted, or a
+        // site root found beneath those pins (PreviewGrants); nothing is
+        // opened by path here, so a folder renamed away and replaced
+        // can't become the root either.
         guard let url = task.request.url, let folder,
-              let file = PreviewFolder.file(for: url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
+              let (root, parts, file) = grants.approve(url, in: folder, openedRoot: openedRoot, vaultRoot: vaultRoot, scriptOn: scriptOn, vault: vault) else {
             task.didFailWithError(URLError(.noPermissionsToReadFile))
             return
         }
         let box = TaskBox(task)
+        let scriptOn = scriptOn
         DispatchQueue.global(qos: .userInitiated).async {
-            let data = try? Data(contentsOf: file, options: .mappedIfSafe)
+            let data = PreviewRead.data(parts, beneath: root, scriptOn: scriptOn)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let task = box.task
@@ -986,6 +807,69 @@ final class DocumentFolderFiles: NSObject, WKURLSchemeHandler {
         }
         return folder
     }
+}
+
+/// `cedric-asset://vendor/…`: the bundled Mermaid and KaTeX files
+/// (PreviewRich.files, from Owlink.app/Contents/Resources/Preview, or the
+/// source tree's Resources/Preview for `swift run`), and nothing else.
+/// Only while the page may run JavaScript; with it off every request fails.
+@MainActor
+final class PreviewAssets: NSObject, WKURLSchemeHandler {
+    var scriptOn = false
+    /// What was asked for (for the checks): served paths, and refused
+    /// URLs. Kept in a check build only, and only the latest `logLimit`.
+    private(set) var served: [String] = []
+    private(set) var refused: [String] = []
+    static let logLimit = 256
+
+    private func log(_ entry: String, in list: inout [String]) {
+        guard DevEnvironment.checksEnabled else { return }
+        if list.count >= Self.logLimit { list.removeFirst(list.count - Self.logLimit + 1) }
+        list.append(entry)
+    }
+
+    /// The bundle's Preview folder. The source tree's is a fallback only
+    /// for a development build run unbundled (`swift run`): a packaged app
+    /// missing its resources serves nothing (fails closed).
+    nonisolated static let directory: URL? = {
+        var candidates: [URL] = []
+        if let r = Bundle.main.resourceURL { candidates.append(r.appendingPathComponent("Preview")) }
+        if DevEnvironment.checksEnabled, Bundle.main.bundleURL.pathExtension != "app" {
+            candidates.append(URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+                .appendingPathComponent("../../Resources/Preview").standardizedFileURL)
+        }
+        return candidates.first { FileManager.default.fileExists(atPath: $0.appendingPathComponent(PreviewRich.glueScript).path) }
+    }()
+
+    static func mimeType(_ path: String) -> String {
+        switch (path as NSString).pathExtension {
+        case "js": return "text/javascript"
+        case "css": return "text/css"
+        case "woff2": return "font/woff2"
+        default: return "application/octet-stream"
+        }
+    }
+
+    /// A check's stand-in for a build missing its bundled scripts: every
+    /// request is refused (check builds only).
+    static var refuseAllForCheck = false
+
+    func webView(_ webView: WKWebView, start task: any WKURLSchemeTask) {
+        guard scriptOn, !(DevEnvironment.checksEnabled && Self.refuseAllForCheck), let url = task.request.url, let rel = PreviewRich.assetPath(for: url), let dir = Self.directory,
+              let data = try? Data(contentsOf: dir.appendingPathComponent(rel), options: .mappedIfSafe) else {
+            log(task.request.url?.absoluteString ?? "-", in: &refused)
+            task.didFailWithError(URLError(.noPermissionsToReadFile))
+            return
+        }
+        log(rel, in: &served)
+        task.didReceive(URLResponse(url: url, mimeType: Self.mimeType(rel), expectedContentLength: data.count, textEncodingName: rel.hasSuffix(".woff2") ? nil : "utf-8"))
+        task.didReceive(data)
+        task.didFinish()
+    }
+
+    func webView(_ webView: WKWebView, stop task: any WKURLSchemeTask) {}
+
+    func resetLog() { served = []; refused = [] }
 }
 
 /// A scheme task handed across the file read (WebKit calls back on the main thread).

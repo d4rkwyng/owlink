@@ -42,8 +42,11 @@ brew install --cask d4rkwyng/tap/owlink
 
 This also puts the `cedric` command on your PATH. Or download
 `Owlink-<version>.zip` from [Releases](https://github.com/d4rkwyng/owlink/releases),
-open it, and move Owlink to Applications. Owlink doesn't update itself:
-`brew upgrade` (or a new download) brings a new version.
+open it, and move Owlink to Applications. Owlink checks for a new version
+about once a day and asks before installing it (Owlink › Check for
+Updates… checks now; Settings › General › Automatically check for updates
+turns the daily check off). Only updates signed with Owlink's key are
+accepted. `brew upgrade` (or a new download) works too.
 
 ## Tabs, files and sessions
 
@@ -117,7 +120,8 @@ of the editor. **View › Show Folder Sidebar** (⌃⌘1) hides and shows it
 again. Until a folder is open nothing is loaded or watched.
 **File › Open Enclosing Folder** (⌥⇧⌘O) opens the folder holding the
 current tab's file, with the file selected; **File › Reveal in Finder**
-shows the file in Finder. Both are off for an untitled tab.
+shows the file in Finder; **File › Open in Terminal Here** opens a
+Terminal window at the file's folder. All three are off for an untitled tab.
 
 - Click a file to open it in a tab, or to go to its tab if it is open
   (Return does the same). Click a folder's triangle, or select it and
@@ -128,7 +132,8 @@ shows the file in Finder. Both are off for an untitled tab.
 - The tree follows files created, deleted and renamed on disk.
 - A newly created or renamed hidden file is shown so you can see it, without turning on Show Hidden Files.
 - Right-click a folder or file for New File, New Folder, Rename, Move to
-  Trash, Reveal in Finder, Copy Path and Find in Folder… (Find in Files
+  Trash, Reveal in Finder, Open in Terminal Here (Terminal at that folder,
+  or at a file's folder), Copy Path and Find in Folder… (Find in Files
   on that folder). New items go inside the folder, or beside the file;
   a new file opens in a tab. Rename edits the name in the tree (the extension is left unselected) and open
   tabs follow a renamed file or folder without losing edits. Move to Trash
@@ -165,12 +170,50 @@ Latin-1, Windows-1252 and Mac Roman, and LF/CRLF/CR, detected on open
 (a file that isn't UTF-8 is read as whichever 8-bit Western encoding
 makes sense of its accented letters and quotes) and shown in the status bar,
 with menus to convert (applied on save) or reopen with another encoding.
-Mixed line endings are shown as such and written as one kind on save.
+
+A file that isn't valid UTF-8 (and has no UTF-16 byte order mark) opens
+under a slim bar: "This file isn’t valid UTF-8, so Owlink opened it as
+Latin-1 (a guess)." The text is there and editable; the status bar says
+**Latin-1 (guessed)** (or Windows-1252, Mac Roman). **Reopen with
+Encoding…** on the bar, or **Format › Reopen with Encoding…** (⌥⇧⌘R),
+lists the encodings to read the file as again; **Keep**, or picking the
+guessed encoding itself under the status bar's Save with Encoding, takes
+the guess as right. Either way the bar goes and "(guessed)" with it.
+
+Mixed line endings (some LF, some CRLF or CR) are shown as such: the
+status bar says **LF (mixed)** (the most common kind) and a bar says
+"This file has mixed line endings (mostly LF)." Saving keeps each line
+break as it was, byte for byte: a break stays with its place in the text
+however you type or delete around it, and one you delete comes back as it
+was when you undo, before or after a save. A line break you type, or one a
+text tool rewrites, gets the most common kind; Convert Indentation, Indent
+and Outdent only change the spaces and tabs at the start of lines, so every
+break keeps its kind. (Delete the text between a CR and an LF and the CR
+is written as CRLF, so the two breaks don't read back as one.) A changed
+line break counts as an unsaved change even when the text looks the same:
+delete a CRLF and press Return in its place and the tab is unsaved until
+you save or undo. The status bar and the bar follow the breaks that are
+left: delete the last CRLF and the status says **LF** and the bar goes
+(undo brings both back); delete every LF and leave only CRLF and it says
+**CRLF**. Follow File keeps the breaks of the lines it adds, and
+of a new file after a rotation, so saving after you stop following writes
+them as the file has them. Unsaved text kept for the next launch or for
+Reopen Closed Tab keeps its line breaks too. **Convert to LF** on the bar (one undo
+step), or picking a line ending from the status bar or **Format › Line
+Endings**, writes them all as that kind from the next save; **Keep
+Mixed** just hides the bar.
 A file that looks binary (a NUL byte, or many control characters, in
 its first 8 KB; never UTF-16) opens with a bar, "This looks like a
 binary file", and nothing shown: **Open Anyway** shows it as text,
 read-only, with Save off so it can't be rewritten by accident; **Allow
 Editing** on the bar makes it an ordinary text tab.
+A file you can't write (no write permission, such as `chmod 444`; locked
+in the Finder's Get Info; or on a read-only volume) opens read-only, with
+"— Read-Only" in the title and a bar that says why. **Allow Editing** on
+the bar lets you type, but Owlink still won't save over the file: ⌘S
+offers **Save As…** instead, and Cedric's Apply stays off. Owlink checks
+again when you save and when the window comes to the front, so after a
+`chmod 644` (or unlocking it) the tab is an ordinary text tab again.
 
 ### Print
 
@@ -257,7 +300,7 @@ typing is as fast with it shown as hidden.
 Markdown's set, left to right: a heading pull-down (Body, Heading 1,
 Heading 2, Heading 3), Bold, Italic, Strikethrough, Inline Code, Link,
 Bulleted List, Numbered List, Checkbox, Quote, Code Block, Insert Table
-and Image Link (see [Markdown editing](#markdown-editing)), and at the far
+and Insert Image… (see [Markdown editing](#markdown-editing)), and at the far
 end a preview toggle (an eye) that lights up while the preview shows. The
 icons take their colour from the theme and stand out from the bar at
 least 3:1 in every theme.
@@ -743,7 +786,12 @@ predates 0.3.0 and is unchanged: on a Mac where nothing but TextEdit
 opens text, Markdown, JSON and YAML files open in Owlink once it's
 installed, because Owlink names those types and TextEdit only claims
 "text". (On macOS 15, where .md files opened in nothing before, they now
-open in Owlink for the same reason.) The labelled types never open in Owlink unless you choose it.
+open in Owlink for the same reason.) For the other types in the list
+Owlink makes the same claims as 0.5.3, so macOS picks their app as it
+did with 0.5.3: on a clean macOS 26 Mac that is TextEdit, Safari,
+Console and so on until you choose Owlink. Owlink also claims plain
+text and source code in general at a low rank, so on a Mac with no
+other app for some type, macOS may pick Owlink for it.
 Changes you make in Get Info show in Settings the next time its window
 comes to the front.
 
@@ -752,11 +800,13 @@ Finder as type-coloured pages with white symbols and, in larger views, short
 type labels (TXT, MD, JSON, YAML, SWFT, PY, JS, TS, SH, LOG, CSV, XML,
 HTML, CSS, TOML, INI, SQL, PS1). Finder shows them:
 
-- only for types you chose Owlink for, in Settings or with Get Info ›
-  Change All. A type that opens in Owlink without your choice (Markdown,
-  JSON, YAML on a Mac with no other editor) shows the generic page with a
-  white line and no label until you choose it; **Use Owlink for All Text Files**
-  does that for every type;
+- for types you chose Owlink for, in Settings or with Get Info ›
+  Change All (**Use Owlink for All Text Files** does that for every type),
+  and for Markdown, JSON and YAML when they open in Owlink without your
+  choice (a Mac with no other editor for them). A plain-text, XML, HTML,
+  CSS or log file that opens in Owlink without your choice (only where
+  TextEdit, Safari or Console doesn't take it) shows the generic page
+  with a white line and no label;
 - when Finder isn't showing a picture of the file's contents instead: in
   icon view, View › Show View Options › **Show icon preview** draws the
   text itself for many text files. Untick it to see the type icons;
@@ -824,7 +874,26 @@ quotes that part of the note, and callouts (`> [!info]-`), `==highlight==`,
 folder on disk (`static/`, `public/`, `quartz/static/` and `content/`), never the network. Fenced code blocks are
 coloured by their language (```` ```swift ````, `py`, `js`, `bash`, …)
 both in the editor and in the preview, by Owlink's own tokenizers and
-the theme's colours (no JavaScript highlighter). **Detach Preview** (View menu, ⇧⌥⌘P,
+the theme's colours (no JavaScript highlighter).
+
+**Diagrams and math** (with Allow JavaScript on): a ```` ```mermaid ````
+block is drawn as a [Mermaid](https://mermaid.js.org) diagram, and TeX
+math is typeset by [KaTeX](https://katex.org): `$e^{i\pi}+1=0$` inline,
+`$$…$$` or `\[…\]` (on lines of their own) as a display. A diagram that
+doesn't parse keeps its source and shows Mermaid's error above it. A
+dollar sign is math only when it reads as math: `$` followed by a space,
+or a closing `$` after a space or before a digit, is no delimiter, so
+"$5 and $10" stays text; `\$` is a plain dollar, and code spans and
+fenced code are never math. Both libraries are bundled in Owlink
+(nothing is fetched), loaded only for a document that has a diagram or
+math, and allowed by the page's security policy by their exact file
+names; Allow Network stays as it was. With Allow JavaScript off, the
+preview is exactly as before: the block shows its source and the TeX is
+text. Export as PDF… follows the tab's Allow JavaScript (only the
+bundled scripts run, never the page's own); Export as HTML… and Copy as
+HTML / Rich Text never carry script, so they keep the source.
+
+**Detach Preview** (View menu, ⇧⌥⌘P,
 or Detach on the preview bar) moves it into its own resizable
 window, "notes.md — Preview", still updating as you type; it stays
 with its own document whichever tab is in front, and closes with that
@@ -881,6 +950,13 @@ way. A session saved before that leaves the preview closed.
   between the parentheses (or uses a URL on the clipboard), a selected
   URL into `![](url)`, and with the caret in an image it takes the image
   markup off and leaves its alt text.
+  Insert Image… (the Context Bar's Image button) asks for one or more
+  image files and treats them exactly as a paste or drop: each is copied
+  into the `images` folder next to the document (a file of the same name
+  there is never replaced; the copy becomes `name-2.png`), a file already
+  inside the document's folder is linked where it is, and the links go
+  in at the caret as one undo step. Undo takes the links out and leaves
+  the copied files. An untitled document is asked to save first.
 - **Checkboxes:** Format › Markdown › Checkbox (⌘↩) checks
   or unchecks `- [ ]` / `- [x]` on the caret's line or every selected
   line, adds a box to a list item without one, and turns a plain line
@@ -931,7 +1007,10 @@ unresolved wikilink is plain text), and embedded notes are written out in
 place. Edit › Copy as HTML puts
 the rendered HTML of the selection (or the whole document) on the
 clipboard as text; Copy as Rich Text puts it there as rich text (RTF and
-HTML) for Mail, Notes or a word processor.
+HTML) for Mail, Notes or a word processor. With the preview's Allow
+JavaScript on, the PDF draws Mermaid diagrams and math as the preview
+does; the HTML file and the copies keep the diagram's source and the TeX
+as typed.
 
 ## CSV and TSV as a spreadsheet
 
@@ -1489,7 +1568,11 @@ folder and passes it along; Owlink deletes it when that file's tab closes
 ## Privacy and what stays on this Mac
 
 The AI engines run on this Mac or a server on your own network, never
-the cloud. What Owlink keeps on this Mac, all under
+the cloud. Owlink has no accounts or analytics. About once a day it asks
+`https://owlink.app/appcast.xml` whether there is a new version (turn that
+off in Settings › General › Automatically check for updates); it accepts
+only an update signed with Owlink's key, and asks before installing it.
+What Owlink keeps on this Mac, all under
 `~/Library/Application Support/Cedric/` (owner-only, 0700; files 0600):
 
 - **`Session/`**: the open tabs and the **unsaved text** of open and
@@ -1545,13 +1628,24 @@ Tests (Swift Testing; the script adds the paths the Command Line Tools need):
 Scripts/test.sh                     # unit tests: tokenizers, Markdown, codecs, find, session store, themes
 Scripts/session-check.sh            # end to end: unsaved tabs survive a kill -9, a normal quit and a last-window close
 Scripts/typing-check.sh             # real key events in every theme; typed glyphs' pixels must be visible
-Scripts/launch-check.sh             # real launches: stays up, quits cleanly, no crash report
-Scripts/launch-check.sh --release   # the same for a build to ship: fails unless it reports "dev hooks: off"
+Scripts/launch-check.sh             # real launches of a check build, in temp session/undo folders: stays up, quits cleanly, no crash report
 Scripts/pdf-check.sh                # PDF tabs in the running app: find, copy, zoom, Open as Text, session
 Scripts/image-check.sh              # image and Office tabs: zoom, copy, GIFs, docx/xlsx text, session, a 12000² PNG vs typing
 Scripts/launch-speed-check.sh       # launch phase medians: empty, 8-tab session, 500 KB file
-swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app
+Scripts/tools-check.sh              # in-app tool checks; --with-recent (the real Open Recent list) and --with-spellstep opt in
+swift Scripts/launch-time.swift "dist/Owlink.app" /System/Applications/TextEdit.app   # check build only; temp session/undo folders
 ```
+
+Every check script, and `launch-time.swift`, launches only a check build
+(the `CedricCheckBuild` Info.plist key, read before anything runs) and gives
+it a temp session folder and ReplaceUndo folder, so the real data in
+`~/Library/Application Support/Cedric` is left alone. The release gates,
+`Scripts/launch-check.sh --release` and `Scripts/smoke-launch.sh`, launch a
+release build, which ignores those folders: it rotates `cli-token` and
+prunes `ReplaceUndo` in the account it runs in. Run them only in a
+disposable macOS user account or VM, with `OWLINK_RELEASE_GATE=1`. Without
+it they refuse to start. `Scripts/release.sh` sets it for its own launch
+check (*Signing a release* in `docs/architecture.md`).
 
 `bundle-app.sh` makes a check build by default: the check scripts drive it
 with `CEDRIC_*` switches (open files, take snapshots), so don't use it as
@@ -1599,7 +1693,7 @@ More in [docs/architecture.md](architecture.md).
 
 ## Not built yet
 
-Macros and automatic updates; folding HTML and XML tags; per-pane folds in split view. See
+Macros; folding HTML and XML tags; per-pane folds in split view. See
 `docs/architecture.md` for where they plug in.
 
 ## Built with Claude
@@ -1613,7 +1707,15 @@ BSD-2-Clause. See [LICENSE](../LICENSE). The Dracula theme's colours are by
 [Dracula Theme](https://draculatheme.com), used under the MIT license.
 
 The built-in AI engine uses [llama.cpp](https://github.com/ggml-org/llama.cpp)
-(MIT, © the ggml authors), bundled as `llama.framework`. Models are not
+(MIT, © the ggml authors), bundled as `llama.framework`. Release builds
+include [Sparkle](https://sparkle-project.org) (MIT, © Andy Matuschak and
+the Sparkle Project contributors) as `Sparkle.framework` for Check for
+Updates…, with its licence in `Owlink.app/Contents/Resources/Sparkle-LICENSE.txt`.
+The Markdown
+preview draws diagrams with [Mermaid](https://github.com/mermaid-js/mermaid)
+(MIT) and math with [KaTeX](https://github.com/KaTeX/KaTeX) (MIT), both
+bundled in the app (versions, sources and checksums in
+[THIRD_PARTY.md](THIRD_PARTY.md)). Models are not
 bundled: the ones Owlink offers to download are Qwen models by Alibaba
 Cloud, each under its own licence. Download first opens a confirmation
 with the model name, licence name and full bundled licence text; no

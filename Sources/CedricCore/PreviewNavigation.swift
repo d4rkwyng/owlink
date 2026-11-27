@@ -63,11 +63,17 @@ public enum PreviewNavigation: Equatable, Sendable {
         return .allowPage
     }
 
-    /// A navigation response is let through only for the preview's own
-    /// page in the main frame (a second line behind `decide`).
-    public static func allowsResponse(url: URL?, mainFrame: Bool) -> Bool {
-        guard mainFrame, let url else { return false }
-        return isPageScheme(url)
+    /// A navigation response is let through only for the page Cedric is
+    /// loading, in the main frame (a second line behind `decide`): the
+    /// response's URL must be `expectedPage` exactly, compared as `decide`
+    /// compares it for `.allowPage`. Not another `cedric-doc:` page, not
+    /// while Cedric isn't loading one (`expectedPage` nil: fails closed).
+    /// Cedric's Back, Forward and reloads load its page again the same way;
+    /// WebKit's own reload or history and in-page anchors are cancelled in
+    /// `decide`, so they never get a response to judge.
+    public static func allowsResponse(url: URL?, mainFrame: Bool, expectedPage: URL?) -> Bool {
+        guard mainFrame, let url, let expectedPage, isPageScheme(url) else { return false }
+        return url == expectedPage
     }
 
     static func isPageScheme(_ url: URL) -> Bool {

@@ -313,6 +313,14 @@ final class PreviewPane: NSView {
     }
 }
 
+/// The detached preview's window. Detach makes it key (it takes the
+/// keyboard) but never main: its editor stays the main window, so
+/// commands that act on the main document window (Window › Float on Top)
+/// still reach the editor.
+final class PreviewWindow: NSWindow {
+    override var canBecomeMain: Bool { false }
+}
+
 /// The detached preview: its own resizable window, "<name> — Preview",
 /// bound to its tab's document (it keeps showing that document whichever
 /// tab is in front, and closes with it). Closing the window hides the
@@ -327,7 +335,7 @@ final class PreviewWindowController: NSWindowController, NSWindowDelegate {
     init(tab: EditorWindowController, pane: PreviewPane, frame: String?) {
         self.tab = tab
         self.pane = pane
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+        let w = PreviewWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: true)
         w.tabbingMode = .disallowed
         w.isRestorable = false

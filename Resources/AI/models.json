@@ -17,6 +17,7 @@
       "license": "Apache-2.0",
       "licenseURL": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/LICENSE",
       "minRAMGB": 8,
+      "kvBytesPerToken": 147456,
       "isDefault": true
     },
     {
@@ -34,6 +35,7 @@
       "license": "Qwen Research License (non-commercial)",
       "licenseURL": "https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/blob/f74adce6aa16316c625447af059dbebe4983757c/LICENSE",
       "minRAMGB": 8,
+      "kvBytesPerToken": 36864,
       "isDefault": false
     },
     {
@@ -51,6 +53,7 @@
       "license": "Apache-2.0",
       "licenseURL": "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/blob/f86cb2c1fa58255f8052cc32aeede1b7482d4361/LICENSE",
       "minRAMGB": 8,
+      "kvBytesPerToken": 28672,
       "isDefault": false
     },
     {
@@ -68,6 +71,7 @@
       "license": "Apache-2.0",
       "licenseURL": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/blob/13fb94bfda8c8cf22497dc57b78f391a9acb426a/LICENSE",
       "minRAMGB": 16,
+      "kvBytesPerToken": 57344,
       "isDefault": false
     },
     {
@@ -85,6 +89,7 @@
       "license": "Apache-2.0",
       "licenseURL": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/blob/bc640142c66e1fdd12af0bd68f40445458f3869b/LICENSE",
       "minRAMGB": 8,
+      "kvBytesPerToken": 147456,
       "isDefault": false
     }
   ]

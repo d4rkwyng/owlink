@@ -37,6 +37,229 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         }
     }
 
+    /// Astra review finding 4: a note made from a missing wiki link stays
+    /// in the open folder even when its parent is a symbolic link out.
+    @Test func aNewNoteNeverLandsOutsideTheOpenFolder() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(atPath: vault.appendingPathComponent("alias").path, withDestinationPath: "sub")
+        #expect(throws: (any Error).self) {
+            try FolderActions.createFile(named: "Escape.md", in: vault.appendingPathComponent("out"), within: vault)
+        }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the outside folder is untouched")
+        // Inside: the root, a subfolder, and a link to a subfolder of the vault.
+        let a = try FolderActions.createFile(named: "A.md", in: vault, within: vault)
+        #expect(fm.fileExists(atPath: a.path))
+        _ = try FolderActions.createFile(named: "B.md", in: vault.appendingPathComponent("sub"), within: vault)
+        _ = try FolderActions.createFile(named: "C.md", in: vault.appendingPathComponent("alias"), within: vault)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("sub/B.md").path) && fm.fileExists(atPath: vault.appendingPathComponent("sub/C.md").path))
+        // Never replaces, and a link of the note's name is not followed.
+        try Data("keep".utf8).write(to: vault.appendingPathComponent("Keep.md"))
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "Keep.md", in: vault, within: vault) }
+        #expect(fm.contents(atPath: vault.appendingPathComponent("Keep.md").path) == Data("keep".utf8))
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("Dangling.md"), withDestinationURL: outside.appendingPathComponent("made.md"))
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "Dangling.md", in: vault, within: vault) }
+        #expect(!fm.fileExists(atPath: outside.appendingPathComponent("made.md").path), "a dangling link isn't followed")
+        // Root given through a link (the sidebar's real root and its path may differ).
+        let rootLink = base.appendingPathComponent("vault-link")
+        try fm.createSymbolicLink(at: rootLink, withDestinationURL: vault)
+        _ = try FolderActions.createFile(named: "D.md", in: rootLink, within: vault)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("D.md").path))
+    }
+
+    /// The open folder replaced at its path between opening it and
+    /// confirming a new note: the note goes in the folder that was opened,
+    /// and its URL (now another folder's) is refused, not opened.
+    @Test func aNewNoteGoesInTheFolderThatWasOpenedEvenIfItsPathIsReplaced() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), moved = base.appendingPathComponent("vault-moved")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let pinned = try FolderRoot(vault)
+        let made = try pinned.createFile(["sub", "First.md"])
+        #expect(made.path == vault.appendingPathComponent("sub/First.md").path && fm.fileExists(atPath: made.path))
+        // Replaced: the old folder moved away, a new one (with the same subfolder) at its path.
+        try fm.moveItem(at: vault, to: moved)
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        #expect(throws: (any Error).self) { try pinned.createFile(["sub", "Second.md"]) }
+        #expect(fm.fileExists(atPath: moved.appendingPathComponent("sub/Second.md").path), "made in the folder that was opened")
+        #expect(((try? fm.contentsOfDirectory(atPath: vault.appendingPathComponent("sub").path)) ?? ["?"]).isEmpty,
+                "nothing made in the folder now at the path")
+        // A link swapped in for the root's path leads nowhere new either.
+        try fm.removeItem(at: vault)
+        try fm.createSymbolicLink(at: vault, withDestinationURL: base.appendingPathComponent("elsewhere"))
+        #expect(throws: (any Error).self) { try pinned.createFile(["Third.md"]) }
+        #expect(!fm.fileExists(atPath: base.appendingPathComponent("elsewhere").path))
+    }
+
+    /// Where the kernel can't keep a lookup beneath a folder, a note in a
+    /// subfolder is refused (Astra batch 3, must-fix 2), and so is any path
+    /// through a symbolic link to a folder, even one inside (fails closed).
+    @Test func theComponentWalkRefusesEveryFolderLink() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(atPath: vault.appendingPathComponent("alias").path, withDestinationPath: "sub")
+        let pinned = try FolderRoot(vault)
+        #expect(throws: (any Error).self) { try pinned.createFile(["sub", "deeper", "A.md"], walk: true) }
+        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/deeper/A.md").path), "no nested note without the kernel's check")
+        #expect(throws: (any Error).self) { try pinned.createFile(["out", "B.md"], walk: true) }
+        #expect(throws: (any Error).self) { try pinned.createFile(["alias", "C.md"], walk: true) }
+        #expect(throws: (any Error).self) { try pinned.createFile(["sub", "deeper", "A.md"], walk: true) }
+        for bad in [[], ["..", "D.md"], ["sub/deeper", "E.md"], [""], ["."]] as [[String]] {
+            #expect(throws: (any Error).self, "\(bad)") { try pinned.createFile(bad, walk: true) }
+            #expect(throws: (any Error).self, "\(bad)") { try pinned.createFile(bad, walk: false) }
+        }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the outside folder is untouched")
+        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/C.md").path) && !fm.fileExists(atPath: base.appendingPathComponent("D.md").path))
+        #expect(!fm.fileExists(atPath: vault.appendingPathComponent("sub/deeper/E.md").path), "a slash inside a name isn't a path")
+    }
+
+    /// Names are checked as the bytes the kernel sees (Astra batch 4 A,
+    /// batch 5 must-fix 1): a slash followed by a combining mark is one
+    /// Swift character, so a text search misses it, but Darwin still splits
+    /// the name there.
+    static let slashNames = ["a/\u{301}b", "sub/\u{301}N.md", "/\u{301}", "\u{301}/", "a/\u{301}", "/\u{301}a",
+                             "a/\u{301}\u{302}b", "./\u{301}", "../\u{301}", "a\u{301}/b"]
+    static let nulNames = ["a\0b", "a\0\u{301}b", "\0", "\0\u{301}", ".\0", "N.md\0"]
+    static let dotNames = ["", ".", "..", "./", "../", "/.", "/..", "/"]
+
+    @Test func aNameIsOneComponentByItsBytes() {
+        for bad in Self.slashNames + Self.nulNames + Self.dotNames {
+            #expect(!Beneath.isName(bad), "\(Array(bad.unicodeScalars))")
+            #expect(throws: (any Error).self, "\(Array(bad.unicodeScalars))") {
+                try FolderActions.destination(in: URL(fileURLWithPath: "/tmp"), name: bad)
+            }
+        }
+        // Not `.` or `..` by their bytes: ordinary names.
+        for good in ["N.md", ".\u{301}", "..\u{301}", "...", ".hidden", "\u{2024}", "\u{2025}", "a\u{301}b", "e\u{301}.md", "\u{FF0F}"] {
+            #expect(Beneath.isName(good), "\(Array(good.unicodeScalars))")
+            #expect(throws: Never.self, "\(Array(good.unicodeScalars))") {
+                _ = try FolderActions.destination(in: URL(fileURLWithPath: "/tmp"), name: good)
+            }
+        }
+    }
+
+    /// A wiki note whose name holds a slash (even one followed by a
+    /// combining mark), a NUL, or is `.` or `..` is refused as a bad name
+    /// before anything is opened, on both lookup paths, and nothing is made.
+    @Test func aWikiNoteNamedWithASeparatorIsRefusedBeforeAnyOpen() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault")
+        // `a` and `sub` exist, so a name the kernel split would land in them.
+        try fm.createDirectory(at: vault.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: vault.appendingPathComponent("a"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let before = listing(vault)
+        let pinned = try FolderRoot(vault)
+        var cases: [[String]] = []
+        for name in Self.slashNames + Self.nulNames + Self.dotNames {
+            cases += [[name], ["sub", name], [name, "N.md"]]
+        }
+        for walk in [true, false] {
+            for components in cases {
+                do {
+                    _ = try pinned.createFile(components, walk: walk)
+                    Issue.record("walk \(walk): \(components.map { Array($0.unicodeScalars) }) was created")
+                } catch let error as NSError {
+                    #expect(error.domain == NSCocoaErrorDomain && error.code == NSFileWriteInvalidFileNameError,
+                            "walk \(walk): \(components.map { Array($0.unicodeScalars) }): \(error)")
+                }
+            }
+            for name in Self.slashNames + Self.nulNames + Self.dotNames {
+                #expect(throws: (any Error).self, "\(Array(name.unicodeScalars))") {
+                    try FolderActions.createFile(named: name, in: vault, within: vault, walk: walk)
+                }
+            }
+        }
+        #expect(listing(vault) == before, "nothing made on disk")
+        #expect(((try? fm.contentsOfDirectory(atPath: base.path)) ?? ["?"]) == ["vault"], "nothing made beside the folder")
+    }
+
+    /// Everything beneath `dir`, as relative paths (links not followed).
+    private func listing(_ dir: URL) -> [String] {
+        (FileManager.default.subpaths(atPath: dir.path) ?? ["?"]).sorted()
+    }
+
+    /// The fallback (forced here): a note directly in the open folder is
+    /// made, one name, exclusively, never through a link.
+    @Test func theFallbackMakesANoteDirectlyInTheOpenFolder() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault, withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("Link.md"), withDestinationURL: outside.appendingPathComponent("Link.md"))
+        let pinned = try FolderRoot(vault)
+        let made = try pinned.createFile(["Root.md"], walk: true)
+        #expect(made.path == vault.appendingPathComponent("Root.md").path)
+        #expect(((try? fm.attributesOfItem(atPath: made.path)[.size]) as? Int) == 0, "a new empty note")
+        let viaPaths = try FolderActions.createFile(named: "Other.md", in: vault, within: vault, walk: true)
+        #expect(viaPaths.path == vault.appendingPathComponent("Other.md").path && fm.fileExists(atPath: viaPaths.path))
+        #expect(throws: (any Error).self) { try pinned.createFile(["Root.md"], walk: true) }
+        #expect(throws: (any Error).self) { try pinned.createFile(["Link.md"], walk: true) }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the link isn't followed")
+    }
+
+    /// The fallback (forced here) refuses a note in a subfolder before
+    /// anything is made: no folder, no file, and the error says why.
+    @Test func theFallbackRefusesANestedNoteBeforeMakingAnything() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        let before = listing(vault)
+        let pinned = try FolderRoot(vault)
+        for components in [["sub", "N.md"], ["sub", "deeper", "N.md"], ["missing", "N.md"], ["missing", "more", "N.md"]] {
+            do {
+                _ = try pinned.createFile(components, walk: true)
+                Issue.record("\(components) was created")
+            } catch let error as NSError {
+                #expect(error.domain == NSCocoaErrorDomain && error.code == NSFeatureUnsupportedError, "\(components): \(error)")
+                #expect(error.localizedDescription.contains("subfolder"), "\(error.localizedDescription)")
+            }
+        }
+        #expect(throws: (any Error).self) {
+            try FolderActions.createFile(named: "P.md", in: vault.appendingPathComponent("sub"), within: vault, walk: true)
+        }
+        #expect(listing(vault) == before, "nothing made on disk")
+    }
+
+    /// Where the kernel enforces beneath lookups, nested notes are made as
+    /// before: a link that stays inside is followed, one that leads out fails.
+    @Test(.enabled(if: Beneath.kernelEnforced)) func theKernelPathStillMakesNestedNotes() throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault"), outside = base.appendingPathComponent("outside")
+        try fm.createDirectory(at: vault.appendingPathComponent("sub/deeper"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: base) }
+        try fm.createSymbolicLink(at: vault.appendingPathComponent("out"), withDestinationURL: outside)
+        try fm.createSymbolicLink(atPath: vault.appendingPathComponent("alias").path, withDestinationPath: "sub")
+        let pinned = try FolderRoot(vault)
+        let a = try pinned.createFile(["sub", "deeper", "A.md"], walk: false)
+        #expect(a.path == vault.appendingPathComponent("sub/deeper/A.md").path && fm.fileExists(atPath: a.path))
+        _ = try pinned.createFile(["sub", "B.md"])
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("sub/B.md").path), "the default here is the kernel path")
+        _ = try pinned.createFile(["alias", "C.md"], walk: false)
+        #expect(fm.fileExists(atPath: vault.appendingPathComponent("sub/C.md").path), "a link that stays inside is followed")
+        #expect(throws: (any Error).self) { try pinned.createFile(["out", "D.md"], walk: false) }
+        #expect(((try? fm.contentsOfDirectory(atPath: outside.path)) ?? ["?"]).isEmpty, "the outside folder is untouched")
+    }
+
     @Test func explorerMovesOnlyTheRenamedPathAndDescendants() {
         let old = URL(fileURLWithPath: "/p/dir")
         let new = URL(fileURLWithPath: "/p/new")
@@ -219,6 +442,65 @@ private func makeTree(_ files: [String], dirs: [String] = []) throws -> URL {
         #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/c/d.txt"), in: root) == "c/d.txt")
         #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/bc/d.txt"), in: root) == nil)
         #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/x"), in: root) == nil)
+    }
+
+    /// Astra batch 7b: a folder whose name starts with a combining mark,
+    /// first-level or nested, is inside the root (a text prefix test made
+    /// "/a/b/" + mark one character and missed it), and the root's own name
+    /// with a mark appended is a sibling, outside.
+    @Test func relativePathsByBytesWithCombiningMarks() {
+        let root = URL(fileURLWithPath: "/a/b")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/\u{301}x/d.md"), in: root) == "\u{301}x/d.md")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/\u{301}x"), in: root) == "\u{301}x")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/c/\u{301}x/d.md"), in: root) == "c/\u{301}x/d.md")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b\u{301}/d.md"), in: root) == nil)
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b\u{301}"), in: root) == nil)
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/a/b/"), in: URL(fileURLWithPath: "/a/b/")) == "")
+        #expect(FolderTree.relativePath(of: URL(fileURLWithPath: "/\u{301}x/d.md"), in: URL(fileURLWithPath: "/")) == "\u{301}x/d.md")
+        // Split at the slash bytes, so the mark stays at the start of its name.
+        #expect(FolderTree.components("c/\u{301}x/d.md") == ["c", "\u{301}x", "d.md"])
+        #expect(FolderTree.components("\u{301}x/d.md") == ["\u{301}x", "d.md"])
+        #expect(FolderTree.components("") == [])
+        #expect(FolderTree.components("a//b/") == ["a", "b"])
+    }
+
+    /// A note made by path in a combining-mark folder, first-level and
+    /// nested, lands in that folder inside the vault, not at its top; a
+    /// sibling folder named root + mark is outside and refused. On the
+    /// fallback (no kernel-enforced beneath: macOS 14, or `walk` forced) a
+    /// note in a subfolder is refused as unsupported, by its exact path,
+    /// and nothing is made beside it or at the vault's top. Run with this
+    /// kernel's default and with the fallback forced.
+    @Test(arguments: [!Beneath.kernelEnforced, true])
+    func aNewNoteInACombiningMarkFolderStaysInThatFolder(walk: Bool) throws {
+        let fm = FileManager.default
+        let base = tempDir()
+        let vault = base.appendingPathComponent("vault")
+        let first = vault.appendingPathComponent("\u{301}x"), nested = vault.appendingPathComponent("c/\u{301}y")
+        let sibling = base.appendingPathComponent("vault\u{301}")
+        for d in [first, nested, sibling] { try fm.createDirectory(at: d, withIntermediateDirectories: true) }
+        defer { try? fm.removeItem(at: base) }
+        for (folder, name, rel) in [(first, "A.md", "\u{301}x/A.md"), (nested, "B.md", "c/\u{301}y/B.md")] {
+            let want = folder.appendingPathComponent(name)
+            if walk {
+                do {
+                    _ = try FolderActions.createFile(named: name, in: folder, within: vault, walk: true)
+                    Issue.record("\(rel): a note in a subfolder is refused on the fallback")
+                } catch let e as NSError {
+                    #expect(e.domain == NSCocoaErrorDomain && e.code == NSFeatureUnsupportedError, "\(rel): \(e)")
+                    #expect((e.userInfo[NSFilePathErrorKey] as? String).map { Array($0.utf8) } == Array(want.path.utf8),
+                            "\(rel): refused by its exact path")
+                }
+                #expect(!fm.fileExists(atPath: want.path), "\(rel): nothing beside it on the fallback")
+            } else {
+                let made = try FolderActions.createFile(named: name, in: folder, within: vault, walk: false)
+                #expect(fm.fileExists(atPath: want.path))
+                #expect(FolderTree.relativePath(of: made, in: vault) == rel)
+            }
+            #expect(!fm.fileExists(atPath: vault.appendingPathComponent(name).path), "\(rel): not at the vault's top")
+        }
+        #expect(throws: (any Error).self) { try FolderActions.createFile(named: "S.md", in: sibling, within: vault, walk: walk) }
+        #expect(((try? fm.contentsOfDirectory(atPath: sibling.path)) ?? ["?"]).isEmpty, "the sibling folder is untouched")
     }
 
     @Test func enclosingFolderOfAFile() {

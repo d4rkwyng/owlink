@@ -150,7 +150,8 @@ extension DevChecks {
         func status() -> String { tab?.statusText ?? "-" }
         func zoom() -> String { tab?.statusBar.zoom.stringValue ?? "-" }
         func scale() -> Double { Double(tab?.scale ?? -1) }
-        run([
+        var steps: [Step] = []
+        let steps1: [Step] = [
             sync {
                 expect(DocumentKind.detect(url: png) == .image && DocumentKind.detect(url: noExt) == .image && DocumentKind.detect(url: gif) == .image
                        && DocumentKind.detect(url: notes) == .text && DocumentKind.detect(url: docNoExt) == .office,
@@ -196,6 +197,9 @@ extension DevChecks {
                        "\(String(describing: a)) / \(String(describing: b))")
             },
             snapshot("image-png.png"),
+        ]
+        steps += steps1
+        let steps2: [Step] = [
             // 0.2.1: the right-click menu, by a real right-click on the image.
             sync {
                 guard let t = tab, let w = t.window else { expect(false, "image tab for the right-click"); return }
@@ -258,6 +262,9 @@ extension DevChecks {
                        && seen?.items.contains { $0.action == #selector(ImageTabController.openInDefaultApp(_:)) && $0.target === t } == true,
                        "Reveal in Finder and Open in Default App act on this image (not run here)")
             },
+        ]
+        steps += steps2
+        let steps3: [Step] = [
             // Menus: what applies is on, editing and saving are off.
             sync {
                 let on: [(String, String, NSEvent.ModifierFlags)] = [
@@ -336,6 +343,9 @@ extension DevChecks {
                 pb.clearContents()
                 if !savedPasteboard.isEmpty { pb.writeObjects(savedPasteboard) }
             },
+        ]
+        steps += steps3
+        let steps4: [Step] = [
             // Print: the image fitted to one page (to a PDF, without panels).
             sync {
                 let pdf = dir.appendingPathComponent("image-print.pdf")
@@ -412,6 +422,9 @@ extension DevChecks {
                     next()
                 }
             },
+        ]
+        steps += steps4
+        let steps5: [Step] = [
             // A damaged .png: an alert, no tab.
             sync {
                 tab?.window?.makeKeyAndOrderFront(nil)
@@ -472,6 +485,9 @@ extension DevChecks {
                 pb.releaseGlobally()
                 app.tabs.first { $0.doc.fileURL?.standardizedFileURL == notes.standardizedFileURL }?.window?.close()
             },
+        ]
+        steps += steps5
+        let steps6: [Step] = [
             // Office: a .docx in a Quick Look tab, Open as Text; an .xlsx, Open Sheet as CSV.
             sync {
                 let r = app.open(docx)
@@ -543,6 +559,9 @@ extension DevChecks {
                     expect((try? Data(contentsOf: u)) == data && modified(u) == mod, "\(u.lastPathComponent) is unchanged on disk")
                 }
             },
+        ]
+        steps += steps6
+        let steps7: [Step] = [
             // A 12000×12000 PNG: decoded off the main thread, downsampled,
             // while typing goes on in a text tab.
             until("the 12000×12000 PNG is made", timeout: 120) { bigMade != nil },
@@ -564,7 +583,9 @@ extension DevChecks {
                        "\(saved.map { "\($0.path ?? "-") \(String(describing: $0.image)) \(String(describing: $0.office))" })")
                 AppDelegate.openWithOverride = nil
             },
-        ])
+        ]
+        steps += steps7
+        run(steps)
     }
 
     /// Opens the big image, then types in a text tab while it decodes;

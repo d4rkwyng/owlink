@@ -66,15 +66,32 @@ let package = Package(
             checksum: "bf45668c4f916117faea4d1f6b3adf75f31c08fa53b8b8269c4d92358c9c7b30"
         ),
 
+        // Sparkle 2 (MIT), the updater behind Owlink › Check for Updates…:
+        // its Swift Package Manager XCFramework, release 2.10.1, pinned by
+        // the SHA-256 that release's own Package.swift gives. Universal
+        // macOS slice, with its Autoupdate tool, Updater.app and XPC
+        // services inside the framework. Only a release build embeds it
+        // (Scripts/bundle-app.sh --release), and the app loads it with
+        // dlopen only when its Info.plist names an update feed and key
+        // (Updater.swift, docs/updates.md), so nothing of Sparkle's is
+        // linked and a check build runs without it.
+        .binaryTarget(
+            name: "Sparkle",
+            url: "https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-for-Swift-Package-Manager.zip",
+            checksum: "4c2e48a3e50ebcc2c88a58a4c7264a1a99c3c31857ce754357afb9cdb323022a"
+        ),
+
         // The AppKit app. Scripts/bundle-app.sh wraps it in "Owlink.app".
         .executableTarget(
             name: "CedricApp",
-            dependencies: ["CedricCore", "CedricAI"],
-            // llama.framework sits in Owlink.app/Contents/Frameworks and is
-            // loaded with dlopen when the built-in engine first loads a model
-            // (CLlamaLoader); -dead_strip_dylibs drops the load commands for
-            // it and the frameworks only it uses, since no symbol of theirs
-            // is referenced.
+            dependencies: ["CedricCore", "CedricAI", "Sparkle"],
+            // llama.framework and Sparkle.framework sit in
+            // Owlink.app/Contents/Frameworks and are loaded with dlopen:
+            // llama when the built-in engine first loads a model
+            // (CLlamaLoader), Sparkle when updates are set up (Updater.swift).
+            // -dead_strip_dylibs drops the load commands for them and the
+            // frameworks only they use, since no symbol of theirs is
+            // referenced.
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks",
                                            "-Xlinker", "-dead_strip_dylibs"])]
         ),

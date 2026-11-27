@@ -50,6 +50,9 @@ public enum MarkdownPaste {
         return encode(f.dropFirst(d.count).joined(separator: "/"))
     }
 
+    /// The link to `name` in the "images" folder next to the document, encoded.
+    public static func imagesPath(_ name: String) -> String { encode("images/" + name) }
+
     static func encode(_ path: String) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "()[]<> ")

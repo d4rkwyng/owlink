@@ -147,6 +147,7 @@ import CedricCore
 
     @Test func sourceDisplayNames() {
         #expect(HintSource.displayName("rules") == nil)
+        #expect(HintSource.displayName("notice") == nil)
         #expect(HintSource.displayName("apple") == "AI suggestion · Apple Intelligence")
         #expect(HintSource.displayName("local:qwen2.5-coder-1.5b-instruct-mlx") == "AI suggestion · Qwen2.5 Coder 1.5B")
         #expect(HintSource.displayName("local:qwen/qwen3.6-35b-a3b") == "AI suggestion · Qwen3.6 35B A3b")
