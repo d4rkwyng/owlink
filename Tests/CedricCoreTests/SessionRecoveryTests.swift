@@ -232,6 +232,40 @@ import Testing
         #expect(again == [c])
     }
 
+    /// The exact maximum (Astra 20e should): a session numbered
+    /// maxGeneration loads with that number, the journal written after it
+    /// (numbered maxGeneration + 1) is a pending journal, not a damaged
+    /// one (no scan: an unrelated stray buffer isn't brought back), and a
+    /// commit past it still saves and loads.
+    @Test func theMaximumCommitNumberRoundTrips() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s1 = store(dir)
+        let a = SessionTab(untitledName: "Untitled", hasBuffer: true)
+        try s1.writeBuffer(a.id, text: "a")
+        try s1.save(Session(windows: [SessionWindow(tabs: [a])]))
+        let file = dir.appendingPathComponent("session.json")
+        var manifest = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        manifest["generation"] = SessionStore.maxGeneration
+        try JSONSerialization.data(withJSONObject: manifest).write(to: file)
+        // A stray buffer no journal names (let go, its prune never ran).
+        let stray = UUID()
+        try Data("let go".utf8).write(to: s1.bufferURL(stray))
+        let s2 = store(dir)
+        guard case .session(_, let none) = s2.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(none.isEmpty)
+        let b = UUID()
+        try s2.writeBuffer(b, text: "after the maximum")
+        let journal = dir.appendingPathComponent("pending-buffers.json")
+        let j = try JSONDecoder().decode(SessionStore.Journal.self, from: Data(contentsOf: journal))
+        #expect(j.generation == SessionStore.maxGeneration + 1)
+        guard case .session(_, let recovered) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(recovered == [b], "pending, not damaged (no scan): \(recovered)")
+        try s2.save(Session(windows: [SessionWindow(tabs: [a, SessionTab(id: b, untitledName: "Recovered", hasBuffer: true)])]))
+        guard case .session(let s, let again) = store(dir).loadForLaunch() else { Issue.record("readable"); return }
+        #expect(s.allTabs.map(\.id) == [a.id, b] && again.isEmpty)
+    }
+
     // MARK: Reopened closed tabs
 
     /// A closed tab whose entry kept a buffer, closed just inside
@@ -870,6 +904,35 @@ import Testing
         #expect(s.heldBuffers == [a])
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
         #expect(s1.readBufferResult(a) == .text("unsaved"))
+    }
+
+    /// A FIFO in a buffer's place is never opened for a blocking read
+    /// (⇧⌘T and a save's completion read on the main thread), and an
+    /// unreadable regular file doesn't count as a closed tab's text on
+    /// disk: the commit refuses it, so the app holds it (never expired).
+    @Test func aBufferThatIsntAReadableFileIsNeverWaitedOnOrCountedAsKept() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        try s.save(Session(windows: []))
+        let fifo = UUID()
+        #expect(mkfifo(s.bufferURL(fifo).path, 0o600) == 0)
+        let start = Date()
+        guard case .unreadable = s.readBufferResult(fifo) else { Issue.record("a FIFO is unreadable"); return }
+        #expect(Date().timeIntervalSince(start) < 1, "not waited on")
+        #expect(s.bufferExists(fifo) && !s.bufferExists(UUID()))
+        let locked = UUID()
+        try s.writeBuffer(locked, text: "can't be read back", open: false)
+        let path = s.bufferURL(locked).path
+        try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path) }
+        let closed = SessionTab(id: locked, untitledName: "Untitled", hasBuffer: true)
+        #expect(throws: SessionStoreError.buffersMissing([locked])) {
+            try s.save(Session(windows: [], closedTabs: [closed]), requiring: [locked: .onDisk])
+        }
+        s.holdBuffer(locked)
+        try s.save(Session(windows: [], closedTabs: [closed]), requiring: [locked: .onDisk])
+        #expect(s.load()?.heldBuffers == [locked])
     }
 
     @Test func injectedWriteFailuresFailEveryWrite() throws {

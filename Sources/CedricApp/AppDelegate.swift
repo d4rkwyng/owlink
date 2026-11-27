@@ -1122,11 +1122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             for id in missing where needed[id] == .onDisk {
                 if let d = docs[id] { d.sessionChangeCount = -1; continue }
                 guard self.closedTexts[id] == nil, let i = self.closedTabs.firstIndex(where: { $0.id == id && $0.hasBuffer }) else { continue }
-                switch self.store.readBufferResult(id) {
-                case .missing:
+                // lstat only: the commit found no readable regular file
+                // there, so nothing is opened (a FIFO would block).
+                if !self.store.bufferExists(id) {
                     FileHandle.standardError.write(Data("session: closed tab \(id)'s buffer is gone\n".utf8))
                     self.closedTabs[i].hasBuffer = false
-                case .text, .unreadable:
+                } else {
                     // There, but not a regular file (a folder, a link) or
                     // not readable: kept where it is (held: never pruned,
                     // named in every commit) and said, so it doesn't block

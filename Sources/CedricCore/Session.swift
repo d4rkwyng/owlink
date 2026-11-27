@@ -478,8 +478,9 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     /// Commit numbers go up by one per commit: far below this. A number
-    /// outside 0...this (a journal's: 1...this) is damaged bookkeeping,
-    /// never trusted, and never near overflow.
+    /// outside 0...this (a journal's: 1...this + 1, the one waiting for a
+    /// commit after one numbered this) is damaged bookkeeping, never
+    /// trusted, and never near overflow.
     static let maxGeneration = 1 << 52
 
     /// `session.json`'s commit number and the held runs' journals the
@@ -711,9 +712,9 @@ public final class SessionStore: @unchecked Sendable {
         } else {
             return ([], [], nil, true)
         }
-        // A number no commit waits for (0, negative, past maxGeneration):
+        // A number no commit waits for (0, negative, past maxGeneration + 1):
         // which commit it waited for is unknown, as for an unreadable one.
-        if let g = j.generation, !(1...Self.maxGeneration).contains(g) { return ([], [], nil, true) }
+        if let g = j.generation, !(1...Self.maxGeneration + 1).contains(g) { return ([], [], nil, true) }
         let ids = j.ids.compactMap(UUID.init(uuidString:))
         let reopened = (j.reopened ?? []).compactMap(UUID.init(uuidString:))
         guard ids.count == j.ids.count, reopened.count == (j.reopened ?? []).count else { return ([], [], j.generation, true) }
@@ -766,6 +767,9 @@ public final class SessionStore: @unchecked Sendable {
             if held.contains(id) { return false }
             var st = stat()
             guard lstat(bufferURL(id).path, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return true }
+            // A regular file this user can't read is no copy of the text
+            // either: the caller holds it (never pruned, never expired).
+            if access(bufferURL(id).path, R_OK) != 0 { return true }
             if case .written(let seq) = need { return (writtenSequence[id] ?? Int.min) < seq }
             return false
         }.keys.sorted { $0.uuidString < $1.uuidString }
@@ -876,14 +880,36 @@ public final class SessionStore: @unchecked Sendable {
         case unreadable(String)
     }
 
+    /// Reads only a regular file, never following a link, opened without
+    /// blocking (O_NONBLOCK): a FIFO, a device or a folder in a buffer's
+    /// place is unreadable, never waited on, so this is safe on the main
+    /// thread (⇧⌘T, a save's completion).
     public func readBufferResult(_ id: UUID) -> BufferRead {
+        let path = bufferURL(id).path
+        var st = stat()
+        guard lstat(path, &st) == 0 else {
+            return errno == ENOENT ? .missing : .unreadable(String(cString: strerror(errno)))
+        }
+        guard st.st_mode & S_IFMT == S_IFREG else { return .unreadable("not a regular file") }
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { return errno == ENOENT ? .missing : .unreadable(String(cString: strerror(errno))) }
+        var fst = stat()
+        guard fstat(fd, &fst) == 0, fst.st_mode & S_IFMT == S_IFREG else {
+            close(fd)
+            return .unreadable("not a regular file")
+        }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         do {
-            return .text(String(decoding: try Data(contentsOf: bufferURL(id)), as: UTF8.self))
-        } catch let e as CocoaError where e.code == .fileReadNoSuchFile {
-            return .missing
+            return .text(String(decoding: try handle.readToEnd() ?? Data(), as: UTF8.self))
         } catch {
             return .unreadable(error.localizedDescription)
         }
+    }
+
+    /// Whether a buffer file is there at all (lstat only: never opens it).
+    public func bufferExists(_ id: UUID) -> Bool {
+        var st = stat()
+        return lstat(bufferURL(id).path, &st) == 0 || errno != ENOENT
     }
 
     public func readBuffer(_ id: UUID) -> String? {
