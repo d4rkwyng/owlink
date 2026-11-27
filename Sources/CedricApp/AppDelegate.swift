@@ -1353,8 +1353,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let load = store.loadForLaunch()
         if store.adoptedFromInstances > 0 {
             noteRecoveryProblem(String(localized: "Owlink brought back \(store.adoptedFromInstances) unsaved text(s) from another Owlink that stopped while this one’s session was in use."))
-            // Committed soon, so the dead Owlink's store can go.
-            scheduleSessionSave()
         }
         if let hold = store.hold {
             noteRecoveryProblem(String(localized: "Owlink isn’t saving its session this run, and keeps everything in \(store.directory.path) as it is: \(hold). Save your unsaved tabs with File › Save As…."))
