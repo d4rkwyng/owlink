@@ -636,6 +636,18 @@ extension DevChecks {
                 expect(FileManager.default.fileExists(atPath: hard) && (try? String(contentsOf: victim, encoding: .utf8)) == "precious\n"
                        && app.tabs.count == before, "a hard link to the victim is refused: nothing read, nothing deleted")
                 try? FileManager.default.removeItem(atPath: hard)
+                // An absolute path whose first name starts with a combining mark:
+                // "/" then the mark is one Swift character, but its first byte is
+                // "/", so it is absolute (asked about, then declined here), not
+                // refused as relative (Astra batch 17v must 6).
+                AppDelegate.linkAnswerForChecks = false
+                AppDelegate.lastURLRefusal = nil
+                openURL(app, "cedric://open?path=" + enc("/\u{301}cedric-check-\(getpid()).txt"), token: false)
+                expect(AppDelegate.lastURLRefusal?.utf8.starts(with: "declined: /".utf8) == true,
+                       "a path starting with a slash then a combining mark is absolute", AppDelegate.lastURLRefusal ?? "-")
+                AppDelegate.lastURLRefusal = nil
+                openURL(app, "cedric://open?path=" + enc("relative/x.txt"), token: false)
+                expect(AppDelegate.lastURLRefusal == "path isn’t absolute", "a relative path is still refused", AppDelegate.lastURLRefusal ?? "-")
                 // A tokenless path= (a link): asked first; declined here (CEDRIC_URL_ASK_ANSWER=no), nothing opens.
                 AppDelegate.linkAnswerForChecks = false
                 openURL(app, "cedric://open?path=" + enc(victim.path), token: false)

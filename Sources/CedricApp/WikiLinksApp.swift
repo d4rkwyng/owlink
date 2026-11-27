@@ -668,11 +668,16 @@ extension EditorWindowController {
     /// A link to no note: create it (as the sidebar's New File does) beside
     /// this note when it is in the folder, else at the folder's top.
     private func offerToCreate(_ target: String, notes: WikiNotes) {
-        var name = target.trimmingCharacters(in: .whitespaces)
-        if name.hasPrefix("/") { name.removeFirst() }
-        let parts = name.split(separator: "/").map(String.init)
-        guard !parts.isEmpty, !parts.contains(".."), !parts.contains(".") else { NSSound.beep(); return }
-        let file = WikiLinks.isNote(name) ? parts.last! : parts.last! + ".md"
+        // Leading "/" bytes dropped and the rest split at each "/" byte
+        // (FolderTree.components): "/" then a combining mark is one Swift
+        // character, so a text split kept it inside a name and refused a
+        // valid nested target (Astra batch 17v).
+        let name = target.trimmingCharacters(in: .whitespaces)
+        let parts = FolderTree.components(name)
+        guard !parts.isEmpty, !parts.contains(where: { FolderTree.sameBytes($0, "..") || FolderTree.sameBytes($0, ".") }) else {
+            NSSound.beep(); return
+        }
+        let file = WikiLinks.isNote(parts.last!) ? parts.last! : parts.last! + ".md"
         // The note's path in the folder, as names: beside this note when it is
         // in the folder and the link names no folder, else from the top. Its
         // folders split at the "/" bytes (FolderTree.components): a text

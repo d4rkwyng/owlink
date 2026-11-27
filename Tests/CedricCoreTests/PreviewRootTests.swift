@@ -102,6 +102,24 @@ func makeTree(_ files: [String]) throws -> URL {
         #expect(PreviewRoot.resolve("/images", from: doc, openedRoot: nil) == nil, "a folder is not a file")
     }
 
+    /// A site-absolute link whose first name starts with a combining mark:
+    /// "/" then the mark is one Swift character, so text tests took the
+    /// link for relative (resolve refused it; the readability probe looked
+    /// beside the document). By the first byte it is site-absolute, split
+    /// at the "/" bytes, and still never climbs (Astra batch 17v must 6).
+    @Test func aSlashBeforeACombiningMarkStartsASiteAbsoluteLink() throws {
+        let t = try makeTree(["site/\u{301}pic.png", "site/sub/doc.md", "secret.png"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let site = t.appendingPathComponent("site"), doc = site.appendingPathComponent("sub")
+        #expect(PreviewRoot.parts(of: "/\u{301}pic.png") == ["\u{301}pic.png"])
+        #expect(PreviewRoot.parts(of: "/a/\u{301}b?x#y") == ["a", "\u{301}b"])
+        #expect(PreviewRoot.parts(of: "//\u{301}host/x") == nil, "still not a //host link")
+        #expect(PreviewRoot.parts(of: "/\u{301}/../../secret.png") == nil, "still never climbs")
+        #expect(PreviewRoot.resolve("/\u{301}pic.png", from: doc, openedRoot: site)?.file.lastPathComponent == "\u{301}pic.png")
+        #expect(PreviewImageAccess.readable("/\u{301}pic.png", folder: doc, openedRoot: site), "found at the site root, not beside the document")
+        #expect(!PreviewImageAccess.readable("/\u{301}/../../secret.png", folder: doc, openedRoot: site))
+    }
+
     @Test func pageLinksFindTheirMarkdown() throws {
         let t = try makeTree(["content/projects/intelbrew.md", "content/blog/index.md", "content/index.md"])
         defer { try? FileManager.default.removeItem(at: t) }

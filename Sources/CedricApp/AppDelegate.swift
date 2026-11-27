@@ -300,7 +300,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let trusted = CLIToken.matches(given, CLIToken.ensure())
             || (Date().timeIntervalSince(Self.cliTokenRotated) < CLIToken.rotationGrace && CLIToken.matches(given, Self.previousCLIToken))
         if let raw = q["path"] {
-            guard raw.hasPrefix("/") else { refuseURL("path isn’t absolute"); return }
+            // Absolute by its first byte: "/" then a combining mark is one
+            // Swift character, which a text test refused as relative.
+            guard raw.utf8.first == 0x2f else { refuseURL("path isn’t absolute"); return }
             let path = (raw as NSString).standardizingPath
             if trusted {
                 openFromURL(path, q)
@@ -327,7 +329,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// The last cedric:// refusal's reason (the checks read it).
+    static var lastURLRefusal: String?
+
     private func refuseURL(_ why: String) {
+        Self.lastURLRefusal = why
         FileHandle.standardError.write(Data((CLIToken.refusal(why, secret: CLIToken.ensure()) + "\n").utf8))
     }
 

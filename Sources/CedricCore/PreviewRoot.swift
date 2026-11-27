@@ -42,15 +42,26 @@ public enum PreviewRoot {
     }
 
     /// The parts of a root-absolute path, decoded; nil for one that isn't
-    /// (relative, a scheme, `//host`) or that climbs with `..`.
+    /// (relative, a scheme, `//host`) or that climbs with `..`. Read as
+    /// UTF-8 bytes and split at each `/` byte (`FolderTree.components`): a
+    /// slash followed by a combining mark is one Swift character, so a
+    /// text test took it for no slash and a text split kept it inside a
+    /// name. (From round 4's c261b56; its byte-keyed root lookups are not
+    /// taken.)
     public static func parts(of path: String) -> [String]? {
-        var p = path
-        if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
-        guard p.hasPrefix("/"), !p.hasPrefix("//") else { return nil }
+        var p = cutQuery(path)
+        let head = Array(p.utf8.prefix(2))
+        guard head.first == 0x2f, head.count < 2 || head[1] != 0x2f else { return nil }
         p = p.removingPercentEncoding ?? p
-        let parts = p.split(separator: "/").map(String.init).filter { $0 != "." }
-        guard !parts.isEmpty, !parts.contains("..") else { return nil }
+        let parts = FolderTree.components(p).filter { !FolderTree.sameBytes($0, ".") }
+        guard !parts.isEmpty, !parts.contains(where: { FolderTree.sameBytes($0, "..") }) else { return nil }
         return parts
+    }
+
+    /// `src` up to its first `?` or `#` byte.
+    static func cutQuery(_ src: String) -> String {
+        guard let cut = src.utf8.firstIndex(where: { $0 == 0x3f || $0 == 0x23 }) else { return src }
+        return String(decoding: src.utf8[..<cut], as: UTF8.self)
     }
 
     /// The file `path` stands for, and the root it was found under.
@@ -169,17 +180,18 @@ public enum PreviewImageAccess {
             guard let page, let f = PreviewFolder.file(for: page, in: vault.root, scriptOn: false) else { return false }
             return fm.isReadableFile(atPath: f.path)
         }
-        if src.hasPrefix("/") {
+        // Site-absolute by its first byte: a "/" then a combining mark is
+        // one Swift character, which a text test took for a relative link.
+        if src.utf8.first == 0x2f {
             guard let hit = PreviewRoot.resolve(src, from: folder, openedRoot: openedRoot, fileManager: fm) else { return false }
             guard let page = PreviewFolder.pageURL(forFile: hit.file),
                   let file = PreviewFolder.file(for: page, in: hit.root, scriptOn: false) else { return false }
             return fm.isReadableFile(atPath: file.path)
         }
-        var p = src
-        if let cut = p.firstIndex(where: { $0 == "?" || $0 == "#" }) { p = String(p[..<cut]) }
+        var p = PreviewRoot.cutQuery(src)
         p = p.removingPercentEncoding ?? p
         let vault = WikiVault(documentFolder: folder, openedRoot: openedRoot, fileManager: fm)
-        guard !p.hasPrefix("/") else { return false }
+        guard p.utf8.first != 0x2f else { return false }
         let relative = folder.appendingPathComponent(p).standardizedFileURL
         if let page = PreviewFolder.pageURL(forFile: relative),
            PreviewFolder.file(for: page, in: vault.root, scriptOn: false) != nil,
