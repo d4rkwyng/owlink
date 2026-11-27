@@ -19,9 +19,9 @@ import Testing
     let dict = SpellDictionaryState(language: "en", automaticByLanguage: true, ignored: [])
 
     /// The early check of `r`, its results back.
-    func covering(_ r: NSRange, marking words: [String] = []) -> SpellCheckCoverage {
+    func covering(_ r: NSRange, marking words: [String] = [], onlyOwlinkInFront: Bool = true) -> SpellCheckCoverage {
         var c = SpellCheckCoverage()
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: onlyOwlinkInFront)
         c.resultsArrived(for: r, marking: words)
         return c
     }
@@ -128,6 +128,120 @@ import Testing
         #expect(took)
     }
 
+    /// The spell server as AppKit's pass would ask it: `learned` words are
+    /// learned; records which words it was asked about (`hasLearnedWord`).
+    final class Server {
+        var learned: Set<String> = []
+        var asked: [String] = []
+        func now(_ c: SpellCheckCoverage, ignored: Set<String> = [], language: String = "en") -> SpellDictionaryState {
+            let words = c.wordsToAskLearned
+            asked += words
+            return SpellDictionaryState(language: language, automaticByLanguage: true, ignored: ignored,
+                                        learned: Set(words.filter { learned.contains($0) }))
+        }
+    }
+
+    /// Only Owlink (or the lock screen) in front all along, nothing changed:
+    /// the pass is skipped without one question about learned words.
+    @Test func activeAllAlongAsksNoLearnedWords() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        #expect(!c.asksLearned && c.wordsToAskLearned.isEmpty)
+        let server = Server()
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(took)
+        #expect(server.asked.isEmpty)
+    }
+
+    /// AppKit's spelling UI shown in Owlink after the early check (its
+    /// Learn may post no notice): the marked words are asked about, and an
+    /// edit's clear starts over.
+    @Test func spellingUIShownAsksLearnedWords() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        #expect(!c.asksLearned)
+        c.spellingUIShown()
+        #expect(c.asksLearned && c.wordsToAskLearned == ["tpyo", "wrnog"])
+        let server = Server()
+        server.learned = ["wrnog"]
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(!took)
+        #expect(server.asked == ["tpyo", "wrnog"])
+    }
+
+    /// Another app came to the front after the early check (it may learn a
+    /// word): the marked words are asked about, and a learned one means
+    /// AppKit's pass runs.
+    @Test func learnedInAnotherAppAfterLeavingIsCaught() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        c.anotherAppInFront()
+        #expect(c.asksLearned && c.wordsToAskLearned == ["tpyo", "wrnog"])
+        let server = Server()
+        server.learned = ["tpyo"]
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(!took)
+        #expect(server.asked == ["tpyo", "wrnog"])
+        // Left and came back, nothing learned: asked, and skipped.
+        var back = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        back.anotherAppInFront()
+        let quiet = Server()
+        let tookBack = back.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: quiet.now(back))
+        #expect(tookBack)
+        #expect(quiet.asked == ["tpyo", "wrnog"])
+    }
+
+    /// Another app was in front at the early check (Owlink opened in the
+    /// background): it may already be learning a word, so it asks.
+    @Test func notActiveAtTheEarlyCheckAsks() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"], onlyOwlinkInFront: false)
+        #expect(c.asksLearned)
+        let server = Server()
+        server.learned = ["tpyo"]
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(!took)
+    }
+
+    /// A word learned in Owlink (the spelling panel's Learn: the view
+    /// hears the spell checker's notification and clears): the pass runs,
+    /// active or not, asked or not.
+    @Test func learnedInOwlinkClears() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        c.clear()
+        let server = Server()
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c))
+        #expect(!took)
+        #expect(server.asked.isEmpty)
+    }
+
+    /// Ignored in the document (asked every time: one round trip): the
+    /// pass runs even while Owlink was active all along.
+    @Test func ignoredWhileActiveIsCaught() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo", "wrnog"])
+        let server = Server()
+        let took = c.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: server.now(c, ignored: ["tpyo"]))
+        #expect(!took)
+    }
+
+    /// Language and options while active all along: the pass runs.
+    @Test func languageOrOptionsWhileActiveAreCaught() {
+        var lang = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"])
+        let tookLang = lang.take(NSRange(location: 0, length: 2899), types: scheduled, dictionary: Server().now(lang, language: "fr"))
+        #expect(!tookLang)
+        var opts = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"])
+        let tookOpts = opts.take(NSRange(location: 0, length: 2899), types: scheduled, hasOptions: true, dictionary: Server().now(opts))
+        #expect(!tookOpts)
+    }
+
+    /// A new early check starts from whether Owlink is active then; a clear
+    /// forgets that it was.
+    @Test func activeStateIsPerEarlyCheck() {
+        var c = covering(NSRange(location: 0, length: 2899), marking: ["tpyo"])
+        c.anotherAppInFront()
+        #expect(c.asksLearned)
+        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
+        #expect(!c.asksLearned)
+        c.clear()
+        #expect(c.asksLearned)
+    }
+
     @Test func checksAfterALanguageChange() {
         for change in [{ (d: inout SpellDictionaryState) in d.language = "fr" }, { $0.automaticByLanguage = false }] {
             var c = covering(NSRange(location: 0, length: 2899))
@@ -143,7 +257,7 @@ import Testing
     @Test func theMarkedWordsAreTheEarlyChecks() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.awaitsResults(for: NSRange(location: 0, length: 10)))
         c.resultsArrived(for: NSRange(location: 0, length: 10), marking: ["other"])
         #expect(c.markedWords.isEmpty && !c.answered)
@@ -187,7 +301,7 @@ import Testing
     @Test func skipsNothingUntilTheEarlyResultsAreBack() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.isEmpty && !c.answered)
         let took15 = c.take(r, types: scheduled, dictionary: dict)
         #expect(!took15)
@@ -197,7 +311,7 @@ import Testing
     @Test func onlyTheEarlyChecksOwnResultsCount() {
         var c = SpellCheckCoverage()
         let r = NSRange(location: 0, length: 2899)
-        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        c.checked(r, types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         c.resultsArrived(for: NSRange(location: 0, length: 100))
         #expect(!c.answered)
         c.resultsArrived(for: r)
@@ -208,7 +322,7 @@ import Testing
 
     @Test func aNewEarlyCheckWaitsForItsOwnResults() {
         var c = covering(NSRange(location: 0, length: 2899))
-        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict)
+        c.checked(NSRange(location: 0, length: 2899), types: SpellCheckCoverage.earlyTypes(enabled: enabled), dictionary: dict, onlyOwlinkInFront: true)
         #expect(!c.answered)
     }
 

@@ -90,7 +90,9 @@ final class EditorSpelling {
               tab.textEditCount == 0, !tv.hasMarkedText(),
               let r = tv.visibleCharacterRange, r.length > 0 else { return }
         let types = SpellCheckCoverage.earlyTypes(enabled: tv.enabledTextCheckingTypes)
-        tv.spellCoverage.checked(r, types: types, dictionary: tv.spellDictionaryState())
+        tv.watchSpellDictionary()
+        tv.spellCoverage.checked(r, types: types, dictionary: EditorTextView.spellDictionary, tag: tv.spellCheckerDocumentTag,
+                                 onlyOwlinkInFront: EditorTextView.onlyOwlinkInFront, spellingUIShown: SpellingPanel.inUse)
         tv.earlyTextChecks += 1
         tv.checkingVisibleNow = true
         tv.checkText(in: r, types: types, options: [:])
@@ -140,11 +142,13 @@ final class EditorSpelling {
         guard ns.length > 0 else { return [] }
         let r = range ?? tv.visibleCharacterRange ?? NSRange(location: 0, length: min(ns.length, 20_000))
         var found: [NSRange] = []
+        let dictionary = EditorTextView.spellDictionary
         for s in scope(for: r) where s.length > 0 {
             let results = NSSpellChecker.shared.check(tv.string, range: s, types: NSTextCheckingResult.CheckingType.spelling.rawValue,
                                                       options: nil, inSpellDocumentWithTag: tv.spellCheckerDocumentTag,
                                                       orthography: nil, wordCount: nil)
             found += results.map(\.range).filter { $0.length > 0 && NSMaxRange($0) <= NSMaxRange(s) }
+                .filter { !dictionary.suppressesMarks || !dictionary.suppressesMark(ns.substring(with: $0), inSpellDocumentWithTag: tv.spellCheckerDocumentTag) }
         }
         return found
     }
@@ -182,28 +186,119 @@ final class EditorSpelling {
     }
 }
 
+/// AppKit's spelling panel (Show Spelling and Grammar), whose Learn may
+/// not post the spell checker's in-process notice. Found without loading
+/// it (`NSSpellChecker.spellingPanel` would load its nib): by its class
+/// (NSSpellingPanel, macOS 27), or as the panel shown through an Owlink
+/// view.
+@MainActor
+enum SpellingPanel {
+    private static let panelClass: AnyClass? = NSClassFromString("NSSpellingPanel")
+    static weak var known: NSWindow?
+
+    static func isPanel(_ w: NSWindow) -> Bool {
+        w === known || panelClass.map { w.isKind(of: $0) } == true
+    }
+
+    /// AppKit has loaded the spelling panel in this process: it may be up
+    /// now, or have been up (and closed again) since the early check, and
+    /// nothing public says when it is ordered in or out, nor whether its
+    /// Learn posted a notice. So once it has been loaded, every first
+    /// pass asks about the marked words (SpellCheckCoverage.spellingUIShown);
+    /// until it is, as when a file is just opened, nothing is asked.
+    /// Owlink's own windows only, no round trip.
+    static var inUse: Bool {
+        NSApp.windows.contains(where: isPanel)
+    }
+}
+
 extension EditorTextView {
     /// AppKit's scheduled checking (NSTextCheckingController) and Check
     /// Document Now come through here. The first request after the
     /// first-frame check is skipped when that check already did it.
     override func checkText(in range: NSRange, types checkingTypes: NSTextCheckingTypes,
                             options: [NSSpellChecker.OptionKey: Any] = [:]) {
-        if !checkingVisibleNow, !spellCoverage.isEmpty,
-           spellCoverage.take(range, types: checkingTypes, hasOptions: !options.isEmpty,
-                              dictionary: spellDictionaryState(learnedAmong: spellCoverage.markedWords)) {
+        if !checkingVisibleNow,
+           spellCoverage.takeAppKitPass(range, types: checkingTypes, hasOptions: !options.isEmpty, onlyOwlinkInFront: Self.onlyOwlinkInFront,
+                                        spellingUIShown: SpellingPanel.inUse, dictionary: Self.spellDictionary, tag: spellCheckerDocumentTag) {
             skippedTextChecks += 1
             return
         }
         super.checkText(in: range, types: checkingTypes, options: options)
     }
 
-    /// The spell checker's state for this document (SpellDictionaryState):
-    /// `learnedAmong`, the early check's marked words now learned.
-    func spellDictionaryState(learnedAmong words: [String] = []) -> SpellDictionaryState {
-        let sc = NSSpellChecker.shared
-        return SpellDictionaryState(language: sc.language(), automaticByLanguage: sc.automaticallyIdentifiesLanguages,
-                                    ignored: Set(sc.ignoredWords(inSpellDocumentWithTag: spellCheckerDocumentTag) ?? []),
-                                    learned: Set(words.filter { sc.hasLearnedWord($0) }))
+    /// The spelling dictionary Owlink reads and writes: the system's, or,
+    /// in a dev check (CEDRIC_CHECK), one of its own, so what Owlink and
+    /// the checks learn or ignore through it never reaches the user's real
+    /// dictionary (RecordingSpellDictionary). AppKit's own spelling
+    /// actions bypass it (Ignore Spelling below calls super; the context
+    /// menu's and the spelling panel's Learn): a check that invoked one
+    /// would write the real dictionary.
+    static let spellDictionary: SpellDictionaryService =
+        DevEnvironment.values["CEDRIC_CHECK"] != nil
+            ? RecordingSpellDictionary(language: { NSSpellChecker.shared.language() },
+                                       automatic: { NSSpellChecker.shared.automaticallyIdentifiesLanguages })
+            : SystemSpellDictionary()
+
+    /// The frontmost app is Owlink, or the lock screen (loginwindow): the
+    /// user can't be typing, nor learning a word, in any other app.
+    /// (NSWorkspace keeps it in-process: no round trip once it's known.)
+    static var onlyOwlinkInFront: Bool {
+        SpellFrontApp.onlyOwlinkInFront(isActive: NSApp.isActive,
+                                        frontmostBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
+    }
+
+    /// Once per view, before its first early check: a word learned in
+    /// Owlink clears the record (when AppKit posts its notice), and another
+    /// app coming to the front or any menu opening (each could learn one,
+    /// unheard) makes AppKit's pass ask about the marked words
+    /// (SpellCheckCoverage.asksLearned), as does the spelling panel
+    /// (SpellingPanel.inUse, read at the early check and the pass).
+    /// Removed with the view.
+    func watchSpellDictionary() {
+        guard spellLearnedWatch == nil else { return }
+        // var, not let: Swift 6.1 (CI's test-swift61) rejects a weak let.
+        nonisolated(unsafe) weak var view = self
+        spellLearnedWatch = SpellLearnedWatch(Self.spellDictionary) {
+            // Posted on the thread that learned the word: on the main
+            // thread at once, else as soon as it gets there.
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { view?.spellCoverage.clear() }
+            } else {
+                DispatchQueue.main.async { MainActor.assumeIsolated { view?.spellCoverage.clear() } }
+            }
+        }
+        NotificationCenter.default.addObserver(self, selector: #selector(anotherAppInFront(_:)),
+                                               name: NSApplication.didResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(anotherAppInFront(_:)),
+                                                          name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(menuOpened(_:)),
+                                               name: NSMenu.didBeginTrackingNotification, object: nil)
+    }
+
+    /// A menu opened in Owlink (the context menu's or Edit's Learn
+    /// Spelling, Guesses): a word may be learned there.
+    @objc private func menuOpened(_ note: Notification) {
+        guard !spellCoverage.isEmpty else { return }
+        spellCoverage.spellingUIShown()
+    }
+
+    /// Show Spelling and Grammar: the panel is AppKit's, its Learn may not
+    /// post a notice, so AppKit's pass asks about the marked words (and,
+    /// should its class be renamed, the panel is still known).
+    override func showGuessPanel(_ sender: Any?) {
+        spellCoverage.spellingUIShown()
+        super.showGuessPanel(sender)
+        SpellingPanel.known = NSSpellChecker.shared.spellingPanel
+    }
+
+    /// Owlink resigned active, or some app was activated: unless that is
+    /// Owlink (or the lock screen), a word may be learned there.
+    @objc private func anotherAppInFront(_ note: Notification) {
+        guard !spellCoverage.isEmpty else { return }
+        let app = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication).map { ($0.processIdentifier, $0.bundleIdentifier) }
+        guard SpellFrontApp.mayLearnElsewhere(activated: app, ownPID: ProcessInfo.processInfo.processIdentifier) else { return }
+        spellCoverage.anotherAppInFront()
     }
 
     /// Turning continuous checking off and on is how Fix Typos' Ignore
@@ -244,11 +339,14 @@ extension EditorTextView {
         let ns = string as NSString
         let inDocument = TextCheckingOffset.documentRanges(checked: range, results: results.map(\.range),
                                                            expected: textLayoutManager != nil ? .relative : .document)
+        let dictionary = Self.spellDictionary
         var kept: [NSTextCheckingResult] = []
         var marked: [NSRange] = []
         for (r, d) in zip(results, inDocument) {
             guard r.resultType == .spelling else { kept.append(r); continue }
             guard spelling.scopeContains(d, in: scope) else { continue }
+            // Checks only: a word the check's own dictionary has learned or ignored.
+            if dictionary.suppressesMarks, dictionary.suppressesMark(ns.substring(with: d), inSpellDocumentWithTag: spellCheckerDocumentTag) { continue }
             kept.append(r)
             marked.append(d)
         }

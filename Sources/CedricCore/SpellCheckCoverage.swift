@@ -22,8 +22,22 @@ import Foundation
 /// changed since the early check (`SpellDictionaryState`: Ignore, Learn,
 /// a language change). The view also clears it before continuous checking
 /// is turned off or on (Fix Typos' Ignore All and Learn Word redraw the
-/// marks that way), when its context menu opens (Learn, Ignore, Unlearn)
-/// and on Ignore Spelling.
+/// marks that way), when its context menu opens (Learn, Ignore, Unlearn),
+/// on Ignore Spelling, and when the spell checker says a word was learned
+/// or unlearned in Owlink (the spelling panel's Learn).
+///
+/// Learned words are the spell server's, a round trip per word to ask
+/// about, so the marked words are asked about at AppKit's pass only when
+/// a word could have been learned without Owlink hearing of it
+/// (`asksLearned`): when something other than Owlink or the lock screen
+/// has been the frontmost app since the early check, or when AppKit's
+/// spelling UI (the spelling panel, any menu: Learn Spelling) has been
+/// shown since. Words are learned where the user types; while Owlink is
+/// in front with none of its spelling UI up, a word is learned only by
+/// Owlink's own commands, which clear the record, and while the screen is
+/// locked nobody types into any app. The spell checker's in-process
+/// learn notice still clears the record early, but nothing rests on it:
+/// it isn't in the SDK, and a learn may not post it.
 public struct SpellCheckCoverage: Equatable, Sendable {
     /// What the early check covered; nil when there is nothing to skip.
     public private(set) var range: NSRange?
@@ -34,10 +48,14 @@ public struct SpellCheckCoverage: Equatable, Sendable {
     public private(set) var dictionary: SpellDictionaryState?
     /// The words the early check's results marked (to see whether one
     /// has been learned since), each once, in the order first marked:
-    /// AppKit's pass asks the spell server about every one of them
-    /// (`hasLearnedWord`, a round trip each), and a page of text marks the
-    /// same few words many times over.
+    /// asking the spell server about one is a round trip
+    /// (`hasLearnedWord`), and a page of text marks the same few words
+    /// many times over.
     public private(set) var markedWords: [String] = []
+    /// Another app may have been in front since the early check, or
+    /// AppKit's spelling UI shown, so a word may have been learned with
+    /// nothing telling Owlink: AppKit's pass asks about the marked words.
+    public private(set) var asksLearned = true
 
     public init() {}
 
@@ -66,13 +84,36 @@ public struct SpellCheckCoverage: Equatable, Sendable {
 
     public var isEmpty: Bool { range == nil }
 
-    /// The early check is about to check `range` for `types`.
-    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState) {
+    /// The early check is about to check `range` for `types`;
+    /// `onlyOwlinkInFront`: the frontmost app is Owlink or the lock screen;
+    /// `spellingUIShown`: AppKit's spelling panel is up (a word may be
+    /// learned there with no notice).
+    public mutating func checked(_ range: NSRange, types: UInt64, dictionary: SpellDictionaryState, onlyOwlinkInFront: Bool,
+                                 spellingUIShown: Bool = false) {
         self.range = range
         self.types = types & Self.publicTypes
         self.dictionary = dictionary
         answered = false
         markedWords = []
+        asksLearned = !onlyOwlinkInFront || spellingUIShown
+    }
+
+    /// The marked words AppKit's pass must ask the spell server about
+    /// (`hasLearnedWord`): all of them when a word could have been learned
+    /// unheard since the early check, none while only Owlink or the lock
+    /// screen was in front with no spelling UI shown.
+    public var wordsToAskLearned: [String] { asksLearned ? markedWords : [] }
+
+    /// Another app came (or may have come) to the front: a word may be learned there.
+    public mutating func anotherAppInFront() {
+        asksLearned = true
+    }
+
+    /// AppKit's spelling UI was shown in Owlink (the spelling panel, a
+    /// menu with Learn Spelling): a word may be learned there without the
+    /// spell checker's notice.
+    public mutating func spellingUIShown() {
+        asksLearned = true
     }
 
     /// The early check's results for `checked` haven't come back yet.
@@ -98,11 +139,21 @@ public struct SpellCheckCoverage: Equatable, Sendable {
         answered = false
         dictionary = nil
         markedWords = []
+        asksLearned = true
     }
 
     /// AppKit asks to check `request` for `requestTypes`, with options
     /// (`hasOptions`), the dictionary now being `dictionary`. True when the
     /// early check already did all of it (skip the request). Always clears.
+    ///
+    /// The accepted exception: a word learned by a background writer (a
+    /// script, another process learning while Owlink stays in front with
+    /// no spelling UI shown) after the early check and before this pass is
+    /// not asked about (`asksLearned` stays false), so this pass is
+    /// skipped and its underline stays. The ~1 s interval bounds only when
+    /// that can happen, not how long the stale underline lasts: it stays
+    /// until AppKit's next pass over that text (scrolling it out of view
+    /// and back, an edit there, a language change, Check Document Now).
     public mutating func take(_ request: NSRange, types requestTypes: UInt64, hasOptions: Bool = false,
                               dictionary now: SpellDictionaryState) -> Bool {
         defer { clear() }
@@ -115,9 +166,10 @@ public struct SpellCheckCoverage: Equatable, Sendable {
 /// What the spell checker's answers depend on besides the text: its
 /// language (or Automatic by Language), the words ignored in the
 /// document, and which of the early check's marked words have since been
-/// learned. Learning another word can't change the early marks (it
-/// wasn't marked); unlearning one is only offered by the context menu,
-/// which clears the record itself.
+/// learned (asked only when `SpellCheckCoverage.asksLearned`). Learning
+/// another word can't change the early marks (it wasn't marked);
+/// unlearning one is offered by the context menu, which clears the record
+/// itself, and by the spelling panel, which the view hears about.
 public struct SpellDictionaryState: Equatable, Sendable {
     public var language: String
     public var automaticByLanguage: Bool
