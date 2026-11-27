@@ -1161,6 +1161,81 @@ import Testing
         #expect(s.load()?.heldBuffers == [locked])
     }
 
+    /// A closed unsaved draft whose buffer a sync or restore moves aside
+    /// while a session is saved: held (the commit goes ahead, its entry
+    /// keeps the buffer), so once the buffer is back the next commit's
+    /// prune keeps it, and the next launch has it again. Let go on that
+    /// one miss (0.6 cleared hasBuffer), the prune deleted it.
+    @Test func aClosedDraftsBufferBrieflyMissingAtASaveIsNotPrunedWhenItReturns() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s = store(dir)
+        let closed = SessionTab(untitledName: "Draft", hasBuffer: true)
+        try s.writeBuffer(closed.id, text: "only copy of the draft", open: false)
+        try s.save(Session(windows: [], closedTabs: [closed]), requiring: [closed.id: .onDisk])
+        let aside = dir.appendingPathComponent("aside.txt")
+        try fm.moveItem(at: s.bufferURL(closed.id), to: aside)
+        #expect(throws: SessionStoreError.buffersMissing([closed.id])) {
+            try s.save(Session(windows: [], closedTabs: [closed]), requiring: [closed.id: .onDisk])
+        }
+        // What the save's completion does with it (AppDelegate.noteUnusableClosedBuffer).
+        #expect(s.holdNeededBuffer(closed.id) == .missing)
+        #expect(s.holdNeededBuffer(closed.id) == nil, "said once")
+        let session = Session(windows: [], closedTabs: [closed])
+        try s.save(session, requiring: [closed.id: .onDisk])
+        s.pruneBuffers(keeping: session.bufferIDs)
+        #expect(s.load()?.heldBuffers == [closed.id])
+        #expect(s.load()?.closedTabs?.first?.hasBuffer == true)
+        // Back; the next commit and its prune.
+        try fm.moveItem(at: aside, to: s.bufferURL(closed.id))
+        try s.save(session, requiring: [closed.id: .onDisk])
+        s.pruneBuffers(keeping: session.bufferIDs)
+        #expect(s.readBuffer(closed.id) == "only copy of the draft")
+        // The next launch reads it and lets the hold go; the tab stays closed with its text.
+        let relaunch = store(dir)
+        guard case .session(let loaded, _) = relaunch.loadForLaunch() else { Issue.record("readable"); return }
+        let retry = relaunch.retryHeldBuffers(loaded)
+        #expect(retry.unreadable.isEmpty && !relaunch.heldBuffers.contains(closed.id))
+        #expect(retry.session.closedTabs?.first { $0.id == closed.id }?.hasBuffer == true)
+        #expect(relaunch.readBuffer(closed.id) == "only copy of the draft")
+    }
+
+    /// Launch: an open draft whose buffer is briefly missing isn't restored,
+    /// but its buffer is held, so the commits without the tab don't prune
+    /// it once it is back, and the next launch recovers it.
+    @Test func anOpenDraftsBufferBrieflyMissingAtLaunchIsHeldAndRecoveredLater() throws {
+        let dir = tempDir()
+        defer { try? fm.removeItem(at: dir) }
+        let s0 = store(dir)
+        let draft = SessionTab(untitledName: "Draft", hasBuffer: true)
+        try s0.writeBuffer(draft.id, text: "open draft")
+        try s0.save(Session(windows: [SessionWindow(tabs: [draft])]))
+        let aside = dir.appendingPathComponent("aside.txt")
+        try fm.moveItem(at: s0.bufferURL(draft.id), to: aside)
+
+        let s1 = store(dir)
+        guard case .session(let first, _) = s1.loadForLaunch() else { Issue.record("readable"); return }
+        #expect(first.allTabs.contains { $0.id == draft.id && $0.hasBuffer })
+        // What restoreTab reads: missing, and held.
+        #expect(s1.readBufferHoldingMissing(draft.id) == .missing)
+        #expect(s1.heldBuffers.contains(draft.id))
+        // The untitled tab wasn't restored: the session saved after names no tab.
+        let empty = Session(windows: [])
+        try s1.save(empty)
+        s1.pruneBuffers(keeping: empty.bufferIDs)
+        try fm.moveItem(at: aside, to: s1.bufferURL(draft.id))
+        try s1.save(empty)
+        s1.pruneBuffers(keeping: empty.bufferIDs)
+        #expect(s1.readBuffer(draft.id) == "open draft", "back, and not pruned")
+        #expect(s1.load()?.heldBuffers == [draft.id])
+
+        let s2 = store(dir)
+        guard case .session(let second, _) = s2.loadForLaunch() else { Issue.record("readable"); return }
+        let retry = s2.retryHeldBuffers(second)
+        #expect(retry.recovered == [draft.id], "opens as a recovered tab")
+        #expect(s2.readBuffer(draft.id) == "open draft")
+    }
+
     @Test func injectedWriteFailuresFailEveryWrite() throws {
         let dir = tempDir()
         defer { try? fm.removeItem(at: dir) }
