@@ -100,20 +100,51 @@ them; orphan buffers are pruned after each save.
   (`SessionStore.claimWriter`), held for the life of the process. The
   kernel releases it when the process ends, crash or kill -9 included.
   Two writers would each commit and prune against their own snapshot,
-  so a second Owlink's save could delete the first's newest buffer. An
-  Owlink that can't take the lock (another one runs on the folder, for
-  instance after `open -n`), or can't open it, runs without a session.
-  It restores nothing, and writes, removes and prunes nothing there: the
-  store refuses (`notWriter`). It says so on the front tab, keeps its own
-  hot-closed text in memory, and its quit asks as a failed quit save does
-  (Save As, Keep Owlink Open, Try Again, Quit Anyway). It never claims
-  the lock later in the run, because a late writer would commit a
-  snapshot without the other's tabs. Handing the open request to the
-  running Owlink would need a channel both agree on. Staying open and
-  saying so is less surprising for a window the user asked for. A run
-  that neither restores nor saves (`CEDRIC_NO_RESTORE` and
-  `CEDRIC_NO_SESSION_SAVE`) doesn't take the lock. crash-check 13 runs
-  two processes on one folder.
+  so a second Owlink's save could delete the first's newest buffer.
+  - The lock is the file, not the descriptor. After the flock, and again
+    before every commit, buffer or journal write, removal and prune
+    (`ensureWriter`), the store checks that its descriptor is still the
+    file at `session.lock` (fstat against lstat: device and inode).
+    Restoring the folder from a backup replaces that file, and a second
+    Owlink could lock the new one while the first still holds the old.
+    A store whose lock is lost, or missing, never writes there again.
+    `claimWriter` asked again checks too. The folder is never pruned
+    without the check just before.
+  - An Owlink that can't take the lock (another runs on the folder, for
+    instance after `open -n`), or whose lock was lost, writes a store of
+    its own: `instances/<uuid>/` in the session folder, owner-only, with
+    its own `session.lock`, locked before the folder gets its name (made
+    as `.new-<uuid>`, then renamed) and held for the life of the process.
+    It restores nothing from the session folder. Its timed backups,
+    hot-closed text and journal go to its store, as a writer's would, so
+    its crash keeps its text, and its quit has nothing to ask. A store
+    that lost its lock copies the buffers it had committed or journaled
+    there and journals them; the app then writes every open tab's text
+    again from memory (`SessionStore.moves`), and says so on the front
+    tab. Only if no store of its own can be made does an Owlink run
+    without a session, as before: the store refuses (`notWriter`), its
+    hot-closed text is kept in memory, and its quit asks as a failed quit
+    save does.
+  - At launch the session folder's writer adopts dead instance stores in
+    `loadForLaunch`, before closed-tab expiry or any prune. A store whose
+    lock it can take has no running Owlink; one whose lock is held is
+    left alone. The dead store's session is read as a launch reads one
+    (its journal applied), and each unsaved text in it is written into
+    the session folder and journaled: its open tabs in a window of their
+    own, its closed tabs on the closed list, loose texts as recovered
+    tabs. A text whose id is taken here by other text gets a new id; the
+    same text already here is skipped (a launch killed before its commit
+    adopts again). The dead store stays, locked, until the next commit
+    here has reached the disk, and is then removed, unless its lock file
+    changed meanwhile. A store with a text or a session that can't be
+    read stays whole for the next launch. A run that saves no session
+    (`CEDRIC_NO_SESSION_SAVE`, the dumps) doesn't adopt.
+  - The session folder is never claimed later in the run, because a late
+    writer would commit a snapshot without the other's tabs. Handing the
+    open request to the running Owlink would need a channel both agree
+    on. A run that neither restores nor saves (`CEDRIC_NO_RESTORE` and
+    `CEDRIC_NO_SESSION_SAVE`) doesn't take the lock. crash-check 13 and
+    14 run two and three processes on one folder.
 - Only each window's selected tab is built during launch. The others are
   built 0.25 s after the first frame, one per run-loop turn, into their
   saved places in the tab bar (AppKit spends ~10 ms adding a window to a
