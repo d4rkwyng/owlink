@@ -192,10 +192,21 @@ final class TextDocument: UIDocument {
     /// The private copy of the file as opened, if one was kept.
     func openedBytes() -> Data? { SaveSafetyStores.revert.load(id: openedCopyID) }
 
-    /// The file's bytes as last read or written here (files up to the
-    /// safety-copy limit), else the opened version's: what Reopen with
-    /// Encoding… reads again.
-    func bytesForReopen() -> Data? { bytesOnDisk ?? openedBytes() }
+    /// The file's bytes as they are on disk now, for Reopen with Encoding…:
+    /// a coordinated read of the document's URL (other writers finish
+    /// first) with the access the document already has, not a cached copy.
+    /// Nil when it can't be read.
+    func bytesForReopen() -> Data? {
+        let url = fileURL
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        var data: Data?
+        var error: NSError?
+        NSFileCoordinator(filePresenter: self).coordinate(readingItemAt: url, options: [.withoutChanges], error: &error) { u in
+            data = try? Data(contentsOf: u)
+        }
+        return error == nil ? data : nil
+    }
 
     func discardOpenedCopy() { SaveSafetyStores.revert.clear(id: openedCopyID) }
 

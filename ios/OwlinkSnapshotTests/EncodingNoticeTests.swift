@@ -16,6 +16,8 @@ final class EncodingNoticeTests: XCTestCase {
     private func editor(bytes: Data, name: String = "old.txt") throws -> EditorViewController {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true).appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try bytes.write(to: url)
         let doc = TextDocument(fileURL: url)
         try doc.load(fromContents: bytes, ofType: nil)
         let editor = EditorViewController(document: doc, readModeOnOpen: false)
@@ -70,6 +72,29 @@ final class EncodingNoticeTests: XCTestCase {
         e.textView.undoManager?.undo()
         XCTAssertEqual(e.textView.text, before)
         XCTAssertEqual(e.document.encoding, guessed)
+    }
+
+    /// Reopen reads the file as it is on disk now (not the bytes read at
+    /// open), and one Undo brings back the text, the encoding and the guess.
+    func testReopenReadsTheFileChangedOnDiskAndUndoRestoresTheGuess() throws {
+        let e = try editor(bytes: eightBit)
+        let guessed = e.document.encoding
+        let before = e.textView.text ?? ""
+        XCTAssertTrue(e.document.encodingGuessed)
+        // Changed on disk after it was opened: "naïve" in Latin-1.
+        let changed = Data([0x6E, 0x61, 0xEF, 0x76, 0x65, 0x0A])
+        try changed.write(to: e.document.fileURL)
+        XCTAssertTrue(e.reopen(with: .latin1))
+        XCTAssertEqual(e.textView.text, TextCodec.decode(changed, as: .latin1)?.text)
+        XCTAssertEqual(e.document.encoding, .latin1)
+        XCTAssertFalse(e.document.encodingGuessed)
+        XCTAssertTrue(e.encodingNotice?.isHidden ?? true)
+        e.textView.undoManager?.undo()
+        XCTAssertEqual(e.textView.text, before)
+        XCTAssertEqual(e.document.encoding, guessed)
+        XCTAssertTrue(e.document.encodingGuessed, "the guess is back")
+        XCTAssertFalse(e.encodingNotice?.isHidden ?? true, "and its notice")
+        XCTAssertFalse(e.textView.undoManager?.canUndo ?? true, "one step")
     }
 
     func testReopenAsUTF8RefusesInvalidBytes() throws {

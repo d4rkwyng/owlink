@@ -2641,18 +2641,33 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                                           mixedLineEndings: document.mixedLineEndings,
                                                           languageIsManual: document.language.isManual,
                                                           styleCheck: AppSettings.styleCheckSettings),
-                                  autoReviewCapped: autoReviewCapSize != nil)
+                                  autoReviewCapped: autoReviewCapped)
     }
 
     /// The document's size when it is over the auto-review cap (100 KB or
     /// 2,000 lines, as on the Mac), else nil. Cheap for most documents: the
     /// UTF-8 count is only made when the UTF-16 length can't settle it.
+    /// The exact UTF-8 count is made only here, for the confirmation
+    /// dialog; scheduling uses `autoReviewCapped`.
     var autoReviewCapSize: AutoReviewCap.Size? {
         let ns = textView.textStorage.string as NSString
-        let lines = lineIndex.length == ns.length ? AutoReviewCap.lineCount(lineIndex) : AutoReviewCap.lineCount(ns)
+        let lines = autoReviewLines(ns)
         let utf8 = { ns.lengthOfBytes(using: String.Encoding.utf8.rawValue) }
         guard AutoReviewCap.reason(utf16Length: ns.length, lines: lines, utf8Bytes: utf8) != nil else { return nil }
         return AutoReviewCap.Size(utf8Bytes: utf8(), lines: lines)
+    }
+
+    /// Over the auto-review cap, by the cheap verdict (UTF-16 length and
+    /// lines; UTF-8 counted only when those can't settle it): what the
+    /// quiet review path schedules by, after every edit pause.
+    var autoReviewCapped: Bool {
+        let ns = textView.textStorage.string as NSString
+        return AutoReviewCap.reason(utf16Length: ns.length, lines: autoReviewLines(ns),
+                                    utf8Bytes: { ns.lengthOfBytes(using: String.Encoding.utf8.rawValue) }) != nil
+    }
+
+    private func autoReviewLines(_ ns: NSString) -> Int {
+        lineIndex.length == ns.length ? AutoReviewCap.lineCount(lineIndex) : AutoReviewCap.lineCount(ns)
     }
 
     /// Asking about a capped file was confirmed once (Ask Cedric or Check

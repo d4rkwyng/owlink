@@ -168,28 +168,42 @@ extension EditorViewController {
         present(a, animated: true)
     }
 
-    /// The file's bytes read again as `e`, as one undoable change of text
-    /// and encoding (the encoding is then the user's pick, not a guess).
-    /// Nothing changes when they aren't valid in `e`.
+    /// The file read again from disk now (`bytesForReopen`) as `e`, as one
+    /// undoable change of text, encoding and guess (the encoding is then
+    /// the user's pick, not a guess; Undo brings the guess back). Nothing
+    /// changes when the file can't be read or isn't valid in `e`.
     @discardableResult
     func reopen(with e: TextEncoding) -> Bool {
         guard let data = document.bytesForReopen(), let decoded = TextCodec.decode(data, as: e) else {
             toast(String(localized: "\(document.displayName) can’t be read as \(e.displayName)."))
             return false
         }
-        if decoded.text != textView.text {
-            guard explicitChangeAllowed() else { return false }
-            replaceAllText(with: decoded.text)
-        }
+        let textChanges = decoded.text != textView.text
+        if textChanges { guard explicitChangeAllowed() else { return false } }
+        let actionName = String(localized: "Reopen with Encoding")
+        let um = textView.undoManager
+        um?.beginUndoGrouping()
+        if textChanges { replaceAllText(with: decoded.text) }
         let change = FormatChange(from: .init(encoding: document.encoding, lineEnding: document.lineEnding,
                                               mixedLineEndings: document.mixedLineEndings),
                                   to: .init(encoding: decoded.encoding, lineEnding: decoded.lineEnding,
                                             mixedLineEndings: decoded.mixedLineEndings))
-        if change.to != change.from { applyFormat(change, actionName: String(localized: "Reopen with Encoding")) }
-        document.encodingGuessed = false
-        encodingNoticeKept = true
-        refreshEncodingNotice()
+        if change.to != change.from { applyFormat(change, actionName: actionName) }
+        setEncodingGuess(guessed: false, kept: true, actionName: actionName)
+        um?.setActionName(actionName)
+        um?.endUndoGrouping()
         updateStatus()
         return true
+    }
+
+    /// The guess state and its notice, undoably (part of Reopen's one step).
+    private func setEncodingGuess(guessed: Bool, kept: Bool, actionName: String) {
+        let old = (document.encodingGuessed, encodingNoticeKept)
+        document.encodingGuessed = guessed
+        encodingNoticeKept = kept
+        textView.undoManager?.registerUndo(withTarget: self) {
+            $0.setEncodingGuess(guessed: old.0, kept: old.1, actionName: actionName)
+        }
+        refreshEncodingNotice()
     }
 }
