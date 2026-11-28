@@ -17,6 +17,61 @@ in Xcode (a change made in Xcode is lost the next time the script runs).
 Source files can be added in Xcode or Finder: `ios/Owlink`,
 `ios/OwlinkUITests` and `Tests/*` are synchronized folders.
 
+## On the 0.6.0 parity branch (not released)
+
+Speed, memory and Cedric (Mac 0.5.3–0.6.0, where they apply on iOS):
+
+- **Spelling off checks nothing.** With "Check spelling while typing" off,
+  the system's grammar marks go too (as the Mac turns off AppKit's
+  automatic text checking with spelling), and Settings dims the grammar
+  switch. Math results after "=" (iOS 18) are off with the other
+  substitutions and inline predictions.
+- **Opening a file never loads the built-in model.** Ask Cedric, Check
+  for Risks and Check with Cedric are requests you made and may load it;
+  the automatic check only uses a model already in memory. **Load model
+  at launch** (Settings › Built-in Models, off by default) loads it in
+  the background at launch, on a device (no simulator runtime), still
+  under the iOS memory check and the 8K phone window.
+- **No automatic Cedric review of large files** (over 100 KB or 2,000
+  lines). Ask Cedric and Check with Cedric ask once first.
+- **Ask Cedric**: a new question no longer waits behind the last (the old
+  one is abandoned); "Processing prompt… 12 s" while nothing has arrived;
+  "fix the typos" opens Fix Typos (offline); edit cards say "Proposed, not
+  applied" with their checks' warnings, and an answer's "Fixed …" is
+  worded as a proposal. Recent hints can be reopened from the owl's
+  long-press menu.
+- Shared, with no iOS change needed: the line index's smaller starts and
+  big-file buffers (TextCodec), the 25 M-character / 20,000-character
+  large-document thresholds, the combined whole-document answer,
+  Summarise in parts and the citation filter, server context discovery
+  (long LM Studio and Ollama prompts are not silently cut).
+
+Features (Mac 0.6.0, iOS-style):
+
+- **Backlinks and Tags…** (More ›): a sheet with Outline, Backlinks (notes
+  whose `[[links]]` lead here) and Tags (every #tag and its notes), read
+  from the vault in a folder the preview was granted, or the document's
+  folder when Owlink can read it. With the caret in a `[[link]]`, the
+  edit menu offers Open "Note". No `[[` completion yet.
+- **Draw Diagrams and Math** (Preview menu, off by default, per
+  document): Mermaid and KaTeX, bundled in the app and served by its own
+  handler; only those files may run, the page's own scripts stay off,
+  nothing is fetched. Off again for another document or a reload.
+- **The Context Bar's Image button**: Photo Library…, Choose File… or the
+  empty Image Link. Picked images are copied into `images/` next to the
+  document (never overwriting) with relative links, one undo step. It
+  needs the document's folder (granted, or Owlink's own); otherwise it
+  asks for it.
+- **CSV preview**: the # cell above the row numbers restores file order.
+- **Guessed encoding**: a file that isn't valid UTF-8 says so in a slim
+  notice with Reopen with Encoding… and Keep ("Latin-1 (guessed)" in the
+  status bar until then). Reopen is also in More › Encoding and Line
+  Endings.
+
+Not on iOS: the Mac's ChunkedContentStorage (iOS doesn't chunk long
+lines; it pauses the extras in large mode, as before) and its early
+spelling pass (AppKit only).
+
 ## New in 0.5.2 (16)
 
 Brings the shared code up to Mac Owlink 0.5.2 (tag v0.5.2) and matches
