@@ -178,7 +178,19 @@ final class SidebarClickBench {
             Kind(name: "pcap_60m", ext: "pcap", bytes: 60 * mb) { k in Self.pcap(bytes: 60 * mb, seed: UInt64(90 + k)) },
         ]
         if let only = DevEnvironment.values["CEDRIC_SIDEBARCLICK_KINDS"] {
-            let names = Set(only.split(separator: ",").map(String.init))
+            // A name that is no kind (pcap_5mb for pcap_5m), or no name at
+            // all, measured nothing and reported no failure: it fails
+            // here, before a byte of the fixture is written.
+            let names = only.split(separator: ",").map(String.init)
+            let known = kinds.map(\.name)
+            let unknown = names.filter { !known.contains($0) }
+            guard !names.isEmpty, unknown.isEmpty else {
+                kinds = []
+                DevChecks.expect(false, "CEDRIC_SIDEBARCLICK_KINDS names kinds to measure",
+                                 (names.isEmpty ? "no names" : "no such kind: " + unknown.joined(separator: ", "))
+                                     + "; kinds: " + known.joined(separator: ","))
+                return
+            }
             kinds = kinds.filter { names.contains($0.name) }
         }
         // Derek's own names for the first of each; the rest are copies.
@@ -381,6 +393,8 @@ final class SidebarClickBench {
     func start() {
         let t0 = Self.now()
         makeFixture()
+        // Nothing to measure (a kind asked for that doesn't exist): failed above.
+        guard !kinds.isEmpty else { DevChecks.finish(); return }
         print(String(format: "sidebarclick: fixture written in %.1f s", Self.now() - t0))
         // A tab with a file outside the folder, as when Owlink was already open.
         let other = app.open(DevChecks.write("notes-outside.txt", "already open\n"))
@@ -445,6 +459,7 @@ final class SidebarClickBench {
 
     func report() {
         probe?.invalidate()
+        DevChecks.expect(!order.isEmpty, "something was measured", "no samples for any kind")
         for key in order {
             let list = samples[key] ?? []
             DevChecks.expect(!list.isEmpty, "\(key): \(list.count) samples")

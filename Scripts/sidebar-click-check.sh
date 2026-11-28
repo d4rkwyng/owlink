@@ -19,6 +19,13 @@
 #
 #   Scripts/sidebar-click-check.sh [--repeats N] [--kinds a,b] [APP]   default "dist/Owlink.app"
 #
+# --kinds runs only the kinds named (the names in LIMITS below, without
+# the mode: md_small, pcap_5m, ...). A name that is not a kind, or an
+# empty list, fails at once, before the app is launched or a file is
+# written: a typo measured nothing and used to pass. Every kind that was
+# asked for (all of them without --kinds) must report both metrics for
+# each of its modes; a missing one fails.
+#
 # APP must be a check build (Scripts/bundle-app.sh, not --release); build
 # it with the release configuration (bundle-app.sh does) since a debug
 # build is not representative. Needs a GUI session (works with the screen
@@ -29,29 +36,16 @@ cd "$(dirname "$0")/.."
 APP="dist/Owlink.app"
 REPEATS=7
 KINDS=
+KINDS_GIVEN=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --repeats) REPEATS=$2; shift ;;
-        --kinds) KINDS=$2; shift ;;
-        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+        --kinds) [ $# -ge 2 ] || { echo "--kinds needs a list: a,b" >&2; exit 2; }; KINDS=$2; KINDS_GIVEN=1; shift ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         *) APP=${1%/} ;;
     esac
     shift
 done
-BIN="$APP/Contents/MacOS/Cedric"
-[ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
-. Scripts/check-env.sh
-cedric_require_check_build "$APP"
-W=$(mktemp -d "${TMPDIR:-/tmp}/cedric-sidebarclick.XXXXXX")
-trap 'rm -rf "$W"' EXIT
-cedric_isolate "$W"
-export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$W/out"
-export TMPDIR="$W/"
-out=$(env CEDRIC_CHECK=sidebarclick CEDRIC_OWL=1 CEDRIC_SIDEBARCLICK_REPEATS="$REPEATS" ${KINDS:+CEDRIC_SIDEBARCLICK_KINDS="$KINDS"} \
-    perl -e 'alarm 1200; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
-echo "$out" | grep -E "^(sidebarclick:|check: (FAIL|note|done))" || true
-echo "$out" | grep -E "^(metric|phase) " || true
-
 # Limits in ms: kind_mode shown-median stall-max.
 LIMITS="
 md_small_cold 180 210
@@ -83,6 +77,39 @@ pcap_60m_cold 600 100
 pcap_60m_reopen 600 100
 pcap_60m_switch 60 60
 "
+# The kinds LIMITS knows (a key without its mode), and whether --kinds
+# asked for one (all of them without --kinds).
+KNOWN=$(echo "$LIMITS" | awk 'NF { sub(/_[a-z]+$/, "", $1); print $1 }' | sort -u)
+asked() { [ "$KINDS_GIVEN" = 0 ] || case ",$KINDS," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+if [ "$KINDS_GIVEN" = 1 ]; then
+    bad=
+    n=0
+    IFS=, read -r -a names <<< "$KINDS"
+    for k in ${names[@]+"${names[@]}"}; do
+        n=$((n + 1))
+        echo "$KNOWN" | grep -qxF -- "$k" || bad="$bad '$k'"
+    done
+    if [ $n = 0 ] || [ -n "$bad" ]; then
+        if [ $n = 0 ]; then echo "sidebar-click-check: --kinds names no kind" >&2; else echo "sidebar-click-check: --kinds: no such kind:$bad" >&2; fi
+        echo "  kinds: $(echo $KNOWN | tr ' ' ',')" >&2
+        echo "sidebar-click-check: FAILED" >&2
+        exit 1
+    fi
+fi
+BIN="$APP/Contents/MacOS/Cedric"
+[ -x "$BIN" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
+. Scripts/check-env.sh
+cedric_require_check_build "$APP"
+W=$(mktemp -d "${TMPDIR:-/tmp}/cedric-sidebarclick.XXXXXX")
+trap 'rm -rf "$W"' EXIT
+cedric_isolate "$W"
+export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$W/out"
+export TMPDIR="$W/"
+out=$(env CEDRIC_CHECK=sidebarclick CEDRIC_OWL=1 CEDRIC_SIDEBARCLICK_REPEATS="$REPEATS" ${KINDS:+CEDRIC_SIDEBARCLICK_KINDS="$KINDS"} \
+    perl -e 'alarm 1200; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null || true)
+echo "$out" | grep -E "^(sidebarclick:|check: (FAIL|note|done))" || true
+echo "$out" | grep -E "^(metric|phase) " || true
+
 fail=0
 m() { echo "$out" | sed -n "s/^metric $1=//p"; }
 check() { # name value limit
@@ -91,16 +118,19 @@ check() { # name value limit
     if [ "$ok" = 1 ]; then echo "  PASS $1 = $2 (< $3)"; else echo "  FAIL $1 = $2 (limit $3)"; fail=1; fi
 }
 echo "$out" | grep -q "check: done .* 0 failed" || { echo "  FAIL the check failed or didn't finish"; fail=1; }
+measured=0
 while read -r key shown stall; do
     [ -n "$key" ] || continue
-    v=$(m "${key}_shown_median_ms")
-    if [ -z "$v" ]; then
-        # Not run (--kinds), or missing.
-        [ -n "$KINDS" ] && continue
-        echo "  FAIL $key: no metrics"; fail=1; continue
-    fi
-    check "${key}_shown_median_ms" "$v" "$shown"
-    check "${key}_stall_max_ms" "$(m "${key}_stall_max_ms")" "$stall"
+    # Not asked for (--kinds): nothing to require.
+    asked "${key%_*}" || continue
+    for metric in shown_median_ms stall_max_ms; do
+        v=$(m "${key}_$metric")
+        # Asked for and not measured is a failure, never a skip.
+        if [ -z "$v" ]; then echo "  FAIL ${key}_$metric: no metric"; fail=1; continue; fi
+        measured=$((measured + 1))
+        if [ $metric = shown_median_ms ]; then check "${key}_$metric" "$v" "$shown"; else check "${key}_$metric" "$v" "$stall"; fi
+    done
 done <<< "$LIMITS"
+[ $measured -gt 0 ] || { echo "  FAIL nothing was measured"; fail=1; }
 [ $fail = 0 ] && echo "sidebar-click-check: all within limits" || echo "sidebar-click-check: FAILED" >&2
 exit $fail
