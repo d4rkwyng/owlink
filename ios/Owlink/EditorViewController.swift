@@ -243,6 +243,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var recoveryWriter: RecoveryWriter!
     /// The document is closing (Close, or a note opened from a link).
     private(set) var closing = false
+    /// The folder grants this editor reads and writes beneath (tests: a
+    /// registry of their own).
+    lazy var folderGrants: PreviewFolderGrants = .shared
+    /// Tests: who opens a linked note once this editor has closed (else
+    /// the browser that presented it), and how the editor leaves the
+    /// screen (a test window's dismissal never finishes without a host app).
+    weak var linkedNoteOpenerForTests: LinkedNoteOpener?
+    var dismissEditorForTests: ((@escaping () -> Void) -> Void)?
     /// Why the text is read-only right now (nothing: editable).
     private(set) var editGate: EditGate
     /// An iCloud conflict is being dealt with (copied, then asked).
@@ -3668,7 +3676,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     func openLinked(_ url: URL, expecting: Beneath.FileID? = nil) {
         guard url.standardizedFileURL != document.fileURL.standardizedFileURL else { return }
-        let opener = navigationController?.presentingViewController as? LinkedNoteOpener
+        let opener = linkedNoteOpenerForTests ?? navigationController?.presentingViewController as? LinkedNoteOpener
         afterClose = { [weak opener] in opener?.openLinkedNote(at: url, expecting: expecting) }
         closeDocument()
     }
@@ -4062,6 +4070,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // and stays there if the editor is told it appeared after this.
         dismissRequested = true
         handWindowBackToPhone()
+        if let hook = dismissEditorForTests { hook(done); return }
         let shown: UIViewController = navigationController ?? self
         if let presenter = shown.presentingViewController {
             presenter.dismiss(animated: true, completion: done)

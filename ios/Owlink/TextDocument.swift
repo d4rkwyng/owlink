@@ -105,7 +105,22 @@ final class TextDocument: UIDocument {
         var errorDescription: String? { String(localized: "The note changed after it was checked, so it wasn’t opened.") }
     }
 
+    /// Why the last read failed (nil: it didn't): set on UIDocument's read
+    /// queue, looked at once the open has finished. The browser decides
+    /// from it, not by reading the file again (`DocumentOpening`).
+    private(set) var readFailure: Error?
+
     override func read(from url: URL) throws {
+        do {
+            try readOnce(from: url)
+            readFailure = nil
+        } catch {
+            readFailure = error
+            throw error
+        }
+    }
+
+    private func readOnce(from url: URL) throws {
         guard let expected = expectedFile else { return try super.read(from: url) }
         let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw LinkedNoteError.changed }

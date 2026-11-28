@@ -271,26 +271,16 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
             }
         }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
-        let doc = TextDocument.linkedNote(at: url, expecting: expecting)
-        doc.openBinaryAnyway = binaryOK
-        doc.open { [weak self] ok in
+        DocumentOpening.open(url, binaryOK: binaryOK, expecting: expecting, offerBinary: !reopening) { [weak self] outcome in
             guard let self else {
-                if ok { doc.close(completionHandler: nil) }
+                if case .opened(let doc) = outcome { doc.close(completionHandler: nil) }
                 finishReopen(false)
                 return
             }
-            // Opened meanwhile in another window: that one keeps it.
-            if ok, self.bringForwardIfOpenElsewhere(url) {
-                doc.close(completionHandler: nil)
-                finishReopen(false)
-                return
-            }
-            if !ok, reopening {
-                finishReopen(false)
-                return
-            }
-            guard ok else {
-                if !binaryOK, (try? Data(contentsOf: url, options: .mappedIfSafe)).map(TextCodec.looksBinary) == true {
+            guard case .opened(let doc) = outcome else {
+                if reopening { finishReopen(false); return }
+                switch outcome {
+                case .binary:
                     let a = UIAlertController(title: String(localized: "This looks like a binary file"),
                                               message: String(localized: "Open it as text anyway? Saving it may damage it."), preferredStyle: .alert)
                     a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
@@ -298,9 +288,17 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                         self.presentDocument(at: url, binaryOK: true, recovered: recovered, expecting: expecting)
                     })
                     self.present(a, animated: true)
-                } else {
+                case .refused(let message):
+                    self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), message)
+                default:
                     self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil)
                 }
+                return
+            }
+            // Opened meanwhile in another window: that one keeps it.
+            if self.bringForwardIfOpenElsewhere(url) {
+                doc.close(completionHandler: nil)
+                finishReopen(false)
                 return
             }
             // Unsaved text from a crash, newer than the file: restored if
@@ -337,6 +335,47 @@ enum UIHostingSettings {
         let host = UIHostingController(rootView: SettingsView())
         host.modalPresentationStyle = .formSheet
         return host
+    }
+}
+
+/// How the browser opens a document: the outcome its UI acts on.
+@MainActor
+enum DocumentOpening {
+    enum Outcome {
+        case opened(TextDocument)
+        /// It looks binary: the browser asks before opening it as text.
+        case binary
+        /// A linked note that is no longer the file it was checked to be.
+        case refused(String)
+        case failed
+    }
+
+    /// Tests: each outcome, as it is handed to the browser.
+    static var outcomeForTests: ((URL, Outcome) -> Void)?
+
+    /// Opens `url` (`expecting`: see `TextDocument.linkedNote`). A
+    /// failure is told apart by what the document's own read found
+    /// (`TextDocument.readFailure`): a linked note that is no longer the
+    /// file it was checked to be is refused, bytes that look binary are
+    /// `.binary` when `offerBinary`. Nothing reads `url` a second time.
+    static func open(_ url: URL, binaryOK: Bool, expecting: Beneath.FileID?, offerBinary: Bool = true,
+                     _ handOver: @escaping (Outcome) -> Void) {
+        let done: (Outcome) -> Void = { outcomeForTests?(url, $0); handOver($0) }
+        let doc = TextDocument.linkedNote(at: url, expecting: expecting)
+        doc.openBinaryAnyway = binaryOK
+        doc.open { ok in
+            if ok { done(.opened(doc)); return }
+            // From the read the document made (for a linked note: the one
+            // checked descriptor); the path is never read again here.
+            switch doc.readFailure {
+            case let e as TextDocument.LinkedNoteError:
+                done(.refused(e.localizedDescription))
+            case TextDocument.OpenError.binary? where offerBinary && !binaryOK:
+                done(.binary)
+            default:
+                done(.failed)
+            }
+        }
     }
 }
 
