@@ -319,7 +319,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         window.isRestorable = false
         super.init(window: window)
         window.delegate = self
-        buildViews()
+        OpenSignpost.interval("build views") { buildViews() }
         // The text gets the keyboard when the tab is first shown. Without
         // this AppKit picks the first view of the key-view loop, and with
         // Full Keyboard Access on that is a button: the Context Bar's
@@ -341,19 +341,19 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             return NSRange(location: index.starts[line], length: index.lineLength(line))
         }
         doc.currentText = { [weak self] in self?.textView.textStorage?.mutableString }
-        setText(text, prepared: prepared)
-        applyAppearance()
+        OpenSignpost.interval("setText") { setText(text, prepared: prepared) }
+        OpenSignpost.interval("applyAppearance") { applyAppearance() }
         PerfTrace.mark("apply_appearance")
         observe()
-        updateContextBar()
+        OpenSignpost.interval("context bar") { updateContextBar() }
         updateTitle()
-        setOwlVisible(Settings.shared.showOwl)
+        OpenSignpost.interval("owl visible") { setOwlVisible(Settings.shared.showOwl) }
         PerfTrace.mark("owl")
-        recheckWriteAccess()
-        AfterFirstFrame.run { [weak self] in self?.gitTabShown() }
+        OpenSignpost.interval("write access") { recheckWriteAccess() }
+        AfterFirstFrame.run { [weak self] in OpenSignpost.interval("git tab shown") { self?.gitTabShown() } }
         // The visible text's misspellings as soon as the first frame is up
         // (AppKit's own first pass comes about 1 s after layout).
-        AfterFirstFrame.run { [weak self] in self?.spelling.checkVisibleNow() }
+        AfterFirstFrame.run { [weak self] in OpenSignpost.interval("spelling visible") { self?.spelling.checkVisibleNow() } }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -535,15 +535,18 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
         doc.detectedIndentation = nil
         // Large mode first, so TextKit never lays out a huge line whole.
         let ns = text as NSString
-        let incoming = prepared.map(\.lineIndex).flatMap { $0.length == ns.length ? $0 : nil } ?? LineIndex(ns)
+        let incoming = prepared.map(\.lineIndex).flatMap { $0.length == ns.length ? $0 : nil }
+            ?? OpenSignpost.interval("line index") { LineIndex(ns) }
         let large = LargeDocument.setupDecision(for: incoming)
-        applyLargeMode(large.reason, newText: true, chunks: large.needsChunks)
+        OpenSignpost.interval("large mode") { applyLargeMode(large.reason, newText: true, chunks: large.needsChunks) }
         PerfTrace.mark("large_check")
         let attrs = baseAttributes()
         let storage = textView.textStorage!
-        storage.beginEditing()
-        storage.setAttributedString(NSAttributedString(string: text, attributes: attrs))
-        storage.endEditing()
+        OpenSignpost.interval("set storage") {
+            storage.beginEditing()
+            storage.setAttributedString(NSAttributedString(string: text, attributes: attrs))
+            storage.endEditing()
+        }
         PerfTrace.mark("set_text_storage")
         // The storage holds exactly `text`: its index is the one just made.
         lineIndex = incoming.length == storage.length ? incoming : LineIndex(storage.string as NSString)
@@ -588,13 +591,13 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             for pane in panes { updateTypewriterInset(pane) }
         }
         updateGutterWidth()
-        colorizer.recolorAll()
+        OpenSignpost.interval("highlighting") { colorizer.recolorAll() }
         PerfTrace.mark("recolor_all")
-        updateStatus()
+        OpenSignpost.interval("status") { updateStatus() }
         PerfTrace.mark("status")
         gitState?.scheduleRefresh()
         // Opening or reloading is not writing: this count is the baseline.
-        armDailyBaseline()
+        OpenSignpost.interval("word count baseline") { armDailyBaseline() }
         // Not valid UTF-8, or mixed line endings: say so (FileNotices.swift).
         refreshFileNotices()
     }

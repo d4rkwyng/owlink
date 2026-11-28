@@ -386,7 +386,7 @@ public enum TextCodec {
     public static func readTextStamped(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false,
                                        hooks: ReadHooks? = nil) throws -> (text: DecodedText?, stamp: DiskStamp) {
         hooks?.before?(url)
-        let (data, stamp) = try snapshotStamped(of: url)
+        let (data, stamp) = try OpenSignpost.interval("raw read") { try snapshotStamped(of: url) }
         hooks?.after?(url)
         return (decode(data, as: encoding, shareBytes: shareBytes), stamp)
     }
@@ -431,17 +431,16 @@ public enum TextCodec {
     /// mapped file. And best for a caller that copies the text and lets it
     /// go (opening a file into a tab): kept, it keeps all of `data`.
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
-        var enc: TextEncoding
-        var scanned: UTF8Scan?
-        var guessed = false
-        if let encoding {
-            enc = encoding
-        } else if let found = detectBOMOrUTF16(data) {
-            enc = found
-        } else {
-            let scan = data.withUnsafeBytes { scanUTF8($0) }
-            if scan.valid { enc = .utf8; scanned = scan } else { enc = guessEightBit(data); guessed = true }
-        }
+        let detected: (TextEncoding, UTF8Scan?, guessed: Bool) = encoding.map { ($0, nil, false) }
+            ?? OpenSignpost.interval("encoding detection") {
+                if let found = detectBOMOrUTF16(data) { return (found, nil, false) }
+                let scan = data.withUnsafeBytes { scanUTF8($0) }
+                return scan.valid ? (.utf8, scan, false) : (guessEightBit(data), nil, true)
+            }
+        var enc = detected.0
+        var scanned = detected.1
+        let guessed = detected.guessed
+        let binary = OpenSignpost.interval("looksBinary") { looksBinary(data) }
         var body = data
         if !enc.bom.isEmpty, data.starts(with: enc.bom) { body = data.dropFirst(enc.bom.count) }
         if enc == .utf8 || enc == .utf8BOM {
@@ -456,23 +455,28 @@ public enum TextCodec {
                 enc = .utf8BOM
                 scanned = nil
             }
-            return decodeUTF8(body, scan: scanned, encoding: enc, looksBinary: looksBinary(data), shareBytes: shareBytes)
+            let (b, s) = (body, scanned)
+            return OpenSignpost.interval("decode") {
+                decodeUTF8(b, scan: s, encoding: enc, looksBinary: binary, shareBytes: shareBytes)
+            }
         }
         if enc == .utf16LE || enc == .utf16BE, body.count % 2 != 0 { return nil }
-        var decoded = String(data: body, encoding: enc.foundation)
-        // A guessed 8-bit encoding that can't decode a byte past the sample
-        // (0x81 in Windows-1252): Latin-1 decodes any bytes.
-        if decoded == nil, encoding == nil, enc == .windows1252 || enc == .macRoman {
-            enc = .latin1
-            decoded = String(data: body, encoding: .isoLatin1)
+        return OpenSignpost.interval("decode") { () -> DecodedText? in
+            var decoded = String(data: body, encoding: enc.foundation)
+            // A guessed 8-bit encoding that can't decode a byte past the sample
+            // (0x81 in Windows-1252): Latin-1 decodes any bytes.
+            if decoded == nil, encoding == nil, enc == .windows1252 || enc == .macRoman {
+                enc = .latin1
+                decoded = String(data: body, encoding: .isoLatin1)
+            }
+            guard let raw = decoded else { return nil }
+            let (ending, mixed) = detectLineEnding(raw)
+            var breaks: BreakRecorder? = mixed ? BreakRecorder(dominant: ending, ascii: false) : nil
+            let text = normalizeLineEndings(raw, recording: &breaks)
+            return DecodedText(text: text, encoding: enc, lineEnding: ending, mixedLineEndings: mixed,
+                               looksBinary: binary, encodingGuessed: guessed,
+                               lineBreaks: breaks.map { LineBreaks(dominant: ending, others: $0.others) })
         }
-        guard let raw = decoded else { return nil }
-        let (ending, mixed) = detectLineEnding(raw)
-        var breaks: BreakRecorder? = mixed ? BreakRecorder(dominant: ending, ascii: false) : nil
-        let text = normalizeLineEndings(raw, recording: &breaks)
-        return DecodedText(text: text, encoding: enc, lineEnding: ending, mixedLineEndings: mixed,
-                           looksBinary: looksBinary(data), encodingGuessed: guessed,
-                           lineBreaks: breaks.map { LineBreaks(dominant: ending, others: $0.others) })
     }
 
     /// UTF-8 `body` (no BOM) as text, from one scan (`scan`, when the

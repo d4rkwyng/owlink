@@ -199,11 +199,13 @@ extension AppDelegate {
         // background: the same when its tab comes.
         let beside: (EditorWindowController) -> Void = { tab in
             guard FolderSidebar.shared === s, s.isShown else { return }
-            s.show(in: tab)
-            s.reveal(tab.doc.fileURL)
-            tab.window?.makeFirstResponder(s.outline)
+            OpenSignpost.interval("beside") {
+                OpenSignpost.interval("beside show") { s.show(in: tab) }
+                OpenSignpost.interval("beside reveal") { s.reveal(tab.doc.fileURL) }
+                OpenSignpost.interval("beside makeFirstResponder") { _ = tab.window?.makeFirstResponder(s.outline) }
+            }
         }
-        let tab = open(node.url, asText: asText, background: true, then: beside)
+        let tab = OpenSignpost.interval("openFromFolder open") { open(node.url, asText: asText, background: true, then: beside) }
         if tab != nil || backgroundOpens[node.url.standardizedFileURL] != nil {
             return
         } else if s.isShown, let viewer = viewerTab(for: node.url) {
@@ -754,6 +756,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func clicked(_ sender: Any?) {
         let row = outline.clickedRow
         guard row >= 0, let n = outline.item(atRow: row) as? FolderNode, !n.isDirectory else { return }
+        SidebarOpenTrace.clicked(n.url)
         onOpen?(n)
     }
 
@@ -761,6 +764,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func doubleClicked(_ sender: Any?) {
         let row = outline.clickedRow
         guard row >= 0, let n = outline.item(atRow: row) as? FolderNode else { return }
+        if !n.isDirectory { SidebarOpenTrace.clicked(n.url, double: true) }
         toggleOrOpen(n)
     }
 
