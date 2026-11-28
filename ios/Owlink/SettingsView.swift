@@ -363,6 +363,12 @@ struct SettingsView: View {
                     if case .failed(let e) = models.states[m.id] { Text(e.message).font(.caption).foregroundStyle(.red) }
                 }
             }
+            // Off by default: opening a file never loads the model (0.5.3).
+            Toggle(String(localized: "Load model at launch"),
+                   isOn: Binding(get: { ai.loadModelAtLaunch }, set: { ai.loadModelAtLaunch = $0; save() }))
+                .disabled(!ai.enabled || BuiltInEngine().unavailableReason != nil)
+                .accessibilityIdentifier("settings.loadModelAtLaunch")
+            Text(LocalAISettings.loadModelAtLaunchNote).font(.caption).foregroundStyle(.secondary)
         } header: {
             Text(String(localized: "Built-in Models"))
         } footer: {

@@ -62,6 +62,28 @@ final class AskCedricModel: ObservableObject {
     var makeEngine: (LocalAISettings) async -> (any OwlChatEngine)? = { await OwlChatEngines.make(settings: $0) }
     /// The current check or answer (tests await it).
     private(set) var task: Task<Void, Never>?
+    /// Bumped by each request and by abandoning one: what an older request
+    /// still delivers (streamed text, its answer, its error) is dropped, so
+    /// a new question never waits behind the last (OwlAskLifecycle on the Mac).
+    private var requestID = 0
+    /// The answer entry the current request writes into.
+    private var answerID: UUID?
+    /// When the current request started: "Processing prompt… 12 s".
+    @Published private(set) var startedAt: Date?
+    /// Requests abandoned for a newer one (tests).
+    private(set) var abandonedCount = 0
+    /// A spelling request ("fix the typos") goes to the offline Fix Typos,
+    /// as on the Mac. Nil: the document isn't spell checked.
+    enum SpellingRoute { case opened, notChecked }
+    var routeSpelling: () -> SpellingRoute = { .notChecked }
+    /// The document's size when it is over the auto-review cap (100 KB or
+    /// 2,000 lines), else nil: asking about it is confirmed once first.
+    var autoReviewCapped: () -> AutoReviewCap.Size? = { nil }
+    /// The confirmation shown before the first request about a capped file.
+    @Published var capConfirmation: (title: String, message: String)?
+    var onCapConfirmed: () -> Void = {}
+    private var capConfirmed = false
+    private var afterCapConfirmation: (() -> Void)?
     private var recheck: Task<Void, Never>?
     private var scopeRefresh: Task<Void, Never>?
     private var lastQuestion = ""
@@ -198,9 +220,20 @@ final class AskCedricModel: ObservableObject {
     }
 
     func ask(_ q: String, action: OwlQuickAction? = nil, inlineSelection: NSRange? = nil) {
-        guard !running else { return }
         let shown = inlineSelection != nil ? q : (action?.title(prose: prose) ?? q)
         guard !shown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // A spelling request opens Fix Typos (offline): no model is asked.
+        if action == nil, inlineSelection == nil, OwlSpellingIntent.isSpellingRequest(q) {
+            abandonRunning()
+            question = ""
+            entries.append(Entry(role: .user, text: q))
+            let note = routeSpelling() == .opened ? Self.spellingRoutedNote : OwlSpellingIntent.notCheckedNote
+            entries.append(Entry(role: .note, text: note))
+            return
+        }
+        guard confirmedCap({ [weak self] in self?.ask(q, action: action, inlineSelection: inlineSelection) }) else { return }
+        // A new question doesn't wait behind the last: that one is abandoned.
+        abandonRunning()
         var snap = makeSnapshot()
         if let selection = inlineSelection {
             snap = OwlDocumentSnapshot(text: snap.text, generation: snap.generation, selection: selection, visible: snap.visible,
@@ -223,7 +256,9 @@ final class AskCedricModel: ObservableObject {
     /// The verdict is never "safe" (`ScriptVerdict`), and is "Don't run it"
     /// after a high finding or a partial review.
     func checkScriptSafety() {
-        guard canCheckScript, !running else { return }
+        guard canCheckScript else { return }
+        guard confirmedCap({ [weak self] in self?.checkScriptSafety() }) else { return }
+        abandonRunning()
         let snap = makeSnapshot()
         let text = snap.text
         let language = self.language
@@ -243,7 +278,9 @@ final class AskCedricModel: ObservableObject {
         let generation = scriptCheckGeneration
         scriptCheckPending = true
         let scanner = scanScript
-        task = Task { [weak self] in
+        requestID += 1
+        startedAt = Date()
+        task = BuiltInLoad.$intent.withValue(.userAsked) { Task { [weak self] in
             // Not cancelled with the task: Stop ends the check at once
             // (`stopScriptCheck`) and this result, when it comes, is dropped.
             let report = await Task.detached(priority: .userInitiated) { scanner(text, language) }.value
@@ -274,7 +311,8 @@ final class AskCedricModel: ObservableObject {
             }
             self.entries.append(Entry(role: .note, text: note))
             self.running = false
-        }
+            self.startedAt = nil
+        } }
     }
 
     /// Stop while a script check is scanning or making its engine: it ends
@@ -285,6 +323,58 @@ final class AskCedricModel: ObservableObject {
         scriptCheckGeneration += 1
         entries.append(Entry(role: .note, text: String(localized: "Stopped.")))
         running = false
+        startedAt = nil
+    }
+
+    /// What the chat says when a spelling request opened Fix Typos (the
+    /// shared note says "on this Mac").
+    static let spellingRoutedNote = String(localized: "Opened Fix Typos. It checks spelling on this device with the system spell checker; nothing is sent anywhere, and each change is yours to make.")
+
+    /// Ends whatever is running now, without waiting for it: its task is
+    /// cancelled (that reaches the engine) and nothing it still delivers
+    /// is shown. An answer with nothing in it yet says "Stopped."
+    func abandonRunning() {
+        guard running else { return }
+        if scriptCheckPending {
+            scriptCheckPending = false
+            scriptCheckGeneration += 1
+        }
+        task?.cancel()
+        requestID += 1
+        abandonedCount += 1
+        if let id = answerID, let i = entries.firstIndex(where: { $0.id == id }), entries[i].role == .owl {
+            if entries[i].text.isEmpty {
+                entries[i].role = .note
+                entries[i].text = String(localized: "Stopped.")
+            }
+        }
+        answerID = nil
+        running = false
+        startedAt = nil
+        verdictStream = nil
+        reviewProgress = nil
+        reviewScopeLabel = nil
+    }
+
+    /// Over the auto-review cap, the first request about the file is
+    /// confirmed (the Mac's "Ask Cedric about this large file?"), Cancel
+    /// the default. True: go ahead now.
+    private func confirmedCap(_ then: @escaping () -> Void) -> Bool {
+        guard !capConfirmed, let size = autoReviewCapped() else { return true }
+        afterCapConfirmation = then
+        capConfirmation = AutoReviewCap.confirmation(fileName: fileName ?? String(localized: "Untitled"), size: size)
+        return false
+    }
+
+    /// The cap confirmation's answer.
+    func answerCapConfirmation(_ ask: Bool) {
+        let then = afterCapConfirmation
+        afterCapConfirmation = nil
+        capConfirmation = nil
+        guard ask else { return }
+        capConfirmed = true
+        onCapConfirmed()
+        then?()
     }
 
     /// The answer: an empty Cedric entry, then the engine's reply into it.
@@ -296,6 +386,11 @@ final class AskCedricModel: ObservableObject {
         entries.append(answer)
         question = ""
         running = true
+        // A script check already counted this request (its scan ran first).
+        if madeEngine == nil { requestID += 1; startedAt = Date() }
+        let id = requestID
+        let answerID = answer.id
+        self.answerID = answerID
         lastQuestion = q
         lastAction = action
         lastInlineSelection = inlineSelection.map { _ in (snap.selection, snap.substring(snap.selection)) }
@@ -303,17 +398,25 @@ final class AskCedricModel: ObservableObject {
         verdictStream = nil
         streamedRenders = []
         let prose = self.prose
-        task = Task { [weak self] in
+        // The user asked: this request may load the built-in model
+        // (BuiltInLoadIntent, 0.5.3). The task and all it starts inherit it.
+        task = BuiltInLoad.$intent.withValue(.userAsked) { Task { [weak self] in
             guard let self else { return }
             defer {
-                self.running = false
-                self.verdictStream = nil
-                self.reviewProgress = nil
-                self.reviewScopeLabel = nil
-                self.refreshScope()
+                if self.requestID == id {
+                    self.running = false
+                    self.startedAt = nil
+                    self.answerID = nil
+                    self.verdictStream = nil
+                    self.reviewProgress = nil
+                    self.reviewScopeLabel = nil
+                    self.refreshScope()
+                }
             }
             var made = madeEngine
             if made == nil, let s = self.settingsProvider() { made = await self.makeEngine(s) }
+            // Abandoned for a newer question while the engine was made.
+            guard self.requestID == id else { return }
             guard let engine = made else {
                 self.finish(error: AIStatus.noEngineMessage)
                 return
@@ -348,29 +451,41 @@ final class AskCedricModel: ObservableObject {
                                      scanHasHigh: scan?.hasHigh ?? false, scanTruncated: scan?.truncated ?? false)
                 if action == .scriptSafety { req.scanFindings = self.lastScan }
             }
-            if await self.runChunkedReview(req, engine: engine) { return }
+            if await self.runChunkedReview(req, engine: engine, request: id) { return }
+            guard self.requestID == id else { return }
             if OwlChunkedReviewRunner.eligible(req) { req = OwlChunkedReviewRunner.wholeRequest(req) }
             // About a script: clamped before it shows (ScriptVerdictStream), as on the Mac.
             if let mode = req.safeClaimGuard { self.verdictStream = ScriptVerdictStream(forced: req.forcedVerdict, guard: mode) }
             do {
                 let outcome = try await OwlChatRunner.run(req, engine: engine, model: engine.scoreKey) { ev in
                     if case .text(let t) = ev {
-                        Task { @MainActor [weak self] in self?.append(t) }
+                        Task { @MainActor [weak self] in self?.append(t, request: id) }
                     }
                 }
                 try? await Task.sleep(for: .milliseconds(50))   // let queued text land first
-                if var last = self.entries.last, last.role == .owl {
-                    last.text = OwlChatRunner.stripThinking(outcome.answer)
-                    last.cards = Self.cards(Array(outcome.proposals.prefix(OwlTools.maxProposals)))
-                    self.entries[self.entries.count - 1] = last
-                    self.refreshCards()
-                }
+                guard self.requestID == id else { return }
+                self.publish(answer: outcome.answer, proposals: outcome.proposals, into: answerID)
             } catch is CancellationError {
-                self.finish(error: String(localized: "Stopped."))
+                if self.requestID == id { self.finish(error: String(localized: "Stopped.")) }
             } catch {
-                self.finish(error: AIStatus.describe(error))
+                if self.requestID == id { self.finish(error: AIStatus.describe(error)) }
             }
+        } }
+    }
+
+    /// The answer and its cards, into the request's own entry. While there
+    /// are proposals, claims of a finished edit are worded as proposals and
+    /// a note says nothing is applied yet (OwlProposalWording, 0.5.3).
+    private func publish(answer raw: String, proposals all: [OwlEditProposal], into answerID: UUID) {
+        guard let i = entries.firstIndex(where: { $0.id == answerID }), entries[i].role == .owl else { return }
+        let proposals = Array(all.prefix(OwlTools.maxProposals))
+        let answer = OwlChatRunner.stripThinking(raw)
+        entries[i].text = OwlProposalWording.guardClaims(answer, proposals: proposals.count)
+        entries[i].cards = Self.cards(proposals)
+        if !proposals.isEmpty {
+            entries.insert(Entry(role: .note, text: OwlProposalWording.header(count: proposals.count)), at: i + 1)
         }
+        refreshCards()
     }
 
     static func inlineRequest(question: String, action: OwlQuickAction, snapshot: OwlDocumentSnapshot,
@@ -398,8 +513,9 @@ final class AskCedricModel: ObservableObject {
                               inlineSelectionNote: clip.note)
     }
 
-    private func runChunkedReview(_ request: OwlChatRequest, engine: any OwlChatEngine) async -> Bool {
+    private func runChunkedReview(_ request: OwlChatRequest, engine: any OwlChatEngine, request id: Int) async -> Bool {
         guard let plan = OwlChunkedReviewRunner.plan(request, engine: engine) else { return false }
+        guard requestID == id else { return true }
         guard running, !Task.isCancelled else {
             finish(error: String(localized: "Stopped."))
             return true
@@ -416,26 +532,22 @@ final class AskCedricModel: ObservableObject {
         let result = await OwlChunkedReviewRunner.run(request, plan: plan, engine: engine, model: engine.scoreKey,
                                                       describeError: { @Sendable error in AIStatus.describe(error) }) { [weak self] _, _ in
             DispatchQueue.main.async { MainActor.assumeIsolated {
-                guard let self, self.running, self.reviewScopeLabel != nil else { return }
+                guard let self, self.requestID == id, self.running, self.reviewScopeLabel != nil else { return }
                 self.reviewProgress = String(localized: "Reviewing…")
             } }
         }
+        guard requestID == id else { return true }
         let answer = OwlChatRunner.stripThinking(result.outcome.answer)
         if answer.isEmpty {
             finish(error: result.error ?? String(localized: "Stopped."))
             return true
         }
-        if var last = entries.last, last.role == .owl {
-            last.text = answer
-            last.cards = Self.cards(Array(result.outcome.proposals.prefix(OwlTools.maxProposals)))
-            entries[entries.count - 1] = last
-            refreshCards()
-        }
+        if let answerID { publish(answer: answer, proposals: result.outcome.proposals, into: answerID) }
         return true
     }
 
-    private func append(_ t: String) {
-        guard running, var last = entries.last, last.role == .owl else { return }
+    private func append(_ t: String, request id: Int) {
+        guard requestID == id, running, var last = entries.last, last.role == .owl else { return }
         if var vs = verdictStream {
             let shown = vs.append(t)
             verdictStream = vs
@@ -677,6 +789,16 @@ struct AskCedricView: View {
         .presentationBackground(c.background)
         .onReceive(NotificationCenter.default.publisher(for: AppSettings.changed)) { _ in theme = AppSettings.theme }
         .task { await model.prepare() }
+        // A file over the auto-review cap: asked for, so confirmed once (Cancel the default).
+        .alert(model.capConfirmation?.title ?? "", isPresented: Binding(
+            get: { model.capConfirmation != nil },
+            set: { if !$0 && model.capConfirmation != nil { model.answerCapConfirmation(false) } })) {
+            Button(String(localized: "Cancel"), role: .cancel) { model.answerCapConfirmation(false) }
+            Button(String(localized: "Ask Cedric")) { model.answerCapConfirmation(true) }
+                .accessibilityIdentifier("ask.capConfirm")
+        } message: {
+            Text(model.capConfirmation?.message ?? "")
+        }
     }
 
     // MARK: Header
@@ -815,7 +937,11 @@ struct AskCedricView: View {
         case .owl:
             VStack(alignment: .leading, spacing: 8) {
                 if e.text.isEmpty && model.running {
-                    AskTypingDots(color: c.secondary)
+                    // Never a bare "…": the model may be loading or reading a whole file.
+                    HStack(spacing: 8) {
+                        AskTypingDots(color: c.secondary)
+                        if let started = model.startedAt { AskWaitingLabel(startedAt: started, color: c.secondary) }
+                    }
                 } else {
                     Text(.init(LineCitations.linked(e.text))).font(.body).textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -911,7 +1037,9 @@ struct AskCedricView: View {
                     .accessibilityLabel(Self.questionAccessibilityLabel)
                     .accessibilityIdentifier("ask.field")
                 Group {
-                    if model.running {
+                    // Typing a new question while one runs: Send asks it,
+                    // and the running one is abandoned (it doesn't wait).
+                    if model.running && empty {
                         Button { model.stop() } label: {
                             Image(systemName: "stop.circle.fill").font(.title2)
                                 .frame(minWidth: 44, minHeight: 44)
@@ -974,6 +1102,22 @@ struct AskTypingDots: View {
     }
 }
 
+/// "Processing prompt… 12 s" while Cedric hasn't written anything yet
+/// (OwlAskWaiting, as on the Mac).
+struct AskWaitingLabel: View {
+    let startedAt: Date
+    let color: Color
+
+    var body: some View {
+        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            Text(OwlAskWaiting.label(elapsed: context.date.timeIntervalSince(startedAt)))
+                .font(.footnote).foregroundStyle(color)
+                .monospacedDigit()
+                .accessibilityIdentifier("ask.waiting")
+        }
+    }
+}
+
 struct AskEditCard: View {
     let entry: UUID
     let card: AskCedricModel.Card
@@ -990,9 +1134,26 @@ struct AskEditCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.footnote.weight(.semibold))
-            if !card.proposal.reason.isEmpty {
-                Text(card.proposal.reason).font(.footnote).foregroundStyle(colors.secondary)
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.footnote.weight(.semibold))
+                Spacer(minLength: 4)
+                // The app says whether an edit happened, not the model.
+                Text(OwlProposalWording.badge)
+                    .font(.caption2.weight(.semibold)).foregroundStyle(colors.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .overlay(Capsule().strokeBorder(colors.hairline, lineWidth: 1))
+                    .accessibilityIdentifier("ask.card.badge")
+            }
+            if !reason.isEmpty {
+                Text(reason).font(.footnote).foregroundStyle(colors.secondary)
+            }
+            if let failure = card.proposal.check.failureText {
+                Text(failure).font(.footnote.weight(.semibold)).foregroundStyle(.red)
+                    .accessibilityIdentifier("ask.card.failure")
+            }
+            if let warning = card.proposal.check.warningText {
+                Text(warning).font(.footnote.weight(.semibold)).foregroundStyle(.orange)
+                    .accessibilityIdentifier("ask.card.warning")
             }
             if OwlEditInvisibles.contains(card.proposal.original) || OwlEditInvisibles.contains(card.proposal.replacement) {
                 Text(OwlEditInvisibles.warning).font(.footnote.weight(.semibold)).foregroundStyle(.purple)
@@ -1038,9 +1199,14 @@ struct AskEditCard: View {
             : String(localized: "Proposed change to lines \(card.firstLine)–\(card.lastLine)")
     }
 
+    /// The model's reason, worded as a proposal ("Fixed the typo" → "Proposed fix: the typo").
+    private var reason: String { OwlProposalWording.guardReason(card.proposal.reason) }
+
     private var label: String {
-        var text = title
-        if !card.proposal.reason.isEmpty { text += ": " + card.proposal.reason }
+        var text = title + ", " + OwlProposalWording.badge
+        if !reason.isEmpty { text += ": " + reason }
+        if let failure = card.proposal.check.failureText { text += ". " + failure }
+        if let warning = card.proposal.check.warningText { text += ". " + warning }
         text += ". " + card.proposal.spokenDiff
         return text
     }

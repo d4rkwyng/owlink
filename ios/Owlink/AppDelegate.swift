@@ -7,6 +7,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         BuiltInSetup.install()
+        BuiltInPreload.ifWanted()
         // No document is open yet: opened-version copies left by a crash go.
         SaveSafetyStores.revert.clearAll()
         // Safety copies (conflict versions and the like) are kept 7 days.

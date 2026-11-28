@@ -2606,8 +2606,24 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                                                           unsavedSince: document.firstUnsavedEdit, lineEnding: document.lineEnding,
                                                           mixedLineEndings: document.mixedLineEndings,
                                                           languageIsManual: document.language.isManual,
-                                                          styleCheck: AppSettings.styleCheckSettings))
+                                                          styleCheck: AppSettings.styleCheckSettings),
+                                  autoReviewCapped: autoReviewCapSize != nil)
     }
+
+    /// The document's size when it is over the auto-review cap (100 KB or
+    /// 2,000 lines, as on the Mac), else nil. Cheap for most documents: the
+    /// UTF-8 count is only made when the UTF-16 length can't settle it.
+    var autoReviewCapSize: AutoReviewCap.Size? {
+        let ns = textView.textStorage.string as NSString
+        let lines = lineIndex.length == ns.length ? AutoReviewCap.lineCount(lineIndex) : AutoReviewCap.lineCount(ns)
+        let utf8 = { ns.lengthOfBytes(using: String.Encoding.utf8.rawValue) }
+        guard AutoReviewCap.reason(utf16Length: ns.length, lines: lines, utf8Bytes: utf8) != nil else { return nil }
+        return AutoReviewCap.Size(utf8Bytes: utf8(), lines: lines)
+    }
+
+    /// Asking about a capped file was confirmed once (Ask Cedric or Check
+    /// with Cedric): not asked again for this document.
+    private(set) var autoReviewAskConfirmed = false
 
     /// The hints he may show: the offline ones only with the setting on;
     /// ones asked for (Check with Cedric) always.
@@ -2933,6 +2949,19 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
 
     @objc func checkWithCedric() {
+        // Over the auto-review cap: asked for, so it runs once confirmed.
+        if !autoReviewAskConfirmed, let size = autoReviewCapSize {
+            let text = AutoReviewCap.confirmation(fileName: document.displayName, size: size)
+            let alert = UIAlertController(title: text.title, message: text.message, preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+            alert.addAction(UIAlertAction(title: String(localized: "Check with Cedric"), style: .default) { [weak self] _ in
+                self?.autoReviewAskConfirmed = true
+                self?.checkWithCedric()
+            })
+            alert.preferredAction = alert.actions.first
+            present(alert, animated: true)
+            return
+        }
         owl.askAI { [weak self] in self!.owlSnapshot() }
         toast(String(localized: "Cedric is looking…"))
     }
@@ -3001,6 +3030,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         model.askIsVisible = { [weak self] in self?.askPanel != nil || self?.askSheet != nil }
         // On top of Ask Cedric (sheet or panel), which stays open.
         model.openSettings = { [weak self] in self?.showSettings() }
+        model.autoReviewCapped = { [weak self] in
+            guard let self, !self.autoReviewAskConfirmed else { return nil }
+            return self.autoReviewCapSize
+        }
+        model.onCapConfirmed = { [weak self] in self?.autoReviewAskConfirmed = true }
+        model.routeSpelling = { [weak self] in self?.routeSpellingRequest() ?? .notChecked }
         askModel = model
         // An iPad at regular width docks Cedric beside the text. A phone
         // always gets the sheet, including landscape, where the width is
@@ -3012,6 +3047,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             return
         }
         presentAskSheet(model)
+    }
+
+    /// "Fix the typos" in Ask Cedric opens Fix Typos (offline), as on the
+    /// Mac. The step-through works on the text: a sheet over it goes first.
+    private func routeSpellingRequest() -> AskCedricModel.SpellingRoute {
+        guard spellingChecksThisDocument else { return .notChecked }
+        if let sheet = askSheet, !sheet.isBeingDismissed {
+            sheet.dismiss(animated: true) { [weak self] in self?.startFixTypos() }
+        } else {
+            startFixTypos()
+        }
+        return .opened
     }
 
     /// Ask Cedric is up: the panel, or a sheet not on its way out.

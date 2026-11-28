@@ -40,6 +40,9 @@ final class EditorOwl {
         var language: Language
         var generation: Int
         var facts: OwlDocumentFacts
+        /// Over the auto-review cap (100 KB or 2,000 lines, `AutoReviewCap`):
+        /// no automatic AI check; the offline rules (a window only) carry on.
+        var autoReviewCapped = false
     }
 
     /// The offline rules, 0.8 s after the last edit; then the AI, if it is
@@ -55,7 +58,7 @@ final class EditorOwl {
             let found = self.rules.check(window.context, facts: s.facts)
             self.merge(found, offset: window.offset, generation: s.generation, text: s.text, source: "rules")
             let ai = AIStore.load()
-            if ai.isUsable, ai.automaticChecks, Date().timeIntervalSince(self.lastAICheck) >= ai.minInterval {
+            if ai.isUsable, ai.automaticChecks, !s.autoReviewCapped, Date().timeIntervalSince(self.lastAICheck) >= ai.minInterval {
                 self.askAI(snap, quiet: true)
             }
         }
@@ -64,9 +67,12 @@ final class EditorOwl {
     /// "Check with Cedric": the AI engine now, whatever the interval.
     func askAI(_ snap: @escaping () -> Snapshot, quiet: Bool = false) {
         aiTask?.cancel()
-        aiTask = Task { [weak self] in
+        // Asked for (Check with Cedric) may load the built-in model; the
+        // automatic check only uses one already in memory (0.5.3).
+        aiTask = BuiltInLoad.$intent.withValue(quiet ? .automatic : .userAsked) { Task { [weak self] in
             guard !Task.isCancelled, let self else { return }
             let s = snap()
+            if quiet && s.autoReviewCapped { return }
             let window = Self.window(s, documentID: self.documentID)
             guard HintPrompt.hasEnoughText(window.context.text) else {
                 if !quiet { self.onNote?(String(localized: "Type a little more and Cedric will take a look.")) }
@@ -94,7 +100,7 @@ final class EditorOwl {
             guard !Task.isCancelled else { return }
             if found.isEmpty, !quiet { self.onNote?(String(localized: "Cedric found nothing to point out.")) }
             self.merge(found, offset: window.offset, generation: s.generation, text: s.text, source: provider.name)
-        }
+        } }
     }
 
     static func window(_ s: Snapshot, documentID: UUID) -> OwlContextWindow {
