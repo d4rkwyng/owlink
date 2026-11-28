@@ -241,7 +241,7 @@ public struct Workbook: Sendable {
         // Not a worksheet at all (and not cut short by a cap).
         let parsed = x.parse()
         if p.invalidCoordinate { throw SpreadsheetError.damaged }
-        if !parsed, !cut, !p.stoppedEarly, !p.sawSheetData { throw SpreadsheetError.damaged }
+        if !cut, !p.stoppedEarly, !parsed || x.parserError != nil || !p.sawSheetData { throw SpreadsheetError.damaged }
         for (r, cells) in p.committed {
             for (c, cell) in cells { table.set(cell, row: r, column: c) }
         }
