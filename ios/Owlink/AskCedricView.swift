@@ -1189,7 +1189,7 @@ struct AskEditCard: View {
         .accessibilityIdentifier("ask.card")
     }
 
-    private var title: String {
+    var title: String {
         let lines = card.firstLine == card.lastLine
             ? String(localized: "line \(card.firstLine)")
             : String(localized: "lines \(card.firstLine)–\(card.lastLine)")
@@ -1200,9 +1200,10 @@ struct AskEditCard: View {
     }
 
     /// The model's reason, worded as a proposal ("Fixed the typo" → "Proposed fix: the typo").
-    private var reason: String { OwlProposalWording.guardReason(card.proposal.reason) }
+    var reason: String { OwlProposalWording.guardReason(card.proposal.reason) }
 
-    private var label: String {
+    /// What VoiceOver reads for the card (tests read it too).
+    var label: String {
         var text = title + ", " + OwlProposalWording.badge
         if !reason.isEmpty { text += ": " + reason }
         if let failure = card.proposal.check.failureText { text += ". " + failure }

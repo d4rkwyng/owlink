@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import CedricCore
 import CedricAI
 
@@ -36,6 +37,26 @@ private actor IntentEngine: OwlChatEngine {
     func release() { released = true }
     func recordedIntents() -> [BuiltInLoadIntent] { intents }
     func recordedCount() -> Int { questions.count }
+}
+
+/// An engine that proposes one edit (a tool call), then claims it "Fixed" it.
+private actor ProposingEngine: OwlChatEngine {
+    nonisolated let title = "Proposing engine"
+    nonisolated let scoreKey: String
+    nonisolated let contextBudget = 6_000
+    init(scoreKey: String) { self.scoreKey = scoreKey }
+
+    func turn(_ messages: [OwlChatMessage], tools: [OwlToolSpec], toolbox: OwlToolbox?, maxTokens: Int,
+              onText: @escaping @Sendable (String) -> Void) async throws -> OwlTurn {
+        let results = messages.filter { if case .toolResult = $0 { return true }; return false }
+        if results.isEmpty, tools.contains(where: { $0.name == .proposeEdit }) {
+            return .toolCalls([OwlToolCall(id: "e", name: "propose_edit", arguments: .object([
+                "find": .string("A secnod line."), "replace": .string("A second line."), "reason": .string("Fixed the typo")]))])
+        }
+        let a = "Fixed the typo."
+        onText(a)
+        return .answer(a)
+    }
 }
 
 @MainActor
@@ -175,11 +196,36 @@ final class AskLifecycleTests: XCTestCase {
         #endif
     }
 
-    /// The card's badge and reason wording come from the shared code.
-    func testProposalWording() {
+    /// An Ask answer with a proposal: the transcript words the model's
+    /// "Fixed …" as a proposal, a note says nothing is applied, and the
+    /// card shows the badge and the reason worded as a proposal.
+    func testProposalWording() async throws {
         XCTAssertEqual(OwlProposalWording.badge, "Proposed, not applied")
-        XCTAssertEqual(OwlProposalWording.guardReason("Fixed the typo"), "Proposed fix: the typo")
-        XCTAssertEqual(OwlProposalWording.header(count: 2), "Proposed 2 changes, not applied")
+        let gate = OwlToolGate.bundled()
+        let key = try XCTUnwrap(gate.scores.keys.first(where: { gate.allowsTools($0) }))
+        let engine = ProposingEngine(scoreKey: key)
+        let text = "Some notes.\nA secnod line.\n"
+        let m = AskCedricModel(fileName: "notes.md", language: .markdown)
+        m.makeSnapshot = { OwlDocumentSnapshot(text: text, generation: 1, fileName: "notes.md", language: "markdown") }
+        m.documentNow = {
+            AskCedricModel.DocumentNow(text: text as NSString, generation: 1, readOnly: false, large: false, lines: LineIndex(text as NSString))
+        }
+        m.settingsProvider = { LocalAISettings(enabled: true, backend: .ollama, model: "test") }
+        m.makeEngine = { _ in engine }
+        m.ask("Please correct the second line.")
+        await waitFor { !m.running && m.entries.contains { !$0.cards.isEmpty } }
+        let answer = try XCTUnwrap(m.entries.first { !$0.cards.isEmpty }, "\(m.entries.map { "\($0.role): \($0.text)" })")
+        XCTAssertEqual(answer.role, .owl)
+        XCTAssertFalse(answer.text.contains("Fixed"), answer.text)
+        XCTAssertTrue(answer.text.contains("Proposed fix: the typo"), answer.text)
+        XCTAssertTrue(m.entries.contains { $0.role == .note && $0.text == OwlProposalWording.header(count: 1) },
+                      "\(m.entries.map(\.text))")
+        let card = try XCTUnwrap(answer.cards.first)
+        XCTAssertEqual(card.proposal.replacement, "A second line.")
+        let view = AskEditCard(entry: answer.id, card: card, count: 1, colors: AskColors(EditorPalettes.light),
+                               apply: {}, skip: {}, showAll: {}, askAgain: {}, noteWidth: { _ in })
+        XCTAssertEqual(view.reason, "Proposed fix: the typo")
+        XCTAssertTrue(view.label.hasPrefix(view.title + ", " + OwlProposalWording.badge + ": Proposed fix: the typo"), view.label)
     }
 
     private var windows: [UIWindow] = []
