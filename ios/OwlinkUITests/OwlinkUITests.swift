@@ -104,6 +104,63 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["editor.format"].label.contains("UTF-8"))
     }
 
+    // MARK: Read-only viewers (PDF, Office)
+
+    /// A PDF opens in the read-only PDF viewer, not the text editor, and
+    /// with no "binary file" alert; Done goes back to the file list.
+    func testOpenPDFReadOnly() throws {
+        let app = launch("sample.pdf", fresh: true)
+        let viewer = app.descendants(matching: .any)["viewer.pdf"]
+        XCTAssertTrue(viewer.waitForExistence(timeout: 15), "the PDF viewer didn't open")
+        XCTAssertFalse(app.alerts["This looks like a binary file"].exists, "a PDF got the binary-file alert")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "a PDF opened in the text editor")
+        XCTAssertGreaterThan(viewer.frame.width, 0)
+        XCTAssertGreaterThan(viewer.frame.height, 0)
+        XCTAssertTrue(app.navigationBars["sample.pdf"].exists || app.staticTexts["sample.pdf"].exists, "no file name in the bar")
+        // PDFKit exposes the page's text: the sample's first line shows.
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Owlink PDF sample'")).firstMatch
+            .waitForExistence(timeout: 10), "the PDF's text didn't render")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "pdf-viewer"
+        shot.lifetime = .keepAlways
+        add(shot)
+        assertDoneReturnsToFiles(app, "PDF")
+    }
+
+    /// An .xlsx opens in Quick Look, read-only, with no "binary file"
+    /// alert; the sheet's first cell renders; Done goes back.
+    func testOpenXLSXReadOnly() throws {
+        let app = launch("sample.xlsx", fresh: true)
+        let viewer = app.descendants(matching: .any)["viewer.quicklook"]
+        XCTAssertTrue(viewer.waitForExistence(timeout: 15), "the Quick Look viewer didn't open")
+        XCTAssertFalse(app.alerts["This looks like a binary file"].exists, "an .xlsx got the binary-file alert")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "an .xlsx opened in the text editor")
+        XCTAssertGreaterThan(viewer.frame.width, 0)
+        XCTAssertGreaterThan(viewer.frame.height, 0)
+        // Quick Look really drew the workbook: its first cell's text.
+        let cell = app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'Owlink XLSX sample'")).firstMatch
+        XCTAssertTrue(cell.waitForExistence(timeout: 15), "Quick Look didn't render the workbook's text")
+        XCTAssertGreaterThan(cell.frame.width, 0)
+        XCTAssertGreaterThan(cell.frame.height, 0)
+        // Read-only: no Quick Look markup / edit button.
+        XCTAssertFalse(app.buttons["Markup"].exists, "Quick Look offers Markup")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "xlsx-viewer"
+        shot.lifetime = .keepAlways
+        add(shot)
+        assertDoneReturnsToFiles(app, "xlsx")
+    }
+
+    private func assertDoneReturnsToFiles(_ app: XCUIApplication, _ state: String, file: StaticString = #filePath, line: UInt = #line) {
+        let done = app.buttons["viewer.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable, "\(state): no Done button", file: file, line: line)
+        done.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "\(state): Done didn't return to the file list", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.pdf"].exists, "\(state): the PDF viewer is still up", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.quicklook"].exists, "\(state): Quick Look is still up", file: file, line: line)
+    }
+
     func testHideKeyboardButton() throws {
         let app = launch("sample.swift", fresh: true)
         let tv = editor(app)
