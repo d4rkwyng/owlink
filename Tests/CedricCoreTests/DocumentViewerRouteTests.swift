@@ -118,7 +118,9 @@ final class DocumentViewerRouteTests: XCTestCase {
     /// editor), whatever they hold: never Quick Look.
     func testCSVAndTSVGoToTheGrid() throws {
         XCTAssertEqual(try route("table.csv", Array("a,b\n1,2\n".utf8)), .spreadsheet(.csv))
-        XCTAssertEqual(try route("TABLE.CSV", Array("a,b\n".utf8)), .spreadsheet(.csv))
+        // By name only: "TABLE.CSV" beside "table.csv" is the same file on
+        // a case-insensitive volume (the simulator refuses the second write).
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "TABLE.CSV", prefix: Array("a,b\n".utf8)), .spreadsheet(.csv))
         XCTAssertEqual(try route("table.tsv", Array("a\tb\n".utf8)), .spreadsheet(.tsv))
         XCTAssertEqual(try route("empty.csv", []), .spreadsheet(.csv))
         XCTAssertEqual(try route("sheet.csv", zip), .spreadsheet(.csv))
