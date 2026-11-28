@@ -131,12 +131,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// a scroll then defers the gutter to the next turn (TextKit 2 can spin
     /// finding the visible range mid-edit). User scrolling stays inline.
     var isApplyingTextEdits = false
-    /// Mixed line endings: the entries each system edit (typing, Backspace,
-    /// IME, the text view's own undo and redo) took out of the text, keyed
-    /// by the edit (`location`, `oldLength` units became `newLength`). An
-    /// undo or redo edit that is its exact inverse puts them back, as
-    /// applyTextEdits' own inverse does for commands. Newest last, capped.
-    private var systemRemovedBreaks: [(location: Int, oldLength: Int, newLength: Int, breaks: [Int])] = []
     /// Gutter layouts run by scheduleGutterLayout (for tests).
     private(set) var scheduledGutterLayoutCount = 0
     var dailyIdleInterval: TimeInterval = 1
@@ -1036,7 +1030,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         // The text was replaced from disk: the old undo steps' ranges no
         // longer match it.
         textView.undoManager?.removeAllActions()
-        systemRemovedBreaks = []
         colorizer.setLanguage(document.language.language)
         generation += 1
         regexFind.invalidate()
@@ -1068,7 +1061,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             scheduleEditorHighlights(selectionChanged: false)
         }
         let oldRange = NSRange(location: edited.location, length: edited.length - delta)
-        if !isApplyingTextEdits { noteSystemEdit(oldRange, newLength: edited.length, in: textStorage) }
         shiftAutoClosers(oldRange: oldRange, newLength: edited.length)
         folding?.textEdited(oldRange: oldRange, newLength: edited.length, storage: textStorage)
         spellStep?.textEdited(oldRange, newLength: edited.length)
@@ -1099,26 +1091,6 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         markdownFenceIndex.invalidate(fromLine: first)
         colorizer?.textDidChange(firstLine: first, lastLine: lineIndex.line(containing: NSMaxRange(edited)),
                                  lineDelta: lineIndex.lineCount - oldLines)
-    }
-
-    /// Every change the system makes to the storage (applyTextEdits notes
-    /// its own) is noted for the mixed line endings here, once, from the
-    /// storage's own edit: marked-text updates and the text view's undo
-    /// and redo don't all go through shouldChangeTextIn. The entries an
-    /// edit takes out are kept for the undo or redo that reverses it.
-    private func noteSystemEdit(_ oldRange: NSRange, newLength: Int, in storage: NSTextStorage) {
-        let removed = document.noteTextReplacement(oldRange, newLength: newLength)
-        if let undo = textView.undoManager, undo.isUndoing || undo.isRedoing,
-           let i = systemRemovedBreaks.lastIndex(where: {
-               $0.location == oldRange.location && $0.newLength == oldRange.length && $0.oldLength == newLength
-           }) {
-            let e = systemRemovedBreaks.remove(at: i)
-            document.restoreLineBreaks(e.breaks, at: e.location, within: NSRange(location: e.location, length: e.oldLength),
-                                       in: storage.string as NSString)
-        }
-        guard !removed.isEmpty else { return }
-        systemRemovedBreaks.append((oldRange.location, oldRange.length, newLength, removed))
-        if systemRemovedBreaks.count > 200 { systemRemovedBreaks.removeFirst(systemRemovedBreaks.count - 200) }
     }
 
     func textViewDidChange(_ textView: UITextView) {
@@ -1172,12 +1144,18 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    /// An edit applied through applyTextEdit is noted there for the mixed
-    /// line endings and returns false; one the system makes (allowed here,
-    /// or one applyTextEdit declines) is noted once, from the storage's own
-    /// edit (noteSystemEdit), as are IME updates that don't come here.
+    /// Every edit the system is let make is noted for the mixed line
+    /// endings here, exactly once (IME composition too: marked text
+    /// changes the UTF-16 offsets after it). An edit applied through
+    /// applyTextEdit is noted there and returns false; one it declines is
+    /// left to the system and noted here.
     func textView(_ textView: UITextView, shouldChangeTextIn range: NSRange, replacementText replacement: String) -> Bool {
-        systemAppliesTextChange(textView, range: range, replacement: replacement)
+        let allowed = systemAppliesTextChange(textView, range: range, replacement: replacement)
+        if allowed, textView === self.textView, range.location != NSNotFound,
+           NSMaxRange(range) <= textView.textStorage.length {
+            document.noteTextReplacement(range, newLength: (replacement as NSString).length)
+        }
+        return allowed
     }
 
     /// True: the system makes the edit as typed. False: it was applied
