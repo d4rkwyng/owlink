@@ -68,6 +68,7 @@ public struct SpreadsheetTable: Sendable, Equatable {
     public var truncated = false
     /// When truncated: the rows the sheet has, if known.
     public var totalRows: Int?
+    public var truncatedColumns = false
     private var rows: [Int: [Int: SpreadsheetCell]] = [:]
 
     public init(name: String) { self.name = name }
@@ -88,12 +89,14 @@ public struct SpreadsheetTable: Sendable, Equatable {
 
     /// "Showing the first 500 rows of 2,000." when rows were left out.
     public var truncationNotice: String? {
-        guard truncated else { return nil }
+        let columns = truncatedColumns ? String(localized: "Showing the first 16,384 columns.") : ""
+        guard truncated else { return columns.isEmpty ? nil : columns }
+        let suffix = columns.isEmpty ? "" : " " + columns
         let shown = Self.grouped(rowCount)
         if let totalRows, totalRows > rowCount {
-            return String(localized: "Showing the first \(shown) rows of \(Self.grouped(totalRows)).")
+            return String(localized: "Showing the first \(shown) rows of \(Self.grouped(totalRows)).") + suffix
         }
-        return String(localized: "Showing the first \(shown) rows.")
+        return String(localized: "Showing the first \(shown) rows.") + suffix
     }
 
     /// 12345 → "12,345" (US English, whatever the device's region).
@@ -591,16 +594,9 @@ public enum DelimitedText {
         // Every record holds at least one cell: no more than the cap's
         // worth of records is parsed (the rest are only counted).
         let parsed = CSV.parse(text, dialect: CSV.dialect(for: text, fileName: fileName), maxRows: limits.maxCells + 1,
-                               stopUnclosedQuoteAtLineEnd: true, maxColumns: SpreadsheetLimits.maxColumns)
-        var cells = 0
-        var shown = 0
+                               stopUnclosedQuoteAtLineEnd: true, maxColumns: SpreadsheetLimits.maxColumns, maxCells: limits.maxCells)
+        t.truncatedColumns = parsed.truncatedColumns
         for (r, fields) in parsed.rows.enumerated() {
-            if cells + fields.count > limits.maxCells, shown > 0 {
-                t.truncated = true
-                break
-            }
-            cells += fields.count
-            shown += 1
             for (c, f) in fields.enumerated() where !f.isEmpty {
                 let isNumber = Double(f.trimmingCharacters(in: .whitespaces)) != nil
                 t.set(SpreadsheetCell(f, kind: isNumber ? .number : .text), row: r, column: c)
@@ -608,7 +604,7 @@ public enum DelimitedText {
         }
         // Every record shown counts, so an empty last row (",,") and
         // trailing empty columns still show.
-        t.pad(rows: shown, columns: parsed.columnCount)
+        t.pad(rows: parsed.rows.count, columns: parsed.columnCount)
         if parsed.truncated || cut { t.truncated = true }
         if t.truncated, !cut {
             t.totalRows = parsed.truncated ? records(text, quote: 0x22) : parsed.rows.count

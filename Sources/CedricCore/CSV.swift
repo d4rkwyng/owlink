@@ -215,12 +215,13 @@ public enum CSV {
     /// never closes ends at its line's end instead of swallowing the rest
     /// of the file, so the rows after it still show (the warning says where).
     public static func parse(_ text: NSString, dialect: Dialect, maxRows: Int = .max,
-                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max) -> Table {
+                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max,
+                             maxCells: Int = .max) -> Table {
         let n = text.length
         var buf = [UInt16](repeating: 0, count: n)
         text.getCharacters(&buf, range: NSRange(location: 0, length: n))
         return parse(buf, dialect: dialect, maxRows: maxRows,
-                     stopUnclosedQuoteAtLineEnd: stopUnclosedQuoteAtLineEnd, maxColumns: maxColumns)
+                     stopUnclosedQuoteAtLineEnd: stopUnclosedQuoteAtLineEnd, maxColumns: maxColumns, maxCells: maxCells)
     }
 
     public static func parse(_ u: [UInt16], delimiter d: UInt16 = 44, maxRows: Int = .max) -> Table {
@@ -228,7 +229,8 @@ public enum CSV {
     }
 
     public static func parse(_ u: [UInt16], dialect: Dialect, maxRows: Int = .max,
-                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max) -> Table {
+                             stopUnclosedQuoteAtLineEnd: Bool = false, maxColumns: Int = .max,
+                             maxCells: Int = .max) -> Table {
         var t = Table()
         let d = dialect.delimiter
         t.delimiter = d
@@ -248,6 +250,7 @@ public enum CSV {
         var field: [UInt16] = []
         field.reserveCapacity(64)
         var row: [String] = []
+        var remaining = maxCells
         while i < n {
             if t.rows.count >= maxRows { t.truncated = true; break }
             let rowStart = i, rowLine = line
@@ -300,6 +303,12 @@ public enum CSV {
                     while field.count > kept, field.last == 32 { field.removeLast() }
                 }
                 if row.count < max(1, maxColumns) {
+                    if row.count >= remaining && !dialect.edgeDelimiters {
+                        if row.count > 0 || sawQuote || !field.allSatisfy({ $0 == 32 || $0 == 9 }) || (i < n && u[i] == d) {
+                            t.truncated = true
+                            return t
+                        }
+                    }
                     row.append(String(decoding: field, as: UTF16.self))
                 } else {
                     t.truncatedColumns = true
@@ -320,6 +329,8 @@ public enum CSV {
                 if row.count > 1, row[row.count - 1].isEmpty { row.removeLast() }
                 if !sawQuote, row.allSatisfy(isRule) { continue } // |---|:--:|
             }
+            guard row.count <= remaining else { t.truncated = true; break }
+            remaining -= row.count
             t.rows.append(row)
             t.rowStarts.append(rowStart)
             t.rowLines.append(rowLine)
