@@ -497,9 +497,14 @@ final class NoteLinksTests: XCTestCase {
         guard case .binary? = outcomes.first else { return XCTFail("first: \(outcomes)") }
         let prompt = try XCTUnwrap(browser.presentedViewController as? UIAlertController, "the binary prompt is up")
         XCTAssertEqual(prompt.title, "This looks like a binary file")
-        // Replaced while the prompt is up.
-        try FileManager.default.removeItem(at: alpha)
-        try (Self.binaryBytes + Data([7])).write(to: alpha)
+        // Replaced while the prompt is up: the original moved aside and kept (its inode can't be
+        // reused), the replacement written beside it and renamed into place (Sol r5 should-fix).
+        let aside = d.appendingPathComponent("Alpha.original"), fresh = d.appendingPathComponent("Alpha.new")
+        try FileManager.default.moveItem(at: alpha, to: aside)
+        try (Self.binaryBytes + Data([7])).write(to: fresh)
+        XCTAssertEqual(rename(fresh.path, alpha.path), 0, "the replacement renamed into place")
+        XCTAssertNotEqual(Beneath.FileID(path: alpha.path, followLast: false), note.id, "the replacement is another file")
+        XCTAssertNotNil(Beneath.FileID(path: aside.path, followLast: false), "the original is still there")
         prompt.dismiss(animated: false)
         try tap("Open as Text", in: prompt)
         deadline = Date().addingTimeInterval(10)
