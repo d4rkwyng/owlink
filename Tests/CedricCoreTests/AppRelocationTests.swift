@@ -14,8 +14,8 @@ import Testing
 
     static func classify(_ path: String, translocated: Bool? = false, original: String? = nil,
                          readOnly: Bool = false, quarantined: Bool = false) -> AppLocation {
-        AppLocation.classify(bundle: URL(fileURLWithPath: path), translocated: translocated,
-                             original: original.map { URL(fileURLWithPath: $0) },
+        AppLocation.classify(bundle: URL(fileURLWithPath: path, isDirectory: true), translocated: translocated,
+                             original: original.map { URL(fileURLWithPath: $0, isDirectory: true) },
                              applicationsFolders: folders, onReadOnlyVolume: readOnly, quarantined: quarantined)
     }
 
@@ -23,7 +23,7 @@ import Testing
 
     @Test func aTranslocatedPathIsTranslocatedEvenWhenItsOriginalIsInApplications() {
         let l = Self.classify(Self.translocatedPath, translocated: true, original: "/Applications/Owlink.app")
-        #expect(l == .translocated(original: URL(fileURLWithPath: "/Applications/Owlink.app")))
+        #expect(l == .translocated(original: URL(fileURLWithPath: "/Applications/Owlink.app", isDirectory: true)))
         #expect(l.offersMove)
     }
 
@@ -49,7 +49,7 @@ import Testing
         #expect(Self.classify("/Applications2/Owlink.app", quarantined: true) == .elsewhere(quarantined: true))
         #expect(Self.classify("/Users/tester/ApplicationsOld/Owlink.app") == .elsewhere(quarantined: false))
         // The folder itself isn't "inside" it.
-        #expect(!AppLocation.isInside(URL(fileURLWithPath: "/Applications"), anyOf: Self.folders))
+        #expect(!AppLocation.isInside(URL(fileURLWithPath: "/Applications", isDirectory: true), anyOf: Self.folders))
     }
 
     @Test func aReadOnlyVolumeIsADiskImage() {
@@ -77,7 +77,7 @@ import Testing
         #expect(!AppLocation.shouldOffer(loc, bundle: app, checksEnabled: false, suppressed: true))
         let bare = URL(fileURLWithPath: "/Users/tester/GitHub/owlink/.build/debug")
         #expect(!AppLocation.shouldOffer(Self.classify(bare.path), bundle: bare, checksEnabled: false, suppressed: false))
-        let installed = URL(fileURLWithPath: "/Applications/Owlink.app")
+        let installed = URL(fileURLWithPath: "/Applications/Owlink.app", isDirectory: true)
         #expect(!AppLocation.shouldOffer(Self.classify(installed.path), bundle: installed, checksEnabled: false, suppressed: false))
     }
 
@@ -198,17 +198,24 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
 }
 
 @Suite struct AppMoverTests {
+    /// Every path here is a folder or a bundle. Built as a directory URL, as
+    /// the mover builds its destination (appendingPathComponent(_:isDirectory:
+    /// true)), without looking at the disk: URL(fileURLWithPath:) alone adds
+    /// the trailing slash only when the path exists as a folder on this Mac,
+    /// so a real /Applications/Owlink.app would change what the tests expect.
+    static func url(_ path: String) -> URL { URL(fileURLWithPath: path, isDirectory: true) }
+
     static let apps = "/Applications"
     static let dest = "/Applications/Owlink.app"
     static let staging = "/Applications/.Owlink-moving-TEST.app"
-    static let folders = AppLocation.applicationsFolders(home: URL(fileURLWithPath: "/Users/tester"))
+    static let folders = AppLocation.applicationsFolders(home: Self.url("/Users/tester"))
     static let download = "/Users/tester/Downloads/Owlink.app"
     static let translocated = AppLocationTests.translocatedPath
 
     static func mover(_ fs: FakeInstallFS) -> AppMover { AppMover(fs: fs, makeStagingName: { ".Owlink-moving-TEST.app" }) }
 
     static func plan(_ location: AppLocation, source: String, fs: FakeInstallFS) throws -> AppMovePlan {
-        try AppMovePlan.make(location: location, source: URL(fileURLWithPath: source), folders: folders, fs: fs)
+        try AppMovePlan.make(location: location, source: Self.url(source), folders: folders, fs: fs)
     }
 
     /// Every path the fake saw quarantine removed under is the staging copy.
@@ -220,7 +227,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
     static func translocatedFromApplications() throws -> (FakeInstallFS, AppMovePlan) {
         let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.translocated], writable: [Self.apps])
         fs.watch = [Self.dest]
-        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.dest)), source: Self.translocated, fs: fs)
+        let p = try Self.plan(.translocated(original: Self.url(Self.dest)), source: Self.translocated, fs: fs)
         return (fs, p)
     }
 
@@ -229,7 +236,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(p.destination.path == Self.dest && !p.destinationExists && p.trashOriginal)
         let out = try Self.mover(fs).install(p, replaceExisting: false)
-        #expect(out == .init(installed: URL(fileURLWithPath: Self.dest)))
+        #expect(out == .init(installed: Self.url(Self.dest)))
         #expect(fs.log == [
             "copy \(Self.download) -> \(Self.staging)",
             "unquarantine \(Self.staging)",
@@ -244,7 +251,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(p.destinationExists && p.destinationIsOriginal && !p.trashOriginal)
         let old = fs.ids[Self.dest]!
         let out = try Self.mover(fs).install(p, replaceExisting: false)
-        #expect(out == .init(installed: URL(fileURLWithPath: Self.dest)))
+        #expect(out == .init(installed: Self.url(Self.dest)))
         #expect(fs.log == [
             "copy \(Self.translocated) -> \(Self.staging)",
             "unquarantine \(Self.staging)",
@@ -267,7 +274,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(fs.ids[Self.dest] == old)
         #expect(fs.wentMissing.isEmpty)
         #expect(fs.trashed.isEmpty)
-        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+        #expect(!fs.exists(Self.url(Self.staging)))
     }
 
     @Test func aReplacedAppThatWontGoToTheTrashLeavesTheNewInstallUsable() throws {
@@ -278,7 +285,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(out.installed.path == Self.dest)
         #expect(out.replacedLeftBehind?.path == Self.staging)
         #expect(fs.ids[Self.dest] == fs.lastCopyID)
-        #expect(fs.signatureMatchesRunningApp(URL(fileURLWithPath: Self.dest)))
+        #expect(fs.signatureMatchesRunningApp(Self.url(Self.dest)))
         #expect(fs.ids[Self.staging] == old)   // kept, not deleted
         #expect(!fs.log.contains("rm \(Self.staging)"))
     }
@@ -287,25 +294,25 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         // Finder replaces /Applications/Owlink.app while "Move to Applications?" is up.
         let (fs, p) = try Self.translocatedFromApplications()
         let other = fs.replace(Self.dest)
-        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+        #expect(throws: AppMoveError.destinationChanged(Self.url(Self.dest))) {
             try Self.mover(fs).install(p, replaceExisting: false)
         }
         #expect(fs.ids[Self.dest] == other)
         #expect(fs.trashed.isEmpty)
         #expect(!fs.log.contains { $0.hasPrefix("swap") })
-        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+        #expect(!fs.exists(Self.url(Self.staging)))
     }
 
     @Test func anAppTheUserAgreedToReplaceThatWasThenReplacedIsLeftAlone() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.download], writable: [Self.apps])
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         let other = fs.replace(Self.dest)
-        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+        #expect(throws: AppMoveError.destinationChanged(Self.url(Self.dest))) {
             try Self.mover(fs).install(p, replaceExisting: true)
         }
         #expect(fs.ids[Self.dest] == other)
         #expect(fs.trashed.isEmpty)
-        #expect(fs.exists(URL(fileURLWithPath: Self.download)))
+        #expect(fs.exists(Self.url(Self.download)))
     }
 
     @Test func aReplacementBetweenTheLookAndTheSwapIsSwappedBack() throws {
@@ -314,17 +321,17 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         fs.beforeSwap = { f in
             if other == nil { other = f.replace(Self.dest) }
         }
-        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+        #expect(throws: AppMoveError.destinationChanged(Self.url(Self.dest))) {
             try Self.mover(fs).install(p, replaceExisting: false)
         }
         #expect(fs.ids[Self.dest] == other)
         #expect(fs.trashed.isEmpty)
-        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+        #expect(!fs.exists(Self.url(Self.staging)))
     }
 
     @Test func translocatedFromDownloadsTrashesTheRealOriginalNotTheTranslocatedPath() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.download, Self.translocated], writable: [Self.apps])
-        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.download)), source: Self.translocated, fs: fs)
+        let p = try Self.plan(.translocated(original: Self.url(Self.download)), source: Self.translocated, fs: fs)
         _ = try Self.mover(fs).install(p, replaceExisting: false)
         #expect(fs.trashed == [Self.download])
         #expect(fs.log.first == "copy \(Self.translocated) -> \(Self.staging)")
@@ -333,7 +340,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
 
     @Test func aDifferentItemAtTheOriginalsPathIsNotTrashed() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.download, Self.translocated], writable: [Self.apps])
-        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.download)), source: Self.translocated, fs: fs)
+        let p = try Self.plan(.translocated(original: Self.url(Self.download)), source: Self.translocated, fs: fs)
         let other = fs.replace(Self.download)   // a new download took the name
         let out = try Self.mover(fs).install(p, replaceExisting: false)
         #expect(out.installed.path == Self.dest)
@@ -367,7 +374,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         let old = fs.ids[Self.dest]!
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(p.destinationExists && !p.destinationIsOriginal)
-        #expect(throws: AppMoveError.destinationExists(URL(fileURLWithPath: Self.dest))) {
+        #expect(throws: AppMoveError.destinationExists(Self.url(Self.dest))) {
             try Self.mover(fs).install(p, replaceExisting: false)
         }
         #expect(fs.log.isEmpty)   // nothing written, nothing unquarantined
@@ -398,7 +405,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         let old = fs.ids[Self.dest]
         #expect(throws: AppMoveError.signatureInvalid) { try Self.mover(fs).install(p, replaceExisting: true) }
         #expect(fs.quarantineRemovedUnder.isEmpty)
-        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+        #expect(!fs.exists(Self.url(Self.staging)))
         #expect(fs.ids[Self.dest] == old && fs.trashed.isEmpty)
     }
 
@@ -425,7 +432,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(!p.destinationExists)
         fs.items.insert(Self.dest)   // dropped in while the question was up
-        #expect(throws: AppMoveError.destinationExists(URL(fileURLWithPath: Self.dest))) {
+        #expect(throws: AppMoveError.destinationExists(Self.url(Self.dest))) {
             try Self.mover(fs).install(p, replaceExisting: false)
         }
         #expect(fs.trashed.isEmpty)
