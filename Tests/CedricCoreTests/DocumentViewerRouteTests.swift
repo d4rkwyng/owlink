@@ -217,6 +217,38 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertTrue(decision.forgetsLastOpenDocument)
     }
 
+    /// The editor's own read (`TextDocument.load`) asks the route again on
+    /// the bytes it got: a file classified as text and then replaced by a
+    /// PDF before the read (a launch reopen, a recovery restore, a reload
+    /// after a change on disk) isn't taken as text. "Open as Text" still is.
+    func testEditorLoadRefusesViewerContentSwappedInAfterClassification() throws {
+        let pdfURL = samples.appendingPathComponent("sample.pdf")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: pdfURL.path), "ios/Samples not reachable from this test host")
+        let pdfBytes = try Data(contentsOf: pdfURL)
+        let url = try file("notes", Array("plain notes\n".utf8))
+        XCTAssertEqual(DocumentViewerRoute.route(for: url), .editor, "premise: classified as the editor's")
+        try pdfBytes.write(to: url)
+        let read = try Data(contentsOf: url)
+        XCTAssertFalse(DocumentViewerRoute.editorMayLoad(fileName: "notes", data: read, openAsText: false))
+        XCTAssertFalse(DocumentViewerRoute.editorMayLoad(fileName: "paper.pdf", data: read, openAsText: false))
+        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "notes", data: read, openAsText: true), "Open as Text")
+        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "paper.pdf", data: read, openAsText: true), "Open as Text")
+    }
+
+    func testEditorLoadKeepsText() {
+        let cases: [(String, String)] = [
+            ("notes.txt", "hello\n"), ("table.csv", "a,b\n1,2\n"), ("README.md", "# Title\n"),
+            ("notes", "plain text, no extension\n"), ("notes", "%PDF notes (no dash)\n"),
+            ("pdf-notes", "% PDF-ish\n"), ("Makefile", "all:\n\techo hi\n"),
+            // A text name keeps the editor whatever the first bytes are (as the route).
+            ("paper.txt", "%PDF-1.7 pasted into a text file\n"), ("data.csv", "%PDF-,x\n"),
+        ]
+        for (name, text) in cases {
+            XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: name, data: Data(text.utf8), openAsText: false), name)
+        }
+        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "empty", data: Data(), openAsText: false))
+    }
+
     // MARK: The bundled samples
 
     private var samples: URL {
