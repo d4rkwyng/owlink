@@ -95,6 +95,12 @@ public struct RecoveryStore: Sendable {
     public var checkFailRead = false
     /// Check builds only: setting a file aside fails (it stays where it is).
     public var checkFailSetAside = false
+    /// Check builds only: lstat of a recovery file fails with this errno
+    /// (ENOENT: it is missing; anything else: an error, not absence).
+    public var checkStatErrno: Int32?
+    /// Check builds only: runs when this value finds the folder locked by
+    /// another thread, just before it waits for the lock.
+    public var checkLockContended: (@Sendable () -> Void)?
 
     public init(directory: URL, durableFrom: URL? = nil) {
         self.directory = directory
@@ -125,7 +131,11 @@ public struct RecoveryStore: Sendable {
 
     private func locked<T>(_ body: (Folder) throws -> T) rethrows -> T {
         let f = folder
-        f.lock.lock(); defer { f.lock.unlock() }
+        if !f.lock.try() {
+            if DevEnvironment.checksEnabled, let hook = checkLockContended { hook() }
+            f.lock.lock()
+        }
+        defer { f.lock.unlock() }
         return try body(f)
     }
 
@@ -157,6 +167,7 @@ public struct RecoveryStore: Sendable {
     }
 
     private func exists(_ url: URL) -> Bool {
+        if DevEnvironment.checksEnabled, checkStatErrno != nil { return false }
         var st = stat()
         return lstat(url.path, &st) == 0
     }
