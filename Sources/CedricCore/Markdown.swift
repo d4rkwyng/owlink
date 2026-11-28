@@ -136,7 +136,7 @@ final class MarkdownRenderer {
             out += frontmatter(lines[1..<end])
             start = end + 1
         }
-        if options.math, source.contains(Self.dollarMark) { dollarMarkFree = false }
+        if options.math, source.unicodeScalars.contains(Self.dollarScalar) { dollarMarkFree = false }
         if options.obsidian, source.contains("%%") { stripComments(&lines, from: start) }
         collectDefinitions(&lines, from: start)
         renderBlocks(lines[start...], firstLine: start, into: &out)
@@ -798,7 +798,10 @@ final class MarkdownRenderer {
     /// end) become <br>; emphasis may run across the lines.
     func inlineLines(_ lines: [String]) -> String {
         var text = ""
+        var held: [String] = []
         for (k, l) in lines.enumerated() {
+            // The user's own marks are held before the break marks go in.
+            let l = literalHolds(l, &held)
             let last = k == lines.count - 1
             if !last, l.hasSuffix("  ") {
                 text += l.trimmingCharacters(in: .whitespaces) + Self.breakMark + "\n"
@@ -808,7 +811,7 @@ final class MarkdownRenderer {
                 text += l.trimmingCharacters(in: .whitespaces) + (last ? "" : "\n")
             }
         }
-        return inline(text)
+        return inline(text, held)
     }
 
     /// Stands for a hard line break until the placeholders are restored.
@@ -817,6 +820,8 @@ final class MarkdownRenderer {
     /// whether it has math (then `\$` is `$`; else it stays as typed).
     static let dollarMark: Character = "\u{E003}"
     private static let open: Character = "\u{E000}", close: Character = "\u{E001}"
+    private static let openScalar: Unicode.Scalar = "\u{E000}", closeScalar: Unicode.Scalar = "\u{E001}"
+    private static let breakScalar: Unicode.Scalar = "\u{E002}", dollarScalar: Unicode.Scalar = "\u{E003}"
 
     /// Inline Markdown → HTML. 1: code spans, autolinks, raw inline tags,
     /// bare URLs and escapes are lifted out into placeholders, so nothing
@@ -827,10 +832,32 @@ final class MarkdownRenderer {
     /// placeholders are put back.
     func inline(_ text: String) -> String {
         var held: [String] = []
+        let text = literalHolds(text, &held)
+        return inline(text, held)
+    }
+
+    /// `text` has its own U+E000…U+E003 already held (`literalHolds`).
+    private func inline(_ text: String, _ held: [String]) -> String {
+        var held = held
         let s = liftCode(Array(text), &held)
         let linked = links(s, &held, allowLinks: true)
         let marked = options.obsidian ? highlights(linked, &held) : linked
-        return restore(emphasis(marked), held)
+        return restore(emphasis(marked), held, below: held.count)
+    }
+
+    /// The U+E000…U+E003 the user typed, each held as a literal
+    /// (U+E000 `L`index U+E001), so no placeholder or mark is read from them.
+    private func literalHolds(_ text: String, _ held: inout [String]) -> String {
+        guard text.unicodeScalars.contains(where: { $0.value >= 0xE000 && $0.value <= 0xE003 }) else { return text }
+        var out = String.UnicodeScalarView()
+        for u in text.unicodeScalars {
+            guard u.value >= 0xE000, u.value <= 0xE003 else { out.append(u); continue }
+            held.append(String(u))
+            out.append(Self.openScalar)
+            out.append(contentsOf: ("L" + String(held.count - 1)).unicodeScalars)
+            out.append(Self.closeScalar)
+        }
+        return String(out)
     }
 
     private func hold(_ html: String, _ held: inout [String]) -> [Character] {
@@ -838,22 +865,33 @@ final class MarkdownRenderer {
         return [Self.open] + Array(String(held.count - 1)) + [Self.close]
     }
 
-    private func restore(_ s: String, _ held: [String]) -> String {
-        var s = s
-        if s.contains(Self.breakMark) { s = s.replacingOccurrences(of: Self.breakMark, with: "<br>") }
-        guard !held.isEmpty, s.contains(Self.open) else { return s }
-        var out = ""
-        var it = s.makeIterator()
-        while let ch = it.next() {
-            if ch == Self.open {
-                var num = ""
-                while let d = it.next(), d != Self.close { num.append(d) }
-                if let k = Int(num), k < held.count { out += restore(held[k], held) }
-            } else {
-                out.append(ch)
+    /// Puts the held HTML back (break marks as <br>). Only a well-formed
+    /// placeholder of a hold before `below` is read, so the recursion ends;
+    /// a literal hold comes back as typed, not read again.
+    private func restore(_ s: String, _ held: [String], below: Int) -> String {
+        let u = s.unicodeScalars
+        guard u.contains(where: { $0 == Self.openScalar || $0 == Self.breakScalar }) else { return s }
+        var out = String.UnicodeScalarView()
+        var i = u.startIndex
+        while i < u.endIndex {
+            let ch = u[i]
+            i = u.index(after: i)
+            if ch == Self.breakScalar { out.append(contentsOf: "<br>".unicodeScalars); continue }
+            guard ch == Self.openScalar else { out.append(ch); continue }
+            var j = i
+            let literal = j < u.endIndex && u[j] == "L"
+            if literal { j = u.index(after: j) }
+            var k = 0, digits = 0
+            while j < u.endIndex, digits < 10, u[j].value >= 48, u[j].value <= 57 {
+                k = k * 10 + Int(u[j].value - 48)
+                digits += 1
+                j = u.index(after: j)
             }
+            guard digits > 0, j < u.endIndex, u[j] == Self.closeScalar, k < below else { out.append(ch); continue }
+            i = u.index(after: j)
+            out.append(contentsOf: (literal ? held[k] : restore(held[k], held, below: k)).unicodeScalars)
         }
-        return out
+        return String(out)
     }
 
     private static let escapable: Set<Character> = Set("\\`*_{}[]()#+-.!|~<>\"'")
@@ -1064,7 +1102,8 @@ final class MarkdownRenderer {
             let labelChars = linkDepth > Self.maxNesting ? label : links(label, &held, allowLinks: false)
             linkDepth -= 1
             if isImage {
-                let alt = Self.stripTags(restore(emphasis(labelChars), held))
+                // Held again: the user's own characters must not be read later.
+                let alt = literalHolds(Self.stripTags(restore(emphasis(labelChars), held, below: held.count)), &held)
                 out += hold("<img src=\"\(url)\" alt=\"\(alt)\"\(title)>", &held)
             } else {
                 // The label may hold images (a badge), not other links.
@@ -1115,7 +1154,8 @@ final class MarkdownRenderer {
             }
             var sub = options
             sub.embedDepth += 1
-            let body = MarkdownRenderer(options: sub).render(text)
+            // The note's own U+E000…U+E003 held, so this render's restore keeps them.
+            let body = literalHolds(MarkdownRenderer(options: sub).render(text), &held)
             return "<blockquote class=\"embed\"><p class=\"embed-title\"><a class=\"wikilink\"\(link)>\(label)</a></p>\n\(body)</blockquote>"
         }
         let shown = alias.flatMap { $0.isEmpty ? nil : $0 } ?? (fragment.map { name.isEmpty ? $0 : name + " › " + $0 } ?? name)
