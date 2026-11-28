@@ -237,7 +237,9 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
 
     func open(_ url: URL, importIfNeeded: Bool) {
         if importIfNeeded {
-            importGate.beginReveal(url)
+            // Already being revealed (a second Open In for the same
+            // file): that reveal presents it; no second UIKit reveal.
+            guard importGate.beginReveal(url) else { return }
             revealDocument(at: url, importIfNeeded: true) { [weak self] revealed, error in
                 guard let self, self.importGate.finishReveal(url) else { return }
                 if let revealed { self.presentDocument(at: revealed) } else { self.alert(String(localized: "Couldn’t open the file"), error?.localizedDescription) }
@@ -399,13 +401,16 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
 /// `failedToImportDocumentAt`) and then `revealDocument`'s completion.
 /// While a reveal of a source is in flight, the delegate leaves it to the
 /// completion, which presents (or alerts) once per reveal. An import with
-/// no reveal (a new document) is the delegate's alone.
+/// no reveal (a new document) is the delegate's alone. A second request
+/// for a source while its reveal is in flight is coalesced into it.
 struct ImportPresentationGate {
     private var revealing: Set<String> = []
 
     private static func key(_ url: URL) -> String { url.standardizedFileURL.resolvingSymlinksInPath().path }
 
-    mutating func beginReveal(_ source: URL) { revealing.insert(Self.key(source)) }
+    /// False when a reveal of `source` is already in flight: start no
+    /// second one (that reveal presents or alerts for both).
+    mutating func beginReveal(_ source: URL) -> Bool { revealing.insert(Self.key(source)).inserted }
 
     /// Whether a delegate callback for `source` presents (or alerts).
     func delegateOwns(_ source: URL) -> Bool { !revealing.contains(Self.key(source)) }
