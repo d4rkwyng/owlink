@@ -16,13 +16,18 @@
 # (cedric_require_release_gate, Scripts/check-env.sh).
 #
 #   Scripts/smoke-launch.sh [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip
+#   Scripts/smoke-launch.sh [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.dmg
 #
 #   --seconds N           how long the app must stay up (default: 10)
 #   --allow-check-build   accept a build with the dev switches compiled in
 #                         (local tries only; a release must report "off")
 #
 # Unzips the zip (ditto, like Finder) into a fresh temp folder and checks
-# that copy of Owlink.app, never the build tree's:
+# that copy of Owlink.app, never the build tree's. A .dmg is mounted
+# read-only at a private mount point, must hold Owlink.app and an
+# Applications symlink to /Applications, and its Owlink.app is copied out
+# (ditto, as a Finder drag copies it) before the image is detached; then
+# the same steps run on that copy:
 #   1. Layout: every file the app looks up through Bundle.main is in
 #      Contents/Resources (owl art, the model list, the tool scores, the
 #      model licences, the `cedric` launcher), Contents/MacOS/Cedric and
@@ -86,7 +91,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ -n "$ZIP" ] && [ -f "$ZIP" ] || { echo "usage: $0 [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip" >&2; exit 2; }
+[ -n "$ZIP" ] && [ -f "$ZIP" ] || { echo "usage: $0 [--seconds N] [--allow-check-build] PATH/Owlink-X.Y.Z.zip|.dmg" >&2; exit 2; }
 ZIP=$(cd "$(dirname "$ZIP")" && pwd)/$(basename "$ZIP")
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 . "$HERE/Scripts/check-env.sh"
@@ -99,6 +104,7 @@ with_alarm() { local s=$1; shift; perl -e 'alarm shift; exec @ARGV' "$s" "$@"; }
 
 TMP=""
 PID=""
+DMG_MNT=""
 HIDDEN=()
 RESTORE_FAILED=0
 restore() {
@@ -118,6 +124,10 @@ restore() {
 cleanup() {
     local rc=$?
     [ -n "$PID" ] && kill -9 "$PID" 2>/dev/null || true
+    if [ -n "$DMG_MNT" ]; then
+        hdiutil detach -quiet "$DMG_MNT" 2>/dev/null || hdiutil detach -quiet -force "$DMG_MNT" 2>/dev/null || true
+        rmdir "$DMG_MNT" 2>/dev/null || true
+    fi
     restore
     [ -n "$TMP" ] && rm -rf "$TMP"
     if [ $RESTORE_FAILED = 1 ]; then
@@ -132,10 +142,24 @@ trap 'exit 130' INT TERM HUP
 # 0. A fresh copy of what ships.
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/owlink-smoke.XXXXXX")
 mkdir "$TMP/unzipped"
-ditto -x -k "$ZIP" "$TMP/unzipped"
+case "$ZIP" in
+    *.dmg)
+        # Under /tmp: hdiutil may refuse a mount point on another volume.
+        DMG_MNT=$(mktemp -d /tmp/owlink-smoke-dmg.XXXXXX)
+        hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$DMG_MNT" "$ZIP" 2>/dev/null || fail "$ZIP does not mount"
+        [ -d "$DMG_MNT/Owlink.app" ] || { ls -la "$DMG_MNT" >&2; fail "$ZIP has no Owlink.app at its root"; }
+        [ -L "$DMG_MNT/Applications" ] && [ "$(readlink "$DMG_MNT/Applications")" = /Applications ] \
+            || fail "$ZIP has no Applications symlink to /Applications"
+        ditto "$DMG_MNT/Owlink.app" "$TMP/unzipped/Owlink.app"
+        hdiutil detach -quiet "$DMG_MNT" || hdiutil detach -quiet -force "$DMG_MNT"
+        rmdir "$DMG_MNT" 2>/dev/null || true
+        DMG_MNT=""
+        ;;
+    *) ditto -x -k "$ZIP" "$TMP/unzipped" ;;
+esac
 APP="$TMP/unzipped/Owlink.app"
 [ -d "$APP" ] || { ls -la "$TMP/unzipped" >&2; fail "$ZIP does not unpack to Owlink.app"; }
-echo "unzipped $(basename "$ZIP") to $APP"
+echo "unpacked $(basename "$ZIP") to $APP"
 EXE="$APP/Contents/MacOS/Cedric"
 RES="$APP/Contents/Resources"
 
@@ -298,4 +322,4 @@ crash=$(new_reports)
 NHIDDEN=${#HIDDEN[@]}
 restore
 [ $RESTORE_FAILED = 0 ] || fail "could not restore every hidden path (see above)"
-echo "SMOKE PASS: $(basename "$ZIP") unzipped fresh; Owlink ran ${SECONDS_UP}s and quit cleanly with ${NHIDDEN} build-machine fallback path(s) hidden; llama.framework loads; no crash report"
+echo "SMOKE PASS: $(basename "$ZIP") unpacked fresh; Owlink ran ${SECONDS_UP}s and quit cleanly with ${NHIDDEN} build-machine fallback path(s) hidden; llama.framework loads; no crash report"

@@ -138,6 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // Sparkle, only in a release build set up for updates (Updater.swift):
         // otherwise nothing is loaded and nothing goes to the network.
         AfterFirstFrame.run { Updater.shared.startIfConfigured() }
+        // Translocated, on a disk image, or a download outside
+        // Applications: offer to move there (MoveToApplications.swift).
+        AfterFirstFrame.run { MoveToApplications.offerIfNeeded() }
         AfterFirstFrame.run {
             let store = ReplaceInFiles.store
             ReplaceInFiles.queue.async { store.pruneAtLaunch() }

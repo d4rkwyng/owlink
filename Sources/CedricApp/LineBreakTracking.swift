@@ -62,10 +62,11 @@ extension EditorWindowController {
     /// back now, only where that undo or redo inserted text; Reload's ⌘Z
     /// sets the old text's breaks whole.
     func undoOrRedoEnded() {
-        defer { pendingBreaks = []; undoInserted = []; pendingBreakSnapshot = nil }
-        if let snapshot = pendingBreakSnapshot {
-            doc.lineEnding = snapshot.0
-            doc.lineBreaks = snapshot.1
+        defer { pendingBreaks = []; undoInserted = []; pendingFormatSnapshot = nil }
+        var encodingMoved = false
+        if let snapshot = pendingFormatSnapshot {
+            encodingMoved = snapshot.encoding != doc.encoding || snapshot.encodingGuessed != doc.encodingGuessed
+            doc.restore(snapshot)
         } else if !pendingBreaks.isEmpty, !undoInserted.isEmpty, doc.lineBreaks != nil, let storage = textView.textStorage {
             restorePendingBreaks(within: undoInserted, in: storage.string as NSString)
         } else {
@@ -76,7 +77,8 @@ extension EditorWindowController {
         doc.noteBreaksChange()
         if wasDirty != doc.isDirty { updateTitle() }
         updateStatus()
-        refreshLineEndingNoticeIfChanged()
+        // The encoding bar (a guess) follows the encoding that came back.
+        if encodingMoved { refreshFileNotices() } else { refreshLineEndingNoticeIfChanged() }
     }
 
     /// What the line endings are now (LineBreaks.summary): the most common
@@ -97,18 +99,20 @@ extension EditorWindowController {
     }
 
     /// Reload (and Revert to Saved) replaced the text as one undoable edit:
-    /// its ⌘Z brings back the old text with `before`'s line breaks, and
-    /// its redo the reloaded file's.
-    /// Both maps are given, never read when the record runs: a redo runs
+    /// its ⌘Z brings back the old text with `before`'s format (line breaks,
+    /// encoding and BOM, the guess: DocumentFormat), and its redo the
+    /// reloaded file's. Before 0.6.1 only the breaks came back, and a save
+    /// after ⌘Z wrote the old text in the reloaded version's encoding.
+    /// Both are given, never read when the record runs: a redo runs
     /// this record after its text change, which has already taken the
     /// breaks out of the map, so the next undo got a stripped map back
     /// (Revert, ⌘Z, ⌘⇧Z, ⌘Z lost every odd break).
-    func registerLineBreaksSnapshotUndo(restoring before: (LineEnding, LineBreaks?), redoing after: (LineEnding, LineBreaks?)) {
+    func registerFormatSnapshotUndo(restoring before: DocumentFormat, redoing after: DocumentFormat) {
         guard let um = textView.undoManager, um.isUndoRegistrationEnabled else { return }
         um.registerUndo(withTarget: self) { tab in
             MainActor.assumeIsolated {
-                tab.pendingBreakSnapshot = before
-                tab.registerLineBreaksSnapshotUndo(restoring: after, redoing: before)
+                tab.pendingFormatSnapshot = before
+                tab.registerFormatSnapshotUndo(restoring: after, redoing: before)
             }
         }
     }

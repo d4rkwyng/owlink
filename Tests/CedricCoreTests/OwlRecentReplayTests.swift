@@ -250,25 +250,6 @@ import Testing
         #expect(!RulesHintProvider.formatsWholeJSONFile(json(closed, document: nil).hint, isStale: json(closed, document: nil).isStale))
     }
 
-    /// Codex round 2: 64 KB of input nested hundreds deep pretty-prints to
-    /// tens of megabytes. Checked again, it is a past hint, not a 20 MB
-    /// replacement; the formatter stops at the limit.
-    @Test func deeplyNestedJSONIsNotFormattedPastTheOutputLimit() throws {
-        let depth = 400
-        let text = String(repeating: "[", count: depth) + Array(repeating: "1", count: 30_000).joined(separator: ",")
-            + String(repeating: "]", count: depth)
-        #expect((text as NSString).length <= RulesHintProvider.replayJSONLimit)
-        let unbounded = JSONFormatter.prettyIfMinified(text)
-        #expect((unbounded?.utf8.count ?? 0) > 20 * RulesHintProvider.replayJSONOutputLimit, "the case is real")
-        #expect(JSONFormatter.prettyIfMinified(text, limit: RulesHintProvider.replayJSONOutputLimit) == nil)
-        #expect(throws: TextToolError.self) { try JSONFormatter.format(text, pretty: true, limit: 1000) }
-        let r = RulesHintProvider.recheckJSON(text, source: "rules")
-        #expect(RulesHintProvider.isPastJSONHint(r.hint) && r.hint.replacement == nil)
-        // Small enough: formatted as before.
-        #expect(try JSONFormatter.format(#"{"a":[1]}"#, pretty: true, limit: 1000) == JSONFormatter.prettyIfMinified(#"{"a":[1]}"#))
-        #expect(!RulesHintProvider.isPastJSONHint(RulesHintProvider.recheckJSON(#"{"a":[1]}"#, source: "rules").hint))
-    }
-
     /// VoiceOver's label for a Recent hints row: "Format it?." in 0.5.4.
     @Test func theSpokenRowHasNoDoubledPunctuation() {
         #expect(OwlCoordinator.spokenRecent(time: "11:50 AM", title: "Looks like JSON. Format it?",
@@ -382,5 +363,40 @@ import Testing
         }
         #expect(try JSONFormatter.format(text, pretty: true, limit: full.utf8.count) == full)
         #expect(try JSONFormatter.format(text, pretty: false, limit: 200).utf8.count <= 200)
+    }
+}
+
+/// Off the main actor: this pretty-prints tens of megabytes on purpose
+/// (2.4 s alone here, far longer on a 3-core CI runner). In the
+/// `@MainActor` suite above it held the main actor that long, and on CI,
+/// where both test targets share one process, every main-actor test waited
+/// behind it; the AI tests' `eventually` waits ran out first
+/// (AIStatusLineTests.bridgeReportsChecks,
+/// OwlReduceCancelTests.stopAfterTheCombinedAnswerReturnedKeepsTheNotesNotTheAnswer).
+/// The work runs on a thread of its own with an 8 MB stack (`onLargeStack`),
+/// not `.offPool`: 400 levels of the debug-build parser overflow a GCD
+/// thread's 512 KB. What it checks is unchanged.
+@Suite struct OwlRecentReplayJSONLimitTests {
+    /// Codex round 2: 64 KB of input nested hundreds deep pretty-prints to
+    /// tens of megabytes. Checked again, it is a past hint, not a 20 MB
+    /// replacement; the formatter stops at the limit.
+    @Test func deeplyNestedJSONIsNotFormattedPastTheOutputLimit() async throws {
+        let depth = 400
+        let text = String(repeating: "[", count: depth) + Array(repeating: "1", count: 30_000).joined(separator: ",")
+            + String(repeating: "]", count: depth)
+        #expect((text as NSString).length <= RulesHintProvider.replayJSONLimit)
+        let (unboundedBytes, bounded, tight, r) = await onLargeStack {
+            (JSONFormatter.prettyIfMinified(text)?.utf8.count,
+             JSONFormatter.prettyIfMinified(text, limit: RulesHintProvider.replayJSONOutputLimit),
+             Result { try JSONFormatter.format(text, pretty: true, limit: 1000) },
+             RulesHintProvider.recheckJSON(text, source: "rules"))
+        }
+        #expect((unboundedBytes ?? 0) > 20 * RulesHintProvider.replayJSONOutputLimit, "the case is real")
+        #expect(bounded == nil)
+        #expect(throws: TextToolError.self) { try tight.get() }
+        #expect(RulesHintProvider.isPastJSONHint(r.hint) && r.hint.replacement == nil)
+        // Small enough: formatted as before.
+        #expect(try JSONFormatter.format(#"{"a":[1]}"#, pretty: true, limit: 1000) == JSONFormatter.prettyIfMinified(#"{"a":[1]}"#))
+        #expect(!RulesHintProvider.isPastJSONHint(RulesHintProvider.recheckJSON(#"{"a":[1]}"#, source: "rules").hint))
     }
 }

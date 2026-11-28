@@ -308,13 +308,18 @@ public final class FileTail: @unchecked Sendable {
             // Shorter than what was read (cut since the fstat): the next
             // check resets.
             guard let bytes = try fh.read(upToCount: Int(size - start)), UInt64(bytes.count) > heldCount else { return }
-            // A UTF-8 BOM written to a file of which nothing is shown yet
+            // A BOM written to a file of which nothing is shown yet
             // (followed empty, or a reset to nothing): that version's own
             // BOM, so the whole file is read as a reset, which decodes it
             // and carries its encoding, rather than appended as text
             // (U+FEFF on one macOS, dropped on another, and the tab kept
-            // the encoding it had: a save lost the BOM).
-            if start == 0, encoding.base == .utf8, bytes.starts(with: TextEncoding.utf8BOM.bom) {
+            // the encoding it had: a save lost the BOM). UTF-8's, or the
+            // UTF-16 byte order's: 0.6.1 before Astra's review checked
+            // UTF-8's only, so a UTF-16 log truncated before its writer
+            // wrote the new BOM showed it as U+FEFF, stamped as the file,
+            // and an unedited save wrote two BOMs. A BOM split across
+            // writes is held (half a character) until it is whole.
+            if start == 0, !encoding.familyBOM.isEmpty, bytes.starts(with: encoding.familyBOM) {
                 resetPending = true
                 check()
                 return
@@ -359,12 +364,20 @@ public final class FileTail: @unchecked Sendable {
     /// decoding drops a leading U+FEFF on macOS 26, and Follow stamped the
     /// bytes as shown all the same: a second BOM appended on its own was
     /// missing from the tab, and ⌘S wrote the file three bytes short.
+    /// UTF-16 the same way (TextCodec.decodeUTF16: its byte order, every
+    /// U+FEFF kept, a surrogate not in a pair refused), so it no longer
+    /// depends on what Foundation does with a U+FEFF on a given macOS.
+    /// The 8-bit encodings have no BOM and map every byte (or refuse it)
+    /// the same way: Foundation.
     static func decodeAppended(_ bytes: Data, _ encoding: TextEncoding) -> String? {
-        if encoding.base == .utf8 {
+        switch encoding.base {
+        case .utf8, .utf8BOM:
             guard TextCodec.isValidUTF8(bytes) else { return nil }
             return bytes.withUnsafeBytes { String(decoding: $0.bindMemory(to: UInt8.self), as: UTF8.self) }
+        case .utf16LE, .utf16LENoBOM: return TextCodec.decodeUTF16(bytes, bigEndian: false)
+        case .utf16BE, .utf16BENoBOM: return TextCodec.decodeUTF16(bytes, bigEndian: true)
+        case .latin1, .windows1252, .macRoman: return String(data: bytes, encoding: encoding.foundation)
         }
-        return String(data: bytes, encoding: encoding.foundation)
     }
 
     /// Decodes the longest prefix of `bytes` that ends on a whole character:
@@ -372,7 +385,7 @@ public final class FileTail: @unchecked Sendable {
     /// byte (Foundation would decode it by dropping it, and the next
     /// append would start out of alignment).
     static func decodePrefix<T>(_ bytes: Data, _ encoding: TextEncoding, _ decode: (Data) -> T?) -> (T, Int)? {
-        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let utf16 = encoding.isUTF16
         let first = utf16 ? bytes.count % 2 : 0
         for cut in stride(from: first, through: min(first + 3, bytes.count), by: utf16 ? 2 : 1) {
             if let t = decode(bytes.prefix(bytes.count - cut)) { return (t, bytes.count - cut) }
@@ -406,7 +419,7 @@ public final class FileTail: @unchecked Sendable {
     /// such CR.
     static func heldCR(_ data: Data, _ encoding: TextEncoding) -> Int? {
         guard let cr = "\r".data(using: encoding.foundation), !cr.isEmpty else { return nil }
-        let utf16 = encoding == .utf16LE || encoding == .utf16BE
+        let utf16 = encoding.isUTF16
         let end = data.count - (utf16 ? data.count % 2 : 0)
         guard end >= cr.count, data[data.startIndex + end - cr.count ..< data.startIndex + end].elementsEqual(cr) else { return nil }
         return end - cr.count

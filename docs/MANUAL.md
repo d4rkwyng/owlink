@@ -33,16 +33,35 @@ The short version is the [README](../README.md).
 
 ## Install
 
-With [Homebrew](https://brew.sh):
+Download **`Owlink-<version>.dmg`** from
+[Releases](https://github.com/d4rkwyng/owlink/releases), open it, drag
+Owlink onto the Applications folder in its window, eject it, and open
+Owlink from Applications. (The release also has a `.zip` of the same app;
+that one is for the updater.)
+
+Or with [Homebrew](https://brew.sh):
 
 ```sh
 brew trust --tap d4rkwyng/tap      # once: newer Homebrew asks you to trust a third-party tap
 brew install --cask d4rkwyng/tap/owlink
 ```
 
-This also puts the `cedric` command on your PATH. Or download
-`Owlink-<version>.zip` from [Releases](https://github.com/d4rkwyng/owlink/releases),
-open it, and move Owlink to Applications. Owlink checks for a new version
+This also puts the `cedric` command on your PATH, and Owlink can update
+itself from there.
+
+If Owlink finds itself running from somewhere it can't update from (the
+disk image, Downloads or anywhere else outside Applications, or a
+temporary copy macOS made because it wasn't moved with Finder, called App
+Translocation), it asks to **Move to Applications**. It copies itself
+there, checks that the copy is the same signed app, takes the download
+marking off that new copy only, and reopens from Applications. An Owlink
+already in Applications goes to the Trash only if you say Replace (and is
+left alone if it changed while Owlink was asking). The copy you opened can
+go to the Trash too, when it is somewhere Owlink can write to: this is a
+tidy-up, so if it can't, the copy just stays where it is. A disk image is
+left alone. **Not Now** asks again next time; tick **Don't ask again** with Not Now to stop asking.
+
+Owlink checks for a new version
 about once a day and asks before installing it (Owlink › Check for
 Updates… checks now; Settings › General › Automatically check for updates
 turns the daily check off). Only updates signed with Owlink's key are
@@ -152,8 +171,8 @@ Terminal window at the file's folder. All three are off for an untitled tab.
 **Files changed on disk** reload by themselves when the tab has no unsaved
 changes. With unsaved changes, a bar says so (**Reload** / **Keep Mine**),
 owl or no owl. **⌘S never overwrites another app's changes:** if the file
-changed since Owlink read or saved it, a sheet asks first (**Keep My
-Version**, **Reload Theirs** (undoable) or **Compare**).
+changed since Owlink read or saved it, a sheet asks first (**Keep What's in
+This Tab**, **Reload from Disk** (undoable), **Compare** or **Cancel**).
 
 **A file deleted or moved away** while its tab is open gets a bar when
 you come back to the window: "“name” was deleted or moved. Its text is
@@ -713,7 +732,8 @@ menu overrides it.
 ### Themes
 
 System (light or dark with macOS), Light, Dark, Tankard (deep
-purple and amber) and Dracula, the same set as Tankard. Every theme's text
+purple and amber), Dracula, and Owlink's own **Cedric** (peach paper, navy
+text) and **Cedric Night** (navy page, sepia text). Every theme's text
 colours meet WCAG AA contrast (4.5:1), checked by a test. SF Mono by
 default, or any installed fixed-pitch font (Markdown and plain text can
 have their own *prose font*, below); ⌘+ / ⌘− / ⌘0 zoom. The zoom

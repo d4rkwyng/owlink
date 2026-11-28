@@ -341,7 +341,7 @@ public enum FileReplace {
         switch encoding {
         case .latin1, .windows1252, .macRoman:
             return !replacements.unicodeScalars.allSatisfy(\.isASCII) || containsUTF8Multibyte(data)
-        case .utf8, .utf8BOM, .utf16LE, .utf16BE:
+        case .utf8, .utf8BOM, .utf16LE, .utf16LENoBOM, .utf16BE, .utf16BENoBOM:
             return false
         }
     }

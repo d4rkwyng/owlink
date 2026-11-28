@@ -76,9 +76,97 @@ offers nothing.
   (`--host-arch`: the appcast item is offered to every Mac). `Scripts/updates-check.sh` tests those
   refusals.
 
+## Downloads: the DMG for people, the zip for Sparkle (0.6.1)
+
+The release job makes two artifacts from the same notarized, stapled
+`Owlink.app` (release.sh's `dist/Owlink.app`, built and signed once):
+
+- **`Owlink-<version>.dmg`, the download.** A drag-to-install disk image:
+  Owlink.app and an alias (symlink) to /Applications (`Scripts/make-dmg.sh`,
+  which mounts the image and checks the app on it has the same files,
+  CDHash and stapled ticket as the bundle it was given). The DMG itself is
+  signed with the Developer ID, notarized and stapled
+  (`Scripts/release-dmg.sh`), Gatekeeper assesses it and the app on it, and
+  `Scripts/smoke-launch.sh` launches the app copied out of it. The release
+  notes, the README and the manual lead with it, and the Homebrew cask is to
+  point at it from 0.6.1 on (changed at release time, with the published
+  DMG's sha256).
+- **`Owlink-<version>.zip`, the Sparkle enclosure**, signed with
+  `sign_update` as in 0.6.0, and still attached to the release.
+
+**Why the zip stays the enclosure.** 0.6.0 proved the zip path end to end
+(signed feed, install, "You're up to date"). A zip update replaces the .app
+in place and mounts nothing, so there is no attach/detach, licence window or
+Finder-open step to fail. First install from a DMG and later updates from a
+zip is a normal Mac pattern: Sparkle doesn't care how the app was first
+installed. Pointing the enclosure at the DMG is valid, but it would change
+the proven 0.6.0 update path in the same release that introduces DMG
+packaging, for no gain to someone updating. Revisit only with a reason the
+zip can't serve.
+
+**Why a DMG at all (App Translocation).** macOS runs a quarantined app
+through App Translocation (a random read-only path under
+`…/AppTranslocation/`) until the user moves it with Finder, and Sparkle
+can't update a translocated app ("Owlink can't be updated if it's running
+from the location it was downloaded to"). In a throwaway macOS 26.6.2 VM
+with the 0.6.0 zip, quarantined as Safari would (not a live Safari
+download), on 2026-11-27:
+
+| How Owlink got into /Applications | Quarantine flags before first launch | Translocated? | Check for Updates |
+|---|---|---|---|
+| Archive Utility, then a mouse drag in Finder (synthetic CGEvent mouse down, drag, up) from Downloads to /Applications | `0181` | no | "You're up to date!" |
+| A DMG (app plus Applications alias), dragged onto the alias the same way | `0181` | no | "You're up to date!" |
+| Archive Utility, then a Finder AppleScript `duplicate` | `0081` | **yes** | "can't be updated…" |
+| Archive Utility, then a Finder AppleScript `move` (and, in the 0.6.0 QA, same-volume `/bin/mv`) | `0081` | **yes** | "can't be updated…" |
+| `brew install --cask d4rkwyng/tap/owlink` (0.6.0 QA) | Homebrew Cask | no | "You're up to date!" |
+
+So a real drag clears translocation; a scripted copy or move doesn't. The
+DMG makes the drag the obvious thing to do, and Homebrew is a path that
+updates too.
+
+**Move to Applications, in the app.** For everyone else (a script
+install, an app opened straight from Downloads or from the DMG itself),
+a release build asks at launch, after the first frame, whether to move
+itself to Applications when it is translocated
+(`SecTranslocateIsTranslocatedURL` through dlsym, else the
+`/AppTranslocation/` path), running from a read-only disk image, or any
+other copy outside /Applications and ~/Applications, quarantined or not
+(`Sources/CedricCore/AppRelocation.swift`,
+`Sources/CedricApp/MoveToApplications.swift`). A check or debug build
+never asks (that is how a build you made yourself runs). After LetsMove's
+idea, in our own tested code:
+
+1. copy the running bundle to a hidden staging name inside /Applications
+   (~/Applications, created if needed, when /Applications isn't writable);
+2. check that the copy is the running app: an intact signature (all
+   architectures, nested code, strict) that satisfies the running
+   process's designated requirement, and the running code's code
+   directory hash on one of its architectures;
+3. remove `com.apple.quarantine` from **that copy only**;
+4. publish it: whatever is at /Applications/Owlink.app (asking first,
+   unless it is this app's own translocation original) is exchanged with
+   the copy in one `renamex_np(RENAME_SWAP)`, so that path always holds a
+   whole app, and the old app, now at the staging name, goes to the
+   Trash. Only the very item that was there when the user was asked
+   (device, inode and birth time) is replaced: anything put there since
+   is left alone. With nothing there, an exclusive rename;
+5. send the original to the Trash when it is somewhere writable (never
+   the disk image) and still the item it was. This is best-effort: if it
+   fails, the original stays where it is. Then reopen from /Applications
+   once this process has quit.
+
+A failure in 1–4 removes the staging copy and leaves the installed app as
+it was. If the old app can't go to the Trash in step 4, the new one stays
+installed and the old one is kept beside it under the staging name. This is not a Gatekeeper bypass: it only runs in an app Gatekeeper has
+already let run (the user said Open on the first launch), and it never
+changes the download's, the disk image's or the translocated original's
+quarantine, or any Gatekeeper setting. "Don't ask again", ticked with Not Now, stops the question
+(the `OwlinkMoveToApplicationsSuppressed` user default).
+
 ## Signing in CI
 
-After the notarized zip passes the launch smoke test, release.yml:
+After the notarized zip passes the launch smoke test, and the DMG is
+made, notarized, stapled and smoke-tested the same way (above), release.yml:
 
 1. writes `SPARKLE_ED_PRIVATE_KEY` to `$RUNNER_TEMP/sparkle-key/ed25519.key`
    (umask 077, folder 700, file 600; outside the checkout, never logged, no
@@ -93,9 +181,10 @@ After the notarized zip passes the launch smoke test, release.yml:
    enclosure is the tag's release asset,
    `https://github.com/d4rkwyng/owlink/releases/download/<tag>/Owlink-<version>.zip`
    (`<version>` is the tag without `v` and any `-rcN` suffix, as for the zip);
-4. prints the zip's sha256 (also in the job summary), deletes the key
-   folder in an `if: always()` step, even when signing failed, and attaches
-   the zip and `appcast.xml` to the **draft** release. Nothing is published:
+4. prints the zip's and the DMG's sha256 (also in the job summary, with
+   the DMG's url and sha256 for the cask), deletes the key folder in an
+   `if: always()` step, even when signing failed, and attaches the DMG, the
+   zip and `appcast.xml` to the **draft** release. Nothing is published:
    not the release, not `https://owlink.app/appcast.xml`.
 
 The appcast is a fresh one-item feed (no `--from`): once older versions are
@@ -171,8 +260,8 @@ checks the secret the same way on a dummy file and prints only PASS or FAIL.
    copy>` so the new item is added to it.
 4. Upload by hand, in this order: the zip to its download URL, then
    `dist/appcast.xml` to `https://owlink.app/appcast.xml`.
-5. Bump the cask as usual (version and sha256), without `auto_updates` (see
-   above).
+5. Bump the cask (version, and from 0.6.1 the DMG's url and sha256 from the
+   job summary), without `auto_updates` (see above).
 6. The first update-enabled release has nothing to update from. The first
    real test is the next release: install the update-enabled version,
    publish the next one, and use Check for Updates….
