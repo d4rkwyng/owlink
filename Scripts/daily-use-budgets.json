@@ -1,0 +1,89 @@
+{
+  "host" : "geonosis",
+  "measured" : "2026-11-28",
+  "metrics" : {
+    "cold_launch_ms" : {
+      "baseline_ms" : 163.7,
+      "budget_ms" : 300,
+      "cap_ms" : 1500,
+      "floor_ms" : 300,
+      "runs_ms" : [
+        154.3,
+        156.5,
+        167.8,
+        149.4,
+        167.2,
+        164.4,
+        163.7
+      ]
+    },
+    "preview_toggle_ms" : {
+      "baseline_ms" : 66.6,
+      "budget_ms" : 86.5,
+      "cap_ms" : 600,
+      "floor_ms" : 80,
+      "runs_ms" : [
+        58.5,
+        66.6,
+        67.9,
+        70.4,
+        62.3
+      ]
+    },
+    "sidebar_log_ms" : {
+      "baseline_ms" : 52.2,
+      "budget_ms" : 80,
+      "cap_ms" : 600,
+      "floor_ms" : 80,
+      "runs_ms" : [
+        45.9,
+        52.2,
+        44.6,
+        60.2,
+        56.3
+      ]
+    },
+    "sidebar_md_ms" : {
+      "baseline_ms" : 40,
+      "budget_ms" : 52,
+      "cap_ms" : 250,
+      "floor_ms" : 40,
+      "runs_ms" : [
+        34.6,
+        52.8,
+        40,
+        39.5,
+        46.9
+      ]
+    },
+    "sidebar_switch_ms" : {
+      "baseline_ms" : 12.5,
+      "budget_ms" : 30,
+      "cap_ms" : 200,
+      "floor_ms" : 30,
+      "runs_ms" : [
+        9.4,
+        12.5,
+        14.5,
+        18.1,
+        11.3
+      ]
+    }
+  },
+  "notes" : [
+    "perf run 1: load (1 min) before 3.55, after 3.91, 14 cores; metric=sidebar_md_ms value=34.58 metric=sidebar_log_ms value=45.86 metric=sidebar_switch_ms value=9.40 metric=preview_toggle_ms value=58.50 ",
+    "perf run 2: load (1 min) before 3.91, after 3.19, 14 cores; metric=sidebar_md_ms value=52.83 metric=sidebar_log_ms value=52.21 metric=sidebar_switch_ms value=12.48 metric=preview_toggle_ms value=66.57 ",
+    "perf run 3: load (1 min) before 3.02, after 2.56, 14 cores; metric=sidebar_md_ms value=40.01 metric=sidebar_log_ms value=44.56 metric=sidebar_switch_ms value=14.47 metric=preview_toggle_ms value=67.88 ",
+    "perf run 4: load (1 min) before 2.56, after 2.30, 14 cores; metric=sidebar_md_ms value=39.48 metric=sidebar_log_ms value=60.18 metric=sidebar_switch_ms value=18.08 metric=preview_toggle_ms value=70.40 ",
+    "perf run 5: load (1 min) before 2.30, after 2.16, 14 cores; metric=sidebar_md_ms value=46.92 metric=sidebar_log_ms value=56.31 metric=sidebar_switch_ms value=11.30 metric=preview_toggle_ms value=62.31 ",
+    "measured by Scripts\/daily-use.sh --write-budgets --runs 5 --cold 7 on geonosis; baselines are medians of per-run medians (cold: of 7 launches)",
+    "cold launch 0 launch_ms=524.9 load_start=3.51 load_end=3.51",
+    "cold launch 1 launch_ms=154.3 load_start=3.51 load_end=3.51",
+    "cold launch 2 launch_ms=156.5 load_start=3.51 load_end=3.51",
+    "cold launch 3 launch_ms=167.8 load_start=3.51 load_end=3.51",
+    "cold launch 4 launch_ms=149.4 load_start=3.55 load_end=3.55",
+    "cold launch 5 launch_ms=167.2 load_start=3.55 load_end=3.55",
+    "cold launch 6 launch_ms=164.4 load_start=3.55 load_end=3.55",
+    "cold launch 7 launch_ms=163.7 load_start=3.55 load_end=3.55"
+  ]
+}

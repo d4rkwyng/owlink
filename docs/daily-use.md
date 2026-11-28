@@ -4,7 +4,9 @@
 times it, so usability bugs and slowdowns are found by a process and not
 by hand. It is not part of CI, `Scripts/test.sh` or `Scripts/verify.sh`.
 
-    Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets] [APP]
+    Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets] [--flows-only] [APP]
+
+`--flows-only` runs the self-test and the flows, no timings (about 30 s).
 
 It builds the check build (`Scripts/bundle-app.sh`, never `--release`),
 then runs everything in process through the DevChecks framework
@@ -32,8 +34,10 @@ turn on.
   5. switching folders B → A: root, rows, selection, sidebar width, tabs;
   6. every Settings pane: at most 700 pt tall, no control outside the
      window, no truncated single-line text, no overlapping controls;
-  7. a 5 MB one-line file in long-line mode: Wrap ON keeps fragments in
-     the view width, Wrap OFF scrolls horizontally;
+     Settings › Cedric once per AI engine (its height depends on it);
+  7. a 5 MB one-line file in long-line mode: Wrap ON, no row past the
+     view and each row of the spaceless line fills the width; Wrap OFF
+     scrolls horizontally;
   8. an untitled tab, typing `**bold**` on line 1, switches to Markdown
      at the next typing pause.
 - Cold launches (`CEDRIC_LAUNCH_METRICS`'s `launch_ms`, out of process).
@@ -41,6 +45,13 @@ turn on.
   `sidebar_log_ms`, `sidebar_switch_ms`, `preview_toggle_ms` (DailyUsePerf.swift).
 - `CEDRIC_CHECK=dailyusebudget`: the metrics against
   `Scripts/daily-use-budgets.json`.
+
+The app runs inactive (a background launch, often a locked screen), so
+no window becomes key: after an open the check sends the front tab's
+`windowDidBecomeKey` as the system would, and a sidebar click the
+inactive outline drops is replayed as select-and-open (both noted in the
+log). A divider drag is not taken by an inactive app's split view, so the
+sidebar width is checked against its saved width, not after a drag.
 
 A main-thread watchdog fails the run (`check: FAIL hang in <step>`, a
 `sample` of the process in `hang-sample.txt`) when the run loop has not
@@ -74,8 +85,11 @@ end is a SKIP, not a FAIL.
 
 ## Isolation
 
-Every launch gets temporary session and undo folders (`cedric_isolate`)
-and no session restore or save. The app runs as a copy of the check build
+Every launch gets temporary session and undo folders (`cedric_isolate`),
+no session restore or save, a temporary `CEDRIC_MODELS_DIR` (Settings ›
+Cedric otherwise lists the real Application Support/Cedric/Models) and a
+scratch `CEDRIC_AI_DEFAULTS` suite (the engine sweep writes the AI
+settings), deleted at the end. The app runs as a copy of the check build
 with the bundle id `net.mindtricks.cedric.dailyuse` (re-signed ad hoc), so
 its defaults and recent-documents list are its own; both are removed at
 the end. The runner checks that `net.mindtricks.cedric`'s defaults and
