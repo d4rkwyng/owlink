@@ -168,8 +168,11 @@ extension DevChecks {
         let o = s.outline
         let rect = o.frameOfCell(atColumn: 0, row: r)
         o.scrollRowToVisible(r)
+        // A row already selected (left from before) shows no change when
+        // the inactive outline drops the click: open it as the click would.
+        let wasSelected = o.selectedRow == r
         click(o, at: NSPoint(x: rect.minX + 30, y: rect.midY))
-        if o.selectedRow != r {
+        if o.selectedRow != r || (wasSelected && !NSApp.isActive) {
             if !dailyNotedClick {
                 dailyNotedClick = true
                 DailyUseHarness.main.note("synthetic click not taken by the inactive outline; selecting the row and opening as the click would")
@@ -177,6 +180,22 @@ extension DevChecks {
             o.selectRowIndexes([r], byExtendingSelection: false)
             s.activateSelection()
         }
+    }
+
+    /// Notes once that key-window changes are emulated (inactive app).
+    static var dailyNotedKey = false
+
+    /// What the system does when the front tab's window becomes key
+    /// (windowDidBecomeKey → AppDelegate.tabBecameKey: the sidebar follows
+    /// it). An inactive app (a locked screen, a background launch) gets no
+    /// key windows, so the check sends it, as a click in the window would.
+    static func dailyBecomeKey(_ app: AppDelegate) {
+        guard !NSApp.isActive, let t = app.currentTab, let w = t.window else { return }
+        if !dailyNotedKey {
+            dailyNotedKey = true
+            DailyUseHarness.main.note("app inactive: sending windowDidBecomeKey for the front tab after opens, as the system would when it becomes key")
+        }
+        t.windowDidBecomeKey(Notification(name: NSWindow.didBecomeKeyNotification, object: w))
     }
 
     /// The open tab of `url`: a text tab or a viewer tab's window.
@@ -304,6 +323,7 @@ extension DevChecks {
                 DailyUseHarness.poll(2, { dailyTab(app, file) != nil }) { opened in
                     h.check(opened, "outside: application(_:open:) opens outside.md from folder B in a tab")
                     if let t = dailyTab(app, file) { sized(t) }
+                    dailyBecomeKey(app)
                     // Give the sidebar the chance to follow (listing B).
                     DailyUseHarness.poll(3, { s?.rootURL.standardizedFileURL == fx.b.standardizedFileURL && s?.root.isLoaded == true }) { _ in
                         // KNOWN BUG on main, fixed on fix/0.6.1-sidebar-speed: the
@@ -324,6 +344,7 @@ extension DevChecks {
                 app.open(file, background: true)
                 h.check(dailyTab(app, file) != nil, "outside: File › Open's path (open(_:background:)) opens other.txt from B")
                 if let t = dailyTab(app, file) { sized(t) }
+                dailyBecomeKey(app)
                 DailyUseHarness.poll(3, { s?.rootURL.standardizedFileURL == fx.b.standardizedFileURL && s?.root.isLoaded == true }) { _ in
                     // KNOWN BUG on main, fixed on fix/0.6.1-sidebar-speed.
                     h.knownBug(id: "sidebar-follow", note: "File › Open of a file outside the sidebar's folder leaves the sidebar on the old folder") {
@@ -488,6 +509,7 @@ extension DevChecks {
                     h.check(ok, "recent: choosing \(file.lastPathComponent) in Open Recent opens it")
                     if let t = dailyTab(app, file) { sized(t) }
                     h.check(app.currentTab === dailyTab(app, file), "recent: …in the selected tab")
+                    dailyBecomeKey(app)
                     // Let the sidebar settle a turn, as a user would see it.
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         h.check(s?.selectedNode?.url.standardizedFileURL == file.standardizedFileURL, "recent: …and its row is selected in the sidebar",
@@ -514,6 +536,7 @@ extension DevChecks {
                     h.check(false, "recent: list.csv (folder B) is in Open Recent", "\(app.recentMenu?.items.map(\.title) ?? [])"); next(); return
                 }
                 m.performActionForItem(at: i)
+                DispatchQueue.main.async { MainActor.assumeIsolated { dailyBecomeKey(app) } }
                 DailyUseHarness.poll(3, { dailyTab(app, file) != nil && s?.rootURL.standardizedFileURL == fx.b.standardizedFileURL && s?.root.isLoaded == true }) { _ in
                     h.check(dailyTab(app, file) != nil, "recent: choosing list.csv (folder B) opens it")
                     if let t = dailyTab(app, file) { sized(t) }
