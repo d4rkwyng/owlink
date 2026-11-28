@@ -261,8 +261,8 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         // PDF and Office / iWork files open read-only in a viewer, as on
         // the Mac (`DocumentViewerRoute`: name, type, first bytes). Not
         // for "Open as Text" (binaryOK), a crash-recovery restore, or a
-        // launch reopen: only editor documents are remembered as
-        // `LastOpenDocument`, so a reopen is always the editor's.
+        // launch reopen: those open only the editor, and skip a file that
+        // routes to a viewer (below).
         if !binaryOK, recovered == nil, !reopening, presentViewerIfNeeded(at: url) { return }
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
@@ -274,6 +274,18 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 RecoveryOffer.reopenFinished(opened: opened, browser: self)
             } else {
                 RecoveryOffer.reopenCancelled()
+            }
+        }
+        // A reopen or a restore goes to the editor only if the file is
+        // still the editor's: a viewer file (a PDF with no NUL bytes passes
+        // the editor's binary check) isn't opened, the reopen forgets its
+        // record, and a recovery record is left as it is (not cleared).
+        if !binaryOK, recovered != nil || reopening {
+            let decision = DocumentViewerRoute.editorOnlyOpen(DocumentViewerRoute.route(for: url), reopening: reopening)
+            if !decision.opensEditor {
+                if recovered != nil { alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
+                finishReopen(false)
+                return
             }
         }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }

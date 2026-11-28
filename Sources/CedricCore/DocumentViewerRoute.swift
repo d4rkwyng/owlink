@@ -83,6 +83,27 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         return .editor
     }
 
+    /// What a path that only ever opens the text editor (a launch reopen,
+    /// a crash-recovery restore) does with a file, by its current route.
+    public struct EditorOnlyOpen: Equatable, Sendable {
+        /// The file is the editor's: open it in a `TextDocument`.
+        public var opensEditor: Bool
+        /// A reopen of a viewer file: forget the last-open record (the
+        /// reopen ends as "not opened").
+        public var forgetsLastOpenDocument: Bool
+        /// Never: a recovery record's text stays, offered for its own
+        /// document if that ever routes to the editor again.
+        public var clearsRecoveryRecord: Bool
+    }
+
+    /// A viewer file (PDF, Office, iWork, RTFD) is never opened in the
+    /// writable editor by a reopen or a restore: the editor's own binary
+    /// check accepts PDFs with no NUL bytes.
+    public static func editorOnlyOpen(_ route: DocumentViewerRoute, reopening: Bool) -> EditorOnlyOpen {
+        let editor = route == .editor
+        return EditorOnlyOpen(opensEditor: editor, forgetsLastOpenDocument: !editor && reopening, clearsRecoveryRecord: false)
+    }
+
     /// Reads the first 32 bytes (not the whole file) and the content type.
     /// A file that can't be read goes by its name and type (the viewer or
     /// editor then reports why it can't open it).
