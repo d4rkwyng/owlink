@@ -88,7 +88,7 @@ final class DocumentViewerRouteTests: XCTestCase {
 
     func testPDFByExtensionHeaderAndUpperCase() throws {
         XCTAssertEqual(try route("paper.pdf", pdf), .pdf)
-        XCTAssertEqual(try route("PAPER.PDF", pdf), .pdf)
+        XCTAssertEqual(try route("REPORT.PDF", pdf), .pdf)
         XCTAssertEqual(try route("scan", pdf), .pdf, "no extension, %PDF- header")
         XCTAssertEqual(try route("download.bin", pdf), .pdf, "an odd extension, %PDF- header")
         // Named .pdf but damaged: the PDF viewer (it says it can't open it).
