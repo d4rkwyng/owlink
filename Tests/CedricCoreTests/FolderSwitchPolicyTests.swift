@@ -62,6 +62,62 @@ import Testing
         #expect(switched(t.appendingPathComponent("a-link/sub/one.md"), root: a) == nil)
     }
 
+    /// 0.6.1 review: a path through a link out of the root is inside the
+    /// root by its spelling only. Where the file really is decides.
+    @Test func symlinkedPathOutOfTheRootSwitches() throws {
+        let t = try tree(["a/one.md", "b/file.md", "b/sub/deep.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let a = t.appendingPathComponent("a", isDirectory: true)
+        let b = t.appendingPathComponent("b", isDirectory: true)
+        let fm = FileManager.default
+        // A folder link inside the root pointing out of it: the file is
+        // in B. The folder is the one given (File › Open Enclosing Folder).
+        try fm.createSymbolicLink(atPath: a.appendingPathComponent("link").path, withDestinationPath: b.path)
+        #expect(switched(a.appendingPathComponent("link/file.md"), root: a) == a.appendingPathComponent("link").path)
+        #expect(switched(a.appendingPathComponent("link/sub/deep.md"), root: a) == a.appendingPathComponent("link/sub").path)
+        // A relative link, and a file link inside the root to a file outside it.
+        try fm.createSymbolicLink(atPath: a.appendingPathComponent("rel").path, withDestinationPath: "../b")
+        #expect(switched(a.appendingPathComponent("rel/file.md"), root: a) == a.appendingPathComponent("rel").path)
+        try fm.createSymbolicLink(atPath: a.appendingPathComponent("file-link.md").path, withDestinationPath: b.appendingPathComponent("file.md").path)
+        #expect(switched(a.appendingPathComponent("file-link.md"), root: a) == a.path)
+        // The root loaded through its link spelling: still out of it.
+        try fm.createSymbolicLink(atPath: t.appendingPathComponent("a-link").path, withDestinationPath: a.path)
+        let aLink = t.appendingPathComponent("a-link", isDirectory: true)
+        #expect(switched(aLink.appendingPathComponent("link/file.md"), root: a) == aLink.appendingPathComponent("link").path)
+        #expect(switched(a.appendingPathComponent("link/file.md"), root: aLink) == a.appendingPathComponent("link").path)
+        // Once the sidebar shows the link's folder, the same file is inside it.
+        #expect(switched(a.appendingPathComponent("link/file.md"), root: a.appendingPathComponent("link", isDirectory: true)) == nil)
+        #expect(switched(a.appendingPathComponent("link/file.md"), root: b) == nil)
+        // Out through one link and back in through another: inside.
+        try fm.createSymbolicLink(atPath: b.appendingPathComponent("back").path, withDestinationPath: a.path)
+        #expect(switched(a.appendingPathComponent("link/back/one.md"), root: a) == nil)
+    }
+
+    /// A link whose file is really at a volume root never lists the whole disk.
+    @Test func linkToAVolumeRootDoesNotSwitch() throws {
+        let t = try tree(["a/one.md", "b/keep.txt"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let a = t.appendingPathComponent("a", isDirectory: true)
+        let b = t.appendingPathComponent("b", isDirectory: true)
+        let fm = FileManager.default
+        // macOS keeps an empty regular file at /.file; links only resolve
+        // to a file that exists, so the test needs a real one at /.
+        let atRoot = "/.file"
+        guard FolderTree.isRegularFile(atRoot) else { return }
+        // A folder link to /: the file's folder as given is b/slash, really /.
+        try fm.createSymbolicLink(atPath: b.appendingPathComponent("slash").path, withDestinationPath: "/")
+        #expect(switched(b.appendingPathComponent("slash/.file"), root: a) == nil)
+        // A file link to a file at /.
+        try fm.createSymbolicLink(atPath: b.appendingPathComponent("root-file.txt").path, withDestinationPath: atRoot)
+        #expect(switched(b.appendingPathComponent("root-file.txt"), root: a) == nil)
+        // A link to a file one folder below / does switch (so the nils
+        // above are the volume root), to the folder as given.
+        guard FolderTree.isRegularFile("/etc/hosts") else { return }
+        try fm.createSymbolicLink(atPath: b.appendingPathComponent("hosts-link").path, withDestinationPath: "/etc/hosts")
+        #expect(switched(b.appendingPathComponent("hosts-link"), root: a) == b.path)
+        #expect(switched(b.appendingPathComponent("slash/etc/hosts"), root: a) == b.appendingPathComponent("slash/etc").path)
+    }
+
     @Test func privateVarAndVarSpellingsAreTheSameFolder() throws {
         let t = try tree(["a/one.md"])
         defer { try? FileManager.default.removeItem(at: t) }

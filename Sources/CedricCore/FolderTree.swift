@@ -166,25 +166,34 @@ public enum FolderTree {
     ///   `sidebarShown`): hidden, only remembered or none, nothing is
     ///   loaded or shown (the 0.2.0 rule: no folder until the user opens one);
     /// - `file` a regular file (a link followed), not a folder or a package;
-    /// - `file` outside the loaded root: by the bytes (`relativePath`),
-    ///   then with links resolved on both sides (a path through a link
-    ///   into the root, /var vs /private/var, /tmp vs /private/tmp), then
-    ///   by identity (`eventRelativePath`: another spelling of the root);
-    /// - its folder not a volume root (a whole disk is never listed unasked).
-    /// The folder is the file's enclosing folder as given (unresolved),
-    /// as File › Open Enclosing Folder opens it.
+    /// - `file` outside the loaded root, by where it really is: both the
+    ///   file and the root with their links resolved, compared by the bytes
+    ///   (`relativePath`), then by identity (`eventRelativePath`: another
+    ///   spelling of the root). The path as given decides nothing. A path
+    ///   through a link into the root (or /var for /private/var, /tmp for
+    ///   /private/tmp) is inside it; a path under the root that goes
+    ///   through a link out of it (root A, A/link → B, A/link/file.md) is
+    ///   outside, in B, and switches;
+    /// - its folder not a volume root (a whole disk is never listed
+    ///   unasked): neither the folder as given nor the one the file is
+    ///   really in (a link to a file at the top of a disk).
+    /// The folder returned is the file's enclosing folder as given
+    /// (unresolved, A/link above), as File › Open Enclosing Folder opens
+    /// it. The resolved one only answers the two questions above.
     /// `isRegularFile`: a seam for tests.
     public static func folderToSwitchTo(opening file: URL, loadedRoot: URL?, sidebarShown: Bool,
                                         isRegularFile: (String) -> Bool = FolderTree.isRegularFile) -> URL? {
         guard sidebarShown, let root = loadedRoot, file.isFileURL else { return nil }
         let std = file.standardizedFileURL
         guard isRegularFile(std.path), let folder = enclosingFolder(of: std) else { return nil }
-        guard folder.path != "/", (try? folder.resourceValues(forKeys: [.isVolumeKey]))?.isVolume != true else { return nil }
         let realFile = std.resolvingSymlinksInPath()
+        guard let realFolder = enclosingFolder(of: realFile) else { return nil }
+        for f in [folder, realFolder] {
+            guard f.path != "/", (try? f.resourceValues(forKeys: [.isVolumeKey]))?.isVolume != true else { return nil }
+        }
         let realRoot = root.standardizedFileURL.resolvingSymlinksInPath()
-        let roots = [root.standardizedFileURL, realRoot]
-        for path in [std, realFile] where roots.contains(where: { relativePath(of: path, in: $0) != nil }) { return nil }
-        if eventRelativePath(realFile.path, roots: roots) != nil { return nil }
+        if relativePath(of: realFile, in: realRoot) != nil { return nil }
+        if eventRelativePath(realFile.path, roots: [realRoot]) != nil { return nil }
         return folder
     }
 
