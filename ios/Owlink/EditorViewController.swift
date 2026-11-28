@@ -798,6 +798,11 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
         statistics.accessibilityIdentifier = "stats.menu"
         quickly.accessibilityIdentifier = "editor.menu.quickOpen"
+        let noteLinks = UIAction(title: String(localized: "Backlinks and Tags…"), image: UIImage(systemName: "link.badge.plus")) { [weak self] _ in
+            self?.showNoteLinks()
+        }
+        noteLinks.accessibilityIdentifier = "editor.menu.noteLinks"
+        if !noteLinksApply { noteLinks.attributes = .disabled }
         let wrap = UIAction(title: String(localized: "Wrap Lines"), image: UIImage(systemName: "text.word.spacing")) { [weak self] _ in
             self?.toggleWrap()
         }
@@ -871,7 +876,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if WindowSupport.multipleScenes { fileGroup.append(Self.newWindowAction()) }
         let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
             UIMenu(options: .displayInline, children: preview == nil ? [] : [viewMenu]),
-            UIMenu(options: .displayInline, children: [goTo, quickly, statistics]),
+            UIMenu(options: .displayInline, children: [goTo, quickly, noteLinks, statistics]),
             UIMenu(options: .displayInline, children: tools),
             UIMenu(options: .displayInline, children: [writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu()]),
             UIMenu(options: .displayInline, children: fileGroup),
@@ -1459,6 +1464,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
                   suggestedActions: [UIMenuElement]) -> UIMenu? {
         guard textView === self.textView else { return UIMenu(children: suggestedActions) }
         var actions: [UIMenuElement] = []
+        if let open = wikiLinkMenuAction(for: range) { actions.append(open) }
         if document.language.language == .markdown {
             let html = UIAction(title: String(localized: "Copy as HTML")) { [weak self] _ in
                 self?.copyMarkdown(rich: false, selection: range)
@@ -3603,7 +3609,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// way (saved, or asked about), then the browser opens the note.
     private var afterClose: (() -> Void)?
 
-    private func openLinked(_ url: URL) {
+    func openLinked(_ url: URL) {
         guard url.standardizedFileURL != document.fileURL.standardizedFileURL else { return }
         let browser = navigationController?.presentingViewController as? DocumentBrowserViewController
         afterClose = { [weak browser] in browser?.presentDocument(at: url) }
