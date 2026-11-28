@@ -94,7 +94,8 @@ import Testing
     }
 
     /// A link whose file is really at a volume root never lists the whole disk.
-    @Test func linkToAVolumeRootDoesNotSwitch() throws {
+    @Test(.enabled(if: FolderTree.isRegularFile("/.file"), "Requires a regular file at /.file"))
+    func linkToAVolumeRootDoesNotSwitch() throws {
         let t = try tree(["a/one.md", "b/keep.txt"])
         defer { try? FileManager.default.removeItem(at: t) }
         let a = t.appendingPathComponent("a", isDirectory: true)
@@ -103,7 +104,6 @@ import Testing
         // macOS keeps an empty regular file at /.file; links only resolve
         // to a file that exists, so the test needs a real one at /.
         let atRoot = "/.file"
-        guard FolderTree.isRegularFile(atRoot) else { return }
         // A folder link to /: the file's folder as given is b/slash, really /.
         try fm.createSymbolicLink(atPath: b.appendingPathComponent("slash").path, withDestinationPath: "/")
         #expect(switched(b.appendingPathComponent("slash/.file"), root: a) == nil)
