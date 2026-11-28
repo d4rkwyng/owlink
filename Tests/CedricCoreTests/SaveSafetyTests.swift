@@ -169,35 +169,6 @@ import Testing
         #expect(try Data(contentsOf: aside[0]) == bytes)
     }
 
-    /// write itself sets an unreadable live file aside before replacing
-    /// it, and fails rather than replace it if its bytes can't be kept.
-    @Test func writeKeepsAnUnreadableLiveFileOrFails() throws {
-        let t = try temp(); defer { try? fm.removeItem(at: t) }
-        let store = RecoveryStore(directory: t)
-        try store.write(record(text: "old"))
-        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
-        let bytes = try Data(contentsOf: live)
-        var stuck = store
-        stuck.checkFailRead = true
-        stuck.checkFailSetAside = true
-        #expect(throws: (any Error).self) { try stuck.write(record(text: "new")) }
-        #expect(try Data(contentsOf: live) == bytes, "not replaced")
-        // A read that can't keep it holds it: a plain write still won't replace it.
-        #expect(stuck.read(documentPath: "/docs/a.txt") == nil)
-        var noAside = store
-        noAside.checkFailSetAside = true
-        #expect(throws: (any Error).self) { try noAside.write(record(text: "new")) }
-        #expect(try Data(contentsOf: live) == bytes)
-        // Once it can be set aside, the write goes ahead and the old bytes are kept.
-        var unreadable = store
-        unreadable.checkFailRead = true
-        try unreadable.write(record(text: "new"))
-        #expect(store.read(documentPath: "/docs/a.txt")?.text == "new")
-        let aside = try setAside(in: t)
-        #expect(aside.count == 1)
-        #expect(try Data(contentsOf: aside[0]) == bytes)
-    }
-
     @Test func recoveryWriteIsDurableAndAFailedFlushLeavesThePreviousCopy() throws {
         let t = try temp(); defer { try? fm.removeItem(at: t) }
         let store = RecoveryStore(directory: t)
@@ -214,8 +185,13 @@ import Testing
         let t = try temp(); defer { try? fm.removeItem(at: t) }
         let store = RecoveryStore(directory: t)
         try store.write(record(text: "one"))
+        // make() flushes parent entries to revalidate the folder; throw only
+        // on the post-rename flush of the store directory itself.
+        let dir = t.standardizedFileURL.path
         #expect(throws: PrivateDirectory.Unconfirmed.self) {
-            try store.write(record(text: "two"), syncFolder: { _ in throw CocoaError(.fileWriteUnknown) })
+            try store.write(record(text: "two"), syncFolder: { path in
+                if (path as NSString).standardizingPath == dir { throw CocoaError(.fileWriteUnknown) }
+            })
         }
         // The rename happened; only the folder flush failed.
         #expect(store.read(documentPath: "/docs/a.txt")?.text == "two")
@@ -243,7 +219,7 @@ import Testing
     }
 
     /// The throttle's own rule; RecoveryWriter's first write before
-    /// textChanged() returns is covered by the iOS tests (RecoveryWriterTests).
+    /// textChanged() returns is covered by the iOS tests (SaveSafetyEditorTests).
     @Test func firstRecoveryWriteIsImmediateThenAtMostEveryThreeSeconds() {
         #expect(RecoveryThrottle.delay(sinceLastWrite: nil) == 0, "the first edit writes at once")
         #expect(RecoveryThrottle.delay(sinceLastWrite: 0) == RecoveryThrottle.interval)

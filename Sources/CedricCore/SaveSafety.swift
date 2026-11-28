@@ -91,7 +91,7 @@ public struct RecoveryStore: Sendable {
     /// were read and found unreadable and before they are set aside.
     public var checkBeforeSetAside: (@Sendable (URL) -> Void)?
     /// Check builds only: reading a recovery file fails though it is there
-    /// (an I/O error), for reads and for write's look at the copy it replaces.
+    /// (an I/O error).
     public var checkFailRead = false
     /// Check builds only: setting a file aside fails (it stays where it is).
     public var checkFailSetAside = false
@@ -101,16 +101,12 @@ public struct RecoveryStore: Sendable {
         self.durableFrom = durableFrom ?? directory.deletingLastPathComponent()
     }
 
-    /// The state every store value on one folder shares: its lock, the
+    /// The state every store value on one folder shares: its lock, and the
     /// folders made for it whose entry flush failed (flushed again before a
-    /// write counts), and the live files that couldn't be read or kept.
+    /// write counts).
     private final class Folder: @unchecked Sendable {
         let lock = NSRecursiveLock()
         var unconfirmed = Set<String>()
-        var ready = false
-        /// Live names read as unreadable whose bytes couldn't be set aside:
-        /// no write replaces them until they are.
-        var held = Set<String>()
 
         private static let registryLock = NSLock()
         nonisolated(unsafe) private static var registry: [String: Folder] = [:]
@@ -141,50 +137,28 @@ public struct RecoveryStore: Sendable {
         return directory.appendingPathComponent(String(format: "%016llx", h) + ".recovery")
     }
 
-    /// Writes `record` durably. On first use the folder and any missing
-    /// parents are made one at a time, each new entry flushed through its
-    /// parent (from `durableFrom` down, as the session store does): a
-    /// failed flush fails the write, and a retry flushes them again, so no
-    /// write is acknowledged in a folder whose path may not be on the disk.
-    /// A live file that is there but can't be read is set aside first; if
-    /// its bytes can't be kept, the write fails rather than replace them.
+    /// Writes `record` durably. The folder and any missing parents are made
+    /// one at a time, each new entry flushed through its parent (from
+    /// `durableFrom` down, as the session store does): a failed flush fails
+    /// the write, and a retry flushes them again, so no write is acknowledged
+    /// in a folder whose path may not be on the disk. `make` runs on every
+    /// write, so a replacement at the folder path is checked again.
     public func write(_ record: RecoveryRecord, durable: Bool = true, failSync: Bool = false,
                       syncFolder: ((String) throws -> Void)? = nil) throws {
         let sync = syncFolder ?? PrivateDirectory.syncFolder
         try locked { f in
-            if !f.ready || !FileManager.default.fileExists(atPath: directory.path) {
-                f.ready = false
-                try PrivateDirectory.make(directory, root: directory, durableFrom: durableFrom,
-                                          unconfirmed: &f.unconfirmed, syncParent: sync)
-                f.ready = true
-            }
+            try PrivateDirectory.make(directory, root: directory, durableFrom: durableFrom,
+                                      unconfirmed: &f.unconfirmed, syncParent: sync)
             PrivateDirectory.excludeFromBackup(directory)
-            let url = fileURL(forDocumentPath: record.documentPath)
-            if f.held.contains(url.lastPathComponent) || !isReadable(url) {
-                guard setAsideDamaged(at: url) != nil || !exists(url) else {
-                    throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: url.path])
-                }
-                f.held.remove(url.lastPathComponent)
-            }
             let data = try PropertyListEncoder().encode(record)
-            try PrivateDirectory.writePrivateFile(data, to: url, durable: durable, failSync: failSync, syncFolder: sync)
+            try PrivateDirectory.writePrivateFile(data, to: fileURL(forDocumentPath: record.documentPath),
+                                                  durable: durable, failSync: failSync, syncFolder: sync)
         }
     }
 
     private func exists(_ url: URL) -> Bool {
         var st = stat()
         return lstat(url.path, &st) == 0
-    }
-
-    /// False only for a file that is there and can't be opened to read
-    /// (missing counts as readable: nothing to keep).
-    private func isReadable(_ url: URL) -> Bool {
-        guard exists(url) else { return true }
-        if checkFailRead, DevEnvironment.checksEnabled { return false }
-        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
-        guard fd >= 0 else { return false }
-        close(fd)
-        return true
     }
 
     /// Moves an unreadable recovery file aside, next to it
@@ -222,9 +196,9 @@ public struct RecoveryStore: Sendable {
 
     /// A readable record from `url`, or nil. A file that is there but
     /// can't be read or decoded is set aside, not deleted and not left
-    /// under the live name (if it can't be set aside, no write replaces it).
+    /// under the live name.
     private func record(fromFile url: URL) -> RecoveryRecord? {
-        locked { f in
+        locked { _ in
             let data: Data
             do {
                 if checkFailRead, DevEnvironment.checksEnabled, exists(url) { throw CocoaError(.fileReadUnknown) }
@@ -233,12 +207,12 @@ public struct RecoveryStore: Sendable {
                 // Missing: nothing to keep.
                 guard exists(url) else { return nil }
                 if DevEnvironment.checksEnabled, let hook = checkBeforeSetAside { hook(url) }
-                if setAsideDamaged(at: url) == nil, exists(url) { f.held.insert(url.lastPathComponent) }
+                _ = setAsideDamaged(at: url)
                 return nil
             }
             if let r = try? PropertyListDecoder().decode(RecoveryRecord.self, from: data) { return r }
             if DevEnvironment.checksEnabled, let hook = checkBeforeSetAside { hook(url) }
-            if setAsideDamaged(at: url) == nil, exists(url) { f.held.insert(url.lastPathComponent) }
+            _ = setAsideDamaged(at: url)
             return nil
         }
     }
@@ -263,11 +237,8 @@ public struct RecoveryStore: Sendable {
     }
 
     public func clear(documentPath path: String) {
-        locked { f in
-            let url = fileURL(forDocumentPath: path)
-            // An unreadable copy that couldn't be kept stays.
-            guard !f.held.contains(url.lastPathComponent) else { return }
-            try? FileManager.default.removeItem(at: url)
+        locked { _ in
+            try? FileManager.default.removeItem(at: fileURL(forDocumentPath: path))
         }
     }
 }
