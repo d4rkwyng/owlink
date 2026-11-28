@@ -293,6 +293,21 @@ import Testing
         #expect(try fm.contentsOfDirectory(atPath: t.path).count == 1, "nothing else made")
     }
 
+    /// B's record is decoded, then removed externally before it can be set
+    /// aside, and the set-aside fails: write(A) has no proof B's bytes were
+    /// kept, so it throws and writes nothing where B was.
+    @Test func writeFailsWhenAnotherDocumentsRecordVanishesAsItsSetAsideFails() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (_, a) = try foreignRecordAtA(store)
+        var stuck = store
+        stuck.checkFailSetAside = true
+        stuck.checkForeignRecordFound = { url in try? FileManager.default.removeItem(at: url) }
+        #expect(throws: (any Error).self) { try stuck.write(record("/docs/a.txt", text: "a")) }
+        #expect(!fm.fileExists(atPath: a.path), "no record for A written where B was")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).isEmpty, "nothing else made")
+    }
+
     /// clear(A) leaves B's record where it is, byte for byte.
     @Test func clearLeavesARecordThatBelongsToAnotherDocument() throws {
         let t = try temp(); defer { try? fm.removeItem(at: t) }

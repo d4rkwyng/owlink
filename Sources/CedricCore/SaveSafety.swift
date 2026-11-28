@@ -101,6 +101,10 @@ public struct RecoveryStore: Sendable {
     /// Check builds only: runs when this value finds the folder locked by
     /// another thread, just before it waits for the lock.
     public var checkLockContended: (@Sendable () -> Void)?
+    /// Check builds only: runs in write, with the folder locked, after the
+    /// live file was decoded as another document's record and before it is
+    /// set aside.
+    public var checkForeignRecordFound: (@Sendable (URL) -> Void)?
 
     public init(directory: URL, durableFrom: URL? = nil) {
         self.directory = directory
@@ -170,6 +174,7 @@ public struct RecoveryStore: Sendable {
             switch live(url) {
             case .kept: kept = true
             case .record(let r) where r.documentPath != record.documentPath:
+                if DevEnvironment.checksEnabled, let hook = checkForeignRecordFound { hook(url) }
                 kept = setAsideDamaged(at: url, kind: "foreign") == nil && entry(url) != .absent
             case .record, .none: kept = false
             }
