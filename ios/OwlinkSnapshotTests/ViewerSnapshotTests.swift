@@ -182,6 +182,18 @@ final class ViewerSnapshotTests: XCTestCase {
         }
     }
 
+    /// A tab tapped while another sheet is still loading wins: the late
+    /// sheet doesn't replace it.
+    func testQuickTabSwitchShowsTheLastTabTapped() async throws {
+        let (_, v) = try await spreadsheet(try sample("multi-sheet.xlsx"), .xlsx, Self.configs[0])
+        v.selectSheet(1)   // not read yet: loads in the background
+        v.selectSheet(0)   // already read: shown at once
+        try await Task.sleep(for: .milliseconds(800))
+        XCTAssertEqual(v.selectedSheet, 0)
+        XCTAssertTrue(v.tabButtons[0].accessibilityTraits.contains(.selected))
+        XCTAssertEqual(v.grid.table?.name, "Owls", "sheet 2 replaced the tab tapped last")
+    }
+
     func testCSV() async throws {
         for c in Self.configs {
             let (w, v) = try await spreadsheet(try sample("sample.csv"), .csv, c)

@@ -168,6 +168,18 @@ import Testing
         #expect(text(t, "D2") == "2024-03-15T00:00:00Z", "an ISO date cell shows as stored")
     }
 
+    /// A date-styled number outside Excel's dates (Excel shows ####):
+    /// shown as the number, not a crash converting it to seconds.
+    @Test func outOfRangeDateSerialShowsTheNumber() throws {
+        let rows = "<row r=\"1\"><c r=\"A1\" s=\"1\"><v>1E+15</v></c><c r=\"B1\" s=\"1\"><v>-5</v></c>"
+            + "<c r=\"C1\" s=\"1\"><v>2958465</v></c><c r=\"D1\" s=\"1\"><v>2958466</v></c></row>"
+        let t = try Workbook(data: Self.workbook([("S", rows)], styles: Self.styles([0, 14]))).table(at: 0)
+        #expect(text(t, "A1") == "1E+15" && kind(t, "A1") == .number)
+        #expect(text(t, "B1") == "-5" && kind(t, "B1") == .number)
+        #expect(text(t, "C1") == "9999-12-31", "Excel's last date")
+        #expect(text(t, "D1") == "2958466")
+    }
+
     @Test func dates1904() throws {
         let rows = "<row r=\"1\"><c r=\"A1\" s=\"1\"><v>0</v></c><c r=\"B1\" s=\"1\"><v>43904</v></c><c r=\"C1\" s=\"2\"><v>43904.25</v></c></row>"
         let wb = try Workbook(data: Self.workbook([("S", rows)], styles: Self.styles([0, 14, 22]), date1904: true))
