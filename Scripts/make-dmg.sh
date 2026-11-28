@@ -70,7 +70,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
 
-newtmp() { local t; t=$(mktemp -d "${TMPDIR:-/tmp}/owlink-dmg.XXXXXX"); TMPS+=("$t"); echo "$t"; }
+# Makes a temp folder, registered for the exit trap, and puts its path in
+# NEWTMP. Not $(newtmp): that runs in a subshell, whose TMPS+= the trap
+# never sees, so the folder would be left behind.
+NEWTMP=
+newtmp() { NEWTMP=$(mktemp -d "${TMPDIR:-/tmp}/owlink-dmg.XXXXXX"); TMPS+=("$NEWTMP"); }
 
 cdhash() { codesign -d -vvv "$1" 2>&1 | sed -n 's/^CDHash=//p' | head -1; }
 
@@ -151,7 +155,7 @@ make_dmg() { # APP OUT
     [ -d "$app" ] && [ "${app%.app}" != "$app" ] || fail "not an .app bundle: $app"
     case "$out" in *.dmg) ;; *) fail "output must end in .dmg: $out" ;; esac
     name=$(basename "$app")
-    stage=$(newtmp)
+    newtmp; stage=$NEWTMP
     mkdir "$stage/root"
     ditto "$app" "$stage/root/$name"
     ln -s /Applications "$stage/root/Applications"
@@ -182,7 +186,7 @@ make_dmg() { # APP OUT
 
 selftest() {
     local t app other dmg
-    t=$(newtmp)
+    newtmp; t=$NEWTMP
     for n in Owlink Other; do
         app="$t/$n/Owlink.app"
         mkdir -p "$app/Contents/MacOS"
