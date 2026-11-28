@@ -181,13 +181,18 @@ extension EditorViewController {
         let textChanges = decoded.text != textView.text
         if textChanges { guard explicitChangeAllowed() else { return false } }
         let actionName = String(localized: "Reopen with Encoding")
-        let um = textView.undoManager
-        um?.beginUndoGrouping()
-        if textChanges { replaceAllText(with: decoded.text) }
         let change = FormatChange(from: .init(encoding: document.encoding, lineEnding: document.lineEnding,
                                               mixedLineEndings: document.mixedLineEndings),
                                   to: .init(encoding: decoded.encoding, lineEnding: decoded.lineEnding,
                                             mixedLineEndings: decoded.mixedLineEndings))
+        // Already this text, format and (no) guess: nothing to undo.
+        if !textChanges, change.to == change.from, !document.encodingGuessed, encodingNoticeKept {
+            updateStatus()
+            return true
+        }
+        let um = textView.undoManager
+        um?.beginUndoGrouping()
+        if textChanges { replaceAllText(with: decoded.text) }
         if change.to != change.from { applyFormat(change, actionName: actionName) }
         setEncodingGuess(guessed: false, kept: true, actionName: actionName)
         um?.setActionName(actionName)

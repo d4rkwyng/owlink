@@ -97,6 +97,27 @@ final class EncodingNoticeTests: XCTestCase {
         XCTAssertFalse(e.textView.undoManager?.canUndo ?? true, "one step")
     }
 
+    /// Reopen again with the same encoding changes nothing, and adds no
+    /// Undo step: one Undo still brings the guess back (Sol round 2,
+    /// should-fix 8).
+    func testRepeatedReopenAddsNoUndoStep() throws {
+        let e = try editor(bytes: eightBit)
+        let guessed = e.document.encoding
+        let other: TextEncoding = guessed == .latin1 ? .windows1252 : .latin1
+        let before = e.textView.text ?? ""
+        XCTAssertTrue(e.reopen(with: other))
+        // Each Reopen is its own event (one undo group per event otherwise).
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertTrue(e.reopen(with: other))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertEqual(e.document.encoding, other)
+        e.textView.undoManager?.undo()
+        XCTAssertEqual(e.textView.text, before)
+        XCTAssertEqual(e.document.encoding, guessed)
+        XCTAssertTrue(e.document.encodingGuessed, "the guess is back after one Undo")
+        XCTAssertFalse(e.textView.undoManager?.canUndo ?? true, "one step")
+    }
+
     func testReopenAsUTF8RefusesInvalidBytes() throws {
         let e = try editor(bytes: eightBit)
         let before = e.textView.text
