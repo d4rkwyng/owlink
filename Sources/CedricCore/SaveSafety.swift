@@ -175,7 +175,7 @@ public struct RecoveryStore: Sendable {
             case .kept: kept = true
             case .record(let r) where r.documentPath != record.documentPath:
                 if DevEnvironment.checksEnabled, let hook = checkForeignRecordFound { hook(url) }
-                kept = setAsideDamaged(at: url, kind: "foreign") == nil && entry(url) != .absent
+                kept = setAsideDamaged(at: url, kind: "foreign") == nil
             case .record, .none: kept = false
             }
             if kept {
