@@ -31,6 +31,9 @@ final class TextDocument: UIDocument {
     /// LF-normalised text.
     var text = ""
     var encoding: TextEncoding = .utf8
+    /// Not valid UTF-8: read as the 8-bit encoding TextCodec guessed. The
+    /// editor says so (Reopen with Encoding… / Keep), as the Mac's bar.
+    var encodingGuessed = false
     var lineEnding: LineEnding = .lf
     var mixedLineEndings = false
     /// The line endings as read, while the file mixes them (0.6.0 LineBreaks).
@@ -141,6 +144,7 @@ final class TextDocument: UIDocument {
         readHistory = ReadHistory()
         text = decoded.text
         encoding = decoded.encoding
+        encodingGuessed = decoded.encodingGuessed
         lineEnding = decoded.lineEnding
         mixedLineEndings = decoded.mixedLineEndings
         lineBreaks = decoded.lineBreaks
@@ -187,6 +191,11 @@ final class TextDocument: UIDocument {
 
     /// The private copy of the file as opened, if one was kept.
     func openedBytes() -> Data? { SaveSafetyStores.revert.load(id: openedCopyID) }
+
+    /// The file's bytes as last read or written here (files up to the
+    /// safety-copy limit), else the opened version's: what Reopen with
+    /// Encoding… reads again.
+    func bytesForReopen() -> Data? { bytesOnDisk ?? openedBytes() }
 
     func discardOpenedCopy() { SaveSafetyStores.revert.clear(id: openedCopyID) }
 

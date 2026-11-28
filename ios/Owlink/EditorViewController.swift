@@ -248,6 +248,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var conflictResolver: ConflictResolver?
     /// A save failed: shown until one succeeds.
     let saveErrorBanner = SaveErrorBanner()
+    /// "Isn't valid UTF-8, opened as Latin-1 (a guess)": made when first shown.
+    var encodingNotice: EncodingNoticeBar?
+    /// Keep was chosen: the guess is the user's, the notice doesn't come back.
+    var encodingNoticeKept = false
 
     /// The window (scene session) the editor is in, for `OpenDocuments`.
     let windowID: String
@@ -990,6 +994,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         updateWritingInset()
         applyProseChecking()
         markdownFenceIndex.invalidateAll()
+        refreshEncodingNotice()
         cachedIndentation = nil
         lineIndentation = nil
         let hadBookmarks = !bookmarks.isEmpty
@@ -1577,7 +1582,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         }
     }
 
-    private func updateStatus() {
+    func updateStatus() {
         let sel = textView.selectedRange
         let line = lineIndex.line(containing: min(sel.location, lineIndex.length))
         let col = sel.location - lineIndex.starts[line] + 1
@@ -1589,7 +1594,10 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         languageButton.menu = languageMenu()
         // A file that mixes line endings keeps each line's own: say so.
         let ending = document.mixedLineEndings ? String(localized: "\(document.lineEnding.displayName) (mixed)") : document.lineEnding.displayName
-        formatButton.setTitle("\(document.encoding.displayName) · \(ending)", for: .normal)
+        // Until it is picked or kept: "Latin-1 (guessed)", as on the Mac.
+        let encoding = document.encodingGuessed
+            ? String(localized: "\(document.encoding.shortName) (guessed)") : document.encoding.displayName
+        formatButton.setTitle("\(encoding) · \(ending)", for: .normal)
         formatButton.menu = formatMenu()
     }
 
@@ -1869,6 +1877,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             for a in enc + ends where a.state != .on { a.attributes = .disabled }
         }
         return UIMenu(title: String(localized: "Encoding and Line Endings"), image: UIImage(systemName: "doc.text"), children: [
+            reopenWithEncodingMenu(),
             UIMenu(title: String(localized: "Save As Encoding"), options: .displayInline, children: enc),
             UIMenu(title: String(localized: "Line Endings"), options: .displayInline, children: ends),
         ])
@@ -4512,7 +4521,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// For a confirmed change to the whole text (Revert, Restore): leaves
     /// read mode, but not while the file is binary, locked or in conflict.
-    private func explicitChangeAllowed() -> Bool {
+    func explicitChangeAllowed() -> Bool {
         if editGate.allowExplicitChange() {
             applyEditGate()
             return true
