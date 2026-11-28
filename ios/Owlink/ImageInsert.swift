@@ -53,11 +53,13 @@ extension EditorViewController {
     /// Where the images go. Under a folder grant: the root is the grant as
     /// the registry recorded it (where it was then, and its identity),
     /// never resolved again, and the document's folder (symbolic links
-    /// resolved) must be inside it. Else Owlink's own container, both
-    /// resolved. `ImageStore.open(in:beneath:rootID:)` then opens the root
-    /// without following a link, checks it is still the folder granted,
-    /// and refuses a link out of it on the way. Nil when Owlink has no
-    /// such access yet (ask).
+    /// resolved) must be inside it; a grant that matched decides alone
+    /// (nil when the folder now leads out of it, never the container).
+    /// With no grant, Owlink's own container, both resolved.
+    /// `ImageStore.open(in:beneath:rootID:)` then opens the root without
+    /// following a link, checks it is still the folder granted, and
+    /// refuses a link out of it on the way. Nil when Owlink has no such
+    /// access yet (ask).
     var imageDestination: ImageDestination? {
         let dir = document.fileURL.deletingLastPathComponent()
         let container = Self.imageContainerForTests ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
@@ -72,7 +74,7 @@ extension EditorViewController {
         }
         if let grant {
             let root = grant.resolved.standardizedFileURL
-            if inside(root) { return ImageDestination(folder: folder, root: root, rootID: grant.id, granted: true) }
+            return inside(root) ? ImageDestination(folder: folder, root: root, rootID: grant.id, granted: true) : nil
         }
         let root = container.resolvingSymlinksInPath().standardizedFileURL
         return inside(root) ? ImageDestination(folder: folder, root: root, rootID: nil, granted: false) : nil

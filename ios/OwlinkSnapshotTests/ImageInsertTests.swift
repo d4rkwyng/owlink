@@ -213,6 +213,37 @@ final class ImageInsertTests: XCTestCase {
         }
     }
 
+    /// Sol and Astra round 4, must-fix 1: the granted folder replaced by a
+    /// symbolic link to a sibling folder that Owlink's own container also
+    /// holds (the container is their common parent). Once a grant matched,
+    /// it decides alone: no destination, nothing written in the sibling.
+    func testGrantReplacedByALinkIntoTheContainerIsRefused() async throws {
+        let (e, dir) = try editor()
+        let container = dir.deletingLastPathComponent()
+        EditorViewController.imageContainerForTests = container
+        let suite = "cedric-tests-grants-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let grants = PreviewFolderGrants(defaults: defaults)
+        XCTAssertTrue(grants.add(dir))
+        e.folderGrants = grants
+        let sibling = try tempDir()
+        XCTAssertEqual(sibling.deletingLastPathComponent().standardizedFileURL, container.standardizedFileURL, "the container holds both")
+        try Data("# Other\n".utf8).write(to: sibling.appendingPathComponent("notes.md"))
+        let moved = container.appendingPathComponent(dir.lastPathComponent + "-moved")
+        try FileManager.default.moveItem(at: dir, to: moved)
+        dirs.append(moved)
+        try FileManager.default.createSymbolicLink(at: dir, withDestinationURL: sibling)
+        let grant = try XCTUnwrap(grants.grant(for: dir), "the grant still matches the document's path")
+        XCTAssertNil(EditorViewController.imageDestination(for: dir, grant: grant, container: container), "the container doesn't stand in for the grant")
+        let paths = await e.insertImageFiles([try png(named: "a.png")])
+        XCTAssertNil(paths)
+        XCTAssertEqual(e.textView.text, "# Notes\n\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sibling.appendingPathComponent("images").path), "written in the folder the link leads to")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: moved.appendingPathComponent("images").path))
+        dismissAlerts(e)
+    }
+
     /// The control: the grant left alone takes the image.
     func testGrantedFolderTakesTheImage() async throws {
         let (e, dir) = try editor()

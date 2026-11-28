@@ -85,6 +85,12 @@ public final class ImageStore {
     /// The pinned document folder, and the path the links are relative to.
     private let root: Int32
     private let folder: URL
+    /// iOS: the verified grant `open(in:beneath:rootID:)` looked the
+    /// document's folder up beneath (-1: none, `open(in:)`), held for the
+    /// store's life, and the folder's components below it. Before
+    /// publishing, the folder must still be found there.
+    private let grant: Int32
+    private let below: [String]
     /// Each published name (by its bytes) and the file it was given.
     private var published = Publications()
     /// Called after "images" is opened and checked (tests swap folders here).
@@ -139,10 +145,11 @@ public final class ImageStore {
         return renameatx_np(d, "f", d, "g", flags) == 0
     }
 
-    private init(fd: Int32, root: Int32, folder: URL, kernel: Bool) {
+    private init(fd: Int32, root: Int32, folder: URL, kernel: Bool, grant: Int32 = -1, below: [String] = []) {
         self.fd = fd; self.root = root; self.folder = folder; self.kernel = kernel
+        self.grant = grant; self.below = below
     }
-    deinit { close(fd); close(root) }
+    deinit { close(fd); close(root); if grant >= 0 { close(grant) } }
 
     /// Opens (making it if needed) "images" in `folder`; throws
     /// `Failure.outside` when it leads out of `folder`, and on the
@@ -165,7 +172,11 @@ public final class ImageStore {
     /// symbolic link, and when `rootID` is given (the root as it was when
     /// it was granted) it must still be that folder: a root replaced by a
     /// link, or by another folder, is refused with `Failure.outside`. Then
-    /// as `open(in:)`.
+    /// as `open(in:)`, except that `root`'s descriptor is kept: just
+    /// before each publish, `folder` must still be at the same components
+    /// beneath it (opened one by one without following a link) and the
+    /// same folder (device and inode), else `Failure.destinationChanged`
+    /// and the staged file is removed.
     public static func open(in folder: URL, beneath root: URL, rootID: Beneath.FileID? = nil) throws -> ImageStore {
         let base = root.standardizedFileURL.pathComponents
         let path = folder.standardizedFileURL.pathComponents
@@ -183,20 +194,25 @@ public final class ImageStore {
         let parts = Array(path.dropFirst(base.count))
         let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY)
         let err = errno
-        close(rfd)
         guard dfd >= 0 else {
+            close(rfd)
             if err == ELOOP || err == ENOTDIR || err == Beneath.notCapable || err == EINVAL { throw Failure.outside }
             throw posix(folder.path, err)
         }
-        return try open(pinned: dfd, folder: folder)
+        return try open(pinned: dfd, folder: folder, grant: rfd, below: parts)
     }
 
-    /// `dfd`: the document's folder, opened (owned from here on).
-    private static func open(pinned dfd: Int32, folder: URL) throws -> ImageStore {
+    /// `dfd`: the document's folder, opened (owned from here on), and
+    /// `grant` (owned too) the folder it was opened beneath, if any.
+    private static func open(pinned dfd: Int32, folder: URL, grant: Int32 = -1, below: [String] = []) throws -> ImageStore {
         let kernel = useKernel
         let ifd: Int32
-        do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch { close(dfd); throw error }
-        let store = ImageStore(fd: ifd, root: dfd, folder: folder, kernel: kernel)
+        do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch {
+            close(dfd)
+            if grant >= 0 { close(grant) }
+            throw error
+        }
+        let store = ImageStore(fd: ifd, root: dfd, folder: folder, kernel: kernel, grant: grant, below: below)
         afterOpen?()
         return store
     }
@@ -257,6 +273,18 @@ public final class ImageStore {
             throw Failure.outside
         }
         return ifd
+    }
+
+    /// Opened beneath a grant: the pinned document folder is still found
+    /// at its components beneath the held grant (each opened without
+    /// following a link). True without a grant, or when it is the grant.
+    private func stillBeneathGrant() -> Bool {
+        guard grant >= 0, !below.isEmpty else { return true }
+        let now = Beneath.open(below, beneath: grant, flags: O_RDONLY | O_DIRECTORY, walk: true)
+        guard now >= 0 else { return false }
+        defer { close(now) }
+        guard let id = Beneath.FileID(fd: now) else { return false }
+        return id == Beneath.FileID(fd: root)
     }
 
     /// Fallback: the held "images" is still directly in the pinned
@@ -351,6 +379,8 @@ public final class ImageStore {
         let id = Beneath.FileID(fd: dst)
         guard close(dst) == 0, let id else { throw Self.posix(name) }
         Self.beforePublish?()
+        // Opened beneath a grant: the document's folder must still be in it.
+        guard stillBeneathGrant() else { throw Failure.destinationChanged }
         let out = try kernel ? publish(tmp, as: name, hint: images) : publishInHeld(tmp, as: name)
         published = true
         self.published.record(out, id)
