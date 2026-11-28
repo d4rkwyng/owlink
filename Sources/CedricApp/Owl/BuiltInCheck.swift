@@ -103,7 +103,13 @@ enum BuiltInCheck {
                 AICheck.press(view.action, "Delete") { downloads.state(m) == .notDownloaded }
                 AICheck.wait("deleted", timeout: 10, { downloads.state(m) == .notDownloaded }) { ok in
                     AICheck.check(ok && !FileManager.default.fileExists(atPath: downloads.store.fileURL(for: m).path), "deleted from disk")
-                    AICheck.check(view.action.title == "Download", "back to Download")
+                    // Automatic now shows the default; pick the deleted model again to see its own button.
+                    if let i = sheet.modelPopup.itemArray.firstIndex(where: { $0.representedObject as? String == m.id }) {
+                        sheet.modelPopup.selectItem(at: i)
+                        NSApp.sendAction(sheet.modelPopup.action!, to: sheet.modelPopup.target, from: sheet.modelPopup)
+                    }
+                    AICheck.check(view.model == m && sheet.builtInTarget == m.id && view.action.title == "Download"
+                                  && view.status.stringValue.hasPrefix("Not downloaded"), "\(m.name): back to Download (\(view.status.stringValue))")
                     OwlCheck.snapshot(panel, "\(out)/4-deleted.png") { AICheck.finish() }
                 }
             }

@@ -150,6 +150,10 @@ extension DevChecks {
                 expect(ai.launchNote.toolTip == LocalAISettings.loadModelAtLaunchNote, "…the full Load model at launch note is its tooltip")
                 expect(v.source.toolTip?.contains("Hugging Face") == true && v.source.toolTip?.contains(BuiltInDownloads.shared.store.directory.lastPathComponent) == true,
                        "…the Hugging Face folder is the source line's tooltip", v.source.toolTip ?? "-")
+                let items = ai.modelPopup.itemArray
+                v.reload()   // as each download progress tick does
+                expect(items.count == ai.modelPopup.numberOfItems && zip(items, ai.modelPopup.itemArray).allSatisfy { $0 === $1 },
+                       "Cedric: a download-state refresh leaves the Model menu's items alone (an open menu isn't rebuilt)")
                 let h = w.frame.height
                 expect(h <= cedricTabMaxHeight, "Cedric: the tab is at most \(Int(cedricTabMaxHeight)) pt tall (was 826)", "\(Int(h)) pt")
                 // Picking a model that isn't downloaded makes it the download

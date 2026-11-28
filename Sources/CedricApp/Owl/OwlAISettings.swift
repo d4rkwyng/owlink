@@ -343,21 +343,17 @@ final class AISettingsSection: NSObject {
             ? String(localized: "Automatic checks are off by default for LM Studio, Ollama and custom servers. Review the first-use notice before enabling them.")
             : String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check.")
 
-        modelPopup.removeAllItems()
+        if !builtIn { builtInTarget = nil }
         let auto: String
         if builtIn { auto = BuiltInModel.automaticTitle(suggested: suggested?.id) }
         else if let s = suggested { auto = String(localized: "Automatic (\(s.id))") }
         else if report != nil { auto = String(localized: "Automatic (no small Qwen found)") }
         else { auto = String(localized: "Automatic (small Qwen)") }
-        modelPopup.addItem(withTitle: auto)
-        modelPopup.lastItem?.representedObject = nil
         if builtIn {
-            refreshBuiltInMenu()
+            refreshBuiltInMenu(automatic: auto)
         } else {
-            for m in offered {
-                modelPopup.addItem(withTitle: m.sizeLabel.isEmpty ? m.id : "\(m.id)  (\(m.sizeLabel))")
-                modelPopup.lastItem?.representedObject = m.id
-            }
+            setModelItems([MenuEntry(title: auto, id: nil, toolTip: nil)]
+                          + offered.map { MenuEntry(title: $0.sizeLabel.isEmpty ? $0.id : "\($0.id)  (\($0.sizeLabel))", id: $0.id, toolTip: nil) })
             select(settings.model)
         }
         grid?.cell(for: modelCell)?.row?.isHidden = apple
@@ -383,6 +379,26 @@ final class AISettingsSection: NSObject {
         onResize?()
     }
 
+    private struct MenuEntry: Equatable {
+        var title: String
+        var id: String?
+        var toolTip: String?
+    }
+
+    /// Replaces the Model popup's items only when they differ: a download's
+    /// progress refreshes this many times a second, and rebuilding the menu
+    /// each time would disturb it while it is open.
+    private func setModelItems(_ entries: [MenuEntry]) {
+        let current = modelPopup.itemArray.map { MenuEntry(title: $0.title, id: $0.representedObject as? String, toolTip: $0.toolTip) }
+        guard current != entries else { return }
+        modelPopup.removeAllItems()
+        for e in entries {
+            modelPopup.addItem(withTitle: e.title)
+            modelPopup.lastItem?.representedObject = e.id
+            modelPopup.lastItem?.toolTip = e.toolTip
+        }
+    }
+
     private func select(_ id: String?) {
         if let id, let i = modelPopup.itemArray.firstIndex(where: { $0.representedObject as? String == id }) {
             modelPopup.selectItem(at: i)
@@ -396,23 +412,18 @@ final class AISettingsSection: NSObject {
     /// download target if there is one, else the model in effect, and points
     /// the buttons and status line at it (for Automatic: the model it uses,
     /// or the default when none is downloaded).
-    private func refreshBuiltInMenu() {
+    private func refreshBuiltInMenu(automatic auto: String) {
         let downloads = BuiltInDownloads.shared
         let catalog = downloads.catalog
         // A target that finished downloading stops being one: the popup goes
         // back to the model in effect (a download never switches it).
         if let t = builtInTarget, let m = catalog?.model(id: t), downloads.state(m) == .installed { builtInTarget = nil }
         if let t = builtInTarget, catalog?.model(id: t) == nil { builtInTarget = nil }
+        var entries = [MenuEntry(title: auto, id: nil, toolTip: nil)]
         // A saved model the catalog doesn't list (CEDRIC_AI_MODEL, an old id) still shows.
-        if let m = settings.model, catalog?.model(id: m) == nil {
-            modelPopup.addItem(withTitle: m)
-            modelPopup.lastItem?.representedObject = m
-        }
-        for m in catalog?.models ?? [] {
-            modelPopup.addItem(withTitle: m.menuTitle)
-            modelPopup.lastItem?.representedObject = m.id
-            modelPopup.lastItem?.toolTip = m.details
-        }
+        if let m = settings.model, catalog?.model(id: m) == nil { entries.append(MenuEntry(title: m, id: m, toolTip: nil)) }
+        entries += (catalog?.models ?? []).map { MenuEntry(title: $0.menuTitle, id: $0.id, toolTip: $0.details) }
+        setModelItems(entries)
         select(builtInTarget ?? settings.model)
         let shownID = modelPopup.selectedItem?.representedObject as? String
         let automatic = shownID == nil
