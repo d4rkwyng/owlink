@@ -227,13 +227,20 @@ final class PreviewFolderGrants {
         return out
     }
 
+    /// Tests: the kept URLs, and those with a recorded grant.
+    var keptForTests: (open: [URL], recorded: [URL]) { (open, Array(recorded.keys)) }
+
     /// `path`'s grant is no longer kept: not offered again, its access stopped.
-    private func forget(_ path: String) {
+    /// (Internal for tests.)
+    func forget(_ path: String) {
         if grants.forget(path), let url = startedURLs.removeValue(forKey: path) {
             url.stopAccessingSecurityScopedResource()
         }
-        open.removeAll { PreviewGrantSet.resolvedPath($0) == path }
-        recorded = recorded.filter { $0.value.resolved.path != path }
+        // The same kept grants leave both lists: those that led to `path`
+        // when granted, or lead there now.
+        let gone = Set(open.filter { recorded[$0]?.resolved.path == path || PreviewGrantSet.resolvedPath($0) == path })
+        open.removeAll { gone.contains($0) }
+        for url in gone { recorded[url] = nil }
     }
 
     private var savedBookmarks: [Data] {

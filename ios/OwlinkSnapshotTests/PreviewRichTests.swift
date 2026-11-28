@@ -154,4 +154,37 @@ final class PreviewRichTests: XCTestCase {
         XCTAssertNil(reloaded.root(for: folders[0]))
         XCTAssertNotNil(reloaded.root(for: folders[PreviewFolderGrants.maxKept]))
     }
+
+    /// Sol round 4, should-fix 2: a grant whose alias now leads elsewhere
+    /// than when it was granted is let go from the kept URLs and from the
+    /// recorded grants together, whichever of its two paths is forgotten.
+    func testForgettingARetargetedGrantDropsItFromBothLists() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("grant-alias-\(UUID().uuidString)", isDirectory: true)
+        let x = base.appendingPathComponent("x", isDirectory: true), y = base.appendingPathComponent("y", isDirectory: true)
+        let alias = base.appendingPathComponent("alias", isDirectory: true)
+        try fm.createDirectory(at: x, withIntermediateDirectories: true)
+        try fm.createDirectory(at: y, withIntermediateDirectories: true)
+        temps.append(base)
+        let atGrant = PreviewGrantSet.resolvedPath(x), now = PreviewGrantSet.resolvedPath(y)
+        for (path, which) in [(atGrant, "where it led when granted"), (now, "where it leads now")] {
+            try? fm.removeItem(at: alias)
+            try fm.createSymbolicLink(at: alias, withDestinationURL: x)
+            let suite = "cedric-tests-grants-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let grants = PreviewFolderGrants(defaults: defaults)
+            XCTAssertTrue(grants.add(alias))
+            XCTAssertNotNil(grants.grant(for: alias))
+            // Retargeted: the alias leads to y now.
+            try fm.removeItem(at: alias)
+            try fm.createSymbolicLink(at: alias, withDestinationURL: y)
+            grants.forget(path)
+            let kept = grants.keptForTests
+            XCTAssertEqual(kept.open, [], "\(which): still kept \(kept.open)")
+            XCTAssertEqual(kept.recorded, [], "\(which): still recorded \(kept.recorded)")
+            XCTAssertNil(grants.root(for: alias), which)
+            XCTAssertNil(grants.grant(for: alias), which)
+        }
+    }
 }
