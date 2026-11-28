@@ -60,9 +60,10 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         }
         let bytes = Array(prefix.prefix(DocumentKind.prefixLength))
         let e = OfficeFormat.ext(fileName)
-        // CSV and TSV by name: the grid, whatever they hold (it says when
-        // a file isn't text; Edit as Text opens the editor).
-        if let sheet = SpreadsheetFormat.delimited[e] { return .spreadsheet(sheet) }
+        // A delimited text file can be replaced while its preview is open.
+        if let sheet = SpreadsheetFormat.delimited[e] {
+            return DocumentKind.hasPDFHeader(bytes) ? .pdf : .spreadsheet(sheet)
+        }
         // An .xlsx / .xlsm by name: the grid, for a zip, for an encrypted
         // workbook (an OLE2 container), and for a damaged one (the grid
         // says it can't read it). An RTF with the name stays text.

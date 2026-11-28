@@ -296,7 +296,7 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         // still the editor's: a viewer file (a PDF with no NUL bytes passes
         // the editor's binary check) isn't opened, the reopen forgets its
         // record, and a recovery record is left as it is (not cleared).
-        if !binaryOK, recovered != nil || reopening {
+        if !binaryOK, asText || recovered != nil || reopening {
             let decision = DocumentViewerRoute.editorOnlyOpen(DocumentViewerRoute.route(for: url), reopening: reopening)
             if !decision.opensEditor {
                 if recovered != nil { alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
@@ -312,6 +312,15 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 if ok { doc.close(completionHandler: nil) }
                 finishReopen(false)
                 return
+            }
+            // Check the coordinated read before handing the document to an editor.
+            if ok, !binaryOK, asText || reopening || recovered != nil {
+                if !doc.mayPresentInEditor {
+                    doc.close { _ in doc.discardOpenedCopy() }
+                    if !reopening { self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
+                    finishReopen(false)
+                    return
+                }
             }
             // Opened meanwhile in another window: that one keeps it.
             if ok, self.bringForwardIfOpenElsewhere(url) {

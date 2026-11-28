@@ -126,7 +126,7 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertEqual(try route("sheet.csv", zip), .spreadsheet(.csv))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "sheet.csv", prefix: zip,
                                                  contentType: .commaSeparatedText), .spreadsheet(.csv))
-        XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.csv", prefix: Array("%PDF-,x\n".utf8)), .spreadsheet(.csv))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.csv", prefix: Array("%PDF-,x\n".utf8)), .pdf)
         XCTAssertTrue(SpreadsheetFormat.csv.isText && SpreadsheetFormat.tsv.isText && !SpreadsheetFormat.xlsx.isText)
     }
 
@@ -188,7 +188,7 @@ final class DocumentViewerRouteTests: XCTestCase {
             XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: pdf, contentType: .pdf), .editor, name)
             XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: zip, contentType: sheet), .editor, name)
         }
-        XCTAssertEqual(DocumentViewerRoute.route(fileName: "table.csv", prefix: pdf, contentType: .pdf), .spreadsheet(.csv))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "table.csv", prefix: pdf, contentType: .pdf), .pdf)
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "table.csv", prefix: zip, contentType: sheet), .spreadsheet(.csv))
     }
 
@@ -285,7 +285,7 @@ final class DocumentViewerRouteTests: XCTestCase {
     }
 
     func testDelimitedFileReplacedBeforeEditorHandoff() throws {
-        let pdf = Data("%PDF-1.7".utf8)
+        let pdf = (try? Data(contentsOf: samples.appendingPathComponent("sample.pdf"))) ?? Data("%PDF-1.7".utf8)
         for name in ["table.csv", "data.tsv"] {
             let url = try file(name, Array("a,b".utf8))
             try pdf.write(to: url)

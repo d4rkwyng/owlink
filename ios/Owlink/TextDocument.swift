@@ -52,6 +52,11 @@ final class TextDocument: UIDocument {
     /// What the save in progress writes (becomes `onDisk` if it succeeds).
     private var writing: (state: DiskState, breaks: LineBreaks?, bytes: Data?)?
     /// The bytes as read or last written, unless over the copy store's cap.
+    private var loadedPrefix = Data()
+    var mayPresentInEditor: Bool {
+        let route = DocumentViewerRoute.route(fileName: fileURL.lastPathComponent, prefix: loadedPrefix)
+        return DocumentViewerRoute.editorOnlyOpen(route, reopening: false).opensEditor
+    }
     private var bytesOnDisk: Data?
     private var readHistory = ReadHistory()
     private var autosaveInProgress = false
@@ -140,6 +145,7 @@ final class TextDocument: UIDocument {
         if decoded.looksBinary && !openBinaryAnyway { throw OpenError.binary }
         // The bytes as first opened (not on a reload after a change elsewhere).
         if openedCopy == nil { openedCopy = SaveSafetyStores.revert.keep(data, id: openedCopyID) }
+        loadedPrefix = Data(data.prefix(DocumentKind.prefixLength))
         bytesOnDisk = data.count <= SafetyCopyStore.maxBytes ? data : nil
         readHistory = ReadHistory()
         text = decoded.text
