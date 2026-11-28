@@ -87,9 +87,29 @@ public enum WikiLinks {
     /// The links in one line (no line break), outside code spans.
     public static func links(inLine b: UnsafeBufferPointer<UInt16>) -> [Link] {
         var out: [Link] = []
+        forEachLink(inLine: b) { out.append($0); return true }
+        return out
+    }
+
+    /// How often (UTF-16 units into a line) the line parsers ask `cancelled`.
+    public static let cancelInterval = 1_024
+
+    /// The links `links(inLine:)` finds, handed to `body` one at a time as
+    /// they are parsed (none kept here); `body` returns false to stop.
+    /// `cancelled` is asked every `cancelInterval` units. False when
+    /// stopped either way.
+    @discardableResult
+    public static func forEachLink(inLine b: UnsafeBufferPointer<UInt16>, cancelled: () -> Bool = { false },
+                                   _ body: (Link) -> Bool) -> Bool {
+        let counter = ParseCounter.current
         let n = b.count
         var i = 0
+        var check = cancelInterval
         while i < n {
+            if i >= check {
+                if cancelled() { return false }
+                check = i + cancelInterval
+            }
             let c = b[i]
             if c == bs { i += 2; continue }
             if c == tick {
@@ -100,13 +120,14 @@ public enum WikiLinks {
             if c == lb, let e = end(in: b, open: i) {
                 let embed = i > 0 && b[i - 1] == bang && !(i > 1 && b[i - 2] == bs)
                 let start = embed ? i - 1 : i
-                out.append(parse(b, open: i, end: e, start: start, embed: embed))
+                counter?.produced += 1
+                guard body(parse(b, open: i, end: e, start: start, embed: embed)) else { return false }
                 i = e
                 continue
             }
             i += 1
         }
-        return out
+        return true
     }
 
     public static func links(inLine s: String) -> [Link] {
@@ -236,12 +257,16 @@ public enum WikiLinks {
             let u = Array(l.utf16)
             if fenceLine(u, fence: &fence) { return }
             guard u.count >= 5 else { return }
-            let found = u.withUnsafeBufferPointer { links(inLine: $0) }
-            guard !found.isEmpty else { return }
-            let snippet = Self.snippet(l)
-            for f in found where !f.target.isEmpty {
-                guard body(Ref(target: f.target, line: line, snippet: snippet)) else { finished = false; stop = true; return }
+            // Each link handed over as it is parsed; the line's snippet once.
+            var snippet: String?
+            let done = u.withUnsafeBufferPointer { b in
+                forEachLink(inLine: b, cancelled: cancelled) { f in
+                    guard !f.target.isEmpty else { return true }
+                    if snippet == nil { snippet = Self.snippet(l) }
+                    return body(Ref(target: f.target, line: line, snippet: snippet ?? ""))
+                }
             }
+            if !done { finished = false; stop = true }
         }
         return finished
     }

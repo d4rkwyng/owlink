@@ -98,9 +98,25 @@ public enum Tags {
     /// The inline tags in one line (no line break), outside code spans.
     public static func tags(inLine b: UnsafeBufferPointer<UInt16>) -> [Found] {
         var out: [Found] = []
+        forEachTag(inLine: b) { out.append($0); return true }
+        return out
+    }
+
+    /// The tags `tags(inLine:)` finds, handed to `body` one at a time as
+    /// they are parsed; `body` returns false to stop. `cancelled` is asked
+    /// every `WikiLinks.cancelInterval` units. False when stopped either way.
+    @discardableResult
+    public static func forEachTag(inLine b: UnsafeBufferPointer<UInt16>, cancelled: () -> Bool = { false },
+                                  _ body: (Found) -> Bool) -> Bool {
+        let counter = ParseCounter.current
         let n = b.count
         var i = 0
+        var check = WikiLinks.cancelInterval
         while i < n {
+            if i >= check {
+                if cancelled() { return false }
+                check = i + WikiLinks.cancelInterval
+            }
             let c = b[i]
             if c == bs { i += 2; continue }
             if c == tick {
@@ -112,14 +128,17 @@ public enum Tags {
                 let e = nameEnd(b, from: i + 1)
                 if e > i + 1 {
                     let raw = String(decoding: UnsafeBufferPointer(rebasing: b[(i + 1)..<e]), as: UTF16.self)
-                    if let name = normalize(raw) { out.append(Found(name: name, range: NSRange(location: i, length: e - i))) }
+                    if let name = normalize(raw) {
+                        counter?.produced += 1
+                        guard body(Found(name: name, range: NSRange(location: i, length: e - i))) else { return false }
+                    }
                 }
                 i = max(e, i + 1)
                 continue
             }
             i += 1
         }
-        return out
+        return true
     }
 
     public static func tags(inLine s: String) -> [Found] {
@@ -165,12 +184,17 @@ public enum Tags {
     private static func eachRef(in text: String, cancelled: @escaping () -> Bool, _ body: @escaping (Ref) -> Bool) -> Bool {
         var seen = Set<String>()
         var finished = true
-        func add(_ name: String, _ line: Int, _ l: String) {
-            guard finished, seen.insert(name.lowercased()).inserted else { return }
-            if !body(Ref(name: name, line: line, snippet: WikiLinks.snippet(l))) { finished = false }
+        var line = 0
+        // The current line's snippet, made once and only for a tag kept.
+        var snippetLine = -1
+        var snippet = ""
+        func add(_ name: String, _ l: String) -> Bool {
+            guard seen.insert(name.lowercased()).inserted else { return true }
+            if snippetLine != line { snippet = WikiLinks.snippet(l); snippetLine = line }
+            if !body(Ref(name: name, line: line, snippet: snippet)) { finished = false; return false }
+            return true
         }
         var fence: (UInt16, Int)?
-        var line = 0
         // Front matter: from a first line `---` to the next `---` or `...`.
         var front: FrontMatter? = nil
         text.enumerateLines { l, stop in
@@ -184,13 +208,14 @@ public enum Tags {
             if front != nil {
                 let t = l.trimmingCharacters(in: .whitespaces)
                 if t == "---" || t == "..." { front = nil; return }
-                for name in front!.feed(l) { add(name, line, l) }
+                if !front!.feed(l, cancelled: cancelled, { add($0, l) }) { finished = false }
                 return
             }
             let u = Array(l.utf16)
             if WikiLinks.fenceLine(u, fence: &fence) { return }
             guard u.count >= 2, u.contains(hash) else { return }
-            for f in u.withUnsafeBufferPointer({ tags(inLine: $0) }) { add(f.name, line, l) }
+            let done = u.withUnsafeBufferPointer { b in forEachTag(inLine: b, cancelled: cancelled) { add($0.name, l) } }
+            if !done { finished = false }
         }
         return finished
     }
@@ -200,35 +225,70 @@ public enum Tags {
         /// In a `tags:` with nothing after it: the list items that follow.
         var inList = false
 
-        mutating func feed(_ l: String) -> [String] {
+        /// The tags `l` holds, handed to `emit` one at a time (it returns
+        /// false to stop). False when stopped, or when `cancelled` said so
+        /// (asked every `WikiLinks.cancelInterval` characters).
+        mutating func feed(_ l: String, cancelled: () -> Bool = { false }, _ emit: (String) -> Bool) -> Bool {
+            let counter = ParseCounter.current
+            func out(_ name: String?) -> Bool {
+                guard let name else { return true }
+                counter?.produced += 1
+                return emit(name)
+            }
             let first = l.first
             if inList {
                 let t = l.trimmingCharacters(in: .whitespaces)
                 if t.hasPrefix("- ") || t == "-" {
-                    return Tags.item(Tags.uncommented(t.dropFirst())).map { [$0] } ?? []
+                    return out(Tags.item(Tags.uncommented(t.dropFirst())))
                 }
                 // Blank lines and comments keep the list; another key ends it.
-                if t.isEmpty || t.hasPrefix("#") { return [] }
-                if first == " " || first == "\t" { return [] }
+                if t.isEmpty || t.hasPrefix("#") { return true }
+                if first == " " || first == "\t" { return true }
                 inList = false
             }
-            guard let colon = l.firstIndex(of: ":"), first != " ", first != "\t" else { return [] }
+            guard let colon = l.firstIndex(of: ":"), first != " ", first != "\t" else { return true }
             let key = l[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-            guard key == "tags" || key == "tag" else { return [] }
+            guard key == "tags" || key == "tag" else { return true }
             var value = l[l.index(after: colon)...].trimmingCharacters(in: .whitespaces)
             // A flow list (its items may be written `#tag`), up to its `]`.
             if value.hasPrefix("[") {
                 var inner = value.dropFirst()
                 if let close = inner.firstIndex(of: "]") { inner = inner[..<close] }
-                return inner.split(separator: ",").compactMap { Tags.item($0) }
+                return Tags.eachPiece(inner, cancelled: cancelled, separator: { $0 == "," }) { out(Tags.item($0)) }
             }
             // A YAML comment after the value.
             value = Tags.uncommented(Substring(value)).trimmingCharacters(in: .whitespaces)
             if value.hasPrefix("#") { value = "" }
-            if value.isEmpty { inList = true; return [] }
+            if value.isEmpty { inList = true; return true }
             // Inline: separated by commas or spaces.
-            return value.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" }).compactMap { Tags.item($0) }
+            return Tags.eachPiece(Substring(value), cancelled: cancelled, separator: { $0 == "," || $0 == " " || $0 == "\t" }) {
+                out(Tags.item($0))
+            }
         }
+    }
+
+    /// `s` split as `split(whereSeparator:)` splits it (empty pieces
+    /// left out), each piece handed to `body` as it is found (it returns
+    /// false to stop), `cancelled` asked every `WikiLinks.cancelInterval`
+    /// characters. False when stopped either way.
+    static func eachPiece(_ s: Substring, cancelled: () -> Bool, separator: (Character) -> Bool,
+                          _ body: (Substring) -> Bool) -> Bool {
+        var start = s.startIndex
+        var i = start
+        var count = 0
+        while i < s.endIndex {
+            count += 1
+            if count >= WikiLinks.cancelInterval {
+                count = 0
+                if cancelled() { return false }
+            }
+            if separator(s[i]) {
+                if start < i, !body(s[start..<i]) { return false }
+                start = s.index(after: i)
+            }
+            i = s.index(after: i)
+        }
+        return start < s.endIndex ? body(s[start...]) : true
     }
 
     /// `s` up to a YAML comment: a `#` after white space, past the start of
@@ -304,50 +364,85 @@ public struct TagTree: Sendable {
     /// Lowercased tag path → its notes (its own and those under it), by path.
     let hits: [String: [Hit]]
 
-    /// `cancelled` is asked before each note's tags: once it says stop,
-    /// the tree holds the notes taken so far (the caller drops it).
-    public init(files: [String: [Tags.Ref]], cancelled: () -> Bool = { false }) {
+    /// The tree was cut at `maxEntries`: some tags (or the notes under
+    /// one) are left out.
+    public let truncated: Bool
+
+    /// `cancelled` is asked every 256 tags while they are expanded, and
+    /// before each node is made: once it says stop, the tree is cut short
+    /// there (the caller drops it). `maxEntries`: the most (tag, note)
+    /// entries kept, a nested tag counting for each tag above it too;
+    /// past it the rest is left out and `truncated` is set.
+    public init(files: [String: [Tags.Ref]], cancelled: () -> Bool = { false }, maxEntries: Int = .max) {
+        let counter = ParseCounter.current
         // Lowercased path → (shown path, note → its first hit).
         var shown: [String: String] = [:]
         var byKey: [String: [String: Hit]] = [:]
-        for src in files.keys.sorted() {
-            if cancelled() { break }
+        var entries = 0
+        var full = false
+        var stopped = false
+        var sinceCheck = 0
+        expand: for src in files.keys.sorted() {
+            if cancelled() { stopped = true; break }
             for r in files[src] ?? [] {
+                sinceCheck += 1
+                if sinceCheck >= 256 {
+                    sinceCheck = 0
+                    if cancelled() { stopped = true; break expand }
+                }
                 let parts = r.name.split(separator: "/").map(String.init)
                 var lower = ""
                 var display = ""
                 for (k, p) in parts.enumerated() {
                     lower += (k == 0 ? "" : "/") + p.lowercased()
                     display += (k == 0 ? "" : "/") + p
+                    let old = byKey[lower]?[src]
+                    if let old, old.line <= r.line { continue }
+                    if old == nil {
+                        guard entries < maxEntries else { full = true; break expand }
+                        entries += 1
+                    }
+                    counter?.treeWork += 1
                     if shown[lower] == nil { shown[lower] = display }
-                    let hit = Hit(source: src, tag: r.name, line: r.line, snippet: r.snippet)
-                    if let old = byKey[lower]?[src], old.line <= r.line { continue }
-                    byKey[lower, default: [:]][src] = hit
+                    byKey[lower, default: [:]][src] = Hit(source: src, tag: r.name, line: r.line, snippet: r.snippet)
                 }
             }
         }
+        truncated = full
         var hits: [String: [Hit]] = [:]
-        for (k, v) in byKey { hits[k] = v.values.sorted { $0.source < $1.source } }
+        if !stopped {
+            for (k, v) in byKey {
+                if cancelled() { stopped = true; break }
+                hits[k] = v.values.sorted { $0.source < $1.source }
+            }
+        }
         self.hits = hits
         tagCount = hits.count
         // Children by parent key.
         var kids: [String: [String]] = [:]
-        for k in hits.keys {
-            let parent = (k as NSString).deletingLastPathComponent
-            kids[k.contains("/") ? parent : "", default: []].append(k)
+        if !stopped {
+            for k in hits.keys {
+                let parent = (k as NSString).deletingLastPathComponent
+                kids[k.contains("/") ? parent : "", default: []].append(k)
+            }
         }
         func build(_ parent: String) -> [Node] {
-            (kids[parent] ?? []).map { k in
+            var nodes: [Node] = []
+            for k in kids[parent] ?? [] {
+                if stopped || cancelled() { stopped = true; return nodes }
                 let path = shown[k] ?? k
-                return Node(name: (path as NSString).lastPathComponent, path: path, count: hits[k]?.count ?? 0, children: build(k))
+                counter?.treeWork += 1
+                nodes.append(Node(name: (path as NSString).lastPathComponent, path: path, count: hits[k]?.count ?? 0, children: build(k)))
             }
-            .sorted { a, b in
+            if stopped || cancelled() { stopped = true; return nodes }
+            return nodes.sorted { a, b in
                 if a.count != b.count { return a.count > b.count }
                 let c = a.name.localizedCaseInsensitiveCompare(b.name)
                 return c != .orderedSame ? c == .orderedAscending : a.name < b.name
             }
         }
-        roots = build("")
+        let built = stopped ? [] : build("")
+        roots = stopped ? [] : built
     }
 
     /// The notes with `tag` or a tag under it, by path, each once at its first such line.

@@ -220,3 +220,115 @@ private func writeTagTree(_ files: [String: String]) throws -> URL {
         #expect(tree(scan).roots.map(\.name) == ["small"])
     }
 }
+
+/// The round-3 tag parser (whole-line arrays, front matter as arrays):
+/// the streaming one must find exactly the same tags.
+private enum OldTagParser {
+    static func tags(_ b: UnsafeBufferPointer<UInt16>) -> [Tags.Found] {
+        var out: [Tags.Found] = []
+        let n = b.count
+        var i = 0
+        while i < n {
+            let c = b[i]
+            if c == Tags.bs { i += 2; continue }
+            if c == Tags.tick {
+                let (runEnd, span) = WikiLinks.codeSpanEnd(b, at: i)
+                i = span ?? runEnd
+                continue
+            }
+            if c == Tags.hash, i == 0 || Tags.isSpace(b[i - 1]) {
+                let e = Tags.nameEnd(b, from: i + 1)
+                if e > i + 1 {
+                    let raw = String(decoding: UnsafeBufferPointer(rebasing: b[(i + 1)..<e]), as: UTF16.self)
+                    if let name = Tags.normalize(raw) { out.append(Tags.Found(name: name, range: NSRange(location: i, length: e - i))) }
+                }
+                i = max(e, i + 1)
+                continue
+            }
+            i += 1
+        }
+        return out
+    }
+
+    struct FrontMatter {
+        var inList = false
+        mutating func feed(_ l: String) -> [String] {
+            let first = l.first
+            if inList {
+                let t = l.trimmingCharacters(in: .whitespaces)
+                if t.hasPrefix("- ") || t == "-" { return Tags.item(Tags.uncommented(t.dropFirst())).map { [$0] } ?? [] }
+                if t.isEmpty || t.hasPrefix("#") { return [] }
+                if first == " " || first == "\t" { return [] }
+                inList = false
+            }
+            guard let colon = l.firstIndex(of: ":"), first != " ", first != "\t" else { return [] }
+            let key = l[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            guard key == "tags" || key == "tag" else { return [] }
+            var value = l[l.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("[") {
+                var inner = value.dropFirst()
+                if let close = inner.firstIndex(of: "]") { inner = inner[..<close] }
+                return inner.split(separator: ",").compactMap { Tags.item($0) }
+            }
+            value = Tags.uncommented(Substring(value)).trimmingCharacters(in: .whitespaces)
+            if value.hasPrefix("#") { value = "" }
+            if value.isEmpty { inList = true; return [] }
+            return value.split(whereSeparator: { $0 == "," || $0 == " " || $0 == "\t" }).compactMap { Tags.item($0) }
+        }
+    }
+
+    static func refs(_ text: String) -> [Tags.Ref] {
+        var out: [Tags.Ref] = []
+        var seen = Set<String>()
+        func add(_ name: String, _ line: Int, _ l: String) {
+            guard seen.insert(name.lowercased()).inserted else { return }
+            out.append(Tags.Ref(name: name, line: line, snippet: WikiLinks.snippet(l)))
+        }
+        var fence: (UInt16, Int)?
+        var line = 0
+        var front: FrontMatter? = nil
+        text.enumerateLines { l, _ in
+            defer { line += 1 }
+            if line == 0 {
+                var first = l
+                if first.hasPrefix("\u{FEFF}") { first.removeFirst() }
+                if first.trimmingCharacters(in: .whitespaces) == "---" { front = FrontMatter(); return }
+            }
+            if front != nil {
+                let t = l.trimmingCharacters(in: .whitespaces)
+                if t == "---" || t == "..." { front = nil; return }
+                for name in front!.feed(l) { add(name, line, l) }
+                return
+            }
+            let u = Array(l.utf16)
+            if WikiLinks.fenceLine(u, fence: &fence) { return }
+            guard u.count >= 2, u.contains(Tags.hash) else { return }
+            for f in u.withUnsafeBufferPointer({ tags($0) }) { add(f.name, line, l) }
+        }
+        return out
+    }
+}
+
+@Suite struct StreamingTagParserTests {
+    @Test func tagsAndRefsMatchTheWholeLineParser() {
+        let extra = ["---\ntags: [ a , , b,#c, \"d e\", 'f' ]\nTag: g\n---\n", "---\ntags: a,,b  c\n...\n#after\n",
+                     "---\ntags:\n- one\n-\n  - two # c\nnext: x\n  - three\n---\n"]
+        for text in OldLineParsers.corpus + extra {
+            #expect(Tags.refs(in: text) == OldTagParser.refs(text))
+            text.enumerateLines { l, _ in
+                let u = Array(l.utf16)
+                u.withUnsafeBufferPointer { b in #expect(Tags.tags(inLine: b) == OldTagParser.tags(b)) }
+            }
+        }
+    }
+
+    @Test func tagTreeLimitAndCancel() {
+        let refs = (0..<100).map { Tags.Ref(name: "a\($0)/b", line: $0, snippet: "") }
+        let full = TagTree(files: ["n.md": refs])
+        #expect(full.tagCount == 200 && !full.truncated)
+        let cut = TagTree(files: ["n.md": refs], maxEntries: 51)
+        #expect(cut.tagCount == 51 && cut.truncated)
+        let stopped = TagTree(files: ["n.md": refs], cancelled: { true })
+        #expect(stopped.roots.isEmpty)
+    }
+}

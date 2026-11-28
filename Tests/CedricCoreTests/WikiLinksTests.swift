@@ -296,3 +296,86 @@ private func writeTree(_ files: [String: String]) throws -> URL {
         #expect(none.cancelled && none.backlinks.isEmpty && none.tagsByNote.isEmpty && none.parsed == 0)
     }
 }
+/// The round-3 parsers, kept here as they were (whole-line arrays): the
+/// streaming ones must find exactly the same links and tags.
+enum OldLineParsers {
+    static func links(_ b: UnsafeBufferPointer<UInt16>) -> [WikiLinks.Link] {
+        var out: [WikiLinks.Link] = []
+        let n = b.count
+        var i = 0
+        while i < n {
+            let c = b[i]
+            if c == WikiLinks.bs { i += 2; continue }
+            if c == WikiLinks.tick {
+                let (runEnd, span) = WikiLinks.codeSpanEnd(b, at: i)
+                i = span ?? runEnd
+                continue
+            }
+            if c == WikiLinks.lb, let e = WikiLinks.end(in: b, open: i) {
+                let embed = i > 0 && b[i - 1] == WikiLinks.bang && !(i > 1 && b[i - 2] == WikiLinks.bs)
+                let start = embed ? i - 1 : i
+                out.append(WikiLinks.parse(b, open: i, end: e, start: start, embed: embed))
+                i = e
+                continue
+            }
+            i += 1
+        }
+        return out
+    }
+
+    static func refs(_ text: String) -> [WikiLinks.Ref] {
+        var out: [WikiLinks.Ref] = []
+        var fence: (UInt16, Int)?
+        var line = 0
+        text.enumerateLines { l, _ in
+            defer { line += 1 }
+            let u = Array(l.utf16)
+            if WikiLinks.fenceLine(u, fence: &fence) { return }
+            guard u.count >= 5 else { return }
+            let found = u.withUnsafeBufferPointer { links($0) }
+            guard !found.isEmpty else { return }
+            let snippet = WikiLinks.snippet(l)
+            for f in found where !f.target.isEmpty { out.append(WikiLinks.Ref(target: f.target, line: line, snippet: snippet)) }
+        }
+        return out
+    }
+
+    static let corpus: [String] = [
+        "# Alpha\nSee [[Beta]] for more. #project\n",
+        "[[a]] [[b|B]] ![[c.png]] \\![[d]] `[[code]]` ``[[x]]`` [[e#H]] [[#Self]] [[ ]] [[f\n[[g]]\n",
+        "```\n[[fenced]]\n```\n~~~~\n[[tilde]]\n~~~\n~~~~\n[[after]] #t\n",
+        "---\ntags: [one, \"two\", #three]\n---\n#inline #a/b//c/ #123 #2024/11 a#b &#123; # Heading\n",
+        "---\ntags:\n  - x\n  # note\n  - 'y z'\nother: 1\n---\nbody #x #X\n",
+        "---\ntag: a, b c\t d # comment\n---\n",
+        "\u{FEFF}---\ntags: [u]\n---\n#ü #日本 #😀 #a_b-c `#code` \\#esc\n",
+        String(repeating: "[[Beta]] #t ", count: 3_000) + "\n" + String(repeating: "word ", count: 400) + "[[Last]]\n",
+        (0..<500).map { "line \($0) [[n\($0 % 7)]] #k\($0 % 11)" }.joined(separator: "\n"),
+        "[[" + String(repeating: "x", count: 600) + "]] [[ok]]\n[[a]]]] [[[b]] [[c|]] [[|d]]\n",
+    ]
+}
+
+@Suite struct StreamingParsersTests {
+    @Test func linksAndRefsMatchTheWholeLineParser() {
+        for text in OldLineParsers.corpus {
+            #expect(WikiLinks.refs(in: text) == OldLineParsers.refs(text))
+            text.enumerateLines { l, _ in
+                let u = Array(l.utf16)
+                u.withUnsafeBufferPointer { b in #expect(WikiLinks.links(inLine: b) == OldLineParsers.links(b)) }
+            }
+        }
+    }
+
+    @Test func streamingStopsWhenAskedAndWhenCancelled() {
+        let line = Array(String(repeating: "[[x]] ", count: 10_000).utf16)
+        var seen = 0
+        let stopped = line.withUnsafeBufferPointer { WikiLinks.forEachLink(inLine: $0) { _ in seen += 1; return seen < 5 } }
+        #expect(!stopped && seen == 5)
+        seen = 0
+        var asked = 0
+        let cancelled = line.withUnsafeBufferPointer { b in
+            WikiLinks.forEachLink(inLine: b, cancelled: { asked += 1; return asked >= 2 }) { _ in seen += 1; return true }
+        }
+        // Asked first after `cancelInterval` units, then again after as many.
+        #expect(!cancelled && asked == 2 && seen <= 2 * WikiLinks.cancelInterval / 6 + 1)
+    }
+}
