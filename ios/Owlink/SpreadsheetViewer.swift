@@ -30,11 +30,13 @@ final class SpreadsheetGridLayout: UICollectionViewLayout {
 
     static let minColumnWidth: CGFloat = 56
     static let maxColumnWidth: CGFloat = 280
-    static let padding: CGFloat = 16
+    /// Room around a cell's text: SpreadsheetGridCell.inset on each side, and some.
+    static let padding: CGFloat = 2 * SpreadsheetGridCell.inset + 4
 
     /// Measures the columns: the widest of the first rows' text (at the
-    /// grid's base font), between 56 and 280 pt.
-    func measure(font: UIFont, headerFont: UIFont) {
+    /// grid's base fonts: numbers and dates in the digit font they show
+    /// in), plus the cell's padding, between 56 and 280 pt.
+    func measure(font: UIFont, numberFont: UIFont, headerFont: UIFont) {
         guard let t = table else { widths = []; starts = [0]; return }
         var w = (0..<t.columnCount).map { c in
             ceil((SpreadsheetTable.columnName(c) as NSString).size(withAttributes: [.font: headerFont]).width) + Self.padding
@@ -44,7 +46,7 @@ final class SpreadsheetGridLayout: UICollectionViewLayout {
             for (c, cell) in t.row(r) where c < w.count {
                 // A multi-line cell is as wide as its longest line.
                 let line = cell.text.split(whereSeparator: \.isNewline).map(String.init).max { $0.count < $1.count } ?? cell.text
-                let width = ceil((line as NSString).size(withAttributes: [.font: font]).width) + Self.padding
+                let width = ceil((line as NSString).size(withAttributes: [.font: cell.alignsRight ? numberFont : font]).width) + Self.padding
                 if width > w[c] { w[c] = min(width, Self.maxColumnWidth) }
             }
         }
@@ -136,6 +138,10 @@ final class SpreadsheetGridCell: UICollectionViewCell {
     let label = UILabel()
     private let line = CALayer()
     var isHeader = false
+    /// The text's inset from each side at scale 1.
+    static let inset: CGFloat = 8
+    /// The grid's zoom: the inset scales with the text.
+    var scale: CGFloat = 1 { didSet { if scale != oldValue { setNeedsLayout() } } }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -153,8 +159,7 @@ final class SpreadsheetGridCell: UICollectionViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let inset = min(8, bounds.width / 8)
-        label.frame = bounds.insetBy(dx: inset, dy: 0)
+        label.frame = bounds.insetBy(dx: min(Self.inset * scale, bounds.width / 8), dy: 0)
         updateLines()
     }
 
@@ -237,7 +242,7 @@ final class SpreadsheetGridView: UIView, UICollectionViewDataSource, UICollectio
         self.table = table
         layout.table = table
         layout.scale = 1
-        layout.measure(font: font, headerFont: headerFont)
+        layout.measure(font: font, numberFont: numberFont, headerFont: headerFont)
         fitted = false
         collectionView.reloadData()
         collectionView.contentOffset = CGPoint(x: -collectionView.adjustedContentInset.left, y: -collectionView.adjustedContentInset.top)
@@ -262,7 +267,7 @@ final class SpreadsheetGridView: UIView, UICollectionViewDataSource, UICollectio
     func fit() {
         let width = availableWidth
         guard width > 0 else { return }
-        layout.measure(font: font, headerFont: headerFont)
+        layout.measure(font: font, numberFont: numberFont, headerFont: headerFont)
         if layout.baseWidth <= width {
             layout.stretch(toFill: width)
             layout.scale = 1
@@ -321,6 +326,7 @@ final class SpreadsheetGridView: UIView, UICollectionViewDataSource, UICollectio
         let row = indexPath.section - 1, col = indexPath.item - 1
         let s = layout.scale
         cell.isHeader = row < 0 || col < 0
+        cell.scale = s
         cell.contentView.layer.borderWidth = 0
         if cell.isHeader {
             cell.backgroundColor = .secondarySystemBackground

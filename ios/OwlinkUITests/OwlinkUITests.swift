@@ -168,8 +168,9 @@ final class OwlinkUITests: XCTestCase {
         let tabs = app.descendants(matching: .any)["viewer.sheetTabs"]
         XCTAssertTrue(tabs.waitForExistence(timeout: 5), "no sheet tabs")
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A2, Barn owl'")).firstMatch.waitForExistence(timeout: 5))
-        let second = tabs.buttons["Sightings"]
-        XCTAssertTrue(second.exists, "no Sightings tab")
+        let second = app.buttons["viewer.sheetTab.1"]
+        XCTAssertTrue(second.exists, "no second tab")
+        XCTAssertEqual(second.label, "Sightings")
         second.tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A2, 2024-03-15'")).firstMatch
             .waitForExistence(timeout: 5), "the second sheet didn't show")
