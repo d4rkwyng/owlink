@@ -86,6 +86,39 @@ final class TextDocument: UIDocument {
     private(set) var saveBlockedUntilEdited = false
     /// "Save automatically" (Settings): read at each autosave.
     var saveAutomatically: () -> Bool = { AppSettings.saveAutomatically }
+    /// The document for a note opened from a link (`expecting`: the file it
+    /// was checked to be, nil for any).
+    static func linkedNote(at url: URL, expecting: Beneath.FileID?) -> TextDocument {
+        let doc = TextDocument(fileURL: url)
+        doc.expectedFile = expecting
+        return doc
+    }
+
+    /// Set before the first open: the file (device and inode) a link was
+    /// checked to lead to. That read opens one descriptor, not following a
+    /// final symbolic link, and reads only if it is still that file; later
+    /// reads (a change made elsewhere) go the usual way.
+    private var expectedFile: Beneath.FileID?
+
+    enum LinkedNoteError: LocalizedError {
+        case changed
+        var errorDescription: String? { String(localized: "The note changed after it was checked, so it wasn’t opened.") }
+    }
+
+    override func read(from url: URL) throws {
+        guard let expected = expectedFile else { return try super.read(from: url) }
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw LinkedNoteError.changed }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, Beneath.FileID(fd: fd) == expected else {
+            throw LinkedNoteError.changed
+        }
+        let data = try handle.readToEnd() ?? Data()
+        expectedFile = nil
+        try load(fromContents: data, ofType: fileType)
+    }
+
     /// This document's copy of the file as opened (Revert to Opened Version).
     let openedCopyID = UUID().uuidString
     /// What happened to that copy (nil: not opened yet).

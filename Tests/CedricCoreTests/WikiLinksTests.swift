@@ -260,4 +260,39 @@ private func writeTree(_ files: [String: String]) throws -> URL {
         scan.update(notes: notes.paths, dirty: nil)
         #expect(scan.backlinks(to: "Alpha.md", in: notes).isEmpty)
     }
+
+    /// iOS's one pass (`collect`) finds what `update` and `backlinks(to:)`
+    /// and `tagsByNote` find, in the same order, within its limits; past
+    /// them it stops collecting and says so, and a cancel stops it
+    /// (Sol round 2, must-fix 4).
+    @Test func collectMatchesTheCacheWithinItsLimits() throws {
+        let root = try writeTree([
+            "Alpha.md": "# A #self\n[[Alpha]] me\n",
+            "Beta.md": "[[Alpha]] one #x\n```\n[[Alpha]] code\n```\n[[alpha]] two #y #x\n",
+            "sub/Gamma.md": "---\ntags: [front]\n---\n[[sub/Alpha]] nope [[Alpha#H|a]] #z\n",
+            "Delta.txt": "no links #w\n",
+        ])
+        let notes = NoteIndex(paths: FileIndex.build(root: root, showHidden: false).paths)
+        var scan = BacklinkScan(root: root)
+        scan.update(notes: notes.paths, dirty: nil, tags: true)
+        let fd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        defer { close(fd) }
+        let all = BacklinkScan.collect(notes: notes.paths, to: "Alpha.md", in: notes, maxBacklinks: 100, maxTagRefs: 100) {
+            BacklinkScan.readBeneath($0, root: fd)
+        }
+        #expect(all.backlinks == scan.backlinks(to: "Alpha.md", in: notes))
+        #expect(all.tagsByNote.mapValues { $0.map(\.name) } == scan.tagsByNote.mapValues { $0.map(\.name) })
+        #expect(!all.truncated && !all.cancelled && all.skipped == 0)
+        // Limits: the first ones in that order, and truncated.
+        let few = BacklinkScan.collect(notes: notes.paths, to: "Alpha.md", in: notes, maxBacklinks: 1, maxTagRefs: 2) {
+            BacklinkScan.readBeneath($0, root: fd)
+        }
+        #expect(few.backlinks == Array(all.backlinks.prefix(1)))
+        #expect(few.tagsByNote.values.reduce(0) { $0 + $1.count } == 2)
+        #expect(few.truncated)
+        // Cancelled before anything: nothing collected.
+        let none = BacklinkScan.collect(notes: notes.paths, to: "Alpha.md", in: notes, maxBacklinks: 100, maxTagRefs: 100,
+                                        cancelled: { true }) { BacklinkScan.readBeneath($0, root: fd) }
+        #expect(none.cancelled && none.backlinks.isEmpty && none.tagsByNote.isEmpty && none.parsed == 0)
+    }
 }

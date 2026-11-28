@@ -187,4 +187,168 @@ final class NoteLinksTests: XCTestCase {
         XCTAssertNil(model)
     }
 
+    private func outsideFolder(_ files: [String: String]) throws -> URL {
+        let o = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: o, withIntermediateDirectories: true)
+        dirs.append(o)
+        for (name, text) in files { try Data(text.utf8).write(to: o.appendingPathComponent(name)) }
+        return o
+    }
+
+    /// Open “Note” checks the note, then this document closes (which can
+    /// save or ask first) before the note opens. A note swapped for a link
+    /// to another file in between is not what opens: the document the
+    /// browser makes for it (`TextDocument.linkedNote`) is read only if it
+    /// is still the file that was checked (Sol round 2, must-fix 2). The
+    /// close itself isn't driven here: with no host app, a test window's
+    /// dismissal never finishes.
+    func testNoteSwappedAfterItsCheckIsNotOpened() throws {
+        let d = try vault()
+        let o = try outsideFolder(["Stolen.md": "# Stolen\n"])
+        let note = try checkedAlpha(d)
+        let alpha = d.appendingPathComponent("Alpha.md")
+        try FileManager.default.removeItem(at: alpha)
+        try FileManager.default.createSymbolicLink(at: alpha, withDestinationURL: o.appendingPathComponent("Stolen.md"))
+        let result = try open(TextDocument.linkedNote(at: note.url, expecting: note.id))
+        XCTAssertFalse(result.ok, "opened: \(result.text)")
+        XCTAssertFalse(result.text.contains("Stolen"))
+        // Another file renamed into its place: refused too.
+        try FileManager.default.removeItem(at: alpha)
+        try Data("# Other\n".utf8).write(to: alpha)
+        let other = try open(TextDocument.linkedNote(at: note.url, expecting: note.id))
+        XCTAssertFalse(other.ok, "opened: \(other.text)")
+    }
+
+    /// The same, with the note left alone: it opens (the test's control).
+    func testCheckedNoteOpens() throws {
+        let d = try vault()
+        let note = try checkedAlpha(d)
+        let result = try open(TextDocument.linkedNote(at: note.url, expecting: note.id))
+        XCTAssertTrue(result.ok)
+        XCTAssertTrue(result.text.hasPrefix("# Alpha"), result.text)
+    }
+
+    /// Alpha.md as Open “Note” checks it from Links.md's editor.
+    private func checkedAlpha(_ d: URL) throws -> NoteLinksModel.CheckedNote {
+        try Data("Go to [[Alpha]].\n".utf8).write(to: d.appendingPathComponent("Links.md"))
+        let e = try editor(d.appendingPathComponent("Links.md"))
+        let found = (e.textView.text as NSString).range(of: "Alpha]]").location
+        XCTAssertNotEqual(found, NSNotFound)
+        let link = try XCTUnwrap(e.wikiLink(at: found == NSNotFound ? 0 : found + 1))
+        XCTAssertNotNil(e.wikiLinkMenuAction(for: NSRange(location: found + 1, length: 0)))
+        return try XCTUnwrap(e.wikiNote(link))
+    }
+
+    private func open(_ doc: TextDocument) throws -> (ok: Bool, text: String) {
+        var ok: Bool?
+        doc.open { ok = $0 }
+        for _ in 0..<200 where ok == nil { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let result = (ok: try XCTUnwrap(ok, "the open finished"), text: doc.text)
+        if result.ok {
+            var closed = false
+            doc.close { _ in closed = true }
+            for _ in 0..<100 where !closed { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        return result
+    }
+
+    /// The root itself replaced by a symbolic link to another folder after
+    /// it was read: the next read, and a note's check, refuse it instead of
+    /// reading the folder the link leads to (Sol round 2, must-fix 3).
+    func testRootReplacedByALinkIsNotRead() async throws {
+        let d = try vault()
+        let model = NoteLinksModel(document: d.appendingPathComponent("Beta.md"), root: d, headings: [])
+        model.load()
+        await model.task?.value
+        XCTAssertEqual(model.backlinks.map(\.source), ["Alpha.md", "sub/Gamma.txt"])
+        let o = try outsideFolder(["Beta.md": "# Beta\n", "Thief.md": "[[Beta]] taken #stolen\n"])
+        let moved = d.deletingLastPathComponent().appendingPathComponent(d.lastPathComponent + "-moved")
+        try FileManager.default.moveItem(at: d, to: moved)
+        dirs.append(moved)
+        try FileManager.default.createSymbolicLink(at: d, withDestinationURL: o)
+        model.load()
+        await model.task?.value
+        XCTAssertFalse(model.backlinks.map(\.source).contains("Thief.md"), "\(model.backlinks.map(\.source))")
+        XCTAssertFalse(NoteLinksView.flatten(model.tags?.roots ?? []).map(\.path).contains("stolen"))
+        let direct = NoteLinksModel.read(root: d, note: "Beta.md", listed: ["Beta.md", "Thief.md"])
+        XCTAssertEqual(direct?.backlinks.map(\.source) ?? [], [])
+        XCTAssertNil(NoteLinksModel.openableNote(d.appendingPathComponent("Thief.md"), under: d))
+    }
+
+    /// The root swapped for another real folder (renamed into its place)
+    /// after it was read: the model's next read refuses it.
+    func testRootSwappedForAnotherFolderIsNotRead() async throws {
+        let d = try vault()
+        let model = NoteLinksModel(document: d.appendingPathComponent("Beta.md"), root: d, headings: [])
+        model.load()
+        await model.task?.value
+        XCTAssertEqual(model.backlinks.map(\.source), ["Alpha.md", "sub/Gamma.txt"])
+        let o = try outsideFolder(["Beta.md": "# Beta\n", "Thief.md": "[[Beta]] taken #stolen\n"])
+        let moved = d.deletingLastPathComponent().appendingPathComponent(d.lastPathComponent + "-moved")
+        try FileManager.default.moveItem(at: d, to: moved)
+        dirs.append(moved)
+        try FileManager.default.moveItem(at: o, to: d)
+        model.load()
+        await model.task?.value
+        XCTAssertFalse(model.backlinks.map(\.source).contains("Thief.md"), "\(model.backlinks.map(\.source))")
+        XCTAssertTrue(model.partial)
+    }
+
+    /// Compact notes holding many links and tags: the read holds no more
+    /// than the limits while it collects, not everything first (Sol round
+    /// 2, must-fix 4).
+    func testReadKeepsWithinTheLimitsWhileCollecting() throws {
+        let d = try vault()
+        var listed = ["Beta.md"]
+        var n = 0
+        for k in 0..<25 {
+            var text = ""
+            for _ in 0..<1_000 { text += "[[Beta]] #t\(n)\n"; n += 1 }
+            let name = String(format: "many-%02d.md", k)
+            try Data(text.utf8).write(to: d.appendingPathComponent(name))
+            listed.append(name)
+        }
+        let stats = NoteLinksModel.ScanStats()
+        let result = try XCTUnwrap(NoteLinksModel.read(root: d, note: "Beta.md", listed: listed, stats: stats))
+        XCTAssertEqual(result.backlinks.count, NoteLinksModel.maxBacklinks)
+        XCTAssertEqual(result.backlinks.first?.source, "many-00.md")
+        XCTAssertTrue(result.truncated)
+        XCTAssertEqual(result.tags.roots.count, NoteLinksModel.maxTagRefs)
+        XCTAssertLessThanOrEqual(stats.retained, NoteLinksModel.maxBacklinks + NoteLinksModel.maxTagRefs,
+                                 "held \(stats.retained) links and tags at once")
+    }
+
+    /// A cancel that comes in the middle of the read (while a note is being
+    /// read) stops it there: that note's links and tags aren't parsed, and
+    /// nothing after it is read.
+    func testCancelInTheMiddleStopsTheWork() throws {
+        let d = try vault()
+        var listed: [String] = []
+        for k in 0..<10 {
+            var text = ""
+            for i in 0..<200 { text += "[[Beta]] #k\(k)x\(i)\n" }
+            let name = "note-\(k).md"
+            try Data(text.utf8).write(to: d.appendingPathComponent(name))
+            listed.append(name)
+        }
+        let flag = CancelFlag()
+        var reads = 0, readsAfter = 0
+        let stats = NoteLinksModel.ScanStats()
+        let result = NoteLinksModel.read(root: d, note: "Beta.md", listed: listed, cancelled: { flag.value }, stats: stats,
+                                         readNote: { rel, dir, max in
+            if flag.value { readsAfter += 1 }
+            reads += 1
+            // Cancelled while the fourth note is read.
+            if reads == 4 { flag.value = true }
+            return BacklinkScan.readBeneath(rel, root: dir, maxBytes: max)
+        })
+        XCTAssertNil(result)
+        XCTAssertEqual(readsAfter, 0)
+        // Three notes, 200 links and 200 tags each, before the cancel.
+        XCTAssertEqual(stats.parsed, 3 * 400, "parsed \(stats.parsed - 3 * 400) after the cancel")
+    }
+}
+
+private final class CancelFlag: @unchecked Sendable {
+    var value = false
 }

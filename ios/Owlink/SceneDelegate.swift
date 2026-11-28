@@ -256,7 +256,8 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         presentDocument(at: url, reopening: true)
     }
 
-    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
+    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false,
+                         expecting: Beneath.FileID? = nil) {
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
         // the record (and its security scope).
@@ -270,7 +271,7 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
             }
         }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
-        let doc = TextDocument(fileURL: url)
+        let doc = TextDocument.linkedNote(at: url, expecting: expecting)
         doc.openBinaryAnyway = binaryOK
         doc.open { [weak self] ok in
             guard let self else {
@@ -294,7 +295,7 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                                               message: String(localized: "Open it as text anyway? Saving it may damage it."), preferredStyle: .alert)
                     a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
                     a.addAction(UIAlertAction(title: String(localized: "Open as Text"), style: .destructive) { _ in
-                        self.presentDocument(at: url, binaryOK: true, recovered: recovered)
+                        self.presentDocument(at: url, binaryOK: true, recovered: recovered, expecting: expecting)
                     })
                     self.present(a, animated: true)
                 } else {
@@ -341,6 +342,20 @@ enum UIHostingSettings {
 
 /// The editor's navigation controller: the editor decides whether the
 /// status bar and home indicator show (hidden in Focus Preview).
+/// Opens a note an editor named once that editor has closed (the
+/// document browser; tests stand in for it).
+@MainActor
+protocol LinkedNoteOpener: AnyObject {
+    /// `expecting`: the file the note was checked to be, or nil.
+    func openLinkedNote(at url: URL, expecting: Beneath.FileID?)
+}
+
+extension DocumentBrowserViewController: LinkedNoteOpener {
+    func openLinkedNote(at url: URL, expecting: Beneath.FileID?) {
+        presentDocument(at: url, expecting: expecting)
+    }
+}
+
 final class EditorNavigationController: UINavigationController {
     /// See `EditorCommandRouting`: a sheet over the editor (Ask Cedric,
     /// Settings) hands its unhandled commands to its presenter, this

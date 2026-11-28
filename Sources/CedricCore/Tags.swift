@@ -147,16 +147,35 @@ public enum Tags {
     /// ignoring case), in order.
     public static func refs(in text: String) -> [Ref] {
         var out: [Ref] = []
+        forEachRef(in: text) { out.append($0); return true }
+        return out
+    }
+
+    /// The tags `refs(in:)` finds, handed to `body` one at a time as each
+    /// line is parsed; `body` returns false to stop. `cancelled` is asked
+    /// before each line. False when stopped either way.
+    @discardableResult
+    public static func forEachRef(in text: String, cancelled: () -> Bool = { false }, _ body: (Ref) -> Bool) -> Bool {
+        // `enumerateLines` takes an escaping closure; these don't outlive this call.
+        withoutActuallyEscaping(cancelled) { cancelled in
+            withoutActuallyEscaping(body) { body in eachRef(in: text, cancelled: cancelled, body) }
+        }
+    }
+
+    private static func eachRef(in text: String, cancelled: @escaping () -> Bool, _ body: @escaping (Ref) -> Bool) -> Bool {
         var seen = Set<String>()
+        var finished = true
         func add(_ name: String, _ line: Int, _ l: String) {
-            if seen.insert(name.lowercased()).inserted { out.append(Ref(name: name, line: line, snippet: WikiLinks.snippet(l))) }
+            guard finished, seen.insert(name.lowercased()).inserted else { return }
+            if !body(Ref(name: name, line: line, snippet: WikiLinks.snippet(l))) { finished = false }
         }
         var fence: (UInt16, Int)?
         var line = 0
         // Front matter: from a first line `---` to the next `---` or `...`.
         var front: FrontMatter? = nil
         text.enumerateLines { l, stop in
-            defer { line += 1 }
+            defer { line += 1; if !finished { stop = true } }
+            if cancelled() { finished = false; return }
             if line == 0 {
                 var first = l
                 if first.hasPrefix("\u{FEFF}") { first.removeFirst() }
@@ -173,7 +192,7 @@ public enum Tags {
             guard u.count >= 2, u.contains(hash) else { return }
             for f in u.withUnsafeBufferPointer({ tags(inLine: $0) }) { add(f.name, line, l) }
         }
-        return out
+        return finished
     }
 
     /// Reads front matter one line at a time, for its `tags:` (or `tag:`).
@@ -285,11 +304,14 @@ public struct TagTree: Sendable {
     /// Lowercased tag path → its notes (its own and those under it), by path.
     let hits: [String: [Hit]]
 
-    public init(files: [String: [Tags.Ref]]) {
+    /// `cancelled` is asked before each note's tags: once it says stop,
+    /// the tree holds the notes taken so far (the caller drops it).
+    public init(files: [String: [Tags.Ref]], cancelled: () -> Bool = { false }) {
         // Lowercased path → (shown path, note → its first hit).
         var shown: [String: String] = [:]
         var byKey: [String: [String: Hit]] = [:]
         for src in files.keys.sorted() {
+            if cancelled() { break }
             for r in files[src] ?? [] {
                 let parts = r.name.split(separator: "/").map(String.init)
                 var lower = ""

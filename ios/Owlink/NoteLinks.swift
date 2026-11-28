@@ -17,12 +17,14 @@ import CedricCore
 /// again the same way just before it opens (`openableNote`).
 ///
 /// Read when Backlinks or Tags is first shown, off the main thread, by the
-/// shared `NoteIndex`, `BacklinkScan` and `TagTree`; cancelled when the
-/// sheet goes or the root changes (the listing and each note check it).
-/// One read takes at most `maxTotalBytes` of notes and keeps at most
-/// `maxBacklinks` backlinks and `maxTagRefs` tag places; past those the
-/// sheet says some notes weren't read. Nothing is written and there is no
-/// live watcher.
+/// shared `NoteIndex`, `BacklinkScan.collect` and `TagTree`; cancelled when
+/// the sheet goes or the root changes (the listing, each note and each line
+/// of one, and the tag tree check it). One read takes at most
+/// `maxTotalBytes` of notes and holds at most `maxBacklinks` backlinks and
+/// `maxTagRefs` tag places while it collects; past those the sheet says
+/// some notes weren't read. The root is opened first, never through a
+/// symbolic link, and a later read refuses it if it is another folder.
+/// Nothing is written and there is no live watcher.
 @MainActor
 final class NoteLinksModel: ObservableObject {
     enum State: Equatable { case idle, reading, ready, noFolder, notInFolder }
@@ -44,6 +46,9 @@ final class NoteLinksModel: ObservableObject {
     let headings: [MarkdownOutline.Heading]
     let document: URL
     private(set) var root: URL?
+    /// `root` as it was first read: a later read (and a note opened from
+    /// the sheet) refuses a root that is now another folder.
+    private(set) var rootID: Beneath.FileID?
     /// Finds `root` off the main thread on the first load, when it isn't
     /// given (the folder probe lists the document's folder).
     private var findRoot: (@Sendable () -> URL?)?
@@ -76,11 +81,11 @@ final class NoteLinksModel: ObservableObject {
         if root == nil, findRoot == nil { state = .noFolder; return }
         if let root, Self.relativePath(of: document, under: root) == nil { state = .notInFolder; return }
         state = .reading
-        let doc = document, known = root, find = findRoot
+        let doc = document, known = root, find = findRoot, knownID = rootID
         let work = Task.detached(priority: .userInitiated) { () -> Outcome in
             guard let root = known ?? find?() else { return .noFolder }
             guard let rel = Self.relativePath(of: doc, under: root) else { return .notInFolder(root) }
-            guard let result = Self.read(root: root, note: rel, cancelled: { Task.isCancelled }) else { return .cancelled }
+            guard let result = Self.read(root: root, note: rel, rootID: knownID, cancelled: { Task.isCancelled }) else { return .cancelled }
             return .ready(root, result)
         }
         self.work = work
@@ -97,6 +102,7 @@ final class NoteLinksModel: ObservableObject {
                 self.state = .notInFolder
             case .ready(let root, let result):
                 self.adopt(root)
+                if self.rootID == nil { self.rootID = result.rootID }
                 self.backlinks = result.backlinks
                 self.tags = result.tags
                 self.partial = result.partial
@@ -122,6 +128,7 @@ final class NoteLinksModel: ObservableObject {
 
     func setRoot(_ url: URL?) {
         root = url?.standardizedFileURL
+        rootID = nil
         findRoot = nil
         load()
     }
@@ -146,9 +153,22 @@ final class NoteLinksModel: ObservableObject {
     /// (`relativePath`) and, looked up from `root`'s descriptor right now,
     /// a regular file reached without leaving `root` (the last component
     /// not followed). Checked just before a note opens.
-    nonisolated static func openableNote(_ url: URL, under root: URL) -> URL? {
+    nonisolated static func openableNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil) -> URL? {
+        checkedNote(url, under: root, rootID: rootID)?.url
+    }
+
+    /// A note `openableNote` allows, and the file it is (device and
+    /// inode): what is opened later must still be that file
+    /// (`TextDocument.linkedNote`). The root itself is not followed if it
+    /// is a symbolic link, and must still be `rootID` when given.
+    struct CheckedNote: Sendable {
+        var url: URL
+        var id: Beneath.FileID
+    }
+
+    nonisolated static func checkedNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil) -> CheckedNote? {
         guard let rel = relativePath(of: url, under: root) else { return nil }
-        let dir = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        let dir = openRoot(root, expected: rootID)
         guard dir >= 0 else { return nil }
         defer { close(dir) }
         let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
@@ -156,8 +176,8 @@ final class NoteLinksModel: ObservableObject {
         guard fd >= 0 else { return nil }
         defer { close(fd) }
         var st = stat()
-        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return nil }
-        return root.appendingPathComponent(rel)
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG, let id = Beneath.FileID(fd: fd) else { return nil }
+        return CheckedNote(url: root.appendingPathComponent(rel), id: id)
     }
 
     struct ReadResult: Sendable {
@@ -165,6 +185,8 @@ final class NoteLinksModel: ObservableObject {
         var tags: TagTree
         var partial: Bool
         var truncated: Bool
+        /// The root as read (its device and inode).
+        var rootID: Beneath.FileID?
     }
 
     /// The notes under `root` (relative paths), as the vault lists them:
@@ -190,42 +212,55 @@ final class NoteLinksModel: ObservableObject {
         return (out, truncated)
     }
 
+    /// What one read did (tests): the most links and tags it held at once,
+    /// and how many it parsed in all.
+    final class ScanStats: @unchecked Sendable {
+        var retained = 0
+        var parsed = 0
+    }
+
+    /// The root opened for reading: a folder, not a symbolic link, and
+    /// still `expected` when given (the folder as first read). -1 when not.
+    nonisolated static func openRoot(_ root: URL, expected: Beneath.FileID?) -> Int32 {
+        let dir = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard dir >= 0 else { return -1 }
+        if let expected, Beneath.FileID(fd: dir) != expected { close(dir); return -1 }
+        return dir
+    }
+
     /// Backlinks to `note` and the tags under `root`, within the caps (see
-    /// the type's comment); nil when `cancelled` said stop. `listed`: the
-    /// notes as listed earlier (tests: a note swapped after the listing).
-    nonisolated static func read(root: URL, note: String, listed given: [String]? = nil,
-                                 cancelled: () -> Bool = { false }) -> ReadResult? {
+    /// the type's comment), kept to them as they are collected; nil when
+    /// `cancelled` said stop. `listed`: the notes as listed earlier (tests:
+    /// a note swapped after the listing). `rootID`: the root as it was
+    /// first read; a root that is now a symbolic link or another folder is
+    /// not read (an empty, partial result). `stats`, `readNote`: tests.
+    nonisolated static func read(root: URL, note: String, listed given: [String]? = nil, rootID: Beneath.FileID? = nil,
+                                 cancelled: () -> Bool = { false }, stats: ScanStats? = nil,
+                                 readNote: (String, Int32, Int) -> BacklinkScan.NoteRead = { BacklinkScan.readBeneath($0, root: $1, maxBytes: $2) }) -> ReadResult? {
+        // The root first: what is listed by path is read only through it.
+        let dir = openRoot(root, expected: rootID)
+        guard dir >= 0 else {
+            return cancelled() ? nil : ReadResult(backlinks: [], tags: TagTree(files: [:]), partial: true, truncated: false, rootID: rootID)
+        }
+        defer { close(dir) }
+        let id = Beneath.FileID(fd: dir)
         let listed = given.map { (paths: $0, truncated: false) } ?? notes(under: root, cancelled: cancelled)
         if cancelled() { return nil }
         let index = NoteIndex(paths: listed.paths)
-        var scan = BacklinkScan(root: root)
-        let dir = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        if dir >= 0 {
-            defer { close(dir) }
-            var budget = maxTotalBytes
-            scan.update(notes: index.paths, dirty: nil, tags: true, cancelled: cancelled, read: { rel in
-                let r = BacklinkScan.readBeneath(rel, root: dir, maxBytes: min(BacklinkScan.maxFileBytes, budget))
-                if case .read(let size, _, _) = r { budget -= size }
-                return r
-            })
+        var budget = maxTotalBytes
+        let found = BacklinkScan.collect(notes: index.paths, to: note, in: index, maxBacklinks: maxBacklinks, maxTagRefs: maxTagRefs,
+                                         cancelled: cancelled) { rel in
+            let r = readNote(rel, dir, min(BacklinkScan.maxFileBytes, budget))
+            if case .read(let size, _, _) = r { budget -= size }
+            return r
         }
+        stats?.parsed = found.parsed
+        stats?.retained = found.backlinks.count + found.tagsByNote.values.reduce(0) { $0 + $1.count }
+        if found.cancelled || cancelled() { return nil }
+        let tags = TagTree(files: found.tagsByNote, cancelled: cancelled)
         if cancelled() { return nil }
-        var truncated = listed.truncated
-        var backlinks = scan.backlinks(to: note, in: index)
-        if backlinks.count > maxBacklinks {
-            backlinks = Array(backlinks.prefix(maxBacklinks))
-            truncated = true
-        }
-        var kept: [String: [Tags.Ref]] = [:]
-        var room = maxTagRefs
-        for (rel, refs) in scan.tagsByNote.sorted(by: { $0.key < $1.key }) {
-            guard room > 0 else { truncated = true; break }
-            if refs.count > room { truncated = true }
-            kept[rel] = Array(refs.prefix(room))
-            room -= min(room, refs.count)
-        }
-        return ReadResult(backlinks: backlinks, tags: TagTree(files: kept),
-                          partial: scan.isPartial || dir < 0, truncated: truncated)
+        return ReadResult(backlinks: found.backlinks, tags: tags, partial: found.skipped > 0,
+                          truncated: listed.truncated || found.truncated, rootID: id)
     }
 }
 
@@ -414,11 +449,12 @@ extension EditorViewController {
         }, onNote: { [weak self, weak model] url in
             host.value?.dismiss(animated: true) {
                 // Only a note inside the folder that was read, checked again now.
-                guard let self, let root = model?.root, let note = NoteLinksModel.openableNote(url, under: root) else {
+                guard let self, let root = model?.root,
+                      let note = NoteLinksModel.checkedNote(url, under: root, rootID: model?.rootID) else {
                     self?.toast(String(localized: "That note isn’t in the folder Owlink can read."))
                     return
                 }
-                self.openLinked(note)
+                self.openLinked(note.url, expecting: note.id)
             }
         }, onChooseFolder: { [weak self, weak model] in
             guard let self else { return }
@@ -457,11 +493,15 @@ extension EditorViewController {
     /// Where a wiki link leads (the vault's notes, as the preview resolves them).
     /// Within the sheet's root only (never a vault above what Owlink may
     /// read), and checked from the root's descriptor (`openableNote`).
-    func wikiTarget(_ link: WikiLinks.Link) -> URL? {
+    func wikiTarget(_ link: WikiLinks.Link) -> URL? { wikiNote(link)?.url }
+
+    /// `wikiTarget`, with the file it was checked to be. A granted root
+    /// must still be the folder that was granted.
+    func wikiNote(_ link: WikiLinks.Link) -> NoteLinksModel.CheckedNote? {
         guard let root = noteLinksRoot() else { return nil }
         let vault = WikiVault(documentFolder: document.fileURL.deletingLastPathComponent(), openedRoot: root)
         guard let url = vault.resolve(link.target) else { return nil }
-        return NoteLinksModel.openableNote(url, under: root)
+        return NoteLinksModel.checkedNote(url, under: root, rootID: PreviewFolderGrants.shared.identity(of: root))
     }
 
     /// The edit menu's "Open “Note”" when the caret is in a `[[link]]`
@@ -471,11 +511,11 @@ extension EditorViewController {
         let name = link.alias ?? link.target
         let a = UIAction(title: String(localized: "Open “\(name)”"), image: UIImage(systemName: "arrow.up.forward.square")) { [weak self] _ in
             guard let self else { return }
-            guard let url = self.wikiTarget(link) else {
+            guard let note = self.wikiNote(link) else {
                 self.toast(String(localized: "No note named “\(link.target)” in the folder Owlink can read."))
                 return
             }
-            self.openLinked(url)
+            self.openLinked(note.url, expecting: note.id)
         }
         a.accessibilityIdentifier = "editor.openWikiLink"
         return a

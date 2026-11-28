@@ -3662,12 +3662,14 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
 
     /// Opens a note a preview link names: this document closes the usual
     /// way (saved, or asked about), then the browser opens the note.
+    /// `expecting`: the file the note was checked to be (`checkedNote`); it
+    /// opens only if it is still that file when it is read.
     private var afterClose: (() -> Void)?
 
-    func openLinked(_ url: URL) {
+    func openLinked(_ url: URL, expecting: Beneath.FileID? = nil) {
         guard url.standardizedFileURL != document.fileURL.standardizedFileURL else { return }
-        let browser = navigationController?.presentingViewController as? DocumentBrowserViewController
-        afterClose = { [weak browser] in browser?.presentDocument(at: url) }
+        let opener = navigationController?.presentingViewController as? LinkedNoteOpener
+        afterClose = { [weak opener] in opener?.openLinkedNote(at: url, expecting: expecting) }
         closeDocument()
     }
 

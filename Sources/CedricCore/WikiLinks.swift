@@ -211,19 +211,39 @@ public enum WikiLinks {
     /// ~~~), with its line. `[[#Heading]]` (the note itself) is left out.
     public static func refs(in text: String) -> [Ref] {
         var out: [Ref] = []
+        forEachRef(in: text) { out.append($0); return true }
+        return out
+    }
+
+    /// The links `refs(in:)` finds, handed to `body` one at a time as each
+    /// line is parsed (nothing kept here); `body` returns false to stop.
+    /// `cancelled` is asked before each line. False when stopped either way.
+    @discardableResult
+    public static func forEachRef(in text: String, cancelled: () -> Bool = { false }, _ body: (Ref) -> Bool) -> Bool {
+        // `enumerateLines` takes an escaping closure; these don't outlive this call.
+        withoutActuallyEscaping(cancelled) { cancelled in
+            withoutActuallyEscaping(body) { body in eachRef(in: text, cancelled: cancelled, body) }
+        }
+    }
+
+    private static func eachRef(in text: String, cancelled: @escaping () -> Bool, _ body: @escaping (Ref) -> Bool) -> Bool {
         var fence: (UInt16, Int)?
         var line = 0
-        text.enumerateLines { l, _ in
+        var finished = true
+        text.enumerateLines { l, stop in
             defer { line += 1 }
+            if cancelled() { finished = false; stop = true; return }
             let u = Array(l.utf16)
             if fenceLine(u, fence: &fence) { return }
             guard u.count >= 5 else { return }
             let found = u.withUnsafeBufferPointer { links(inLine: $0) }
             guard !found.isEmpty else { return }
             let snippet = Self.snippet(l)
-            for f in found where !f.target.isEmpty { out.append(Ref(target: f.target, line: line, snippet: snippet)) }
+            for f in found where !f.target.isEmpty {
+                guard body(Ref(target: f.target, line: line, snippet: snippet)) else { finished = false; stop = true; return }
+            }
         }
-        return out
+        return finished
     }
 
     /// Fenced code (``` and ~~~, up to three spaces in), one line at a time:
@@ -523,27 +543,109 @@ public struct BacklinkScan: Sendable {
     }
 
     static func refs(in data: Data) -> [WikiLinks.Ref] {
-        // Most notes hold no link: two bytes looked for before decoding.
+        guard mayHoldLinks(data) else { return [] }
+        return WikiLinks.refs(in: String(decoding: data, as: UTF8.self))
+    }
+
+    /// Most notes hold no link: two bytes looked for before decoding. A
+    /// NUL early on: not text.
+    static func mayHoldLinks(_ data: Data) -> Bool {
         let has = data.withUnsafeBytes { raw -> Bool in
             guard let p = raw.baseAddress, raw.count >= 5 else { return false }
             return memmem(p, raw.count, "[[", 2) != nil
         }
-        guard has else { return [] }
-        // A NUL early on: not text.
-        if data.prefix(8192).contains(0) { return [] }
-        return WikiLinks.refs(in: String(decoding: data, as: UTF8.self))
+        return has && !data.prefix(8192).contains(0)
     }
 
     static func tags(in data: Data) -> [Tags.Ref] {
-        // A note with no `#` holds no tag (front matter `tags:` needs none,
-        // so a note starting with `---` is read too).
+        guard mayHoldTags(data) else { return [] }
+        return Tags.refs(in: String(decoding: data, as: UTF8.self))
+    }
+
+    /// A note with no `#` holds no tag (front matter `tags:` needs none,
+    /// so a note starting with `---` is read too).
+    static func mayHoldTags(_ data: Data) -> Bool {
         let has = data.withUnsafeBytes { raw -> Bool in
             guard let p = raw.baseAddress, raw.count >= 2 else { return false }
             return memchr(p, 35, raw.count) != nil || (raw.count >= 3 && memcmp(p, "---", 3) == 0)
                 || (raw.count >= 6 && memcmp(p, "\u{FEFF}---", 6) == 0)
         }
-        guard has, !data.prefix(8192).contains(0) else { return [] }
-        return Tags.refs(in: String(decoding: data, as: UTF8.self))
+        return has && !data.prefix(8192).contains(0)
+    }
+
+    /// What `collect` found: at most its limits, in the order `backlinks(to:)`
+    /// and `tagsByNote` (by note) give them.
+    public struct Collected: Sendable {
+        public var backlinks: [Backlink] = []
+        public var tagsByNote: [String: [Tags.Ref]] = [:]
+        /// Notes left out (too big, unreadable, past `maxFiles`).
+        public var skipped = 0
+        /// More backlinks or tags were there than the limits keep.
+        public var truncated = false
+        /// `cancelled` said stop: the rest is what was found until then.
+        public var cancelled = false
+        /// Links and tags parsed (tests).
+        public var parsed = 0
+    }
+
+    /// One pass over `notes` (relative paths) for the backlinks to `note`
+    /// and every note's tags, with the limits kept as they are collected:
+    /// each link is resolved as it is parsed and kept only when it leads to
+    /// `note`, up to `maxBacklinks`, and tags up to `maxTagRefs` in all;
+    /// past both nothing more is parsed. Nothing is cached. `cancelled` is
+    /// asked before each note and each line of one. `read` as `update`'s.
+    public static func collect(notes: [String], to note: String, in index: NoteIndex, maxBacklinks: Int, maxTagRefs: Int,
+                               cancelled: () -> Bool = { false }, read: (String) -> NoteRead) -> Collected {
+        var out = Collected()
+        let list = notes.sorted()
+        out.skipped = max(0, list.count - maxFiles)
+        var resolved: [String: String?] = [:]
+        var linksFull = false, tagsFull = false
+        var tagRoom = maxTagRefs
+        for rel in list.prefix(maxFiles) {
+            if cancelled() { out.cancelled = true; break }
+            if linksFull && tagsFull { break }
+            let data: Data
+            switch read(rel) {
+            case .gone: continue
+            case .skipped: out.skipped += 1; continue
+            case .read(_, _, let d): data = d
+            }
+            let wantLinks = !linksFull && rel != note && mayHoldLinks(data)
+            let wantTags = !tagsFull && mayHoldTags(data)
+            guard wantLinks || wantTags else { continue }
+            let text = String(decoding: data, as: UTF8.self)
+            if wantLinks {
+                WikiLinks.forEachRef(in: text, cancelled: cancelled) { r in
+                    out.parsed += 1
+                    let to: String?
+                    if let c = resolved[r.target] { to = c } else {
+                        to = index.resolve(r.target)
+                        // Bounded too: a folder of distinct targets doesn't grow it past this.
+                        if resolved.count >= 10_000 { resolved.removeAll(keepingCapacity: true) }
+                        resolved[r.target] = to
+                    }
+                    guard to == note else { return true }
+                    guard out.backlinks.count < maxBacklinks else { linksFull = true; return false }
+                    out.backlinks.append(Backlink(source: rel, line: r.line, snippet: r.snippet))
+                    return true
+                }
+            }
+            if wantTags, !cancelled() {
+                var kept: [Tags.Ref] = []
+                Tags.forEachRef(in: text, cancelled: cancelled) { r in
+                    out.parsed += 1
+                    guard tagRoom > 0 else { tagsFull = true; return false }
+                    kept.append(r)
+                    tagRoom -= 1
+                    return true
+                }
+                if !kept.isEmpty { out.tagsByNote[rel] = kept }
+            }
+            if cancelled() { out.cancelled = true; break }
+        }
+        out.truncated = linksFull || tagsFull
+        return out
     }
 
     /// Each note's tags (the notes whose tags were read).
