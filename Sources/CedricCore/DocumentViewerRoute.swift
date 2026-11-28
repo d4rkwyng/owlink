@@ -107,6 +107,16 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         return EditorOnlyOpen(opensEditor: editor, forgetsLastOpenDocument: !editor && reopening, clearsRecoveryRecord: false)
     }
 
+    /// Whether the text editor's own read may take `data` as the text of
+    /// `fileName`: not when the bytes it got route to a viewer (by the same
+    /// name and first-bytes rules as `route`), unless it is "Open as Text".
+    /// A file classified as text and replaced by a PDF before the editor
+    /// reads it (a launch reopen, a recovery restore, a reload) fails its
+    /// open or reload rather than loading the PDF as text.
+    public static func editorMayLoad(fileName: String, data: Data, openAsText: Bool) -> Bool {
+        openAsText || route(fileName: fileName, prefix: data.prefix(DocumentKind.prefixLength)) == .editor
+    }
+
     /// Reads the first 32 bytes (not the whole file) and the content type.
     /// A file that can't be read goes by its name and type (the viewer or
     /// editor then reports why it can't open it).

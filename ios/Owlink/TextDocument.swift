@@ -136,6 +136,12 @@ final class TextDocument: UIDocument {
     override func load(fromContents contents: Any, ofType typeName: String?) throws {
         let data: Data
         if let d = contents as? Data { data = d } else if let w = contents as? FileWrapper, let d = w.regularFileContents { data = d } else { data = Data() }
+        // Bytes the viewer route claims (a PDF read in place of the text a
+        // reopen or a restore classified, or written over an open file) are
+        // refused as a binary file is: nothing below changes.
+        guard DocumentViewerRoute.editorMayLoad(fileName: fileURL.lastPathComponent, data: data, openAsText: openBinaryAnyway) else {
+            throw OpenError.binary
+        }
         guard let decoded = TextCodec.decode(data) else { throw OpenError.undecodable }
         if decoded.looksBinary && !openBinaryAnyway { throw OpenError.binary }
         // The bytes as first opened (not on a reload after a change elsewhere).
