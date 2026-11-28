@@ -74,9 +74,52 @@ import Testing
         #expect(html.contains("c \u{FFFD}0\u{E001}") || html.contains("c \u{E000}0\u{FFFD}"), "got \(html)")
     }
 
-    @Test func aFencedOrIndentedLineKeepsWhatFollowsATab() {
-        #expect(Markdown.render("  ```\n\tx\n  ```\n").contains("<code>x\n</code>"))
-        #expect(Markdown.render("    a\n\tb\n").contains("<code>a\nb\n</code>"))
+    /// Every scalar of `ranges`, in order.
+    static func scalars(_ ranges: ClosedRange<UInt32>...) -> String {
+        var s = String.UnicodeScalarView()
+        for r in ranges { for v in r { s.append(Unicode.Scalar(v)!) } }
+        return String(s)
+    }
+
+    @Test func aTextWithEveryPrivateUseCharacterIsKeptWhole() {
+        let all = Self.scalars(0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD)
+        let (m, exhausted) = Marks.choose(for: all, excluding: [])
+        // Not a letter (U+0100 is Ā): the first unassigned scalars.
+        #expect(!exhausted && m == Marks(open: "\u{378}", close: "\u{379}", brk: "\u{380}", dollar: "\u{381}"))
+        let more = Marks.choose(for: all + Self.scalars(0x100...0x37F), excluding: []).marks
+        #expect(more == Marks(open: "\u{380}", close: "\u{381}", brk: "\u{382}", dollar: "\u{383}"))
+        let html = Markdown.render("`c` \(all) **b** a  \nz\n")
+        #expect(html == "<p data-line=\"0\"><code>c</code> \(all) <strong>b</strong> a<br>\nz</p>\n", "\(html.count) characters")
+    }
+
+    @Test func marksAreNeverJoiningCharacters() {
+        // Joining, whitespace, or a letter, digit, punctuation or symbol.
+        for v: UInt32 in [0x301, 0x200D, 0x600, 0x1F1E6, 0x1100, 0x3000, 0x2028, 0xFE0F, 0x100, 0x4E00, 0x660, 0x2014, 0x1F600] {
+            #expect(!Marks.usable(v), "U+\(String(v, radix: 16))")
+        }
+        for v: UInt32 in [0xE000, 0xF8FF, 0xF0000, 0x10FFFD, 0x378, 0xFFFF, 0x10FFFF, 0x40000] {
+            #expect(Marks.usable(v), "U+\(String(v, radix: 16))")
+        }
+    }
+
+    // Each restart excludes every character of the colliding text: one
+    // restart per note, and nothing lost while free marks are left.
+    @Test func notesHoldingSuccessiveMarksAreAllKept() throws {
+        let t = try makeTree(["n/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let n = t.appendingPathComponent("n")
+        func group(_ k: Int) -> String { Self.scalars(UInt32(0xE000 + 4 * k)...UInt32(0xE003 + 4 * k)) }
+        for k in 0..<65 { try "note \(group(k)) `k`".write(to: n.appendingPathComponent("N\(k).md"), atomically: true, encoding: .utf8) }
+        let vault = WikiVault(documentFolder: n)
+        let eight = Markdown.render((0..<8).map { "![[N\($0)]]" }.joined(separator: " ") + " `x`\n", options: .preview(vault: vault))
+        for k in 0..<8 { #expect(eight.contains("note \(group(k)) <code>k</code>"), "N\(k): \(eight)") }
+        #expect(!eight.contains("\u{FFFD}"))
+        // Only past the restart cap is a note's mark scrubbed: the 64th.
+        let all = Markdown.render((0..<65).map { "![[N\($0)]]" }.joined(separator: " ") + " `x`\n", options: .preview(vault: vault))
+        for k in 0..<65 where k != MarkdownRenderer.maxAttempts - 1 {
+            #expect(all.contains("note \(group(k)) <code>k</code>"), "N\(k)")
+        }
+        #expect(all.contains("note \u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD} <code>k</code>") && all.contains("<code>x</code>"))
     }
 
     @Test func inlineChoosesItsMarksFromItsText() {

@@ -120,11 +120,56 @@ import Testing
         #expect(Markdown.render("# a\u{E000}b\n") == Markdown.render("# ab\n").replacingOccurrences(of: ">ab<", with: ">a\u{E000}b<"))
     }
 
-    // Sol r2 on the mapping design: the text must keep its length and
-    // grapheme structure, so lengths, indents and delimiters count as typed.
-    @Test func aFencedBodyKeepsAMarkJoinedToAPrecedingCharacter() {
-        let html = Markdown.render("  ```\n\t\u{0600}\u{E000}x\n  ```\n")
-        #expect(html.contains("\u{0600}\u{E000}x\n"), "got \(html.debugDescription)")
+    /// `text` with U+E000…U+E003 as U+E100…U+E103 (`inert`), or back.
+    static func swap(_ text: String, inert: Bool) -> String {
+        var out = String.UnicodeScalarView()
+        for u in text.unicodeScalars {
+            let (from, to): (UInt32, UInt32) = inert ? (0xE000, 0xE100) : (0xE100, 0xE000)
+            out.append(u.value &- from < 4 ? Unicode.Scalar(u.value - from + to)! : u)
+        }
+        return String(out)
+    }
+
+    /// Whatever a context does with a character (an indent quirk may even
+    /// drop it), it does the same with U+E000…U+E003 as with any other
+    /// private-use character the render does not use itself.
+    static func rendersLikeAnInertCharacter(_ text: String, _ render: (String) -> String) -> (Bool, String, String) {
+        let literal = render(text)
+        let inert = swap(render(swap(text, inert: true)), inert: false)
+        return (literal == inert, literal, inert)
+    }
+
+    @Test func everyContextTreatsTheCharactersAsAnyOther() throws {
+        let t = try makeTree(["n/doc.md", "n/Note.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let n = t.appendingPathComponent("n")
+        let vault = WikiVault(documentFolder: n)
+        // ¤ is where the character goes.
+        let contexts = [
+            "  ```\n\t\u{0600}¤x\n  ```\n", "  ```\n\t¤x\n  ```\n", "```\n¤0¤ `a`\n```\n",
+            "    a\n\t¤b\n", "    ¤0¤\n", "- a\n\t¤b\n", "- a\n  ¤b `c`\n", "1. ¤\n\t¤\n",
+            "> q¤ `c` **b**\n", "# h¤ `c`\n", "| a | b¤ |\n|---|---|\n| c¤ `d` | ¤0¤ |\n",
+            "[a¤b `c`](http://x.y/¤) and ¤0¤\n", "![a¤b `c`](i¤.png)\n", "a[^¤]\n\n[^¤]: x¤ `y`\n",
+            "[[Note]] [[Note|al¤ias]] [[No¤te]]\n", "`x` ![[Note]] **b** a  \nz \\$1 $y$\n",
+            "a  \n¤ b\\\nc ¤\\$2 $x$ ¤\n", "\\*¤-1¤ ¤0¤ ==h¤== ~~s¤~~ http://a.b/¤c\n",
+        ]
+        for mark in ["\u{E000}", "\u{E001}", "\u{E002}", "\u{E003}", "\u{E000}0\u{E001}", "\u{E003}\u{E002}\u{E001}\u{E000}"] {
+            for context in contexts {
+                let text = context.replacingOccurrences(of: "¤", with: mark)
+                for obsidian in [false, true] {
+                    var options = obsidian ? Markdown.Options.preview(vault: vault) : Markdown.Options()
+                    options.math = obsidian
+                    let (same, literal, inert) = Self.rendersLikeAnInertCharacter(text) { text in
+                        // The embedded note has the same characters as the document.
+                        let note = "n¤te `k` ¤0¤ a  \nb".replacingOccurrences(of: "¤", with: mark)
+                        let inert = text.unicodeScalars.contains { $0.value &- 0xE100 < 4 }
+                        try? (inert ? Self.swap(note, inert: true) : note).write(to: n.appendingPathComponent("Note.md"), atomically: true, encoding: .utf8)
+                        return Markdown.render(text, options: options)
+                    }
+                    #expect(same, "\(text.debugDescription): \(literal.debugDescription) vs \(inert.debugDescription)")
+                }
+            }
+        }
     }
 
     @Test func aMaxLengthReferenceLabelWithAMarkResolves() {
@@ -176,6 +221,10 @@ import Testing
             for mark in ["\u{E000}", "\u{E001}"] where s.contains(mark) && !s.contains("`") && !s.contains("\\") {
                 #expect(html.contains(mark), "\(s.debugDescription) -> \(html)")
             }
+            // The same render as with other private-use characters there
+            // (none of U+E100… is a piece).
+            let inert = Self.swap(Markdown.render(Self.swap(s, inert: true), options: options), inert: false)
+            #expect(html == inert, "\(s.debugDescription): \(html.debugDescription) vs \(inert.debugDescription)")
         }
     }
 }

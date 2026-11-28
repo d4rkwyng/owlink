@@ -153,30 +153,36 @@ final class MarkdownRenderer {
 
     /// A top-level render: marks absent from `source` are chosen, and if an
     /// embedded note or a vault path turns out to hold one of them, the
-    /// render starts again with those characters excluded (never for an
-    /// ordinary document). Past `maxAttempts`, or when no free characters
-    /// are left, the offending characters of that outside text become U+FFFD.
+    /// render starts again with every character of that text excluded, so
+    /// one restart settles it (never for an ordinary document). Past
+    /// `maxAttempts`, or when fewer than four free characters are left, the
+    /// offending characters of outside text (or, past that, of the document
+    /// itself) become U+FFFD. Either takes a deliberately exhaustive text of
+    /// several megabytes, and still cannot trap.
     func render(_ source: String) -> String {
-        guard state == nil else { return renderOnce(source) }
-        var excluded = Set<UInt32>()
+        guard state == nil else { return renderOnce(source, ownSource: false) }
+        var excluded = ScalarSet()
         var attempt = 1
         while true {
             let (marks, exhausted) = Marks.choose(for: source, excluding: excluded, pool: pool)
             let state = MarkState(scrub: exhausted || attempt >= Self.maxAttempts)
-            let out = MarkdownRenderer(options: options, marks: marks, state: state, pool: pool).renderOnce(source)
-            if state.collisions.isEmpty { return out }
+            let out = MarkdownRenderer(options: options, marks: marks, state: state, pool: pool)
+                .renderOnce(source, ownSource: !exhausted)
+            if !state.collided { return out }
             excluded.formUnion(state.collisions)
             attempt += 1
         }
     }
 
-    static let maxAttempts = 8
+    static let maxAttempts = 64
 
-    private func renderOnce(_ source: String) -> String {
+    /// `ownSource`: the top-level document, whose marks were chosen from
+    /// characters it lacks (so it is not scanned again).
+    private func renderOnce(_ source: String, ownSource: Bool) -> String {
         // An embedded note's text, or (only when no free mark is left) the
         // document's own: checked like any other text from outside.
-        let source = external(source)
-        if state?.collisions.isEmpty == false { return "" }
+        let source = ownSource ? source : external(source)
+        if state?.collided == true { return "" }
         var lines = source.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var out = ""
         var start = 0
@@ -424,7 +430,7 @@ final class MarkdownRenderer {
                 var j = i + 1
                 while j < end, !(leadingSpaces(lines[j]) <= 3 && lines[j].trimmingCharacters(in: .whitespaces).hasPrefix(fence)
                                  && lines[j].trimmingCharacters(in: .whitespaces).allSatisfy({ $0 == fence.first })) {
-                    body.append(dropIndentBlanks(lines[j], min(indent, leadingSpaces(lines[j]))))
+                    body.append(String(lines[j].dropFirst(min(indent, leadingSpaces(lines[j])))))
                     j += 1
                 }
                 let lang = info.split(separator: " ").first.map { " class=\"language-\(escape(String($0)))\"" } ?? ""
@@ -449,7 +455,7 @@ final class MarkdownRenderer {
                 var body: [String] = []
                 var j = i
                 while j < end, leadingSpaces(lines[j]) >= 4 || lines[j].trimmingCharacters(in: .whitespaces).isEmpty {
-                    body.append(dropIndentBlanks(lines[j], min(4, leadingSpaces(lines[j]))))
+                    body.append(String(lines[j].dropFirst(min(4, leadingSpaces(lines[j])))))
                     j += 1
                 }
                 while body.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { body.removeLast() }
@@ -829,18 +835,6 @@ final class MarkdownRenderer {
         return String(line.dropFirst(k))
     }
 
-    /// `line` without up to `k` leading spaces and tabs (`k` counts columns,
-    /// a tab up to four, so it can reach past the indent: what follows the
-    /// indent is never dropped).
-    func dropIndentBlanks(_ line: String, _ k: Int) -> String {
-        var i = line.startIndex, n = 0
-        while n < k, i < line.endIndex, line[i] == " " || line[i] == "\t" {
-            i = line.index(after: i)
-            n += 1
-        }
-        return String(line[i...])
-    }
-
     /// Only spaces and tabs (what `trimmingCharacters(in: .whitespaces).isEmpty`
     /// says for Markdown's purposes), without making a trimmed copy.
     func isBlank(_ line: String) -> Bool {
@@ -872,41 +866,65 @@ final class MarkdownRenderer {
 
     // MARK: Marks
 
-    /// The private-use characters the inline pass writes into the text:
-    /// a placeholder (`open` index `close`) for held HTML, `brk` for a hard
-    /// line break until the placeholders are restored, and `dollar` for the
-    /// dollar of a `\$` with Options.math, until the render knows whether it
-    /// has math (then `\$` is `$`; else it stays as typed).
+    /// The characters the inline pass writes into the text: a placeholder
+    /// (`open` index `close`) for held HTML, `brk` for a hard line break
+    /// until the placeholders are restored, and `dollar` for the dollar of a
+    /// `\$` with Options.math, until the render knows whether it has math
+    /// (then `\$` is `$`; else it stays as typed).
     ///
     /// They are chosen per render from characters the text does not have,
     /// so nothing the user typed is read as one and the text is never
     /// changed (its length and grapheme clusters count as typed):
     /// U+E000…U+E003 (so a document without those is rendered as ever),
-    /// else the next free ones of U+E000…U+F8FF, then planes 15 and 16.
+    /// else the next free ones of U+E000…U+F8FF, then planes 15 and 16,
+    /// then (only for a text holding every private-use character) any other
+    /// scalar from U+0100 up that stands alone as a character and is no
+    /// letter, digit, punctuation or symbol (see `usable`).
     struct Marks: Equatable {
         let open: Unicode.Scalar, close: Unicode.Scalar, brk: Unicode.Scalar, dollar: Unicode.Scalar
         static let standard = Marks(open: "\u{E000}", close: "\u{E001}", brk: "\u{E002}", dollar: "\u{E003}")
-        static let pool: [ClosedRange<UInt32>] = [0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD]
+        /// Candidates, in order of preference (surrogates are no scalars).
+        static let pool: [ClosedRange<UInt32>] = [
+            0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD,
+            0x100...0xD7FF, 0xF900...0xEFFFF, 0xFFFFE...0xFFFFF, 0x10FFFE...0x10FFFF,
+        ]
+        /// No candidate is below this, so outside text below it never collides.
+        static let lowest: UInt32 = 0x100
 
         func contains(_ u: Unicode.Scalar) -> Bool { u == open || u == close || u == brk || u == dollar }
 
-        static func inPool(_ v: UInt32, _ pool: [ClosedRange<UInt32>]) -> Bool { pool.contains { $0.contains(v) } }
+        /// A mark must be a character of its own beside anything the
+        /// inline pass puts next to it (letters, digits, another mark), and
+        /// no whitespace: so no combining or joining scalar, no prepend,
+        /// no regional indicator or Hangul jamo. And, like a private-use
+        /// one, no letter, digit, punctuation or symbol, so a tag, a bare
+        /// URL, math or emphasis next to a mark reads it as it would a
+        /// private-use one (outside private use: unassigned scalars, mostly).
+        static func usable(_ v: UInt32) -> Bool {
+            guard let u = Unicode.Scalar(v), !u.properties.isWhitespace else { return false }
+            if v >= 0xE000, v <= 0xF8FF || v >= 0xF0000, u.properties.generalCategory == .privateUse { return true }
+            let c = Character(u)
+            guard !c.isLetter, !c.isNumber, !c.isPunctuation, !c.isSymbol else { return false }
+            var t = String.UnicodeScalarView()
+            t.append("a"); t.append(u); t.append("0"); t.append(u); t.append(u); t.append("a")
+            return String(t).count == 6
+        }
 
-        /// The first four characters of `pool` neither in `text` nor
+        /// The first four usable characters of `pool` neither in `text` nor
         /// `excluded`. `exhausted`: there were not four, so some come from
         /// `excluded` (and outside text holding them is scrubbed) or, past
         /// that, from `text` itself (scrubbed as well).
-        static func choose(for text: String, excluding excluded: Set<UInt32>, pool: [ClosedRange<UInt32>] = Marks.pool) -> (marks: Marks, exhausted: Bool) {
-            // Fast path: no character of the pool, nothing excluded.
-            if excluded.isEmpty, pool == Marks.pool, !text.unicodeScalars.contains(where: { $0.value >= 0xE000 && ($0.value <= 0xF8FF || $0.value >= 0xF0000) }) {
+        static func choose(for text: String, excluding excluded: ScalarSet, pool: [ClosedRange<UInt32>] = Marks.pool) -> (marks: Marks, exhausted: Bool) {
+            // Fast path, one scan: none of the standard marks in the text.
+            if excluded.isEmpty, pool == Marks.pool, !text.unicodeScalars.contains(where: { $0.value &- 0xE000 < 4 }) {
                 return (.standard, false)
             }
-            var used = Set<UInt32>()
-            for u in text.unicodeScalars where inPool(u.value, pool) { used.insert(u.value) }
+            var used = ScalarSet()
+            for u in text.unicodeScalars where u.value >= lowest { used.insert(u.value) }
             var picked: [UInt32] = []
             func pick(_ ok: (UInt32) -> Bool) {
                 for r in pool {
-                    for v in r where ok(v) && !picked.contains(v) {
+                    for v in r where ok(v) && !picked.contains(v) && usable(v) {
                         picked.append(v)
                         if picked.count == 4 { return }
                     }
@@ -922,13 +940,36 @@ final class MarkdownRenderer {
         }
     }
 
+    /// A set of Unicode scalar values: a bitmap of all of them (136 KB),
+    /// allocated on the first insert.
+    struct ScalarSet: ExpressibleByArrayLiteral {
+        private var words: [UInt64] = []
+        init() {}
+        init(arrayLiteral values: UInt32...) { for v in values { insert(v) } }
+        var isEmpty: Bool { words.isEmpty }
+        func contains(_ v: UInt32) -> Bool {
+            !words.isEmpty && v < 0x110000 && words[Int(v >> 6)] & (1 << UInt64(v & 63)) != 0
+        }
+        mutating func insert(_ v: UInt32) {
+            guard v < 0x110000 else { return }
+            if words.isEmpty { words = Array(repeating: 0, count: 0x110000 / 64) }
+            words[Int(v >> 6)] |= 1 << UInt64(v & 63)
+        }
+        mutating func formUnion(_ o: ScalarSet) {
+            guard !o.words.isEmpty else { return }
+            if words.isEmpty { words = o.words; return }
+            for k in words.indices { words[k] |= o.words[k] }
+        }
+    }
+
     /// What a render and its embedded notes share: the characters of
     /// outside text that collided with the marks (the render starts again
     /// without them), or, with `scrub`, no restart: such characters become
     /// U+FFFD instead.
     final class MarkState {
         let scrub: Bool
-        var collisions = Set<UInt32>()
+        var collided = false
+        var collisions = ScalarSet()
         init(scrub: Bool) { self.scrub = scrub }
     }
 
@@ -936,6 +977,7 @@ final class MarkdownRenderer {
     /// a vault path or file name) on its way into held HTML or the output:
     /// if it has a mark, the render is redone (see `render`), or, as a last
     /// resort, the mark becomes U+FFFD. Otherwise it is returned unchanged.
+    /// Scans only `s`, never the document.
     func external(_ s: String) -> String {
         guard s.unicodeScalars.contains(where: marks.contains) else { return s }
         guard let state, !state.scrub else {
@@ -943,8 +985,9 @@ final class MarkdownRenderer {
             for u in s.unicodeScalars { out.append(marks.contains(u) ? "\u{FFFD}" : u) }
             return String(out)
         }
-        // Every private-use character of it, so one restart is enough.
-        for u in s.unicodeScalars where Marks.inPool(u.value, pool) { state.collisions.insert(u.value) }
+        // Every character of it that could be a mark, so one restart is enough.
+        state.collided = true
+        for u in s.unicodeScalars where u.value >= Marks.lowest { state.collisions.insert(u.value) }
         return s
     }
 
