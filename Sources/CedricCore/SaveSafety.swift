@@ -153,6 +153,9 @@ public struct RecoveryStore: Sendable {
     /// the write, and a retry flushes them again, so no write is acknowledged
     /// in a folder whose path may not be on the disk. `make` runs on every
     /// write, so a replacement at the folder path is checked again.
+    /// A live copy is read first, as a reader would: one that is there but
+    /// can't be read or decoded is set aside before the new one replaces
+    /// it, and if it can't be, the write fails and leaves it.
     public func write(_ record: RecoveryRecord, durable: Bool = true, failSync: Bool = false,
                       syncFolder: ((String) throws -> Void)? = nil) throws {
         let sync = syncFolder ?? PrivateDirectory.syncFolder
@@ -160,16 +163,40 @@ public struct RecoveryStore: Sendable {
             try PrivateDirectory.make(directory, root: directory, durableFrom: durableFrom,
                                       unconfirmed: &f.unconfirmed, syncParent: sync)
             PrivateDirectory.excludeFromBackup(directory)
+            let url = fileURL(forDocumentPath: record.documentPath)
+            if case .kept = live(url) {
+                throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: url.path])
+            }
             let data = try PropertyListEncoder().encode(record)
-            try PrivateDirectory.writePrivateFile(data, to: fileURL(forDocumentPath: record.documentPath),
-                                                  durable: durable, failSync: failSync, syncFolder: sync)
+            try PrivateDirectory.writePrivateFile(data, to: url, durable: durable, failSync: failSync, syncFolder: sync)
         }
     }
 
-    private func exists(_ url: URL) -> Bool {
-        if DevEnvironment.checksEnabled, checkStatErrno != nil { return false }
+    /// Absent only for a confirmed ENOENT; any other lstat error is not
+    /// absence (the entry may be there).
+    private enum Entry { case absent, present, unknown }
+
+    private func entry(_ url: URL) -> Entry {
         var st = stat()
-        return lstat(url.path, &st) == 0
+        let err: Int32
+        if DevEnvironment.checksEnabled, let e = checkStatErrno {
+            err = e
+        } else if lstat(url.path, &st) == 0 {
+            return .present
+        } else {
+            err = errno
+        }
+        return err == ENOENT ? .absent : .unknown
+    }
+
+    /// The file's bytes, read (not only opened).
+    private func bytes(of url: URL) throws -> Data {
+        let fd = open(url.path, O_RDONLY | O_CLOEXEC)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        // Opened, then the read fails (a dying disk).
+        if checkFailRead, DevEnvironment.checksEnabled { throw POSIXError(.EIO) }
+        return try handle.readToEnd() ?? Data()
     }
 
     /// Moves an unreadable recovery file aside, next to it
@@ -181,7 +208,7 @@ public struct RecoveryStore: Sendable {
     public func setAsideDamaged(at url: URL, now: Date = Date()) -> URL? {
         locked { _ in
             let fm = FileManager.default
-            guard exists(url), !(checkFailSetAside && DevEnvironment.checksEnabled) else { return nil }
+            guard entry(url) != .absent, !(checkFailSetAside && DevEnvironment.checksEnabled) else { return nil }
             let stamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "")
             func dest(_ tag: String) -> URL { url.appendingPathExtension("unreadable-\(tag)") }
             var next = dest(stamp)
@@ -197,7 +224,7 @@ public struct RecoveryStore: Sendable {
                 do {
                     try fm.copyItem(at: url, to: next)
                     try? fm.removeItem(at: url)
-                    return exists(url) ? nil : next
+                    return entry(url) == .absent ? next : nil
                 } catch {
                     return nil
                 }
@@ -205,27 +232,39 @@ public struct RecoveryStore: Sendable {
         }
     }
 
+    private enum Live {
+        /// Nothing under the live name (a confirmed ENOENT), or it was set aside.
+        case none
+        case record(RecoveryRecord)
+        /// Unreadable, and it couldn't be set aside: still under the live name.
+        case kept
+    }
+
+    /// The live file at `url`, with the folder locked: read and decoded, or
+    /// (there, or not confirmed missing, but unreadable or undecodable) set
+    /// aside. Readers, write and clear all go through this.
+    private func live(_ url: URL) -> Live {
+        locked { _ in
+            switch entry(url) {
+            case .absent: return .none
+            case .present:
+                if let data = try? bytes(of: url),
+                   let r = try? PropertyListDecoder().decode(RecoveryRecord.self, from: data) { return .record(r) }
+                // Gone since (ENOENT on open): nothing to keep.
+                if entry(url) == .absent { return .none }
+            case .unknown: break
+            }
+            if DevEnvironment.checksEnabled, let hook = checkBeforeSetAside { hook(url) }
+            return setAsideDamaged(at: url) != nil || entry(url) == .absent ? .none : .kept
+        }
+    }
+
     /// A readable record from `url`, or nil. A file that is there but
     /// can't be read or decoded is set aside, not deleted and not left
     /// under the live name.
     private func record(fromFile url: URL) -> RecoveryRecord? {
-        locked { _ in
-            let data: Data
-            do {
-                if checkFailRead, DevEnvironment.checksEnabled, exists(url) { throw CocoaError(.fileReadUnknown) }
-                data = try Data(contentsOf: url)
-            } catch {
-                // Missing: nothing to keep.
-                guard exists(url) else { return nil }
-                if DevEnvironment.checksEnabled, let hook = checkBeforeSetAside { hook(url) }
-                _ = setAsideDamaged(at: url)
-                return nil
-            }
-            if let r = try? PropertyListDecoder().decode(RecoveryRecord.self, from: data) { return r }
-            if DevEnvironment.checksEnabled, let hook = checkBeforeSetAside { hook(url) }
-            _ = setAsideDamaged(at: url)
-            return nil
-        }
+        if case .record(let r) = live(url) { return r }
+        return nil
     }
 
     public func read(documentPath path: String) -> RecoveryRecord? {
@@ -247,9 +286,14 @@ public struct RecoveryStore: Sendable {
             .sorted { $0.savedAt > $1.savedAt }
     }
 
+    /// Deletes the copy for `path` once it has been read: one that can't
+    /// be read is set aside instead (or, if it can't be, left), never
+    /// deleted unseen.
     public func clear(documentPath path: String) {
         locked { _ in
-            try? FileManager.default.removeItem(at: fileURL(forDocumentPath: path))
+            let url = fileURL(forDocumentPath: path)
+            guard case .record = live(url) else { return }
+            try? FileManager.default.removeItem(at: url)
         }
     }
 }
