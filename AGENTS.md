@@ -21,6 +21,7 @@ Two review rounds, then stop and ask Derek. A must-fix finding needs evidence: a
 
 - Full local pass: `Scripts/verify.sh` (build, `Scripts/test.sh`, and a Swift 6.1 build when that toolchain is usable).
 - Suite only: `Scripts/test.sh`.
+- Daily-use pass (realistic UI flows, known-bug markers, speed budgets; not in CI or verify.sh): `Scripts/daily-use.sh`, see [docs/daily-use.md](docs/daily-use.md).
 - Any change to saving, encoding, BOM, reload, revert, or Follow File needs a byte-for-byte open/save/reload round-trip test, plus fault-injection tests that an interrupted or rejected write does not lose or invent bytes.
 
 ## Toolchain
