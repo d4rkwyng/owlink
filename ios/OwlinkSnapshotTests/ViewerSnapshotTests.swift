@@ -194,6 +194,21 @@ final class ViewerSnapshotTests: XCTestCase {
         XCTAssertEqual(v.grid.table?.name, "Owls", "sheet 2 replaced the tab tapped last")
     }
 
+    func testEditAsTextHandoffUsesCoordinatedBytes() throws {
+        let csv = Data("a,b\n".utf8)
+        let url = try file("table.csv", csv)
+        let document = TextDocument(fileURL: url)
+        defer { document.discardOpenedCopy() }
+        XCTAssertEqual(DocumentViewerRoute.route(for: url), .spreadsheet(.csv))
+        let pdf = try Data(contentsOf: sample("sample.pdf"))
+        try pdf.write(to: url)
+        let coordinatedRead = try Data(contentsOf: url)
+        try csv.write(to: url)
+        try document.load(fromContents: coordinatedRead, ofType: nil)
+        XCTAssertFalse(document.mayPresentInEditor)
+        XCTAssertEqual(try Data(contentsOf: url), csv)
+    }
+
     func testCSV() async throws {
         for c in Self.configs {
             let (w, v) = try await spreadsheet(try sample("sample.csv"), .csv, c)

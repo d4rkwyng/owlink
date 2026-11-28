@@ -284,6 +284,20 @@ final class DocumentViewerRouteTests: XCTestCase {
         }
     }
 
+    func testDelimitedFileReplacedBeforeEditorHandoff() throws {
+        let pdf = Data("%PDF-1.7".utf8)
+        for name in ["table.csv", "data.tsv"] {
+            let url = try file(name, Array("a,b".utf8))
+            try pdf.write(to: url)
+            for reopening in [true, false] {
+                let decision = DocumentViewerRoute.editorOnlyOpen(DocumentViewerRoute.route(for: url), reopening: reopening)
+                XCTAssertFalse(decision.opensEditor)
+                XCTAssertFalse(decision.clearsRecoveryRecord)
+            }
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: pdf), .pdf)
+        }
+    }
+
     // MARK: The bundled samples
 
     private var samples: URL {
