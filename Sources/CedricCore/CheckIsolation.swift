@@ -57,14 +57,34 @@ public enum CheckIsolation {
     /// Where CEDRIC_MODELS_DIR points: the resolved folder, or (a folder
     /// not made yet, which no check accepts) the path as given.
     public static func modelsDirectoryOverride(_ env: [String: String]) -> URL? {
-        guard let dir = env["CEDRIC_MODELS_DIR"], !dir.isEmpty else { return nil }
-        return URL(fileURLWithPath: canonicalDirectory(dir) ?? dir, isDirectory: true)
+        ModelsDirectoryCache(env).storeOverride
     }
 
-    /// This process's CEDRIC_MODELS_DIR, resolved once: what `ModelStore`
-    /// opens and what `processModelsDirectory()` validates are one value.
-    public static let processModelsOverride: URL? = modelsDirectoryOverride(DevEnvironment.values)
-    private static let processCanonical: String? = DevEnvironment.values["CEDRIC_MODELS_DIR"].flatMap { canonicalDirectory($0) }
+    struct ModelsDirectoryCache: Sendable {
+        let storeOverride: URL?
+        let guardCanonical: String?
+
+        init(_ env: [String: String]) {
+            guard let dir = env["CEDRIC_MODELS_DIR"], !dir.isEmpty else {
+                guardCanonical = nil
+                storeOverride = nil
+                return
+            }
+            guardCanonical = canonicalDirectory(dir)
+            storeOverride = URL(fileURLWithPath: guardCanonical ?? dir, isDirectory: true)
+        }
+
+    }
+
+    private static let processCache = ModelsDirectoryCache(DevEnvironment.values)
+    public static let processModelsOverride = processCache.storeOverride
+    private static let processCanonical = processCache.guardCanonical
+
+    public static func isDownloadTarget(expectedID: String, targetID: String?, displayedID: String?,
+                                        selectedID: String?, actionTitle: String, notDownloaded: Bool) -> Bool {
+        targetID == expectedID && displayedID == expectedID && selectedID == expectedID
+            && actionTitle == "Download" && notDownloaded
+    }
 
     /// Whether anything (a file, a folder, a dangling link) has this name.
     public static func entryExists(_ path: String) -> Bool {

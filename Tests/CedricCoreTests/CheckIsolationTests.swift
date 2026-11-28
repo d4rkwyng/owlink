@@ -114,6 +114,20 @@ import Testing
         #expect(CheckIsolation.modelsDirectoryOverride(["CEDRIC_MODELS_DIR": ""]) == nil)
     }
 
+    @Test func retargetingModelsDirectorySymlinkBetweenStoreAndGuardKeepsTheSameDirectory() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let link = root.appendingPathComponent("override")
+        let other = root.appendingPathComponent("other")
+        try mkdir(other)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: models)
+        let cache = CheckIsolation.ModelsDirectoryCache(["CEDRIC_MODELS_DIR": link.path])
+        let store = try #require(cache.storeOverride)
+        #expect(store.path == (try real(models)))
+        try FileManager.default.removeItem(at: link)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: other)
+        #expect(cache.guardCanonical == store.path)
+    }
+
     /// Whether this volume takes another spelling of a name for the same file.
     var caseInsensitiveVolume: Bool {
         FileManager.default.fileExists(atPath: home.path + "/LIBRARY")
@@ -124,7 +138,7 @@ import Testing
     /// ancestry is by device and inode, so it is refused whatever
     /// `realpath` makes of the spelling.
     @Test func aCaseAliasOfTheLibraryIsStillInsideIt() throws {
-        try #require(caseInsensitiveVolume, "the temp folder's volume is case-sensitive: no case aliases to test")
+        guard caseInsensitiveVolume else { return }
         for alias in ["/library/application support/cedric/models", "/LIBRARY/APPLICATION SUPPORT/CEDRIC/MODELS", "/LIBRARY", "/library/Application Support"] {
             #expect(problem(["CEDRIC_AI_DEFAULTS": suite, "CEDRIC_MODELS_DIR": home.path + alias])?.contains("inside ~/Library") == true, "\(alias)")
         }
@@ -272,6 +286,12 @@ import Testing
         let select = try #require(body.range(of: "popup.selectItem(at: item)"))
         let action = try #require(body.range(of: "NSApp.sendAction(popup.action!"))
         let confirm = try #require(body.range(of: "guard onTarget() else", range: select.upperBound..<body.endIndex))
+        let predicate = try #require(body.range(of: "func onTarget() -> Bool"))
+        let predicateBody = body[predicate.upperBound..<confirm.lowerBound]
+        #expect(predicateBody.contains("CheckIsolation.isDownloadTarget("))
+        for input in ["sheet.builtInTarget", "view.model", "popup.selectedItem", "view.action.title", "downloads.state(m)"] {
+            #expect(predicateBody.contains(input), "onTarget must read \(input)")
+        }
         let press = try #require(body.range(of: "AICheck.press(view.action, \"Download\")"))
         #expect(entries.lowerBound < guardClean.lowerBound && guardClean.upperBound < select.lowerBound && select.upperBound < action.lowerBound)
         #expect(action.upperBound < confirm.lowerBound && confirm.upperBound < press.lowerBound)

@@ -137,6 +137,37 @@ func randomBlob(_ n: Int) -> Data {
 
 // MARK: - Catalog
 
+@Suite struct BuiltInCheckTargetTests {
+    @Test func orphanLoadCheckStampPreventsACleanDownloadTarget() throws {
+        let directory = tempDir()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ModelStore(directory: directory)
+        let model = testModel(body: Data([1]))
+        let stamp = directory.appendingPathComponent(model.fileName + ".loadcheck")
+        try Data("existing stamp".utf8).write(to: stamp)
+        #expect(!store.isInstalled(model))
+        #expect(store.partialBytes(model) == 0)
+        let found = store.cleanTargetEntries(for: model).filter { CheckIsolation.entryExists($0.path) }
+        #expect(found == [stamp])
+        try store.delete(model)
+        #expect(!CheckIsolation.entryExists(stamp.path))
+    }
+
+    @Test func twoModelsShowingDownloadAreDistinctTargets() {
+        let expected = testModel(id: "first", body: Data([1]))
+        let other = testModel(id: "second", body: Data([2]))
+        func matches(_ target: BuiltInModel, _ displayed: BuiltInModel, _ selected: BuiltInModel) -> Bool {
+            CheckIsolation.isDownloadTarget(expectedID: expected.id, targetID: target.id, displayedID: displayed.id,
+                                            selectedID: selected.id, actionTitle: "Download", notDownloaded: true)
+        }
+        #expect(matches(expected, expected, expected))
+        #expect(!matches(other, other, other))
+        #expect(!matches(other, expected, expected))
+        #expect(!matches(expected, other, expected))
+        #expect(!matches(expected, expected, other))
+    }
+}
+
 @Suite struct ModelCatalogTests {
     @Test func bundledCatalogIsValidAndPinned() throws {
         let url = try #require(ModelCatalog.bundledURL())

@@ -61,9 +61,9 @@ enum BuiltInCheck {
         }
         // Before the target is selected: picking a model that is already
         // installed applies and saves it, so only a model this run has not
-        // got (no model file, marker or partial file) is ever picked.
+        // got (no model file, marker, load-check stamp, or partial file) is ever picked.
         let store = downloads.store
-        let entries = [store.fileURL(for: m), store.directory.appendingPathComponent(m.fileName + ".verified"), store.partialURL(for: m)]
+        let entries = store.cleanTargetEntries(for: m)
         let found = entries.filter { CheckIsolation.entryExists($0.path) }.map(\.lastPathComponent)
         guard downloads.state(m) == .notDownloaded, store.partialBytes(m) == 0, found.isEmpty else {
             AICheck.check(false, "\(m.name) is not in a clean Not downloaded state (\(found)); nothing selected or clicked"); AICheck.finish(); return
@@ -76,8 +76,9 @@ enum BuiltInCheck {
                       "picking \(m.name) makes it the download target; the model in use stays \(before ?? "Automatic")")
         // Download is pressed only while the row still shows this model, not downloaded.
         func onTarget() -> Bool {
-            sheet.builtInTarget == m.id && view.model == m && popup.selectedItem?.representedObject as? String == m.id
-                && view.action.title == "Download" && downloads.state(m) == .notDownloaded
+            CheckIsolation.isDownloadTarget(expectedID: m.id, targetID: sheet.builtInTarget,
+                                            displayedID: view.model?.id, selectedID: popup.selectedItem?.representedObject as? String,
+                                            actionTitle: view.action.title, notDownloaded: downloads.state(m) == .notDownloaded)
         }
         guard onTarget() else {
             AICheck.check(false, "\(m.name): Download (the displayed target is \(view.model?.name ?? "-"), \(view.action.title)); nothing clicked"); AICheck.finish(); return

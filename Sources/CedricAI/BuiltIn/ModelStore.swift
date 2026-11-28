@@ -34,6 +34,10 @@ public struct ModelStore: Sendable {
     func markerURL(for model: BuiltInModel) -> URL { directory.appendingPathComponent(model.fileName + ".verified") }
     public func partialURL(for model: BuiltInModel) -> URL { partialDirectory.appendingPathComponent(model.fileName + ".part") }
 
+    public func cleanTargetEntries(for model: BuiltInModel) -> [URL] {
+        [fileURL(for: model), markerURL(for: model), stampURL(for: model), partialURL(for: model)]
+    }
+
     public func isInstalled(_ model: BuiltInModel) -> Bool {
         let fm = FileManager.default
         guard let attrs = try? fm.attributesOfItem(atPath: fileURL(for: model).path),
@@ -110,11 +114,10 @@ public struct ModelStore: Sendable {
 
     public func installed(in catalog: ModelCatalog) -> [BuiltInModel] { catalog.models.filter(isInstalled) }
 
-    /// Removes the model, its marker and any partial download.
+    /// Removes the model, its verification marker, its load-check stamp, and any partial download.
     public func delete(_ model: BuiltInModel) throws {
         let fm = FileManager.default
-        for url in [fileURL(for: model), markerURL(for: model), stampURL(for: model), partialURL(for: model)]
-        where fm.fileExists(atPath: url.path) {
+        for url in cleanTargetEntries(for: model) where fm.fileExists(atPath: url.path) {
             try fm.removeItem(at: url)
         }
     }
