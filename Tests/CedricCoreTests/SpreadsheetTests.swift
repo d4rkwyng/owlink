@@ -71,6 +71,12 @@ import Testing
         #expect(table.truncationNotice?.contains("16,384 columns") == true)
     }
 
+    @Test func damagedXMLAfterCompleteRow() throws {
+        let rows = "<row><c><v>1</v></c></row><row></wrong>"
+        let wb = try Workbook(data: Self.workbook([("Partial", rows)]))
+        #expect(throws: SpreadsheetError.damaged) { try wb.table(at: 0) }
+    }
+
     // MARK: Fixtures
 
     /// A workbook from its parts: sheets as (name, sheetData XML, extra
