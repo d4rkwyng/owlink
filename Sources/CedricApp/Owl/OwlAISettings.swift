@@ -133,6 +133,13 @@ final class AISettingsSection: NSObject {
     private(set) var builtInTarget: String?
     /// The engine's caveat ("Slow on Intel Macs…"), hidden when it has none.
     let noteLabel = NSTextField(wrappingLabelWithString: "")
+    /// Built-in on an Intel Mac: the caveat, short, beside Test Connection
+    /// while no test status shows (the full text is its tooltip), instead
+    /// of `noteLabel`'s row.
+    let engineInlineNote = NSTextField(labelWithString: "")
+    /// Built-in on an Intel Mac: why automatic checks (and so the interval)
+    /// start off, short, beside the interval popup, instead of `automaticNote`'s row.
+    let automaticInlineNote = NSTextField(labelWithString: "")
     /// The selected engine (the section only talks to `AIEngine`).
     var engine: any AIEngine {
         settings.backend == .builtIn ? BuiltInDownloads.shared.engine : AIEngines.engine(for: settings)
@@ -207,12 +214,21 @@ final class AISettingsSection: NSObject {
         modelCell.alignment = .leading
         modelCell.spacing = 2
         noteLabel.textColor = .systemOrange
+        engineInlineNote.textColor = .systemOrange
+        automaticInlineNote.textColor = .secondaryLabelColor
+        for l in [engineInlineNote, automaticInlineNote] {
+            l.font = small
+            l.lineBreakMode = .byTruncatingTail
+            l.maximumNumberOfLines = 1
+            l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
         modelsView.onChange = { [weak self] in self?.refresh() }
         weakLabel.textColor = .systemOrange
         modelsLabel.textColor = .secondaryLabelColor
         statusLabel.setAccessibilityLabel(String(localized: "Connection status"))
 
-        let testRow = NSStackView(views: [testButton, statusLabel])
+        engineInlineNote.isHidden = true
+        let testRow = NSStackView(views: [testButton, statusLabel, engineInlineNote])
         testRow.alignment = .firstBaseline
         let grid = NSGridView(views: [
             [label(String(localized: "AI hints:"), for: enabledBox), enabledBox],
@@ -224,7 +240,7 @@ final class AISettingsSection: NSObject {
             [NSGridCell.emptyContentView, modelsLabel],
             [label(String(localized: "Model:"), for: modelPopup), modelCell],
             [NSGridCell.emptyContentView, weakLabel],
-            [label(String(localized: "Check at most every:"), for: intervalPopup), intervalPopup],
+            [label(String(localized: "Check at most every:"), for: intervalPopup), inlineRow(intervalPopup, automaticInlineNote)],
             [NSGridCell.emptyContentView, automaticBox],
             [NSGridCell.emptyContentView, automaticNote],
             [NSGridCell.emptyContentView, launchBox],
@@ -340,17 +356,20 @@ final class AISettingsSection: NSObject {
         // their tooltips. The server engines' notes still wrap.
         let intel = Self.intelLayoutForCheck && !settings.backend.usesServer
         let note = engine.note ?? (builtIn && intel ? BuiltInEngine.slowHardwareNote : nil)
-        noteLabel.stringValue = (builtIn && note != nil ? Self.builtInSlowNote : note) ?? ""
-        noteLabel.toolTip = note
-        oneLine(noteLabel, builtIn)
-        grid?.cell(for: noteLabel)?.row?.isHidden = note == nil
+        noteLabel.stringValue = builtIn ? "" : note ?? ""
+        grid?.cell(for: noteLabel)?.row?.isHidden = builtIn || note == nil
+        engineInlineNote.stringValue = builtIn && note != nil ? Self.builtInSlowNote : ""
+        engineInlineNote.toolTip = builtIn ? note : nil
+        showEngineInlineNote()
         let serverDefault = settings.backend.usesServer
         let fullAutomaticNote = serverDefault
             ? String(localized: "Automatic checks are off by default for LM Studio, Ollama and custom servers. Review the first-use notice before enabling them.")
             : Self.intelAutomaticNote
-        automaticNote.stringValue = builtIn ? Self.builtInIntelAutomaticNote : fullAutomaticNote
-        automaticNote.toolTip = fullAutomaticNote
-        oneLine(automaticNote, builtIn)
+        automaticNote.stringValue = fullAutomaticNote
+        let automaticNoteShown = !LocalAISettings.defaultAutomaticChecks(for: settings.backend) || intel
+        automaticInlineNote.stringValue = Self.builtInIntelAutomaticNote
+        automaticInlineNote.toolTip = fullAutomaticNote
+        automaticInlineNote.isHidden = !(builtIn && automaticNoteShown)
 
         if !builtIn { builtInTarget = nil }
         let auto: String
@@ -384,13 +403,22 @@ final class AISettingsSection: NSObject {
         grid?.cell(for: modelsLabel)?.row?.isHidden = modelsLabel.isHidden
         // The interval only matters for automatic checks; explain whichever default applies here.
         intervalPopup.isEnabled = settings.automaticChecks
-        grid?.cell(for: automaticNote)?.row?.isHidden = LocalAISettings.defaultAutomaticChecks(for: settings.backend) && !intel
+        grid?.cell(for: automaticNote)?.row?.isHidden = builtIn || !automaticNoteShown
         onResize?()
     }
 
+    /// A control with a short note beside it, on its grid row.
+    private func inlineRow(_ control: NSView, _ note: NSTextField) -> NSStackView {
+        note.isHidden = true
+        let row = NSStackView(views: [control, note])
+        row.spacing = 8
+        row.alignment = .firstBaseline
+        return row
+    }
+
     /// Built-in's one-line Intel notes (the full ones are their tooltips).
-    static let builtInSlowNote = String(localized: "Slow on Intel Macs: the model runs on the CPU.")
-    static let builtInIntelAutomaticNote = String(localized: "Off by default on Intel Macs. Click the owl for Ask AI Now.")
+    static let builtInSlowNote = String(localized: "Slow on Intel Macs (CPU only).")
+    static let builtInIntelAutomaticNote = String(localized: "Automatic checks start off on Intel.")
     static let intelAutomaticNote = String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check.")
 
     /// Checks only (CEDRIC_CHECK=settings): lay the tab out as on an Intel
@@ -401,14 +429,6 @@ final class AISettingsSection: NSObject {
         set { intelLayout = newValue }
     }
     private static var intelLayout = false
-
-    /// One line, truncated (the full text is the tooltip), or wrapping.
-    private func oneLine(_ l: NSTextField, _ one: Bool) {
-        l.maximumNumberOfLines = one ? 1 : 0
-        l.lineBreakMode = one ? .byTruncatingTail : .byWordWrapping
-        l.cell?.wraps = !one
-        l.cell?.truncatesLastVisibleLine = one
-    }
 
     private struct MenuEntry: Equatable {
         var title: String
@@ -521,6 +541,12 @@ final class AISettingsSection: NSObject {
     private func status(_ s: String, error: Bool = false) {
         statusLabel.stringValue = s
         statusLabel.textColor = error ? .systemRed : .secondaryLabelColor
+        showEngineInlineNote()
+    }
+
+    /// The short caveat beside Test Connection, unless a test status is there.
+    private func showEngineInlineNote() {
+        engineInlineNote.isHidden = engineInlineNote.stringValue.isEmpty || !statusLabel.stringValue.isEmpty || testButton.isHidden
     }
 
     /// Any control: validate, and if the result is new, apply it. An invalid

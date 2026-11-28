@@ -188,7 +188,10 @@ final class BuiltInModelsView: NSStackView {
     private func update() {
         status.textColor = .secondaryLabelColor
         progress.isHidden = true
+        // Hidden, Cancel has no title (the tab has no Save or Cancel of its own).
         secondary.isHidden = true
+        secondary.title = ""
+        secondary.setAccessibilityLabel(nil)
         action.isEnabled = true
         guard let model else {
             action.isHidden = true

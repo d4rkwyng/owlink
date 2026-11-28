@@ -160,8 +160,11 @@ extension DevChecks {
                 for l in [ai.privacyLabel, ai.launchNote, v.status, v.source] {
                     expect(!l.isHiddenOrHasHiddenAncestor && oneLine(l), "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
                 }
-                // The Intel notes, where this Mac shows them (an Intel layout is checked below).
-                for l in [ai.noteLabel, ai.automaticNote] where !l.isHiddenOrHasHiddenAncestor {
+                // The Intel notes, where this Mac shows them (an Intel layout is checked below):
+                // on Built-in, beside their popups, never rows of their own.
+                expect(ai.noteLabel.isHiddenOrHasHiddenAncestor && ai.automaticNote.isHiddenOrHasHiddenAncestor,
+                       "Cedric: no wrapping engine or automatic-check note rows on Built-in")
+                for l in [ai.engineInlineNote, ai.automaticInlineNote] where !l.isHiddenOrHasHiddenAncestor {
                     expect(oneLine(l), "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
                 }
                 expect(ai.privacyLabel.stringValue == LocalAISettings.privacyNoteOnDevice, "Cedric: the on-device privacy note stays in view")
@@ -226,28 +229,35 @@ extension DevChecks {
             },
             sync {
                 // As on an Intel Mac: the engine caveat and the automatic-check
-                // note show, each one short line with the full text as its tooltip.
-                guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
+                // note show, each one short line beside Test Connection or the
+                // interval popup, with the full text as its tooltip.
+                guard let ai = s?.ai, let w = s?.window, ai.settings.backend == .builtIn else { return }
+                intelBaseWidth = w.frame.width
                 AISettingsSection.intelLayoutForCheck = true
                 ai.modelsView.reload()
             },
             sync {
                 guard let ai = s?.ai, let w = s?.window, ai.settings.backend == .builtIn else { return }
-                for (l, short, full) in [(ai.noteLabel, AISettingsSection.builtInSlowNote, BuiltInEngine.slowHardwareNote),
-                                         (ai.automaticNote, AISettingsSection.builtInIntelAutomaticNote, AISettingsSection.intelAutomaticNote)] {
+                for (l, short, full, beside) in [(ai.engineInlineNote, AISettingsSection.builtInSlowNote, BuiltInEngine.slowHardwareNote, ai.testButton as NSView),
+                                                 (ai.automaticInlineNote, AISettingsSection.builtInIntelAutomaticNote, AISettingsSection.intelAutomaticNote, ai.intervalPopup)] {
                     expect(!l.isHiddenOrHasHiddenAncestor && l.stringValue == short && l.toolTip == full, "Cedric (Intel layout): \(short)", l.stringValue)
                     expect(oneLine(l) && l.frame.width >= ceil(l.attributedStringValue.size().width), "…one line, not truncated", "\(l.frame.size)")
+                    expect(l.superview === beside.superview, "…beside \((beside as? NSButton)?.title ?? "its popup"), not a row of its own")
+                    let inWindow = w.contentView.map { NSContainsRect($0.bounds, l.convert(l.bounds, to: $0)) } ?? false
+                    expect(inWindow, "…inside the window", "\(l.convert(l.bounds, to: nil))")
                 }
+                expect(ai.noteLabel.isHiddenOrHasHiddenAncestor && ai.automaticNote.isHiddenOrHasHiddenAncestor, "Cedric (Intel layout): no wrapping note rows")
                 let h = w.frame.height
                 print("check: info Cedric (Intel layout) window \(Int(w.frame.width)) x \(Int(h)) pt")
                 expect(h <= cedricTabMaxHeight, "Cedric (Intel layout): the tab is at most \(Int(cedricTabMaxHeight)) pt tall", "\(Int(h)) pt")
+                expect(w.frame.width == intelBaseWidth, "Cedric (Intel layout): no wider", "\(Int(w.frame.width)) pt, was \(Int(intelBaseWidth))")
             },
             { next in snapshot("settings-cedric-intel.png", window: SettingsWindowController.shared?.window)(next) },
             sync {
                 guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
                 AISettingsSection.intelLayoutForCheck = false
                 ai.modelsView.reload()
-                expect(LlamaRuntime.isSlowHardware || (ai.noteLabel.isHiddenOrHasHiddenAncestor && ai.automaticNote.isHiddenOrHasHiddenAncestor),
+                expect(LlamaRuntime.isSlowHardware || (ai.engineInlineNote.isHiddenOrHasHiddenAncestor && ai.automaticInlineNote.isHiddenOrHasHiddenAncestor),
                        "Cedric: back to this Mac's layout (no Intel notes)")
             },
         ]
@@ -317,6 +327,9 @@ extension DevChecks {
         ]
         run(plan)
     }
+
+    /// The Cedric tab's width before the Intel layout.
+    static var intelBaseWidth: CGFloat = 0
 
     /// One line of its font (a wrapping label that wrapped is taller).
     static func oneLine(_ l: NSTextField) -> Bool {
