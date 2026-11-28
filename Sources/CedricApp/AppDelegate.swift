@@ -1439,7 +1439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// `place` nil: in a new window (not ordered in). Else into that
     /// window's tab group at that position.
     @discardableResult
-    private func restoreTab(_ st: SessionTab, into place: (host: NSWindow, index: Int)?) -> NSWindowController? {
+    func restoreTab(_ st: SessionTab, into place: (host: NSWindow, index: Int)?) -> NSWindowController? {
         // A PDF tab (or, from before PDF tabs, a .pdf file opened as text with nothing unsaved).
         if st.pdf != nil || st.explicitText != true && !st.hasBuffer && st.path.map(DocumentKind.hasPDFExtension) == true {
             return restorePDFTab(st, into: place)

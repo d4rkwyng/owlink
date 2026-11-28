@@ -711,7 +711,143 @@ extension DevChecks {
             sync { app.closeFolder() },
         ]
         steps += steps9
+        steps += folderSwitchSteps(app)
         run(steps)
+    }
+
+    /// 0.6.1 bug 1: a file opened from outside the app (Finder / Open With
+    /// / the Dock icon as `application(_:open:)`, Open Recent, a drop, the
+    /// cedric script) while the sidebar shows another folder switches the
+    /// sidebar to the file's folder, the file selected, the sidebar docked
+    /// in the file's own tab (text, image, PDF, a big file read in the
+    /// background). Opens from inside the app (a sidebar click, Quick Open,
+    /// a preview or wiki link, a restored tab) and a hidden or closed
+    /// sidebar leave the folder alone; so do a refused file and a file
+    /// reached through a link into the loaded folder.
+    static func folderSwitchSteps(_ app: AppDelegate) -> [Step] {
+        let fm = FileManager.default
+        func folder(_ name: String) -> URL { dir.appendingPathComponent("switch/\(name)", isDirectory: true) }
+        let a = folder("A"), b = folder("B"), img = folder("Img"), pdf = folder("PDF"), recent = folder("Recent"),
+            cli = folder("CLI"), drop = folder("Drop"), big = folder("Big"), other = folder("Other")
+        _ = write("switch/A/a1.md", "# A\n")
+        _ = write("switch/A/sub/a2.md", "# A2\n")
+        let welcome = write("switch/B/Welcome.md", "# Welcome\n")
+        _ = write("switch/B/zz-other.md", "other\n")
+        let recentFile = write("switch/Recent/recent.md", "recent\n")
+        let cliFile = write("switch/CLI/cli.md", "cli\n")
+        let dropFile = write("switch/Drop/drop.md", "drop\n")
+        let bigText = write("switch/Big/big.log", "")
+        let bigLine = "a line of a big log, read in the background\n"
+        try? Data(String(repeating: bigLine, count: AppDelegate.backgroundOpenBytes / bigLine.utf8.count + 1000).utf8).write(to: bigText)
+        let small = write("switch/Big/small.txt", "small\n")
+        let outsideFiles = ["click.md", "quick.md", "link.md", "wiki.md", "restored.md"].map { write("switch/Other/\($0)", "\($0)\n") }
+        let hiddenFile = write("switch/Hidden/hidden.md", "hidden\n")
+        let closedFile = write("switch/Hidden/closed.md", "closed\n")
+        let image = img.appendingPathComponent("pic.tiff")
+        let pdfFile = pdf.appendingPathComponent("doc.pdf")
+        let fifo = other.appendingPathComponent("pipe")
+        // A link outside the loaded folder into it.
+        let linkIntoBig = dir.appendingPathComponent("switch/big-link")
+        var sidebar: FolderSidebar? { FolderSidebar.shared }
+        func root() -> String { sidebar?.rootURL.path ?? "nil" }
+        func selected() -> String { sidebar?.selectedNode?.url.lastPathComponent ?? "nil" }
+        func textTab(_ u: URL) -> EditorWindowController? { app.tabs.first { $0.doc.fileURL?.standardizedFileURL == u.standardizedFileURL } }
+        func docked(_ w: NSWindow?) -> Bool { w != nil && sidebar?.window === w && sidebar?.isShown == true }
+        func switchedTo(_ f: URL, file: URL, _ what: String) -> (@escaping () -> Void) -> Void {
+            until("\(what): the sidebar shows \(f.lastPathComponent) with \(file.lastPathComponent) selected", timeout: 4) {
+                root() == f.path && selected() == file.lastPathComponent
+            }
+        }
+        func dockedInText(_ file: URL, _ what: String) -> (@escaping () -> Void) -> Void {
+            sync { expect(docked(textTab(file)?.window), "\(what): the sidebar is docked in the file's tab",
+                          "root=\(root()) sidebar window=\(sidebar?.window?.title ?? "nil")") }
+        }
+        func unchanged(_ was: String, _ what: String) {
+            expect(root() == was, "\(what) leaves the folder alone", "root=\(root()) was \(was)")
+        }
+        return [
+            sync {
+                let pdfMade = makePDF(pdfFile, pages: 1)
+                let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4,
+                                           hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+                try? fm.createDirectory(at: img, withIntermediateDirectories: true)
+                try? rep?.tiffRepresentation?.write(to: image)
+                expect(pdfMade && fm.fileExists(atPath: image.path) && mkfifo(fifo.path, 0o600) == 0
+                       && (try? fm.createSymbolicLink(atPath: linkIntoBig.path, withDestinationPath: big.path)) != nil,
+                       "switch fixtures made")
+                app.openFolder(a)
+            },
+            until("folder A is listed", timeout: 4) { root() == a.path && sidebar?.root.isLoaded == true && sidebar?.isShown == true },
+            // Finder double-click / Open With / a file dropped on the Dock icon.
+            sync { app.application(NSApp, open: [welcome]) },
+            switchedTo(b, file: welcome, "Finder open"),
+            dockedInText(welcome, "Finder open"),
+            // An image: a viewer tab.
+            sync { app.application(NSApp, open: [image]) },
+            switchedTo(img, file: image, "image open"),
+            sync { expect(docked(app.viewerTab(for: image)?.window), "image open: the sidebar is docked in the image tab", "root=\(root())") },
+            // A PDF dropped on a window.
+            sync { FileDrop.open([pdfFile]) },
+            switchedTo(pdf, file: pdfFile, "PDF drop"),
+            sync { expect(docked(app.viewerTab(for: pdfFile)?.window), "PDF drop: the sidebar is docked in the PDF tab", "root=\(root())") },
+            // File › Open Recent.
+            sync {
+                let item = NSMenuItem()
+                item.representedObject = recentFile
+                app.openRecentItem(item)
+            },
+            switchedTo(recent, file: recentFile, "Open Recent"),
+            dockedInText(recentFile, "Open Recent"),
+            // The cedric script (cedric://open?path=…, with its token).
+            sync { openURL(app, "cedric://open?path=" + (cliFile.path.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")) },
+            switchedTo(cli, file: cliFile, "cedric script"),
+            dockedInText(cliFile, "cedric script"),
+            // A file already open, opened again from outside: brought to front, folder switched.
+            sync { app.application(NSApp, open: [welcome]) },
+            switchedTo(b, file: welcome, "re-opening an open file"),
+            dockedInText(welcome, "re-opening an open file"),
+            // Several files at once: the last one's folder.
+            sync { app.application(NSApp, open: [recentFile, dropFile]) },
+            switchedTo(drop, file: dropFile, "two files at once"),
+            dockedInText(dropFile, "two files at once"),
+            // A text file of 16 MB or more: read in the background, switched once its tab is there.
+            sync { app.application(NSApp, open: [bigText]) },
+            until("big file: its tab arrives", timeout: 20) { textTab(bigText) != nil },
+            switchedTo(big, file: bigText, "big file"),
+            dockedInText(bigText, "big file"),
+            sync {
+                let was = root()
+                // Through a link outside the folder into it: inside, no switch.
+                app.application(NSApp, open: [linkIntoBig.appendingPathComponent("small.txt")])
+                unchanged(was, "a file reached through a link into the folder")
+                expect(textTab(small) != nil || app.tabs.contains { $0.doc.fileURL?.lastPathComponent == "small.txt" }, "the linked file opened")
+                // Refused (a FIFO): no switch.
+                app.application(NSApp, open: [fifo])
+                unchanged(was, "a refused file")
+                // Opens from inside the app.
+                let (click, quick, link, wiki, restored) = (outsideFiles[0], outsideFiles[1], outsideFiles[2], outsideFiles[3], outsideFiles[4])
+                app.openFromFolder(FolderNode(url: click, entry: FolderEntry(name: click.lastPathComponent, isDirectory: false)))
+                unchanged(was, "a sidebar click")
+                CommandPalette.openFile(quick)
+                unchanged(was, "Quick Open")
+                guard let host = textTab(bigText) else { expect(false, "big file tab for the link opens"); return }
+                host.previewLink(.openInCedric(link))
+                unchanged(was, "a preview link")
+                host.openWikiNote(wiki, heading: nil)
+                unchanged(was, "a wiki link")
+                app.restoreTab(SessionTab(path: restored.path), into: nil)
+                unchanged(was, "a restored tab")
+                expect([click, quick, link, wiki, restored].allSatisfy { textTab($0) != nil }, "the inside-the-app opens made their tabs")
+                // Hidden: the folder stays, still hidden.
+                sidebar?.hide()
+                app.application(NSApp, open: [hiddenFile])
+                expect(root() == was && sidebar?.isShown == false, "a hidden sidebar is not switched or shown", "root=\(root())")
+                // No folder open: none is opened.
+                app.closeFolder()
+                app.application(NSApp, open: [closedFile])
+                expect(FolderSidebar.shared == nil && FolderSidebar.pendingFolder == nil, "no folder open: none is opened")
+            },
+        ]
     }
 }
 

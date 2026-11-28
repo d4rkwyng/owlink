@@ -158,6 +158,19 @@ public enum FolderTree {
         return URL(fileURLWithPath: parent.path, isDirectory: true)
     }
 
+    /// The folder the sidebar switches to when the user opens `file` from
+    /// outside the app (0.6.1). Not written yet: always nil.
+    public static func folderToSwitchTo(opening file: URL, loadedRoot: URL?, sidebarShown: Bool,
+                                        isRegularFile: (String) -> Bool = FolderTree.isRegularFile) -> URL? {
+        nil
+    }
+
+    /// Whether `path` is a regular file (a symbolic link followed).
+    public static func isRegularFile(_ path: String) -> Bool {
+        var st = stat()
+        return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG
+    }
+
     /// Whether two paths or names are the same UTF-8 bytes. Swift's `==`
     /// is canonical equivalence. Same bytes is only ever a fast "yes, the
     /// same name"; different bytes never mean "a different file": APFS
