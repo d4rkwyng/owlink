@@ -231,7 +231,7 @@ extension DevChecks {
 
     static func dailyUseFlows(_ app: AppDelegate) {
         let h = DailyUseHarness.main
-        DailyUseHarness.startHangWatchdog()
+        startHangWatchdog()
         let t0 = CFAbsoluteTimeGetCurrent()
         let fx = dailyUseFixture()
         h.note("fixture in \(dir.path) (\(fx.files.count) files to click; \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms to write)")
@@ -400,8 +400,10 @@ extension DevChecks {
                             if text.contains("Daily Use Readme") || tries > 50 {
                                 h.check(text.contains("Daily Use Readme"), "preview \(round): the heading is rendered", "h1 “\(text)”")
                                 previewJS(t, "document.querySelectorAll('pre code').length + ',' + document.querySelectorAll('a[href]').length") { v in
-                                    h.check((v as? String).map { $0.split(separator: ",").map { Int($0) ?? 0 } }.map { $0.count == 2 && $0[0] >= 1 && $0[1] >= 2 } == true,
-                                            "preview \(round): the code block and links are rendered", "code,links = \(v ?? "nil")")
+                                    let raw = (v as? String) ?? "nil"
+                                    let parts = raw.split(separator: ",").compactMap { Int($0) }
+                                    h.check(parts.count == 2 && parts[0] >= 1 && parts[1] >= 2,
+                                            "preview \(round): the code block and links are rendered", "code,links = \(raw)")
                                     next()
                                 }
                             } else {
