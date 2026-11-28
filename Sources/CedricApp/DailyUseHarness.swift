@@ -205,7 +205,9 @@ final class HangWatchdog: @unchecked Sendable {
         RunLoop.main.add(beat, forMode: .common)
         let t = DispatchSource.makeTimerSource(queue: .global(qos: .userInteractive))
         t.schedule(deadline: .now() + 1, repeating: 0.5)
-        t.setEventHandler { [weak self] in self?.tick(out: out) }
+        // @Sendable: it runs on the timer's queue, not on the main actor
+        // this function is on (else the runtime warns of a data race at each tick).
+        t.setEventHandler { @Sendable [weak self] in self?.tick(out: out) }
         t.resume()
         timer = t
     }

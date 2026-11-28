@@ -70,13 +70,17 @@ log). A divider drag is not taken by an inactive app's split view, so the
 sidebar width is checked against its saved width, not after a drag.
 
 Coverage gap, reported as a `SKIP` in every run: a live two-finger swipe
-comes from the window server and is followed by AppKit's
-`NSEvent.trackSwipeEvent`, which takes an active session and a trackpad.
-The pass makes scroll-wheel events with gesture phases in process; such
-events carry no window, so they are handed to the web view and pass by
-the app's event monitors. The `preview-swipe-back` marker is therefore
-only as good as that: when the swipe merges, drive its handler here as
-`CEDRIC_CHECK=previewswipe` does, and swipe once by hand.
+comes from the window server and is followed by AppKit's swipe tracking,
+which takes an active session and a trackpad. The pass makes scroll-wheel
+events with gesture phases in process and posts them to the app's event
+queue for the preview's window. Main takes no swipe, so
+`preview-swipe-back` fails there for the right reason. But a build with
+feat/sidebar-folder-browsing merged does not take the synthesized events
+either (checked 2026-11-28; `folder-up` and `folder-goto` do flip to
+UNEXPECTED-PASS on that build): this one marker does not flip by itself.
+Whoever merges the swipe replaces the gesture in the flow with the
+swipe's handlers, as `CEDRIC_CHECK=previewswipe` drives them, removes the
+marker, and swipes once by hand.
 
 A main-thread watchdog fails the run (`check: FAIL hang in <step>`, a
 `sample` of the process in `hang-sample.txt`) when the run loop has not
@@ -150,8 +154,12 @@ exits 1 and launches nothing: the check build itself (which has the
 user's bundle id) is never run, and the checks refuse to run in it
 (`check: FAIL isolation: …`). Each launch prints the bundle id, the app
 path, the folders and the suite it runs with; the runner compares that
-with what it set, and checks that `net.mindtricks.cedric`'s defaults and
-recent-documents list did not change. It does not look inside
+with what it set. It also checks that none of the pass's fixture files
+came into `net.mindtricks.cedric`'s recent-documents list (that list
+changing without them is another check lane or your own Owlink: a note),
+and that `net.mindtricks.cedric`'s defaults did not change (a change
+while another process named Cedric was seen cannot be pinned on the
+pass: a SKIP; with none seen: a FAIL). It does not look inside
 `~/Library/Application Support/Cedric`.
 
 ## Output

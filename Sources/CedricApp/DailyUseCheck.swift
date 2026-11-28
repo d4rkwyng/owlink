@@ -321,9 +321,10 @@ extension DevChecks {
     /// scroll-wheel events with gesture phases (began, changed…, ended),
     /// posted to the app's event queue so they pass the app's event
     /// monitors and reach the view under them. Says what it sent. These
-    /// are synthesized events: AppKit's own swipe tracking
-    /// (NSEvent.trackSwipeEvent) follows a live gesture from the window
-    /// server, which no check can produce (the caller reports that gap).
+    /// are synthesized events, not a live gesture from the window server
+    /// (the caller reports that gap): on a build with
+    /// feat/sidebar-folder-browsing merged they are not taken as a swipe
+    /// (checked 2026-11-28).
     static func dailySwipeRight(over view: NSView) -> String {
         guard let w = view.window, let primary = NSScreen.screens.first else { return "not sent: the view has no window" }
         let inWindow = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
@@ -335,6 +336,9 @@ extension DevChecks {
             cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
             cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(w.windowNumber))
             cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(w.windowNumber))
+            // The window an event made in process belongs to (the window
+            // server's own event field, 51: not in the public headers).
+            if let field = CGEventField(rawValue: 51) { cg.setIntegerValueField(field, value: Int64(w.windowNumber)) }
             cg.location = CGPoint(x: onScreen.x, y: primary.frame.height - onScreen.y)
             return NSEvent(cgEvent: cg)
         }
@@ -347,8 +351,13 @@ extension DevChecks {
         let made = events.compactMap { $0 }
         let what = "\(made.count) scroll events (\(sign > 0 ? "+" : "-")x, phases began/changed/ended\(first.phase == .began ? "" : ", the phase not read back"))"
         if first.window === w {
-            for e in made { NSApp.postEvent(e, atStart: false) }
-            return "posted \(what) to the app's event queue for the preview's window"
+            // 50 ms apart (what takes a swipe may ask the page something
+            // between the first event and the next).
+            for (i, e) in made.enumerated() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05 * Double(i)) { NSApp.postEvent(e, atStart: false) }
+            }
+            return "posted \(what), 50 ms apart, to the app's event queue for the preview's window "
+                + "(System Settings › Trackpad › Swipe between pages is \(NSEvent.isSwipeTrackingFromScrollEventsEnabled ? "on" : "OFF: no build swipes then"))"
         }
         // An event made in process carries no window, so the app's queue
         // has nowhere to send it: handed to the view, as its window would
@@ -636,18 +645,20 @@ extension DevChecks {
             let sent = dailySwipeRight(over: p.webView)
             h.note("preview swipe: \(sent)")
             DailyUseHarness.poll(2, { p.isHome }) { _ in
-                // The coverage gap, said out loud: what was sent is not a
-                // live gesture. A build whose swipe is driven by AppKit's
-                // tracking of a live gesture may not take it.
+                // The coverage gap, said out loud in every run: what was sent
+                // is not a live gesture.
                 h.skip("preview swipe (live trackpad gesture)", "not covered: the pass \(sent). "
-                       + "A live two-finger swipe comes from the window server (through the app's event monitors, then AppKit's NSEvent.trackSwipeEvent), "
-                       + "which takes an active session and a trackpad. Swipe by hand on a build that has the swipe; "
-                       + "on feat/sidebar-folder-browsing CEDRIC_CHECK=previewswipe drives its handlers")
+                       + "A live two-finger swipe comes from the window server and is followed by AppKit's swipe tracking, "
+                       + "which takes an active session and a trackpad: a build with the swipe (feat/sidebar-folder-browsing merged, checked 2026-11-28) "
+                       + "does not take these synthesized events, so preview-swipe-back stays KNOWN-BUG there too. "
+                       + "Swipe by hand on a build that has it; CEDRIC_CHECK=previewswipe on that branch drives its handlers")
                 // KNOWN BUG on main, fixed on feat/sidebar-folder-browsing
                 // (PreviewSwipe): nothing in the preview takes a swipe.
-                // Remove this marker when that merges; if the synthesized
-                // gesture is not taken there, drive PreviewSwipe as
-                // CEDRIC_CHECK=previewswipe does, here.
+                // This marker does NOT flip by itself when that merges (the
+                // synthesized gesture is not taken, see the SKIP above):
+                // whoever merges it replaces the gesture here with
+                // PreviewSwipe's handlers, as CEDRIC_CHECK=previewswipe
+                // drives them, and removes the marker.
                 h.knownBug(id: "preview-swipe-back", note: "two fingers swiped right over a linked page in the preview do not go back (no swipe in the preview)") {
                     h.check(p.isHome, "preview swipe: the swipe goes back to the document", "still on \(p.navigationTitle); \(sent)")
                 }
@@ -879,7 +890,27 @@ extension DevChecks {
                         } else {
                             f.stringValue = fx.b.path
                         }
-                        pressReturn(in: panel)
+                        // Return. A key sheet takes it as its default button's key
+                        // equivalent; the sheet of an inactive app is not key, so
+                        // the key goes to the path field, as typed there. (Not a
+                        // synthetic click on the button: its tracking loop never
+                        // ends in a sheet of an inactive app.)
+                        func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(all) }
+                        var how = "Return could not be made"
+                        if let ret = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                                      windowNumber: panel.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r",
+                                                      isARepeat: false, keyCode: 36) {
+                            if panel.performKeyEquivalent(with: ret) {
+                                how = "Return taken as the sheet's key equivalent"
+                            } else {
+                                panel.makeFirstResponder(f)
+                                panel.sendEvent(ret)
+                                how = "Return typed in the path field"
+                            }
+                        }
+                        let labels = panel.contentView.map(all)?.compactMap { $0 as? NSTextField }
+                            .filter { !$0.isEditable && !$0.isHiddenOrHasHiddenAncestor && !$0.stringValue.isEmpty }.map(\.stringValue) ?? []
+                        h.note("folders go to: the field holds “\(f.stringValue)”; \(how); the sheet says \(labels)")
                     }
                     DailyUseHarness.poll(shown ? 3 : 0, { listed(fx.b) }) { _ in
                         // KNOWN BUG on main, fixed on feat/sidebar-folder-browsing

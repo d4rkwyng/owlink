@@ -38,9 +38,12 @@
 # If that copy cannot be made, signed and read back, the script exits 1
 # and launches nothing: the check build itself is never run. The script
 # checks that every launch reported the copy, the scratch folders and the
-# scratch suite, and that net.mindtricks.cedric's defaults and its
-# recent-documents list did not change (a change there may be the user's
-# own Owlink, which is reported). It does not look inside
+# scratch suite; that none of the pass's fixture files (cedric-check-
+# dailyuse*) came into net.mindtricks.cedric's recent-documents list (a
+# change there without them is another check lane or the user's own
+# Owlink: a note); and that net.mindtricks.cedric's defaults did not
+# change (a change while another process named Cedric was seen cannot be
+# pinned on the pass: a SKIP). It does not look inside
 # ~/Library/Application Support/Cedric.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -161,16 +164,24 @@ BIN="$RUNAPP/Contents/MacOS/Cedric"
 # documents. (Nothing here looks inside ~/Library/Application Support/Cedric.)
 defaults export "$REAL" "$W/defaults-before.plist" 2>/dev/null || : > "$W/defaults-before.plist"
 recents_sum() { { cat "$RECENTS/$REAL".sfl* 2>/dev/null || true; } | shasum | awk '{print $1}'; }
+# The pass's fixture folders (cedric-check-dailyuse…-PID in the temp
+# folder) named in the real list: a file of the pass that went there.
+ours_in_recents() { { cat "$RECENTS/$REAL".sfl* 2>/dev/null || true; } | strings | grep -oE 'cedric-check-dailyuse[a-z]*-[0-9]+' | sort -u || true; }
 RECENTS_BEFORE=$(recents_sum)
+ours_in_recents > "$W/ours-before.txt"
 touch "$W/marker"
-own_running() { pgrep -x Cedric >/dev/null && echo yes || echo no; }
-OWN_BEFORE=$(own_running)
+# Another process named Cedric (another check lane, the user's own Owlink):
+# looked for whenever the pass itself has no launch running.
+OTHER=no
+note_other() { if pgrep -x Cedric >/dev/null; then OTHER=yes; fi; }
+note_other
 
 # This invocation's logs: the summary and the exit status read these only.
 LOGS=()
 run_check() { # NAME TIMEOUT env...
     local name=$1 timeout=$2; shift 2
     LOGS+=("$OUT/$name.log")
+    note_other
     env "$@" CEDRIC_SESSION_DIR="$W/session-$name" perl -e "alarm $timeout; exec @ARGV" "$BIN" -ApplePersistenceIgnoreState YES \
         > "$OUT/$name.log" 2> "$OUT/$name.stderr.log" || true
     grep -q "^check: done" "$OUT/$name.log" || echo "check: FAIL $name: the launch ended without its summary (crash, hang or timeout after $timeout s)" >> "$OUT/$name.log"
@@ -252,20 +263,36 @@ if [ $FLOWS_ONLY = 0 ]; then
 fi
 
 # Isolation: every launch was the copy with the scratch folders and
-# suite, and nothing of the real domain's defaults or recents changed.
+# suite; none of the pass's files are in the real recent documents; the
+# real domain's defaults did not change.
 ISO_FAIL=
+ISO_NOTE=
+ISO_SKIP=
+note_other
 defaults export "$REAL" "$W/defaults-after.plist" 2>/dev/null || : > "$W/defaults-after.plist"
-own_note=
-[ "$OWN_BEFORE" = yes ] || [ "$(own_running)" = yes ] && own_note=" (a process named Cedric other than the pass ran: the user's own Owlink may have made the change)"
 if [ -n "$ISO_BAD" ]; then ISO_FAIL="these launches did not report the copy ($DOMAIN at $RUNAPP) with the scratch folders and suite: $ISO_BAD"; fi
-if ! cmp -s "$W/defaults-before.plist" "$W/defaults-after.plist"; then ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }$REAL defaults changed during the run$own_note"; fi
-if [ "$RECENTS_BEFORE" != "$(recents_sum)" ]; then ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }$REAL's recent-documents list changed during the run$own_note"; fi
+ours_in_recents > "$W/ours-after.txt"
+LEAKED=$(comm -13 "$W/ours-before.txt" "$W/ours-after.txt" | tr '\n' ' ')
+if [ -n "$LEAKED" ]; then
+    ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }files of the pass came into $REAL's recent-documents list: $LEAKED"
+elif [ "$RECENTS_BEFORE" != "$(recents_sum)" ]; then
+    ISO_NOTE="$REAL's recent-documents list changed during the run, with none of the pass's files in it (another check lane or the user's own Owlink)"
+fi
+if ! cmp -s "$W/defaults-before.plist" "$W/defaults-after.plist"; then
+    if [ $OTHER = yes ]; then
+        ISO_SKIP="$REAL's defaults changed during the run while another process named Cedric ran (another check lane or the user's own Owlink): it cannot be pinned on the pass"
+    else
+        ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }$REAL's defaults changed during the run, and no other process named Cedric was seen"
+    fi
+fi
 LOGS+=("$OUT/isolation.log")
 if [ -n "$ISO_FAIL" ]; then
     echo "check: FAIL isolation: $ISO_FAIL" > "$OUT/isolation.log"
 else
-    echo "check: PASS isolation: $ISO_OK launches ran as the copy ($DOMAIN) with scratch session, undo and models folders and the scratch AI suite; $REAL's defaults and recent-documents list unchanged" > "$OUT/isolation.log"
+    echo "check: PASS isolation: $ISO_OK launches ran as the copy ($DOMAIN) with scratch session, undo and models folders and the scratch AI suite; none of the pass's files are in $REAL's recent documents${ISO_SKIP:+ (defaults: see the SKIP)}${ISO_SKIP:-; its defaults are unchanged}" > "$OUT/isolation.log"
 fi
+[ -z "$ISO_SKIP" ] || echo "check: SKIP isolation (the real defaults): $ISO_SKIP" >> "$OUT/isolation.log"
+[ -z "$ISO_NOTE" ] || echo "check: note: $ISO_NOTE" >> "$OUT/isolation.log"
 
 RUNTIME=$(( $(date +%s) - T_START ))
 # The summary.

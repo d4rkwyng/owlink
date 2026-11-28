@@ -133,6 +133,33 @@ import Testing
         #expect(out.contains("check: FAIL isolation: these launches did not report the copy"), "\(out)")
     }
 
+    /// The recent-documents tripwire is about the pass's own files: one of
+    /// them in the real app's list fails the run; that list changing
+    /// without them (another check lane, the user's own Owlink) does not.
+    @Test(arguments: [true, false]) func onlyThePassesOwnFilesInTheRealRecentsFail(ours: Bool) throws {
+        let f = try fixture()
+        defer { try? FileManager.default.removeItem(at: f.dir) }
+        let exe = f.app.appendingPathComponent("Contents/MacOS/Cedric")
+        let name = ours ? "cedric-check-dailyuse-4242" : "cedric-check-folder-4242"
+        // The stand-in writes into the (test HOME's) real list, as a leak or as another lane would.
+        let text = try String(contentsOf: exe, encoding: .utf8).replacingOccurrences(of: "echo \"check: PASS stand-in", with: """
+            d="$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
+            mkdir -p "$d" && echo "/tmp/\(name)/A/readme.md" >> "$d/net.mindtricks.cedric.sfl4"
+            echo "check: PASS stand-in
+            """)
+        try text.write(to: exe, atomically: true, encoding: .utf8)
+        let (status, out) = try run(f, ["--flows-only"])
+        let isolation = try String(contentsOf: f.out.appendingPathComponent("isolation.log"), encoding: .utf8)
+        if ours {
+            #expect(status == 1, "\(out)")
+            #expect(isolation.contains("check: FAIL isolation: files of the pass came into net.mindtricks.cedric's recent-documents list: cedric-check-dailyuse-4242"), "\(isolation)")
+        } else {
+            #expect(status == 0, "\(out)")
+            #expect(isolation.hasPrefix("check: PASS isolation: 2 launches ran as the copy"), "\(isolation)")
+            #expect(isolation.contains("check: note: net.mindtricks.cedric's recent-documents list changed during the run, with none of the pass's files in it"), "\(isolation)")
+        }
+    }
+
     /// The runner does not look inside the protected support folder.
     @Test func theRunnerDoesNotInspectTheSupportFolder() throws {
         let code = try String(contentsOf: Self.script, encoding: .utf8).split(separator: "\n").filter { !$0.drop(while: { $0 == " " }).hasPrefix("#") }
