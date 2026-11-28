@@ -14,11 +14,14 @@ import CedricCore
 ///               title, text shown, no second tab, the row selected,
 ///               binary held (an encoding-guess bar on .pcap/.bin is correct)
 ///   3 preview   Markdown preview on and off, twice: width, no overlap,
-///               the heading rendered, the editor's width back
+///               the heading rendered, the editor's width back; then a
+///               local link followed in the preview (its history entry),
+///               a two-finger swipe back, and the bar's Back button
 ///   4 recent    File › Open Recent lists the fixture files; choosing one
 ///               opens it (and from outside the folder: the sidebar)
 ///   5 folders   switching folders B → A: root, rows, selection, the
-///               docked width, the tabs
+///               docked width, the tabs; then File › Up One Folder from
+///               A/sub and File › Go to Folder… to B: the resulting root
 ///   6 settings  every Settings pane opened with ⌘,: at most 700 pt tall,
 ///               nothing cut off, truncated or overlapping
 ///   7 longline  a 5 MB one-line (base64-like) file in long-line mode:
@@ -37,6 +40,21 @@ import CedricCore
 ///                         file when that file is in the opened folder (no
 ///                         fix branch yet). Open Enclosing Folder does, via
 ///                         reveal:.
+///   folder-up             no Up One Folder: fixed on feat/sidebar-folder-browsing
+///   folder-goto           no Go to Folder…: fixed on feat/sidebar-folder-browsing
+///   preview-swipe-back    no swipe back in the preview: fixed on
+///                         feat/sidebar-folder-browsing
+///
+/// Every marker's inputs are checked by plain assertions outside it (the
+/// file opened, the folder listed immediately before, the keystrokes
+/// arrived), so a broken flow is a FAIL and not a "known bug".
+///
+/// CEDRIC_DAILYUSE_FAULT (comma separated) breaks the flow on purpose, to
+/// prove those plain assertions:
+///   drop-typing           the Markdown flow's keystrokes are not sent
+///   first-open-follows    after the Finder-style open the sidebar is moved
+///                         to folder B, as a build with sidebar-follow fixed
+///                         would leave it
 @MainActor
 extension DevChecks {
     /// The fixture: folder A (a mixed set) and folder B elsewhere in the temp folder.
@@ -275,6 +293,70 @@ extension DevChecks {
         return m
     }
 
+    /// A main-menu item by its action's name or its title (the folder
+    /// commands are looked up at run time: main does not have them yet).
+    static func dailyMenuItem(actions: [String], titles: [String]) -> NSMenuItem? {
+        func find(_ m: NSMenu) -> NSMenuItem? {
+            for i in m.items {
+                if let a = i.action, actions.contains(NSStringFromSelector(a)) { return i }
+                if titles.contains(i.title) { return i }
+                if let sub = i.submenu, let f = find(sub) { return f }
+            }
+            return nil
+        }
+        return NSApp.mainMenu.flatMap(find)
+    }
+
+    /// Chooses a menu item as a user would: the menu validates it, then
+    /// its action goes where AppKit sends it. False when it is disabled.
+    static func dailyChoose(_ item: NSMenuItem) -> Bool {
+        guard let menu = item.menu else { return false }
+        menu.update()
+        guard item.isEnabled else { return false }
+        menu.performActionForItem(at: menu.index(of: item))
+        return true
+    }
+
+    /// Two fingers swiped right over `view`, as the trackpad reports it:
+    /// scroll-wheel events with gesture phases (began, changed…, ended),
+    /// posted to the app's event queue so they pass the app's event
+    /// monitors and reach the view under them. Says what it sent. These
+    /// are synthesized events: AppKit's own swipe tracking
+    /// (NSEvent.trackSwipeEvent) follows a live gesture from the window
+    /// server, which no check can produce (the caller reports that gap).
+    static func dailySwipeRight(over view: NSView) -> String {
+        guard let w = view.window, let primary = NSScreen.screens.first else { return "not sent: the view has no window" }
+        let inWindow = view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
+        let onScreen = w.convertPoint(toScreen: inWindow)
+        func event(_ dx: Int32, _ phase: Int64) -> NSEvent? {
+            guard let cg = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: 0, wheel2: dx, wheel3: 0) else { return nil }
+            cg.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+            cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+            cg.setIntegerValueField(.scrollWheelEventMomentumPhase, value: 0)
+            cg.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(w.windowNumber))
+            cg.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(w.windowNumber))
+            cg.location = CGPoint(x: onScreen.x, y: primary.frame.height - onScreen.y)
+            return NSEvent(cgEvent: cg)
+        }
+        // CGScrollPhase: 1 began, 2 changed, 4 ended.
+        guard let first = event(1, 1) else { return "not sent: no scroll event could be made" }
+        // Fingers moving right: a positive delta with Natural Scrolling
+        // (the event says which it is), a negative one without.
+        let sign: Int32 = first.isDirectionInvertedFromDevice ? 1 : -1
+        let events = [event(sign * 6, 1)] + (0..<14).map { _ in event(sign * 40, 2) } + [event(0, 4)]
+        let made = events.compactMap { $0 }
+        let what = "\(made.count) scroll events (\(sign > 0 ? "+" : "-")x, phases began/changed/ended\(first.phase == .began ? "" : ", the phase not read back"))"
+        if first.window === w {
+            for e in made { NSApp.postEvent(e, atStart: false) }
+            return "posted \(what) to the app's event queue for the preview's window"
+        }
+        // An event made in process carries no window, so the app's queue
+        // has nowhere to send it: handed to the view, as its window would
+        // (the app's event monitors do not see these).
+        for e in made { view.scrollWheel(with: e) }
+        return "handed \(what) to the web view itself: an event made in process carries no window, so the app's event queue and its event monitors are passed by"
+    }
+
     static func dailyLoad() -> DailyUseLoad {
         var l = [Double](repeating: 0, count: 3)
         _ = getloadavg(&l, 3)
@@ -290,6 +372,8 @@ extension DevChecks {
         let fx = dailyUseFixture()
         h.note("fixture in \(dir.path) (\(fx.files.count) files to click; \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms to write)")
         h.note("app active=\(NSApp.isActive) key window=\(NSApp.keyWindow != nil) bundle=\(Bundle.main.bundleIdentifier ?? "-")")
+        let faults = Set((DevEnvironment.values["CEDRIC_DAILYUSE_FAULT"] ?? "").split(separator: ",").map(String.init))
+        if !faults.isEmpty { h.note("FAULTS injected on purpose (CEDRIC_DAILYUSE_FAULT): \(faults.sorted())") }
         // Local wrappers: a `let step = DailyUseHarness.step` function
         // value drops argument labels and default values, so
         // `step(name, snapshot: false) { … }` does not compile.
@@ -342,9 +426,28 @@ extension DevChecks {
                     }
                 }
             },
+            // The File › Open case does not lean on the case before: whatever
+            // the sidebar did there (fixed, it is on folder B by now), it
+            // goes back to folder A, and A listed is asserted right before
+            // the open, so the file is from outside the sidebar's folder.
+            step("outside-file-open-reset", snapshot: false) { next in
+                guard faults.contains("first-open-follows") else { next(); return }
+                h.note("fault first-open-follows: moving the sidebar to folder B, as a build with sidebar-follow fixed leaves it")
+                app.openFolder(fx.b)
+                DailyUseHarness.poll(5, { s?.rootURL.standardizedFileURL == fx.b.standardizedFileURL && s?.root.isLoaded == true }) { _ in next() }
+            },
+            sync("outside-file-open-to-a", snapshot: false) {
+                if s?.rootURL.standardizedFileURL != fx.a.standardizedFileURL { app.openFolder(fx.a) }
+            },
+            waitListed(fx.a, "outside-file-open-a-listed"),
             step("outside-file-open-path") { next in
                 // File › Open…'s code path after its panel (openDocument: open(url, background: true)).
                 let file = fx.bFiles[1]
+                h.check(s?.rootURL.standardizedFileURL == fx.a.standardizedFileURL && s?.root.isLoaded == true && dailyRow(fx.readme) >= 0,
+                        "outside (File › Open): folder A is listed in the sidebar immediately before the open",
+                        "root=\(s?.rootURL.path ?? "none") loaded=\(s?.root.isLoaded ?? false)")
+                h.check(dailyTab(app, file) == nil && FolderTree.relativePath(of: file.standardizedFileURL, in: fx.a.standardizedFileURL) == nil,
+                        "outside (File › Open): other.txt is not open yet and is outside folder A")
                 app.open(file, background: true)
                 h.check(dailyTab(app, file) != nil, "outside: File › Open's path (open(_:background:)) opens other.txt from B")
                 if let t = dailyTab(app, file) { sized(t) }
@@ -484,13 +587,103 @@ extension DevChecks {
             })
         }
 
-        // 4. Open Recent.
-        let ownRecents = Bundle.main.bundleIdentifier == "net.mindtricks.cedric.dailyuse"
-        steps.append(sync("recent-menu") {
-            guard ownRecents else {
-                h.skip("recent", "this build shares the user's recent-documents list (bundle \(Bundle.main.bundleIdentifier ?? "-")); Scripts/daily-use.sh runs a copy with its own")
-                return
+        // 3b. A link followed in the preview, a swipe back, the Back button.
+        steps.append(step("preview-nav-on") { next in
+            guard let t = readmeTab else { h.check(false, "preview nav: readme.md is open"); next(); return }
+            focus(t)
+            key("p", [.command, .option])
+            dailyPreviewRendered(since: CFAbsoluteTimeGetCurrent(), web: { t.previewVisible ? t.preview?.webView : nil }, heading: "Daily Use Readme",
+                                 timeout: 5, window: { t.window }) { ms in
+                h.check(ms != nil, "preview nav: the preview shows readme.md's heading")
+                h.check(t.preview?.isHome == true && t.preview?.canGoBack == false, "preview nav: it starts on the document, with nothing to go back to")
+                next()
             }
+        })
+        steps.append(step("preview-follow-link") { next in
+            guard let t = readmeTab, let p = t.preview else { h.check(false, "preview nav: the preview is showing"); next(); return }
+            let tabs = dailyTabCount(app)
+            // A real click where the link is drawn; an inactive web view may
+            // not take it, then the link is activated in the page (noted).
+            previewJS(t, "(() => { const a = document.querySelector('a[href=\"notes.md\"]'); if (!a) return null; const r = a.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2] })()") { v in
+                let xy = (v as? [NSNumber])?.map(\.doubleValue) ?? []
+                h.check(xy.count == 2, "preview nav: the local link to notes.md is in the page", "\(String(describing: v))")
+                if xy.count == 2 {
+                    let web = p.webView
+                    let scale = Double(web.pageZoom * web.magnification)
+                    click(web, at: NSPoint(x: xy[0] * scale, y: web.isFlipped ? xy[1] * scale : Double(web.bounds.height) - xy[1] * scale))
+                }
+                DailyUseHarness.poll(1, { !p.isHome }) { taken in
+                    if !taken {
+                        h.note("synthetic click not taken by the inactive web view; activating the link in the page as the click would")
+                        previewJS(t, "document.querySelector('a[href=\"notes.md\"]').click(); 1") { _ in }
+                    }
+                    dailyPreviewRendered(since: CFAbsoluteTimeGetCurrent(), web: { p.webView }, heading: "Notes", timeout: 5, window: { t.window }) { ms in
+                        h.check(ms != nil, "preview nav: following the link shows notes.md's heading in the preview")
+                        h.check(!p.isHome && p.navigationTitle == "notes.md" && p.canGoBack && !p.canGoForward,
+                                "preview nav: the preview's history entry is notes.md, with Back available",
+                                "home=\(p.isHome) title=\(p.navigationTitle) back=\(p.canGoBack) forward=\(p.canGoForward)")
+                        h.check(dailyTabCount(app) == tabs && app.currentTab === t, "preview nav: the link opened in the preview, not in a tab",
+                                "\(tabs) → \(dailyTabCount(app)) tabs")
+                        next()
+                    }
+                }
+            }
+        })
+        steps.append(step("preview-swipe-back") { next in
+            guard let t = readmeTab, let p = t.preview, !p.isHome, p.canGoBack else {
+                h.check(false, "preview swipe: the linked page is showing, with a page to go back to, before the swipe"); next(); return
+            }
+            let sent = dailySwipeRight(over: p.webView)
+            h.note("preview swipe: \(sent)")
+            DailyUseHarness.poll(2, { p.isHome }) { _ in
+                // The coverage gap, said out loud: what was sent is not a
+                // live gesture. A build whose swipe is driven by AppKit's
+                // tracking of a live gesture may not take it.
+                h.skip("preview swipe (live trackpad gesture)", "not covered: the pass \(sent). "
+                       + "A live two-finger swipe comes from the window server (through the app's event monitors, then AppKit's NSEvent.trackSwipeEvent), "
+                       + "which takes an active session and a trackpad. Swipe by hand on a build that has the swipe; "
+                       + "on feat/sidebar-folder-browsing CEDRIC_CHECK=previewswipe drives its handlers")
+                // KNOWN BUG on main, fixed on feat/sidebar-folder-browsing
+                // (PreviewSwipe): nothing in the preview takes a swipe.
+                // Remove this marker when that merges; if the synthesized
+                // gesture is not taken there, drive PreviewSwipe as
+                // CEDRIC_CHECK=previewswipe does, here.
+                h.knownBug(id: "preview-swipe-back", note: "two fingers swiped right over a linked page in the preview do not go back (no swipe in the preview)") {
+                    h.check(p.isHome, "preview swipe: the swipe goes back to the document", "still on \(p.navigationTitle); \(sent)")
+                }
+                next()
+            }
+        })
+        steps.append(step("preview-back-button") { next in
+            guard let t = readmeTab, let p = t.preview else { h.check(false, "preview back: the preview is showing"); next(); return }
+            if p.isHome {
+                h.note("preview back: the swipe went back already; the Back button is not pressed")
+            } else {
+                // The route main has: the preview bar's Back button.
+                let back = t.previewPane?.bar.buttons[.back]
+                h.check(back?.isEnabled == true && back?.isHiddenOrHasHiddenAncestor == false, "preview back: the bar's Back button is showing and on")
+                back?.performClick(nil)
+            }
+            // (The page before is notes.md, whose heading is another: no mark needed.)
+            dailyPreviewRendered(since: CFAbsoluteTimeGetCurrent(), web: { p.webView }, heading: "Daily Use Readme", timeout: 5, window: { t.window }) { ms in
+                h.check(ms != nil, "preview back: the document's heading is back in the preview")
+                h.check(p.isHome && !p.canGoBack && p.canGoForward && p.navigationTitle != "notes.md",
+                        "preview back: the preview's history entry is the document again, with Forward to notes.md",
+                        "home=\(p.isHome) title=\(p.navigationTitle) back=\(p.canGoBack) forward=\(p.canGoForward)")
+                next()
+            }
+        })
+        steps.append(sync("preview-nav-off") {
+            guard let t = readmeTab else { return }
+            key("p", [.command, .option])
+            t.window?.layoutIfNeeded()
+            h.check(!t.previewVisible && t.previewPane == nil, "preview nav: ⌥⌘P hides the preview again")
+            let w = t.editorArea.frame.width
+            h.check(abs(w - editorWidth) <= 2, "preview nav: the editor's width is back", "\(w) vs \(editorWidth) before")
+        })
+
+        // 4. Open Recent (the copy's own list: dailyUseRequireIsolation).
+        steps.append(sync("recent-menu") {
             app.rebuildRecentMenu()
             let titles = app.recentMenu?.items.map(\.title) ?? []
             h.note("recent menu: \(titles)")
@@ -502,7 +695,6 @@ extension DevChecks {
                     "recent: the newest (the last file clicked) is first", "first “\(titles.first ?? "-")”")
         })
         steps.append(step("recent-choose") { next in
-            guard ownRecents else { next(); return }
             // Close a fixture file's tab, then choose it in the menu.
             let file = fx.files[fx.files.count - 2]
             dailyWindow(app, file)?.close()
@@ -528,7 +720,6 @@ extension DevChecks {
             }
         })
         steps.append(step("recent-outside") { next in
-            guard ownRecents else { next(); return }
             // A recent file from outside the sidebar's folder (B): opened
             // once (the outside step's file fell off the list since), closed,
             // chosen in Open Recent.
@@ -538,7 +729,9 @@ extension DevChecks {
             // (Fixed, that open moved the sidebar to B: back to A, so the
             // assertion below is about Open Recent's own path.)
             if s?.rootURL.standardizedFileURL != fx.a.standardizedFileURL { app.openFolder(fx.a) }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            DailyUseHarness.poll(5, { s?.rootURL.standardizedFileURL == fx.a.standardizedFileURL && s?.root.isLoaded == true }) { listed in
+                h.check(listed && dailyTab(app, file) == nil, "recent (outside): folder A is listed and list.csv is closed immediately before it is chosen",
+                        "root=\(s?.rootURL.path ?? "none") loaded=\(s?.root.isLoaded ?? false) open=\(dailyTab(app, file) != nil)")
                 app.rebuildRecentMenu()
                 guard let m = app.recentMenu, let i = m.items.firstIndex(where: { ($0.representedObject as? URL)?.standardizedFileURL == file.standardizedFileURL }) else {
                     h.check(false, "recent: list.csv (folder B) is in Open Recent", "\(app.recentMenu?.items.map(\.title) ?? [])"); next(); return
@@ -633,6 +826,80 @@ extension DevChecks {
             },
         ]
 
+        // 5b. Up a folder and Go to Folder, through the File menu. Main has
+        // neither command (they are looked up by action and title at run
+        // time), so both are known bugs until feat/sidebar-folder-browsing
+        // merges; with it, the commands are chosen and the root asserted.
+        let sub = fx.a.appendingPathComponent("sub", isDirectory: true)
+        func listed(_ root: URL) -> Bool { s?.rootURL.standardizedFileURL == root.standardizedFileURL && s?.root.isLoaded == true }
+        steps += [
+            sync("folders-open-sub", snapshot: false) { app.openFolder(sub) },
+            waitListed(sub, "folders-sub-listed"),
+            step("folders-up") { next in
+                h.check(listed(sub) && dailyNames() == ["deep", "inner.md"], "folders up: A/sub is listed immediately before (deep, inner.md)", "root=\(s?.rootURL.path ?? "none") rows=\(dailyNames())")
+                // The sidebar focused, as after a click in it.
+                if let side = s { side.window?.makeFirstResponder(side.outline) }
+                let item = dailyMenuItem(actions: ["upOneFolderMenu:"], titles: ["Up One Folder", "Up a Folder", "Go Up One Folder"])
+                let chosen = item.map { dailyChoose($0) } ?? false
+                h.note("folders up: menu item \(item.map { "“\($0.title)” \(chosen ? "chosen" : "disabled")" } ?? "not in the menus")")
+                DailyUseHarness.poll(chosen ? 3 : 0, { listed(fx.a) }) { _ in
+                    // KNOWN BUG on main, fixed on feat/sidebar-folder-browsing
+                    // (File › Up One Folder, ⌘↑). Remove this marker when that merges.
+                    h.knownBug(id: "folder-up", note: "there is no way to go up a folder from the sidebar's folder (no File › Up One Folder)") {
+                        h.check(item != nil, "folders up: the menus have an Up One Folder command")
+                        h.check(chosen, "folders up: the command is enabled with A/sub in the sidebar")
+                        h.check(listed(fx.a), "folders up: the sidebar's root becomes the folder above, A", "root is \(s?.rootURL.lastPathComponent ?? "none")")
+                    }
+                    next()
+                }
+            },
+            sync("folders-goto-to-a", snapshot: false) { if !listed(fx.a) { app.openFolder(fx.a) } },
+            waitListed(fx.a, "folders-goto-a-listed"),
+            step("folders-goto") { next in
+                h.check(listed(fx.a), "folders go to: folder A is listed immediately before", "root=\(s?.rootURL.path ?? "none")")
+                let item = dailyMenuItem(actions: ["goToFolderMenu:"], titles: ["Go to Folder…", "Go to Folder..."])
+                let chosen = item.map { dailyChoose($0) } ?? false
+                h.note("folders go to: menu item \(item.map { "“\($0.title)” \(chosen ? "chosen" : "disabled")" } ?? "not in the menus")")
+                @MainActor func sheet() -> NSWindow? {
+                    let front = app.currentTab?.window ?? app.currentViewerTab?.window
+                    return front?.attachedSheet ?? NSApp.windows.first { $0.isVisible && $0.title == "Go to Folder" }
+                }
+                @MainActor func field(_ w: NSWindow) -> NSTextField? {
+                    func all(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(all) }
+                    return w.contentView.map(all)?.compactMap { $0 as? NSTextField }.first { $0.isEditable && !$0.isHiddenOrHasHiddenAncestor }
+                }
+                DailyUseHarness.poll(chosen ? 3 : 0, { sheet().flatMap(field) != nil }) { shown in
+                    let panel = sheet()
+                    if shown, let panel, let f = field(panel) {
+                        // The path typed over what the field holds, then Return (Go).
+                        panel.makeFirstResponder(f)
+                        if let editor = f.currentEditor() as? NSTextView {
+                            editor.selectAll(nil)
+                            editor.insertText(fx.b.path, replacementRange: editor.selectedRange())
+                        } else {
+                            f.stringValue = fx.b.path
+                        }
+                        pressReturn(in: panel)
+                    }
+                    DailyUseHarness.poll(shown ? 3 : 0, { listed(fx.b) }) { _ in
+                        // KNOWN BUG on main, fixed on feat/sidebar-folder-browsing
+                        // (File › Go to Folder…, ⌥⌘G). Remove this marker when that merges.
+                        h.knownBug(id: "folder-goto", note: "there is no way to type a folder's path to show it in the sidebar (no File › Go to Folder…)") {
+                            h.check(item != nil, "folders go to: the menus have a Go to Folder… command")
+                            h.check(shown, "folders go to: choosing it shows a sheet with a path field")
+                            h.check(listed(fx.b), "folders go to: typing B's path and Return makes B the sidebar's root", "root is \(s?.rootURL.lastPathComponent ?? "none")")
+                        }
+                        // A sheet left open would block the rest of the pass.
+                        if let left = sheet() { left.sheetParent?.endSheet(left); left.orderOut(nil) }
+                        next()
+                    }
+                }
+            },
+            // The rest of the pass starts from folder A.
+            sync("folders-nav-back-to-a", snapshot: false) { if !listed(fx.a) { app.openFolder(fx.a) } },
+            waitListed(fx.a, "folders-nav-a-listed"),
+        ]
+
 
         // 7. Long-line wrap (known bug longline-wrap, fix/0.6.1-longline-wrap).
         let restoreWrap = keepDefaults(["wrapLines"])
@@ -670,11 +937,14 @@ extension DevChecks {
             // should reach the wrapping width within 1.5 characters.
             let inner = m.rows.filter { !$0.lastInFragment }
             let short = inner.filter { $0.width < available - 1.5 * advance }
+            // The marker's input: the line was laid out in wrapped rows at all.
+            h.check(tab.text.utf8.count == 5_000_000 && !inner.isEmpty && available > 100, "longline: Wrap ON, the 5 MB line is laid out in wrapped rows",
+                    "\(tab.text.utf8.count) bytes, \(inner.count) inner rows, \(Int(available)) pt wide")
             // KNOWN BUG on main, fixed on fix/0.6.1-longline-wrap: a run
             // without spaces wraps only after '/', leaving ragged rows.
             // Remove this marker when that merges.
             h.knownBug(id: "longline-wrap", note: "Wrap ON on a 5 MB base64-like line breaks only after '/', rows end early (ragged)") {
-                h.check(!inner.isEmpty && short.isEmpty, "longline: Wrap ON, each row of the line without spaces fills the wrapping width",
+                h.check(short.isEmpty, "longline: Wrap ON, each row of the line without spaces fills the wrapping width",
                         String(format: "%d of %d rows end early; first is %.1f of %.1f pt", short.count, inner.count, short.first?.width ?? 0, available))
             }
             next()
@@ -711,12 +981,23 @@ extension DevChecks {
             h.check(tab.doc.languageChoice.isAuto && (tab.doc.language == .plain || tab.statusBar.languageButton.title == "Plain Text"),
                     "md-detect: untitled starts auto/plain", "language=\(tab.doc.language) title=\(tab.statusBar.languageButton.title)")
             // Character by character so the 0.4 s sniff timer runs (a paste sniffs at once).
-            type("**bold**")
+            if faults.contains("drop-typing") { h.note("fault drop-typing: the keystrokes are not sent") } else { type("**bold**") }
             DailyUseHarness.poll(1.2, every: 0.05, { tab.doc.language == .markdown }) { _ in
+                // The marker's inputs, plainly: the keystrokes arrived in
+                // this untitled tab and nobody chose a language by hand.
+                // Dropped or misdirected typing is a FAIL, not the known bug.
+                let arrived = tab.text == "**bold**" && tab.doc.fileURL == nil && app.tabs.last === tab
+                h.check(arrived, "md-detect: the keystrokes arrived: line 1 of the untitled tab is **bold**",
+                        "text “\(tab.text.prefix(40))” (\(tab.text.count) characters), first responder \(tab.window?.firstResponder.map { String(describing: Swift.type(of: $0)) } ?? "none")")
+                h.check(tab.doc.languageChoice.isAuto, "md-detect: the language is still chosen automatically", "manual=\(tab.doc.languageIsManual)")
+                guard arrived else {
+                    h.note("md-detect: the known-bug marker is not evaluated (its input did not arrive; the FAIL above stands)")
+                    next(); return
+                }
                 // LanguageDetector.MarkdownSignals.score is 0 for a single kind
                 // (bold alone), so on main this stays Plain Text. That's the bug.
                 h.knownBug(id: "md-detect", note: "typing **bold** on line 1 of an untitled tab does not switch to Markdown at the pause (fix/0.6.1-md-detect)") {
-                    h.check(tab.doc.language == .markdown && tab.doc.languageChoice.isAuto,
+                    h.check(tab.doc.language == .markdown,
                             "md-detect: after a pause, **bold** on line 1 is Markdown (auto)",
                             "language=\(tab.doc.language) title=\(tab.statusBar.languageButton.title) manual=\(tab.doc.languageIsManual)")
                 }
@@ -797,6 +1078,9 @@ extension DevChecks {
             one()
         })
         steps.append(sync("settings-cedric-height", snapshot: false) {
+            // The marker's input: the pane was measured.
+            h.check(!cedricHeights.isEmpty && cedricHeights.allSatisfy { $0.height > 100 }, "settings Cedric: the pane was shown and measured for at least one engine",
+                    "\(cedricHeights.map { "\($0.engine) \(Int($0.height))" })")
             guard !cedricHeights.isEmpty else { return }
             for c in cedricHeights { h.note(String(format: "settings Cedric with %@: window %.0f pt tall", c.engine, c.height)) }
             // KNOWN BUG on main, fixed on fix/cedric-settings-compact: the
@@ -810,7 +1094,7 @@ extension DevChecks {
         steps.append(sync("settings-close", snapshot: false) { SettingsWindowController.shared?.window?.close() })
 
         steps.append(sync("done", snapshot: false) {
-            if ownRecents { NSDocumentController.shared.clearRecentDocuments(nil) }
+            NSDocumentController.shared.clearRecentDocuments(nil)
             h.note(String(format: "pass wall time %.1f s", CFAbsoluteTimeGetCurrent() - t0))
             if DevEnvironment.values["CEDRIC_CHECK_OUT"] != nil { try? FileManager.default.removeItem(at: dir) }
         })

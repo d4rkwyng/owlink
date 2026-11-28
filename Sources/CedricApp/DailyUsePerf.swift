@@ -1,5 +1,6 @@
 import AppKit
 import CedricCore
+import WebKit
 
 /// The daily-use pass's speed measurements (docs/daily-use.md).
 ///
@@ -10,8 +11,10 @@ import CedricCore
 ///     sidebar_log_ms     the same for the 5 MB .log
 ///     sidebar_switch_ms  a click on the row of a file already open → its
 ///                        tab selected and displayed
-///     preview_toggle_ms  ⌥⌘P on a Markdown tab → the preview rendered
-///                        and displayed
+///     preview_toggle_ms  ⌥⌘P on a Markdown tab → the document's heading
+///                        is in the page WebKit loaded, laid out, as read
+///                        back from the page (dailyPreviewRendered); a
+///                        heading that never comes fails the sample
 ///   Each is sampled CEDRIC_DAILYUSE_SAMPLES times (default 8, at least
 ///   8: the first is a warm-up, printed, not counted); prints
 ///   "perf: metric=NAME value=MEDIAN" and the load at start and end.
@@ -22,7 +25,12 @@ import CedricCore
 ///     Scripts/daily-use.sh collected: DailyUseResults' format) against
 ///     CEDRIC_DAILYUSE_BUDGETS (Scripts/daily-use-budgets.json); with
 ///     CEDRIC_DAILYUSE_WRITE=1 writes the measured baselines there instead
-///     (CEDRIC_DAILYUSE_HOST, CEDRIC_DAILYUSE_NOTES: a file of note lines).
+///     (CEDRIC_DAILYUSE_HOST, CEDRIC_DAILYUSE_NOTES: a file of note lines),
+///     but only from a complete collection: CEDRIC_DAILYUSE_RUNS perf
+///     launches and CEDRIC_DAILYUSE_COLD cold launches, none failed,
+///     skipped or under heavy load (DailyUseBudget.baselines); otherwise
+///     the file is left as it is. CEDRIC_DAILYUSE_METRICS (comma
+///     separated) re-measures those metrics only, keeping the others.
 @MainActor
 extension DevChecks {
     static func dailyUsePerf(_ app: AppDelegate) {
@@ -71,13 +79,70 @@ extension DevChecks {
         turn()
     }
 
+    /// Marks the document `web` shows now as the one before (the mark
+    /// goes with the document): dailyPreviewRendered then waits for the
+    /// next one. For a web view that is kept across a load; a preview
+    /// toggled on has a new web view and needs none.
+    static func dailyPreviewExpire(_ web: WKWebView?, then: @escaping @MainActor () -> Void) {
+        guard let web else { then(); return }
+        web.evaluateJavaScript("window.__dailyUseStale = true; 1", in: nil, in: .defaultClient) { _ in MainActor.assumeIsolated { then() } }
+    }
+
+    /// The preview's endpoint: hands over the ms since `t0` once the page
+    /// WebKit has loaded in `web` (not one marked by dailyPreviewExpire)
+    /// has an <h1> with
+    /// `heading` in it and a laid-out box, as the page itself reports (asked again every
+    /// millisecond: a probe is a round trip to the page's process, so it
+    /// is answered after whatever that process was doing). Then the
+    /// window is displayed. nil when the heading has not come within
+    /// `timeout` s (a blank or stuck preview). Submitting the load
+    /// (PreviewController's pageLoads, bodySwaps) is not the endpoint.
+    /// Painting to the screen is not timed: with the screen locked WebKit
+    /// has no display refresh to wait for.
+    static func dailyPreviewRendered(since t0: CFAbsoluteTime, web: @escaping @MainActor () -> WKWebView?, heading: String, timeout: Double = 10,
+                                     window: @escaping @MainActor () -> NSWindow? = { nil }, then: @escaping @MainActor (Double?) -> Void) {
+        let needle = heading.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        // A document marked by dailyPreviewExpire is the page before: until
+        // the new page commits, the web view still answers for it.
+        let js = "(() => { if (window.__dailyUseStale) return 0; const h = document.querySelector('h1'); "
+            + "return h && h.textContent.includes('\(needle)') && h.getBoundingClientRect().height > 0 ? 1 : 0 })()"
+        var done = false
+        @MainActor func end(_ ms: Double?) {
+            guard !done else { return }
+            done = true
+            then(ms)
+        }
+        @MainActor func again() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.001) { MainActor.assumeIsolated { probe() } }
+        }
+        @MainActor func probe() {
+            guard !done else { return }
+            if CFAbsoluteTimeGetCurrent() - t0 > timeout { end(nil); return }
+            guard let w = web() else { again(); return }
+            w.evaluateJavaScript(js, in: nil, in: .defaultClient) { result in
+                MainActor.assumeIsolated {
+                    guard !done else { return }
+                    if case .success(let v) = result, (v as? NSNumber)?.intValue == 1 {
+                        window()?.displayIfNeeded()
+                        end((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+                    } else {
+                        again()
+                    }
+                }
+            }
+        }
+        // A page process that never answers: the probe above would wait forever.
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout + 0.5) { MainActor.assumeIsolated { end(nil) } }
+        probe()
+    }
+
     static func dailyUsePerfRun(_ app: AppDelegate, _ fx: DailyUseFixture, samples: Int, loadStart: DailyUseLoad) {
         let h = DailyUseHarness.main
         let md = fx.a.appendingPathComponent("notes.md")
         let anchor = fx.a.appendingPathComponent("main.swift")
         var results: [String: [Double]] = [:]
         func sample(_ metric: String, _ v: Double?) {
-            guard let v else { h.check(false, "\(metric): a sample finished within 10 s"); return }
+            guard let v else { h.check(false, "\(metric): a sample reached its endpoint within 10 s"); return }
             results[metric, default: []].append(v)
             print(String(format: "perf: sample %@ %d %.2f%@", metric, results[metric]!.count, v, results[metric]!.count == 1 ? " (warm-up)" : ""))
         }
@@ -146,9 +211,11 @@ extension DevChecks {
             steps.append(DailyUseHarness.step("perf-preview-\(i)", snapshot: false) { next in
                 guard let t = dailyTab(app, fx.readme) else { h.check(false, "perf: readme.md open"); next(); return }
                 focus(t)
+                // A preview left showing would have its heading already.
+                if t.previewVisible || t.previewPane != nil { h.check(false, "perf: the preview is hidden before the toggle") }
                 let t0 = CFAbsoluteTimeGetCurrent()
                 key("p", [.command, .option])
-                dailyMeasure(since: t0, window: { t.window }, { t.previewVisible && (t.preview?.pageLoads ?? 0) + (t.preview?.bodySwaps ?? 0) > 0 }) { ms in
+                dailyPreviewRendered(since: t0, web: { t.previewVisible ? t.preview?.webView : nil }, heading: "Daily Use Readme", window: { t.window }) { ms in
                     sample("preview_toggle_ms", ms)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         key("p", [.command, .option])
@@ -186,21 +253,23 @@ extension DevChecks {
         let r = DailyUseResults.parse(text)
         let metrics = DailyUseBudget.limits.keys.sorted()
         if env["CEDRIC_DAILYUSE_WRITE"] == "1" {
-            var entries: [String: DailyUseBudgetEntry] = [:]
-            for m in metrics {
-                guard let e = DailyUseBudget.entry(metric: m, runMedians: r.runMedians[m] ?? []) else { h.skip(m, "no samples to write a baseline from"); continue }
-                entries[m] = e
-                h.note(String(format: "baseline %@ = %.1f ms (median of %@), budget %.1f ms", m, e.baseline_ms, "\(e.runs_ms)", e.budget_ms))
-            }
+            let asked = env["CEDRIC_DAILYUSE_METRICS"].map { $0.split(separator: ",").map(String.init) } ?? metrics
             let notes = (env["CEDRIC_DAILYUSE_NOTES"].flatMap { try? String(contentsOfFile: $0, encoding: .utf8) } ?? "")
                 .split(separator: "\n").map(String.init)
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd"
-            let file = DailyUseBudgetFile(measured: f.string(from: Date()), host: env["CEDRIC_DAILYUSE_HOST"] ?? ProcessInfo.processInfo.hostName,
-                                          notes: notes, metrics: entries)
             do {
-                try file.encoded().write(to: URL(fileURLWithPath: budgetsPath), options: .atomic)
-                h.check(true, "budget: wrote \(entries.count) baselines to \(budgetsPath)")
+                let file = try DailyUseBudget.writeBaselines(
+                    from: r, metrics: asked, runs: env["CEDRIC_DAILYUSE_RUNS"].flatMap(Int.init) ?? 0, cold: env["CEDRIC_DAILYUSE_COLD"].flatMap(Int.init) ?? 0,
+                    to: URL(fileURLWithPath: budgetsPath), measured: f.string(from: Date()),
+                    host: env["CEDRIC_DAILYUSE_HOST"] ?? ProcessInfo.processInfo.hostName, notes: notes)
+                for m in asked.sorted() {
+                    guard let e = file.metrics[m] else { continue }
+                    h.note(String(format: "baseline %@ = %.1f ms (median of %@), budget %.1f ms", m, e.baseline_ms, "\(e.runs_ms)", e.budget_ms))
+                }
+                h.check(true, "budget: wrote \(asked.count) baselines to \(budgetsPath)")
+            } catch let e as DailyUseIncomplete {
+                h.check(false, "budget: baselines not written, \(budgetsPath) is left as it was (the collection is not complete)", e.problems.joined(separator: "; "))
             } catch {
                 h.check(false, "budget: write \(budgetsPath)", "\(error)")
             }
@@ -218,14 +287,13 @@ extension DevChecks {
         if perfMetrics.allSatisfy({ (r.runMedians[$0] ?? []).isEmpty }) && !r.skippedRuns.isEmpty {
             h.skip("perf", "machine under heavy load in every perf launch (\(r.skippedRuns.joined(separator: ", ")))")
         }
-        h.note("heavy load at the end of a perf launch: \(r.heavyAtEnd) (\(r.endLoads.map(\.text)))")
+        if !r.failedRuns.isEmpty { h.note("perf launches that failed (their own logs have the FAIL lines): runs \(r.failedRuns)") }
         for m in metrics {
-            let runs = r.runMedians[m] ?? []
-            if runs.isEmpty && m != "cold_launch_ms" && !r.skippedRuns.isEmpty { continue }
-            let value = DailyUseBudget.median(runs)
-            if let value { print(String(format: "metric %@=%.1f", m, value)) }
-            h.note("\(m): per-run values \(runs.map { String(format: "%.1f", $0) })")
-            h.record(DailyUseBudget.evaluate(metric: m, value: value, entry: budgets?.metrics[m], heavyAtEnd: r.heavyAtEnd))
+            let samples = r.samples[m] ?? []
+            if samples.isEmpty && m != DailyUseBudget.coldMetric && !r.skippedRuns.isEmpty { continue }
+            if let value = DailyUseBudget.median(samples.map(\.value)) { print(String(format: "metric %@=%.1f", m, value)) }
+            h.note("\(m): samples \(samples.map { String(format: "%.1f%@", $0.value, $0.heavy ? " (heavy load in its run)" : "") })")
+            h.record(DailyUseBudget.evaluate(metric: m, samples: samples, entry: budgets?.metrics[m]))
         }
         h.finish()
     }

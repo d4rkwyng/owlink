@@ -18,16 +18,16 @@
       ]
     },
     "preview_toggle_ms" : {
-      "baseline_ms" : 66.6,
-      "budget_ms" : 86.5,
+      "baseline_ms" : 124.4,
+      "budget_ms" : 161.7,
       "cap_ms" : 600,
       "floor_ms" : 80,
       "runs_ms" : [
-        58.5,
-        66.6,
-        67.9,
-        70.4,
-        62.3
+        121.1,
+        124.7,
+        124.4,
+        125,
+        121.4
       ]
     },
     "sidebar_log_ms" : {
@@ -84,6 +84,12 @@
     "cold launch 4 launch_ms=149.4 load_start=3.55 load_end=3.55",
     "cold launch 5 launch_ms=167.2 load_start=3.55 load_end=3.55",
     "cold launch 6 launch_ms=164.4 load_start=3.55 load_end=3.55",
-    "cold launch 7 launch_ms=163.7 load_start=3.55 load_end=3.55"
+    "cold launch 7 launch_ms=163.7 load_start=3.55 load_end=3.55",
+    "2026-11-28 preview_toggle_ms: perf run 1: load (1 min) before 3.63, after 2.98, 14 cores; metric=sidebar_md_ms value=48.48 metric=sidebar_log_ms value=54.76 metric=sidebar_switch_ms value=15.37 metric=preview_toggle_ms value=121.05 ",
+    "2026-11-28 preview_toggle_ms: perf run 2: load (1 min) before 2.82, after 2.64, 14 cores; metric=sidebar_md_ms value=51.46 metric=sidebar_log_ms value=57.83 metric=sidebar_switch_ms value=15.75 metric=preview_toggle_ms value=124.66 ",
+    "2026-11-28 preview_toggle_ms: perf run 3: load (1 min) before 2.59, after 2.23, 14 cores; metric=sidebar_md_ms value=52.56 metric=sidebar_log_ms value=58.51 metric=sidebar_switch_ms value=15.59 metric=preview_toggle_ms value=124.35 ",
+    "2026-11-28 preview_toggle_ms: perf run 4: load (1 min) before 2.23, after 2.24, 14 cores; metric=sidebar_md_ms value=47.74 metric=sidebar_log_ms value=61.62 metric=sidebar_switch_ms value=15.49 metric=preview_toggle_ms value=125.00 ",
+    "2026-11-28 preview_toggle_ms: perf run 5: load (1 min) before 2.24, after 2.24, 14 cores; metric=sidebar_md_ms value=40.54 metric=sidebar_log_ms value=60.19 metric=sidebar_switch_ms value=15.53 metric=preview_toggle_ms value=121.35 ",
+    "2026-11-28 preview_toggle_ms: measured by Scripts\/daily-use.sh --write-budgets --metrics preview_toggle_ms --runs 5 --cold 7 on geonosis; baselines are medians of per-run medians (cold: of 7 launches)"
   ]
 }

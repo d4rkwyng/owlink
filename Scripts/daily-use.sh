@@ -5,7 +5,7 @@
 # known-bug markers, and the speed budgets (cold launch, sidebar clicks,
 # preview toggle) checked against Scripts/daily-use-budgets.json.
 #
-#   Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets] [--flows-only] [APP]
+#   Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets [--metrics LIST]] [--flows-only] [APP]
 #
 #   --no-build        use APP as it is (default: build a check build first
 #                     with Scripts/bundle-app.sh, never --release)
@@ -15,11 +15,18 @@
 #   --out DIR         default ~/Orchestrator/scratch/daily-use/YYYY-MM-DD
 #   --flows-only      the self-test and the flows, no timings
 #   --write-budgets   measure only (no flows, no verdicts) and write the
-#                     baselines to Scripts/daily-use-budgets.json
+#                     baselines to Scripts/daily-use-budgets.json. Only a
+#                     complete collection replaces the file: every launch
+#                     asked for, none failed, skipped or under heavy load.
+#                     Not with --flows-only.
+#   --metrics LIST    with --write-budgets: re-measure these metrics only
+#                     (comma separated), keeping the others' entries
 #   APP               default dist/Owlink.app
 #
 # Writes summary.md (passes, known bugs, metrics against budgets, SKIPs,
 # every FAIL line, the runtime), the raw logs and the screenshots to DIR.
+# The summary and the exit status are about this invocation's launches
+# only: logs an earlier run left in DIR are not read.
 # Exit 1 on any FAIL, else 0 (a known bug is a pass with a note; a SKIP is
 # not a failure). Not part of CI, test.sh or verify.sh.
 #
@@ -28,9 +35,13 @@
 # app runs as a COPY of the check build with its own bundle id
 # (net.mindtricks.cedric.dailyuse, re-signed ad hoc), so its defaults and
 # its recent-documents list are its own; both are removed at the end.
-# The script checks that net.mindtricks.cedric's defaults and the mtimes
-# in ~/Library/Application Support/Cedric did not change during the run
-# (a change there may be the user's own Owlink, which is reported).
+# If that copy cannot be made, signed and read back, the script exits 1
+# and launches nothing: the check build itself is never run. The script
+# checks that every launch reported the copy, the scratch folders and the
+# scratch suite, and that net.mindtricks.cedric's defaults and its
+# recent-documents list did not change (a change there may be the user's
+# own Owlink, which is reported). It does not look inside
+# ~/Library/Application Support/Cedric.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -40,6 +51,7 @@ COLD=7
 OUT=
 WRITE=0
 FLOWS_ONLY=0
+METRICS=
 APP="dist/Owlink.app"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,12 +61,27 @@ while [ $# -gt 0 ]; do
         --out) OUT=$2; shift ;;
         --write-budgets) WRITE=1 ;;
         --flows-only) FLOWS_ONLY=1 ;;
-        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
+        --metrics) METRICS=$2; shift ;;
+        -h|--help) sed -n '2,45p' "$0"; exit 0 ;;
         -*) echo "daily-use.sh: unknown option $1" >&2; exit 2 ;;
         *) APP=${1%/} ;;
     esac
     shift
 done
+if [ $WRITE = 1 ] && [ $FLOWS_ONLY = 1 ]; then
+    echo "daily-use.sh: --write-budgets and --flows-only do not go together (one measures only, the other does not measure)" >&2; exit 2
+fi
+if [ -n "$METRICS" ] && [ $WRITE = 0 ]; then echo "daily-use.sh: --metrics is for --write-budgets" >&2; exit 2; fi
+ALL_METRICS="cold_launch_ms preview_toggle_ms sidebar_log_ms sidebar_md_ms sidebar_switch_ms"
+for m in ${METRICS//,/ }; do
+    case " $ALL_METRICS " in *" $m "*) ;; *) echo "daily-use.sh: --metrics: $m is not one of: $ALL_METRICS" >&2; exit 2 ;; esac
+done
+# Cold launches and perf launches are run only for the metrics asked for.
+NEED_COLD=1; NEED_PERF=1
+if [ -n "$METRICS" ]; then
+    case ",$METRICS," in *,cold_launch_ms,*) ;; *) NEED_COLD=0 ;; esac
+    [ "$METRICS" = cold_launch_ms ] && NEED_PERF=0
+fi
 T_START=$(date +%s)
 OUT=${OUT:-$HOME/Orchestrator/scratch/daily-use/$(date +%Y-%m-%d)}
 mkdir -p "$OUT/shots"
@@ -64,6 +91,7 @@ DOMAIN=net.mindtricks.cedric.dailyuse
 # Cedric AI settings (AIStore) go to their own scratch suite: the flows
 # switch "Where the AI runs" to measure the Settings pane per engine.
 AISUITE=net.mindtricks.cedric.dailyuse.ai
+REAL=net.mindtricks.cedric
 RECENTS="$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
 log() { echo "daily-use: $*"; }
 load() { sysctl -n vm.loadavg | awk '{print $2}'; }
@@ -88,7 +116,8 @@ fi
 [ -x "$APP/Contents/MacOS/Cedric" ] || { echo "no app at $APP: run Scripts/bundle-app.sh first" >&2; exit 1; }
 . Scripts/check-env.sh
 cedric_require_check_build "$APP"
-W=$(mktemp -d)
+# The physical path (no /var → /private/var link): launches report it back.
+W=$(cd "$(mktemp -d)" && pwd -P)
 cleanup() {
     defaults delete "$DOMAIN" >/dev/null 2>&1 || true
     defaults delete "$AISUITE" >/dev/null 2>&1 || true
@@ -105,35 +134,52 @@ cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_AI_DEFAULTS=$AISUITE CEDRIC_MODELS_DIR="$W/models"
 mkdir -p "$W/models"
 
-# The copy with its own bundle id; the check build itself if that fails.
+# The copy with its own bundle id. No copy, no run: the check build
+# itself has the user's bundle id, so its opens would go to the user's
+# recent documents and its settings to the user's defaults.
 RUNAPP="$W/Owlink-dailyuse.app"
 ISOLATION="copy of $APP with bundle id $DOMAIN (own defaults and recent documents)"
-if ditto "$APP" "$RUNAPP" && plutil -replace CFBundleIdentifier -string "$DOMAIN" "$RUNAPP/Contents/Info.plist" \
-        && codesign --force --deep --sign - "$RUNAPP" >/dev/null 2>&1 && [ -z "$(cedric_check_build_problem "$RUNAPP")" ]; then
-    log "running $ISOLATION"
-else
-    rm -rf "$RUNAPP"
-    RUNAPP=$APP
-    ISOLATION="FALLBACK: $APP itself (bundle id net.mindtricks.cedric; the Open Recent flow SKIPs, it would touch the shared list)"
-    log "$ISOLATION"
+prepare_copy() {
+    ditto "$APP" "$RUNAPP" || { echo "ditto failed"; return 1; }
+    plutil -replace CFBundleIdentifier -string "$DOMAIN" "$RUNAPP/Contents/Info.plist" || { echo "plutil could not set the bundle id"; return 1; }
+    codesign --force --deep --sign - "$RUNAPP" >/dev/null 2>&1 || { echo "codesign (ad hoc) failed"; return 1; }
+    codesign --verify --deep "$RUNAPP" >/dev/null 2>&1 || { echo "the copy's signature does not verify"; return 1; }
+    [ "$(plutil -extract CFBundleIdentifier raw -o - "$RUNAPP/Contents/Info.plist" 2>/dev/null)" = "$DOMAIN" ] || { echo "the copy's bundle id does not read back as $DOMAIN"; return 1; }
+    local why
+    why=$(cedric_check_build_problem "$RUNAPP") || { echo "$why"; return 1; }
+    [ -x "$RUNAPP/Contents/MacOS/Cedric" ] || { echo "the copy has no executable"; return 1; }
+}
+if ! why=$(prepare_copy); then
+    echo "daily-use.sh: cannot prepare the isolated copy of $APP (${why:-unknown}). Nothing was launched: $APP itself has the bundle id $REAL and would write the user's recent documents and defaults." >&2
+    exit 1
 fi
+log "running $ISOLATION"
 cedric_require_check_build "$RUNAPP"
 BIN="$RUNAPP/Contents/MacOS/Cedric"
 
-# What must not change: the real domain's defaults and Owlink's support folder.
-SUPPORT="$HOME/Library/Application Support/Cedric"
-defaults export net.mindtricks.cedric "$W/defaults-before.plist" 2>/dev/null || : > "$W/defaults-before.plist"
-stat -f '%m' "$SUPPORT" > "$W/support-before.txt" 2>/dev/null || echo none > "$W/support-before.txt"
+# What must not change: the real domain's defaults and its recent
+# documents. (Nothing here looks inside ~/Library/Application Support/Cedric.)
+defaults export "$REAL" "$W/defaults-before.plist" 2>/dev/null || : > "$W/defaults-before.plist"
+recents_sum() { { cat "$RECENTS/$REAL".sfl* 2>/dev/null || true; } | shasum | awk '{print $1}'; }
+RECENTS_BEFORE=$(recents_sum)
 touch "$W/marker"
 own_running() { pgrep -x Cedric >/dev/null && echo yes || echo no; }
 OWN_BEFORE=$(own_running)
 
+# This invocation's logs: the summary and the exit status read these only.
+LOGS=()
 run_check() { # NAME TIMEOUT env...
     local name=$1 timeout=$2; shift 2
+    LOGS+=("$OUT/$name.log")
     env "$@" CEDRIC_SESSION_DIR="$W/session-$name" perl -e "alarm $timeout; exec @ARGV" "$BIN" -ApplePersistenceIgnoreState YES \
         > "$OUT/$name.log" 2> "$OUT/$name.stderr.log" || true
     grep -q "^check: done" "$OUT/$name.log" || echo "check: FAIL $name: the launch ended without its summary (crash, hang or timeout after $timeout s)" >> "$OUT/$name.log"
+    # The launch must say it ran as the copy, with the scratch folders and suite.
+    local want="check: note: isolation: bundle=$DOMAIN app=$RUNAPP session=$W/session-$name replace-undo=$CEDRIC_REPLACE_UNDO_DIR models=$CEDRIC_MODELS_DIR ai-defaults=$AISUITE"
+    if grep -qxF "$want" "$OUT/$name.log"; then ISO_OK=$((ISO_OK + 1)); else ISO_BAD="${ISO_BAD:+$ISO_BAD, }$name"; fi
 }
+ISO_OK=0
+ISO_BAD=
 
 : > "$OUT/results.txt"
 if [ $WRITE = 0 ]; then
@@ -147,7 +193,9 @@ if [ $WRITE = 0 ]; then
     grep -E "^check: (FAIL|KNOWN-BUG|SKIP|done)" "$OUT/flows.log" || true
 fi
 
+PERF_FAILED=0
 if [ $FLOWS_ONLY = 0 ]; then
+  if [ $NEED_COLD = 1 ]; then
     log "cold launches: 1 warm-up + $COLD"
     : > "$OUT/cold.log"
     for i in $(seq 0 "$COLD"); do
@@ -156,48 +204,68 @@ if [ $FLOWS_ONLY = 0 ]; then
             "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null | sed -n 's/^metric launch_ms=//p' | head -1) || true
         l1=$(load)
         echo "launch $i launch_ms=${v:-none} load_start=$l0 load_end=$l1" >> "$OUT/cold.log"
-        if [ "$i" -gt 0 ] && [ -n "$v" ]; then echo "cold value=$v" >> "$OUT/results.txt"; fi
-        echo "cold load_start=$l0 load_end=$l1 cores=$CORES" >> "$OUT/results.txt"
+        # One line per launch: its value with its own load (the warm-up has no value).
+        if [ "$i" -gt 0 ] && [ -n "$v" ]; then
+            echo "cold=$i value=$v load_start=$l0 load_end=$l1 cores=$CORES" >> "$OUT/results.txt"
+        else
+            echo "cold=$i load_start=$l0 load_end=$l1 cores=$CORES" >> "$OUT/results.txt"
+        fi
         sleep 1
     done
     cat "$OUT/cold.log"
+  fi
 
+  : > "$W/notes.txt"
+  if [ $NEED_PERF = 1 ]; then
     log "perf: $RUNS launches"
-    : > "$W/notes.txt"
     for i in $(seq 1 "$RUNS"); do
         l0=$(load)
         run_check "perf-$i" 600 CEDRIC_CHECK=dailyuseperf CEDRIC_CHECK_OUT="$OUT/shots"
         l1=$(load)
         sed -En "s/^perf: (metric=.*|load_start=.*|skipped=.*)/run=$i \1/p" "$OUT/perf-$i.log" >> "$OUT/results.txt"
+        if grep -q "^check: FAIL" "$OUT/perf-$i.log"; then echo "run=$i failed=1" >> "$OUT/results.txt"; PERF_FAILED=$((PERF_FAILED + 1)); fi
         echo "perf run $i: load (1 min) before $l0, after $l1, $CORES cores; $(grep '^perf: metric=' "$OUT/perf-$i.log" | sed 's/^perf: //' | tr '\n' ' ')" | tee -a "$W/notes.txt"
         sleep 2
     done
-    grep -h "^check: FAIL" "$OUT"/perf-*.log || true
+    for i in $(seq 1 "$RUNS"); do grep -h "^check: FAIL" "$OUT/perf-$i.log" || true; done
+    [ $PERF_FAILED = 0 ] || log "$PERF_FAILED of $RUNS perf launches failed"
+  fi
 
     if [ $WRITE = 1 ]; then
-        echo "measured by Scripts/daily-use.sh --write-budgets --runs $RUNS --cold $COLD on $(hostname -s); baselines are medians of per-run medians (cold: of $COLD launches)" >> "$W/notes.txt"
-        while read -r l; do echo "cold $l" >> "$W/notes.txt"; done < "$OUT/cold.log"
+        echo "measured by Scripts/daily-use.sh --write-budgets${METRICS:+ --metrics $METRICS} --runs $RUNS --cold $COLD on $(hostname -s); baselines are medians of per-run medians (cold: of $COLD launches)" >> "$W/notes.txt"
+        if [ $NEED_COLD = 1 ]; then while read -r l; do echo "cold $l" >> "$W/notes.txt"; done < "$OUT/cold.log"; fi
+        # The writer (DailyUseBudget.writeBaselines) replaces the file only
+        # with a complete collection; a failed perf launch is in results.txt.
+        SUM_BEFORE=$(shasum "$BUDGETS" 2>/dev/null | awk '{print $1}')
         run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS" \
-            CEDRIC_DAILYUSE_WRITE=1 CEDRIC_DAILYUSE_HOST="$(hostname -s)" CEDRIC_DAILYUSE_NOTES="$W/notes.txt"
+            CEDRIC_DAILYUSE_WRITE=1 CEDRIC_DAILYUSE_HOST="$(hostname -s)" CEDRIC_DAILYUSE_NOTES="$W/notes.txt" \
+            CEDRIC_DAILYUSE_RUNS="$RUNS" CEDRIC_DAILYUSE_COLD="$COLD" CEDRIC_DAILYUSE_METRICS="${METRICS:-${ALL_METRICS// /,}}"
         grep "^check:" "$OUT/budget.log"
-        cat "$BUDGETS"
+        if [ "$SUM_BEFORE" = "$(shasum "$BUDGETS" 2>/dev/null | awk '{print $1}')" ]; then
+            log "$BUDGETS is unchanged"
+        else
+            cat "$BUDGETS"
+        fi
     else
         run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS"
     fi
 fi
 
-# Isolation: nothing of the real domain or support folder changed.
+# Isolation: every launch was the copy with the scratch folders and
+# suite, and nothing of the real domain's defaults or recents changed.
 ISO_FAIL=
-defaults export net.mindtricks.cedric "$W/defaults-after.plist" 2>/dev/null || : > "$W/defaults-after.plist"
-stat -f '%m' "$SUPPORT" > "$W/support-after.txt" 2>/dev/null || echo none > "$W/support-after.txt"
-changed=$(find "$SUPPORT" -maxdepth 2 -newer "$W/marker" 2>/dev/null | sed "s|^$HOME|~|" | head -5 || true)
+defaults export "$REAL" "$W/defaults-after.plist" 2>/dev/null || : > "$W/defaults-after.plist"
 own_note=
 [ "$OWN_BEFORE" = yes ] || [ "$(own_running)" = yes ] && own_note=" (a process named Cedric other than the pass ran: the user's own Owlink may have made the change)"
-if ! cmp -s "$W/defaults-before.plist" "$W/defaults-after.plist"; then ISO_FAIL="net.mindtricks.cedric defaults changed during the run$own_note"; fi
-if ! cmp -s "$W/support-before.txt" "$W/support-after.txt" || [ -n "$changed" ]; then
-    ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }~/Library/Application Support/Cedric changed during the run$own_note: ${changed:-the folder mtime}"
+if [ -n "$ISO_BAD" ]; then ISO_FAIL="these launches did not report the copy ($DOMAIN at $RUNAPP) with the scratch folders and suite: $ISO_BAD"; fi
+if ! cmp -s "$W/defaults-before.plist" "$W/defaults-after.plist"; then ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }$REAL defaults changed during the run$own_note"; fi
+if [ "$RECENTS_BEFORE" != "$(recents_sum)" ]; then ISO_FAIL="${ISO_FAIL:+$ISO_FAIL; }$REAL's recent-documents list changed during the run$own_note"; fi
+LOGS+=("$OUT/isolation.log")
+if [ -n "$ISO_FAIL" ]; then
+    echo "check: FAIL isolation: $ISO_FAIL" > "$OUT/isolation.log"
+else
+    echo "check: PASS isolation: $ISO_OK launches ran as the copy ($DOMAIN) with scratch session, undo and models folders and the scratch AI suite; $REAL's defaults and recent-documents list unchanged" > "$OUT/isolation.log"
 fi
-[ -n "$ISO_FAIL" ] && echo "check: FAIL isolation: $ISO_FAIL" > "$OUT/isolation.log" || echo "check: PASS isolation: net.mindtricks.cedric defaults and ~/Library/Application Support/Cedric unchanged" > "$OUT/isolation.log"
 
 RUNTIME=$(( $(date +%s) - T_START ))
 # The summary.
@@ -206,7 +274,8 @@ RUNTIME=$(( $(date +%s) - T_START ))
     echo
     echo "- Commit: $(git rev-parse --short HEAD) ($(git rev-parse --abbrev-ref HEAD))$(git diff --quiet HEAD -- || echo ', with local changes')"
     echo "- App: $ISOLATION"
-    echo "- Total runtime: ${RUNTIME} s$( [ $WRITE = 0 ] && echo " (flows ${T_FLOWS} s)")"
+    echo "- Total runtime: ${RUNTIME} s$( [ $WRITE = 0 ] && echo " (flows ${T_FLOWS} s)" || true)"
+    echo "- Logs of this invocation: $(for l in "${LOGS[@]}"; do basename "$l"; done | tr '\n' ' ')"
     echo "- Load now: $(sysctl -n vm.loadavg) on $CORES cores"
     echo
     if [ $WRITE = 0 ]; then
@@ -223,22 +292,22 @@ RUNTIME=$(( $(date +%s) - T_START ))
     echo "## Speed"
     echo
     echo '```'
-    grep -hE "^metric |^check: (PASS|FAIL|SKIP)" "$OUT/budget.log" 2>/dev/null || echo "(not measured: --flows-only)"
+    if [ $FLOWS_ONLY = 1 ]; then echo "(not measured: --flows-only)"; else grep -hE "^metric |^check: (PASS|FAIL|SKIP)" "$OUT/budget.log" || echo "(no verdicts)"; fi
     echo '```'
     echo
     echo "## SKIPs"
     echo
-    grep -h "^check: SKIP" "$OUT"/*.log | sed 's/^check: SKIP /- /' || echo "- none"
+    grep -h "^check: SKIP" "${LOGS[@]}" | sed 's/^check: SKIP /- /' | grep . || echo "- none"
     echo
     echo "## Findings (every FAIL)"
     echo
-    grep -H "^check: FAIL" "$OUT"/*.log | sed "s|^$OUT/||; s/^/- /" || echo "- none"
+    grep -H "^check: FAIL" "${LOGS[@]}" | sed "s|^$OUT/||; s/^/- /" | grep . || echo "- none"
     echo
     echo "## Files"
     echo
-    echo "Logs: $OUT/*.log. Screenshots: $OUT/shots ($(ls "$OUT/shots" | grep -c '\.png$' || true) PNGs)."
+    echo "Logs: $OUT/*.log (this invocation's are listed above). Screenshots: $OUT/shots ($(find "$OUT/shots" -name '*.png' -newer "$W/marker" | wc -l | tr -d ' ') PNGs from this invocation)."
 } > "$OUT/summary.md"
 cat "$OUT/summary.md"
 log "runtime ${RUNTIME} s; summary in $OUT/summary.md"
-if grep -q "^check: FAIL" "$OUT"/*.log; then exit 1; fi
+if grep -q "^check: FAIL" "${LOGS[@]}"; then exit 1; fi
 exit 0
