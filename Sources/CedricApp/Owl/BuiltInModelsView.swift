@@ -64,156 +64,195 @@ final class BuiltInDownloads {
     }
 }
 
-/// One row per catalog model: name, size, licence, state, and Download /
-/// Pause / Resume / Cancel / Delete.
+/// The built-in engine's compact chooser parts. Settings › Cedric's one
+/// Model popup picks the model; this shows that model's Download / Pause /
+/// Resume / Delete (`action`) and, while it downloads or is paused, Cancel
+/// (`secondary`), both on the popup's row (`controls`), plus an info button
+/// whose popover has the full description. The view itself is one status
+/// line (state, with a small progress bar) and one line saying where models
+/// come from (the full text in its tooltip).
 @MainActor
 final class BuiltInModelsView: NSStackView {
-    final class Row: NSStackView {
-        let model: BuiltInModel
-        let title = NSTextField(labelWithString: "")
-        let detail = NSTextField(wrappingLabelWithString: "")
-        let status = NSTextField(labelWithString: "")
-        let progress = NSProgressIndicator()
-        let action = NSButton(title: "", target: nil, action: nil)
-        let secondary = NSButton(title: "", target: nil, action: nil)
-
-        init(model: BuiltInModel) {
-            self.model = model
-            super.init(frame: .zero)
-            orientation = .vertical
-            alignment = .leading
-            spacing = 3
-            title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-            let small = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            detail.font = small
-            detail.textColor = .secondaryLabelColor
-            detail.preferredMaxLayoutWidth = 380
-            status.font = small
-            progress.style = .bar
-            progress.isIndeterminate = false
-            progress.minValue = 0
-            progress.maxValue = 1
-            progress.controlSize = .small
-            progress.widthAnchor.constraint(equalToConstant: 150).isActive = true
-            for b in [action, secondary] { b.controlSize = .small; b.bezelStyle = .rounded }
-            title.setContentCompressionResistancePriority(.required, for: .horizontal)
-            let spacer = NSView()
-            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            let line = NSStackView(views: [title, spacer, action, secondary])
-            line.spacing = 6
-            line.alignment = .centerY
-            line.widthAnchor.constraint(equalToConstant: 380).isActive = true
-            let statusLine = NSStackView(views: [progress, status])
-            statusLine.spacing = 8
-            statusLine.alignment = .centerY
-            addArrangedSubview(line)
-            addArrangedSubview(detail)
-            addArrangedSubview(statusLine)
-        }
-
-        required init?(coder: NSCoder) { fatalError() }
-
-        private func showTitle(_ button: NSButton, _ title: String, _ spoken: String) {
-            button.title = title
-            button.setAccessibilityLabel(spoken)
-        }
-
-        func show(_ state: ModelDownloadState) {
-            var name = model.name
-            if model.isDefault { name += String(localized: " (recommended)") }
-            title.stringValue = name
-            var d = "\(model.summary) \(model.shortDescription). \(String(localized: "Licence")): \(model.license)."
-            if model.needsMoreMemory() { d += " " + String(localized: "Needs \(model.minRAMGB) GB of memory; this Mac has less.") }
-            detail.stringValue = d
-            status.textColor = .secondaryLabelColor
-            progress.isHidden = true
-            secondary.isHidden = true
-            action.isEnabled = true
-            let f = ByteCountFormatter()
-            let modelName = model.name
-            switch state {
-            case .notDownloaded:
-                showTitle(action, String(localized: "Download"), String(localized: "Download \(modelName)"))
-                status.stringValue = ""
-            case .downloading(let r, let t):
-                showTitle(action, String(localized: "Pause"), String(localized: "Pause \(modelName)"))
-                showTitle(secondary, String(localized: "Cancel"), String(localized: "Cancel \(modelName)"))
-                secondary.isHidden = false
-                progress.isHidden = false; progress.doubleValue = state.fraction ?? 0
-                status.stringValue = String(localized: "Downloading \(f.string(fromByteCount: r)) of \(f.string(fromByteCount: t))…")
-            case .paused(let r, let t):
-                showTitle(action, String(localized: "Resume"), String(localized: "Resume \(modelName)"))
-                showTitle(secondary, String(localized: "Cancel"), String(localized: "Cancel \(modelName)"))
-                secondary.isHidden = false
-                progress.isHidden = false; progress.doubleValue = state.fraction ?? 0
-                status.stringValue = String(localized: "Paused at \(f.string(fromByteCount: r)) of \(f.string(fromByteCount: t)).")
-            case .verifying:
-                showTitle(action, String(localized: "Verifying…"), String(localized: "Verifying \(modelName)"))
-                action.isEnabled = false
-                status.stringValue = String(localized: "Checking the SHA-256…")
-            case .installed:
-                showTitle(action, String(localized: "Delete"), String(localized: "Delete \(modelName)"))
-                status.stringValue = String(localized: "Downloaded and verified.")
-                status.textColor = .systemGreen
-            case .failed(let e):
-                showTitle(action, String(localized: "Download"), String(localized: "Download \(modelName)"))
-                status.stringValue = e.message
-                status.textColor = .systemRed
-            }
-            status.isHidden = status.stringValue.isEmpty
-            status.superview?.isHidden = status.isHidden && progress.isHidden
-        }
-    }
-
     let downloads: BuiltInDownloads
-    private(set) var rows: [Row] = []
+    /// The model the buttons and status act on: the popup's download target,
+    /// or with Automatic selected, the one Automatic uses (or would).
+    private(set) var model: BuiltInModel?
+    /// Automatic is selected: the status line names the model it uses.
+    private(set) var automatic = false
+    let action = NSButton(title: "", target: nil, action: nil)
+    let secondary = NSButton(title: "", target: nil, action: nil)
+    let info = NSButton(title: "", target: nil, action: nil)
+    /// action, secondary and info: next to the Model popup.
+    let controls: NSStackView
+    let status = NSTextField(labelWithString: "")
+    let progress = NSProgressIndicator()
+    let source = NSTextField(labelWithString: "")
     private var token: UUID?
     private(set) var licenseConfirmationAlert: NSAlert?
-    /// After any state change (the sheet refreshes its model menu).
+    private(set) var infoPopover: NSPopover?
+    /// After any download state change (the section refreshes its Model menu).
     var onChange: (() -> Void)?
 
     init(downloads: BuiltInDownloads = .shared) {
         self.downloads = downloads
+        controls = NSStackView(views: [action, secondary, info])
         super.init(frame: .zero)
         orientation = .vertical
         alignment = .leading
-        spacing = 10
-        for m in downloads.catalog?.models ?? [] {
-            let row = Row(model: m)
-            row.action.target = self; row.action.action = #selector(primary(_:))
-            row.secondary.target = self; row.secondary.action = #selector(secondary(_:))
-            rows.append(row)
-            addArrangedSubview(row)
+        spacing = 0
+        controls.spacing = 4
+        controls.alignment = .centerY
+        for b in [action, secondary] { b.controlSize = .small; b.bezelStyle = .rounded }
+        action.target = self; action.action = #selector(primary(_:))
+        secondary.target = self; secondary.action = #selector(secondary(_:))
+        info.bezelStyle = .inline
+        info.isBordered = false
+        info.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: String(localized: "Model details"))
+        info.imagePosition = .imageOnly
+        info.target = self; info.action = #selector(showInfo(_:))
+        let small = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+        status.font = small
+        status.lineBreakMode = .byTruncatingTail
+        progress.style = .bar
+        progress.isIndeterminate = false
+        progress.minValue = 0
+        progress.maxValue = 1
+        progress.controlSize = .small
+        progress.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        let statusLine = NSStackView(views: [progress, status])
+        statusLine.spacing = 6
+        statusLine.alignment = .centerY
+        let folder = (downloads.store.directory.path as NSString).abbreviatingWithTildeInPath
+        source.stringValue = String(localized: "Downloaded from Hugging Face into \(folder).")
+        source.toolTip = String(localized: "Downloaded from Hugging Face into \(folder). The model runs on this Mac; nothing is sent anywhere.")
+        source.font = small
+        source.textColor = .secondaryLabelColor
+        source.lineBreakMode = .byTruncatingMiddle
+        for l in [status, source] {
+            l.maximumNumberOfLines = 1
+            l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            l.widthAnchor.constraint(lessThanOrEqualToConstant: 380).isActive = true
         }
-        let where_ = NSTextField(wrappingLabelWithString: String(localized: "Downloaded from Hugging Face into \((downloads.store.directory.path as NSString).abbreviatingWithTildeInPath). The model runs on this Mac; nothing is sent anywhere."))
-        where_.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        where_.textColor = .secondaryLabelColor
-        where_.preferredMaxLayoutWidth = 380
-        addArrangedSubview(where_)
+        addArrangedSubview(statusLine)
+        addArrangedSubview(source)
         token = downloads.observe { [weak self] in self?.reload() }
-        reload()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func detach() { if let token { downloads.stopObserving(token) }; token = nil }
 
+    /// A download state changed: show it, and let the section refresh.
     func reload() {
-        for r in rows { r.show(downloads.state(r.model)) }
+        update()
         onChange?()
     }
 
-    func row(_ id: String) -> Row? { rows.first { $0.model.id == id } }
+    /// The popup now shows `model` (Automatic: the one it uses or would).
+    func show(_ model: BuiltInModel?, automatic: Bool) {
+        self.model = model
+        self.automatic = automatic
+        update()
+    }
+
+    private func showTitle(_ button: NSButton, _ title: String, _ spoken: String) {
+        button.title = title
+        button.setAccessibilityLabel(spoken)
+    }
+
+    private func update() {
+        status.textColor = .secondaryLabelColor
+        progress.isHidden = true
+        secondary.isHidden = true
+        action.isEnabled = true
+        guard let model else {
+            action.isHidden = true
+            info.isHidden = true
+            status.stringValue = String(localized: "No models are bundled with this build.")
+            return
+        }
+        action.isHidden = false
+        info.isHidden = false
+        let modelName = model.name
+        info.setAccessibilityLabel(String(localized: "About \(modelName)"))
+        info.toolTip = model.details
+        let state = downloads.state(model)
+        let f = ByteCountFormatter()
+        var line: String
+        switch state {
+        case .notDownloaded:
+            showTitle(action, String(localized: "Download"), String(localized: "Download \(modelName)"))
+            line = String(localized: "Not downloaded (\(model.sizeLabel)).")
+        case .downloading(let r, let t):
+            showTitle(action, String(localized: "Pause"), String(localized: "Pause \(modelName)"))
+            showTitle(secondary, String(localized: "Cancel"), String(localized: "Cancel \(modelName)"))
+            secondary.isHidden = false
+            progress.isHidden = false; progress.doubleValue = state.fraction ?? 0
+            line = String(localized: "Downloading \(f.string(fromByteCount: r)) of \(f.string(fromByteCount: t))…")
+        case .paused(let r, let t):
+            showTitle(action, String(localized: "Resume"), String(localized: "Resume \(modelName)"))
+            showTitle(secondary, String(localized: "Cancel"), String(localized: "Cancel \(modelName)"))
+            secondary.isHidden = false
+            progress.isHidden = false; progress.doubleValue = state.fraction ?? 0
+            line = String(localized: "Paused at \(f.string(fromByteCount: r)) of \(f.string(fromByteCount: t)).")
+        case .verifying:
+            showTitle(action, String(localized: "Verifying…"), String(localized: "Verifying \(modelName)"))
+            action.isEnabled = false
+            line = String(localized: "Checking the SHA-256…")
+        case .installed:
+            showTitle(action, String(localized: "Delete"), String(localized: "Delete \(modelName)"))
+            line = String(localized: "Downloaded and verified.")
+            status.textColor = .systemGreen
+        case .failed(let e):
+            showTitle(action, String(localized: "Download"), String(localized: "Download \(modelName)"))
+            line = e.message
+            status.textColor = .systemRed
+        }
+        if model.needsMoreMemory(), state != .installed {
+            line += " " + String(localized: "Needs \(model.minRAMGB) GB of memory; this Mac has less.")
+        }
+        if automatic { line = String(localized: "Uses \(modelName). ") + line }
+        status.stringValue = line
+        status.toolTip = line
+    }
 
     @objc func primary(_ sender: NSButton) {
-        guard let row = rows.first(where: { $0.action === sender }) else { return }
-        switch downloads.state(row.model) {
-        case .notDownloaded, .failed: confirmDownload(row.model)
-        case .paused: downloads.download(row.model)
-        case .downloading: downloads.pause(row.model)
-        case .installed: downloads.delete(row.model)
+        guard let model else { return }
+        switch downloads.state(model) {
+        case .notDownloaded, .failed: confirmDownload(model)
+        case .paused: downloads.download(model)
+        case .downloading: downloads.pause(model)
+        case .installed: downloads.delete(model)
         case .verifying: break
         }
+    }
+
+    @objc func showInfo(_ sender: NSButton) {
+        guard let model else { return }
+        infoPopover?.close()
+        var text = model.details
+        if model.needsMoreMemory() { text += "\n" + String(localized: "This Mac has less memory than that.") }
+        let label = NSTextField(wrappingLabelWithString: text)
+        label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        label.isSelectable = true
+        label.preferredMaxLayoutWidth = 340
+        label.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            label.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            label.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            label.widthAnchor.constraint(lessThanOrEqualToConstant: 340),
+        ])
+        let vc = NSViewController()
+        vc.view = content
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = vc
+        infoPopover = popover
+        popover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .maxY)
     }
 
     private func confirmDownload(_ model: BuiltInModel) {
@@ -267,7 +306,7 @@ final class BuiltInModelsView: NSStackView {
     }
 
     @objc func secondary(_ sender: NSButton) {
-        guard let row = rows.first(where: { $0.secondary === sender }) else { return }
-        downloads.cancel(row.model)
+        guard let model else { return }
+        downloads.cancel(model)
     }
 }

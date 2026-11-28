@@ -112,7 +112,10 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
         loadModelAtLaunch = try c.decodeIfPresent(Bool.self, forKey: .loadModelAtLaunch) ?? false
     }
 
-    /// Settings › Cedric, under "Load model at launch", word for word.
+    /// Settings › Cedric, under "Load model at launch": the one line shown
+    /// (the full note below is its tooltip).
+    public static let loadModelAtLaunchShortNote = "Off: automatic hints wait until you first ask Cedric."
+    /// Settings › Cedric's tooltip for "Load model at launch", word for word.
     public static let loadModelAtLaunchNote = "Off: automatic hints use the built-in model only after you have asked Cedric something since Owlink started. On: Owlink loads it in the background when it starts."
 
     public static let `default` = LocalAISettings()
