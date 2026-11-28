@@ -384,11 +384,14 @@ public enum TextCodec {
     /// `readText` and the stamp of the file the bytes came from (the same
     /// descriptor: `snapshotStamped`).
     public static func readTextStamped(at url: URL, as encoding: TextEncoding? = nil, shareBytes: Bool = false,
-                                       hooks: ReadHooks? = nil) throws -> (text: DecodedText?, stamp: DiskStamp) {
+                                       hooks: ReadHooks? = nil, forOpen: Bool = false) throws -> (text: DecodedText?, stamp: DiskStamp) {
         hooks?.before?(url)
         let (data, stamp) = try OpenSignpost.interval("raw read") { try snapshotStamped(of: url) }
         hooks?.after?(url)
-        return (decode(data, as: encoding, shareBytes: shareBytes), stamp)
+        // forOpen: a binary file is not decoded until Open Anyway (0.6.1).
+        let text = forOpen ? decodeForOpen(data, as: encoding, shareBytes: shareBytes)
+            : decode(data, as: encoding, shareBytes: shareBytes)
+        return (text, stamp)
     }
 
     /// Too large to read (`snapshot`'s `maxBytes`).
@@ -431,11 +434,16 @@ public enum TextCodec {
     /// mapped file. And best for a caller that copies the text and lets it
     /// go (opening a file into a tab): kept, it keeps all of `data`.
     /// How a file is prepared for a new tab (0.6.1). A binary file
-    /// (`looksBinary` on the first 8 KB) returns empty text; Open Anyway
-    /// decodes with `decode`. The body is a stub that calls `decode` until
-    /// the 0.6.1 sidebar-speed fix lands (failing BinaryOpenDecodeTests).
+    /// (`looksBinary` on the first 8 KB) returns empty text so a sidebar
+    /// click does not decode megabytes of a pcap (or similar) before the
+    /// tab is shown; Open Anyway decodes with `decode`. A requested
+    /// encoding still goes through `decode` (Reload, Revert, an encoding
+    /// reopen).
     public static func decodeForOpen(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
-        decode(data, as: encoding, shareBytes: shareBytes)
+        if encoding == nil, looksBinary(data) {
+            return DecodedText(text: "", encoding: .utf8, lineEnding: .lf, mixedLineEndings: false, looksBinary: true)
+        }
+        return decode(data, as: encoding, shareBytes: shareBytes)
     }
 
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {

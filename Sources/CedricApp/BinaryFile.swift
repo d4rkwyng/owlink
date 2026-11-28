@@ -97,11 +97,20 @@ extension EditorWindowController {
         showBinaryBar()
     }
 
-    /// Open Anyway: the decoded text, read-only.
+    /// Open Anyway: the decoded text, read-only. If the open path skipped
+    /// the decode (0.6.1: a binary file's first 8 KB were enough to tell),
+    /// the bytes are read and decoded now, with detection, and applied to
+    /// the document (encoding and line endings).
     func openBinaryAnyway() {
         guard case .held(let text) = binary else { return }
+        var shown = text
+        if shown.isEmpty, let url = doc.fileURL, let (d, mod) = try? EditorDocument.read(url, shareBytes: true) {
+            doc.apply(d)
+            doc.noteDisk(mod)
+            shown = d.text
+        }
         binary = .readOnly
-        setText(text)
+        setText(shown)
         doc.markSaved()
         setEditable(false)
         showBinaryBar()

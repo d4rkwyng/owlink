@@ -1350,10 +1350,15 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSText
             return
         }
         guard inBackground else {
-            reloadClean(try? EditorDocument.read(url, encoding: doc.encoding), prepared: nil)
+            // A held binary file may not have a real encoding yet (0.6.1:
+            // open skipped the decode). Detect this version's format, as
+            // reloadClean's held branch already applies "its own format".
+            let enc: TextEncoding? = { if case .held = binary { return nil }; return doc.encoding }()
+            reloadClean(try? EditorDocument.read(url, encoding: enc), prepared: nil)
             return
         }
-        let known = doc.diskStamp, encoding = doc.encoding
+        let known = doc.diskStamp
+        let encoding: TextEncoding? = { if case .held = binary { return nil }; return doc.encoding }()
         catchUpReads += 1
         DispatchQueue.global(qos: .userInitiated).async {
             let read = try? EditorDocument.read(url, encoding: encoding, shareBytes: true)

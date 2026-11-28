@@ -32,14 +32,15 @@ public enum DocumentRead {
     /// Reload, Revert to Saved, an encoding reopen, a restored or reopened
     /// tab all read whichever version is on disk now.
     public static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false,
-                            hooks: TextCodec.ReadHooks? = nil) throws -> (DecodedText, DiskStamp?) {
+                            hooks: TextCodec.ReadHooks? = nil, forOpen: Bool = false) throws -> (DecodedText, DiskStamp?) {
         if let kind = SpecialFile.kind(atPath: url.path) {
             throw LoadError.unreadable(url, NSError(domain: "Cedric", code: 2, userInfo: [NSLocalizedDescriptionKey:
                 String(localized: "It is \(kind), not a regular file.")]))
         }
         let read: (text: DecodedText?, stamp: DiskStamp)
         do {
-            read = try TextCodec.readTextStamped(at: url, as: encoding?.base, shareBytes: shareBytes, hooks: hooks)
+            read = try TextCodec.readTextStamped(at: url, as: encoding?.base, shareBytes: shareBytes, hooks: hooks,
+                                                 forOpen: forOpen && encoding == nil)
         } catch {
             throw LoadError.unreadable(url, error)
         }

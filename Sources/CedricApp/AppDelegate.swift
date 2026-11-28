@@ -691,7 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         do {
             // The text goes into the tab's storage (a copy) and is let go.
-            let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true) }
+            let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true, forOpen: true) }
             PerfTrace.mark("read_decode")
             let language = OpenSignpost.interval("LanguageChoice") { LanguageChoice.forFile(named: std.lastPathComponent, content: d.text) }
             PerfTrace.mark("detect_language")
@@ -821,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// index, the saved-text fingerprint, the language and the certificate
     /// sniff. The text is immutable until the tab copies it.
     nonisolated static func readInBackground(_ std: URL) throws -> BackgroundRead {
-        let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true) }
+        let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true, forOpen: true) }
         let name = std.lastPathComponent
         let text = d.text
         let ns = text as NSString

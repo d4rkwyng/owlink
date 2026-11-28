@@ -182,8 +182,9 @@ final class EditorDocument {
 
     /// Reads and decodes a file into a tab: the text and the stamp of the
     /// file it came from, both from one open descriptor (DocumentRead).
-    nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false) throws -> (DecodedText, DiskStamp?) {
-        try DocumentRead.read(url, encoding: encoding, shareBytes: shareBytes)
+    nonisolated static func read(_ url: URL, encoding: TextEncoding? = nil, shareBytes: Bool = false,
+                                 forOpen: Bool = false) throws -> (DecodedText, DiskStamp?) {
+        try DocumentRead.read(url, encoding: encoding, shareBytes: shareBytes, forOpen: forOpen)
     }
 
     func apply(_ d: DecodedText) {
