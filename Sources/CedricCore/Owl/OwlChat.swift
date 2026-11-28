@@ -320,7 +320,7 @@ public enum OwlQuickAction: String, Sendable, CaseIterable {
         case .explainLine: return String(localized: "Explain Line")
         case .scriptSafety: return String(localized: "Check for Risks")
         case .explain: return String(localized: "Explain")
-        case .summarise: return String(localized: "Summarise")
+        case .summarise: return String(localized: "Summarize")
         case .findProblems: return String(localized: "Find Problems")
         case .rewrite: return prose ? String(localized: "Rewrite") : String(localized: "Simplify")
         case .addComments: return String(localized: "Add Comments")
