@@ -143,6 +143,37 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: [], contentType: .plainText), .editor)
     }
 
+    /// Text metadata (a provider's plain-text type) doesn't take a known
+    /// viewer file away from its viewer: a `.pdf` name or `%PDF-` header,
+    /// a recognized Office / iWork name with its header.
+    func testTextContentTypeDoesNotBeatAKnownViewerFile() throws {
+        for type in [UTType.plainText, .text, .utf8PlainText] {
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "sample.pdf", prefix: pdf, contentType: type), .pdf)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "damaged.pdf", prefix: [], contentType: type), .pdf)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "scan", prefix: pdf, contentType: type), .pdf)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "book.xlsx", prefix: zip, contentType: type), .quickLook(.spreadsheet))
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "letter.docx", prefix: zip, contentType: type), .quickLook(.word))
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "old.xls", prefix: ole, contentType: type), .quickLook(.spreadsheet))
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "talk.key", prefix: zip, contentType: type), .quickLook(.keynote))
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "styled.rtfd", prefix: [UInt8](), contentType: type,
+                                                     isDirectory: true), .quickLook(.rtfd))
+            // Still text: a PEM key named .key, an RTF named .doc, no telling name or header.
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "server.key", prefix: Array("-----BEGIN".utf8), contentType: type), .editor)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "notes.doc", prefix: Array("{\\rtf1".utf8), contentType: type), .editor)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: zip, contentType: type), .editor)
+        }
+    }
+
+    /// The other way: a text name wins over viewer metadata (a CSV the
+    /// provider calls a PDF or a spreadsheet is still the editor's).
+    func testTextNameBeatsViewerContentType() throws {
+        let sheet = try XCTUnwrap(UTType("org.openxmlformats.spreadsheetml.sheet"))
+        for name in ["table.csv", "notes.txt", "README.md"] {
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: pdf, contentType: .pdf), .editor, name)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: zip, contentType: sheet), .editor, name)
+        }
+    }
+
     func testKindNames() {
         XCTAssertEqual(OfficeFormat.spreadsheet.kindName, "Excel spreadsheet")
         XCTAssertEqual(OfficeFormat.word.kindName, "Word document")
