@@ -5,8 +5,8 @@ import CedricCore
 /// through App Translocation, from a mounted disk image, or as a download
 /// outside Applications (AppLocation.offersMove). Sparkle can't update the
 /// app from any of those. Move copies the app into Applications
-/// (AppMover: the copy's signature is checked and only the copy loses its
-/// quarantine), then quits and reopens from there. Not Now asks again next
+/// (AppMover: the copy must be this running app, by signature and code
+/// hash, and only the copy loses its quarantine), then quits and reopens from there. Not Now asks again next
 /// launch; "Don't ask again" with Not Now stops asking (the
 /// OwlinkMoveToApplicationsSuppressed user default).
 ///
@@ -78,6 +78,9 @@ enum MoveToApplications {
         if let left = outcome.originalLeftBehind {
             NSLog("Owlink: moved; the original at %@ couldn't go to the Trash", left.path)
         }
+        if let left = outcome.replacedLeftBehind {
+            NSLog("Owlink: moved; the replaced Owlink, now at %@, couldn't go to the Trash", left.path)
+        }
         relaunch(outcome.installed)
     }
 
@@ -102,6 +105,7 @@ enum MoveToApplications {
         case .replaceFailed: return String(localized: "the Owlink already there couldn’t be replaced")
         case .noWritableApplicationsFolder: return String(localized: "no Applications folder Owlink can write to")
         case .destinationExists: return String(localized: "an Owlink is already there")
+        case .destinationChanged: return String(localized: "the Owlink there was replaced while Owlink was asking, so it was left alone")
         case nil: return error.localizedDescription
         }
     }

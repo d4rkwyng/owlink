@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Security
 import Testing
 @testable import CedricCore
 
@@ -81,24 +82,64 @@ import Testing
 }
 
 /// A file system in memory that records every call and can fail any one.
+/// Every item has an identity (a fresh number whenever something new is
+/// written at a path) and a signer ("owlink": the running app's), so the
+/// tests can tell "the app the user was asked about" from "whatever is at
+/// that path now", and a copy of something else from the running app.
 final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
-    var items: Set<String>
+    /// path → which item is there.
+    var ids: [String: Int] = [:]
+    /// path → who signed the item there.
+    var signer: [String: String] = [:]
+    var runningSigner = "owlink"
     var writable: Set<String>
     var readOnly: Set<String> = []
-    var badSignature = false
-    var fail: Set<String> = []   // "copy", "rename", "trash:<path>", "quarantine", "create"
+    var fail: Set<String> = []   // "copy", "rename", "swap", "trash:<path>", "quarantine", "create"
     var log: [String] = []
     var quarantineRemovedUnder: [String] = []
     var trashed: [String] = []
+    /// Item identities that went to the Trash, in order.
+    var trashedIDs: [Int] = []
+    /// Paths that must never be empty during the install (the installed
+    /// app: a crash at any step must not leave it only in the Trash).
+    var watch: Set<String> = []
+    var wentMissing: Set<String> = []
+    /// Runs inside `swap`, just before it exchanges (a race with Finder).
+    var beforeSwap: ((FakeInstallFS) -> Void)?
+    /// The identity the last copy got.
+    var lastCopyID: Int?
+    private var nextID = 1
 
-    init(items: Set<String>, writable: Set<String>) {
-        self.items = items
-        self.writable = writable
+    var items: Set<String> {
+        get { Set(ids.keys) }
+        set {
+            for k in ids.keys where !newValue.contains(k) { ids[k] = nil; signer[k] = nil }
+            for k in newValue where ids[k] == nil { ids[k] = fresh(); signer[k] = runningSigner }
+        }
     }
 
+    init(items: Set<String>, writable: Set<String>) {
+        self.writable = writable
+        self.items = items
+    }
+
+    func fresh() -> Int { defer { nextID += 1 }; return nextID }
+    /// A different item is put at `path` (Finder replacing it).
+    @discardableResult func replace(_ path: String, signer s: String = "owlink") -> Int {
+        let id = fresh(); ids[path] = id; signer[path] = s
+        return id
+    }
+    private func move(_ from: String, _ to: String) {
+        ids[to] = ids[from]; signer[to] = signer[from]
+        ids[from] = nil; signer[from] = nil
+        noteMissing()
+    }
+    private func noteMissing() { for w in watch where ids[w] == nil { wentMissing.insert(w) } }
+
     struct Boom: Error {}
-    func exists(_ url: URL) -> Bool { items.contains(url.path) }
-    func isWritableFolder(_ url: URL) -> Bool { items.contains(url.path) && writable.contains(url.path) }
+    func exists(_ url: URL) -> Bool { ids[url.path] != nil }
+    func identity(_ url: URL) -> FileIdentity? { ids[url.path].map { FileIdentity(device: 1, inode: UInt64($0)) } }
+    func isWritableFolder(_ url: URL) -> Bool { exists(url) && writable.contains(url.path) }
     func createFolder(_ url: URL) throws {
         log.append("mkdir \(url.path)")
         if fail.contains("create") { throw Boom() }
@@ -106,21 +147,31 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
     }
     func copy(_ from: URL, to: URL) throws {
         log.append("copy \(from.path) -> \(to.path)")
-        if fail.contains("copy") { items.insert(to.path); throw Boom() }   // a partial copy is left
-        items.insert(to.path)
+        let id = fresh()
+        ids[to.path] = id; signer[to.path] = signer[from.path]
+        lastCopyID = id
+        if fail.contains("copy") { throw Boom() }   // a partial copy is left
     }
-    func rename(_ from: URL, to: URL) throws {
+    func renameExclusive(_ from: URL, to: URL) throws {
         log.append("rename \(from.path) -> \(to.path)")
-        if fail.contains("rename") && from.lastPathComponent.hasPrefix(".Owlink-moving") { throw Boom() }
-        items.remove(from.path); items.insert(to.path)
+        if fail.contains("rename") || exists(to) || !exists(from) { throw Boom() }
+        move(from.path, to.path)
     }
-    func remove(_ url: URL) throws { log.append("rm \(url.path)"); items.remove(url.path) }
+    func swap(_ a: URL, _ b: URL) throws {
+        log.append("swap \(a.path) <-> \(b.path)")
+        beforeSwap?(self)
+        if fail.contains("swap") || !exists(a) || !exists(b) { throw Boom() }
+        (ids[a.path], ids[b.path]) = (ids[b.path], ids[a.path])
+        (signer[a.path], signer[b.path]) = (signer[b.path], signer[a.path])
+    }
+    func remove(_ url: URL) throws { log.append("rm \(url.path)"); ids[url.path] = nil; signer[url.path] = nil; noteMissing() }
     func trash(_ url: URL) throws -> URL? {
         log.append("trash \(url.path)")
-        if fail.contains("trash:\(url.path)") { throw Boom() }
-        items.remove(url.path); trashed.append(url.path)
-        let t = "/Users/tester/.Trash/\(url.lastPathComponent)"
-        items.insert(t)
+        if fail.contains("trash:\(url.path)") || !exists(url) { throw Boom() }
+        trashed.append(url.path)
+        trashedIDs.append(ids[url.path]!)
+        let t = "/Users/tester/.Trash/\(trashed.count)-\(url.lastPathComponent)"
+        move(url.path, t)
         return URL(fileURLWithPath: t)
     }
     func removeQuarantine(under url: URL) throws {
@@ -128,7 +179,7 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         quarantineRemovedUnder.append(url.path)
         if fail.contains("quarantine") { throw Boom() }
     }
-    func signatureIsValid(_ url: URL) -> Bool { !badSignature }
+    func signatureMatchesRunningApp(_ url: URL) -> Bool { signer[url.path] == runningSigner }
     func isReadOnlyVolume(_ url: URL) -> Bool { readOnly.contains { url.path.hasPrefix($0) } }
 }
 
@@ -151,12 +202,20 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         fs.quarantineRemovedUnder.allSatisfy { $0 == staging }
     }
 
+    /// 0.6.0 QA's case: moved into /Applications by a script, still translocated.
+    static func translocatedFromApplications() throws -> (FakeInstallFS, AppMovePlan) {
+        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.translocated], writable: [Self.apps])
+        fs.watch = [Self.dest]
+        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.dest)), source: Self.translocated, fs: fs)
+        return (fs, p)
+    }
+
     @Test func aDownloadIsCopiedUnquarantinedRenamedAndTheOriginalTrashed() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.download], writable: [Self.apps])
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(p.destination.path == Self.dest && !p.destinationExists && p.trashOriginal)
         let out = try Self.mover(fs).install(p, replaceExisting: false)
-        #expect(out == .init(installed: URL(fileURLWithPath: Self.dest), originalLeftBehind: nil))
+        #expect(out == .init(installed: URL(fileURLWithPath: Self.dest)))
         #expect(fs.log == [
             "copy \(Self.download) -> \(Self.staging)",
             "unquarantine \(Self.staging)",
@@ -166,21 +225,87 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(Self.onlyStagingUnquarantined(fs))
     }
 
-    @Test func translocatedFromApplicationsReplacesItsOwnOriginalWithoutAsking() throws {
-        // 0.6.0 QA's case: moved into /Applications by a script, still translocated.
-        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.translocated], writable: [Self.apps])
-        let loc = AppLocation.translocated(original: URL(fileURLWithPath: Self.dest))
-        let p = try Self.plan(loc, source: Self.translocated, fs: fs)
+    @Test func translocatedFromApplicationsSwapsInTheCopyThenTrashesTheOldApp() throws {
+        let (fs, p) = try Self.translocatedFromApplications()
         #expect(p.destinationExists && p.destinationIsOriginal && !p.trashOriginal)
-        _ = try Self.mover(fs).install(p, replaceExisting: false)
+        let old = fs.ids[Self.dest]!
+        let out = try Self.mover(fs).install(p, replaceExisting: false)
+        #expect(out == .init(installed: URL(fileURLWithPath: Self.dest)))
         #expect(fs.log == [
             "copy \(Self.translocated) -> \(Self.staging)",
             "unquarantine \(Self.staging)",
-            "trash \(Self.dest)",
-            "rename \(Self.staging) -> \(Self.dest)",
+            "swap \(Self.staging) <-> \(Self.dest)",
+            "trash \(Self.staging)",
         ])
-        #expect(fs.trashed == [Self.dest])
+        // The installed path was never empty, the new copy is there, and
+        // the item in the Trash is the old app.
+        #expect(fs.wentMissing.isEmpty)
+        #expect(fs.ids[Self.dest] == fs.lastCopyID)
+        #expect(fs.trashedIDs == [old])
         #expect(Self.onlyStagingUnquarantined(fs))
+    }
+
+    @Test func aFailedSwapLeavesTheOriginalInstalled() throws {
+        let (fs, p) = try Self.translocatedFromApplications()
+        let old = fs.ids[Self.dest]!
+        fs.fail = ["swap"]
+        #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: false) }
+        #expect(fs.ids[Self.dest] == old)
+        #expect(fs.wentMissing.isEmpty)
+        #expect(fs.trashed.isEmpty)
+        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+    }
+
+    @Test func aReplacedAppThatWontGoToTheTrashLeavesTheNewInstallUsable() throws {
+        let (fs, p) = try Self.translocatedFromApplications()
+        let old = fs.ids[Self.dest]!
+        fs.fail = ["trash:\(Self.staging)"]
+        let out = try Self.mover(fs).install(p, replaceExisting: false)
+        #expect(out.installed.path == Self.dest)
+        #expect(out.replacedLeftBehind?.path == Self.staging)
+        #expect(fs.ids[Self.dest] == fs.lastCopyID)
+        #expect(fs.signatureMatchesRunningApp(URL(fileURLWithPath: Self.dest)))
+        #expect(fs.ids[Self.staging] == old)   // kept, not deleted
+        #expect(!fs.log.contains("rm \(Self.staging)"))
+    }
+
+    @Test func anOriginalReplacedWhileThePromptWasOpenIsLeftAlone() throws {
+        // Finder replaces /Applications/Owlink.app while "Move to Applications?" is up.
+        let (fs, p) = try Self.translocatedFromApplications()
+        let other = fs.replace(Self.dest)
+        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+            try Self.mover(fs).install(p, replaceExisting: false)
+        }
+        #expect(fs.ids[Self.dest] == other)
+        #expect(fs.trashed.isEmpty)
+        #expect(!fs.log.contains { $0.hasPrefix("swap") })
+        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+    }
+
+    @Test func anAppTheUserAgreedToReplaceThatWasThenReplacedIsLeftAlone() throws {
+        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.download], writable: [Self.apps])
+        let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
+        let other = fs.replace(Self.dest)
+        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+            try Self.mover(fs).install(p, replaceExisting: true)
+        }
+        #expect(fs.ids[Self.dest] == other)
+        #expect(fs.trashed.isEmpty)
+        #expect(fs.exists(URL(fileURLWithPath: Self.download)))
+    }
+
+    @Test func aReplacementBetweenTheLookAndTheSwapIsSwappedBack() throws {
+        let (fs, p) = try Self.translocatedFromApplications()
+        var other: Int?
+        fs.beforeSwap = { f in
+            if other == nil { other = f.replace(Self.dest) }
+        }
+        #expect(throws: AppMoveError.destinationChanged(URL(fileURLWithPath: Self.dest))) {
+            try Self.mover(fs).install(p, replaceExisting: false)
+        }
+        #expect(fs.ids[Self.dest] == other)
+        #expect(fs.trashed.isEmpty)
+        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
     }
 
     @Test func translocatedFromDownloadsTrashesTheRealOriginalNotTheTranslocatedPath() throws {
@@ -192,7 +317,17 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(Self.onlyStagingUnquarantined(fs))
     }
 
-    @Test func translocatedWithAnUnknownOriginalTrashesNothingButTheReplacedDestination() throws {
+    @Test func aDifferentItemAtTheOriginalsPathIsNotTrashed() throws {
+        let fs = FakeInstallFS(items: [Self.apps, Self.download, Self.translocated], writable: [Self.apps])
+        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.download)), source: Self.translocated, fs: fs)
+        let other = fs.replace(Self.download)   // a new download took the name
+        let out = try Self.mover(fs).install(p, replaceExisting: false)
+        #expect(out.installed.path == Self.dest)
+        #expect(fs.trashed.isEmpty)
+        #expect(fs.ids[Self.download] == other)
+    }
+
+    @Test func translocatedWithAnUnknownOriginalTrashesNothing() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.translocated], writable: [Self.apps])
         let p = try Self.plan(.translocated(original: nil), source: Self.translocated, fs: fs)
         #expect(!p.trashOriginal)
@@ -214,6 +349,8 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
 
     @Test func anotherOwlinkInApplicationsNeedsTheUsersYes() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.download], writable: [Self.apps])
+        fs.watch = [Self.dest]
+        let old = fs.ids[Self.dest]!
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(p.destinationExists && !p.destinationIsOriginal)
         #expect(throws: AppMoveError.destinationExists(URL(fileURLWithPath: Self.dest))) {
@@ -222,8 +359,10 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(fs.log.isEmpty)   // nothing written, nothing unquarantined
         // With the user's yes it goes to the Trash (not deleted) and is replaced.
         _ = try Self.mover(fs).install(p, replaceExisting: true)
-        #expect(fs.trashed == [Self.dest, Self.download])
-        #expect(!fs.log.contains { $0.hasPrefix("rm \(Self.dest)") })
+        #expect(fs.trashed == [Self.staging, Self.download])
+        #expect(fs.trashedIDs.first == old)
+        #expect(fs.wentMissing.isEmpty)
+        #expect(!fs.log.contains { $0.hasPrefix("rm ") })
     }
 
     @Test func aFailedCopyRemovesThePartialStagingCopyAndTouchesNothingElse() throws {
@@ -236,13 +375,17 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(fs.items == [Self.apps, Self.download])
     }
 
-    @Test func aBrokenSignatureOnTheCopyStopsBeforeQuarantineIsTouched() throws {
-        let fs = FakeInstallFS(items: [Self.apps, Self.download], writable: [Self.apps])
-        fs.badSignature = true
+    @Test func aCopyThatIsntTheRunningAppStopsBeforeQuarantineIsTouched() throws {
+        // The bundle at the source path was swapped for another, validly
+        // signed one after launch: its copy must not lose its quarantine.
+        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.download], writable: [Self.apps])
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
-        #expect(throws: AppMoveError.signatureInvalid) { try Self.mover(fs).install(p, replaceExisting: false) }
+        fs.replace(Self.download, signer: "someone else")
+        let old = fs.ids[Self.dest]
+        #expect(throws: AppMoveError.signatureInvalid) { try Self.mover(fs).install(p, replaceExisting: true) }
         #expect(fs.quarantineRemovedUnder.isEmpty)
-        #expect(!fs.items.contains(Self.staging) && !fs.items.contains(Self.dest))
+        #expect(!fs.exists(URL(fileURLWithPath: Self.staging)))
+        #expect(fs.ids[Self.dest] == old && fs.trashed.isEmpty)
     }
 
     @Test func aFailedQuarantineRemovalDropsTheCopy() throws {
@@ -255,33 +398,12 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(Self.onlyStagingUnquarantined(fs))
     }
 
-    @Test func anExistingAppThatWontGoToTheTrashStaysAndTheCopyGoes() throws {
-        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.download], writable: [Self.apps])
-        fs.fail = ["trash:\(Self.dest)"]
-        let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
-        #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: true) }
-        #expect(fs.items == [Self.apps, Self.dest, Self.download])
-    }
-
     @Test func aFailedRenameDropsTheCopy() throws {
         let fs = FakeInstallFS(items: [Self.apps, Self.download], writable: [Self.apps])
         fs.fail = ["rename"]
         let p = try Self.plan(.elsewhere(quarantined: true), source: Self.download, fs: fs)
         #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: false) }
         #expect(fs.items == [Self.apps, Self.download])
-    }
-
-    @Test func aFailedRenameAfterReplacingPutsTheOldAppBackFromTheTrash() throws {
-        // The translocated-from-Applications case: the user's only copy must survive.
-        let fs = FakeInstallFS(items: [Self.apps, Self.dest, Self.translocated], writable: [Self.apps])
-        fs.fail = ["rename"]
-        let p = try Self.plan(.translocated(original: URL(fileURLWithPath: Self.dest)), source: Self.translocated, fs: fs)
-        #expect(throws: AppMoveError.self) { try Self.mover(fs).install(p, replaceExisting: false) }
-        #expect(fs.log.suffix(3) == [
-            "rename \(Self.staging) -> \(Self.dest)",
-            "rm \(Self.staging)",
-            "rename /Users/tester/.Trash/Owlink.app -> \(Self.dest)",
-        ])
     }
 
     @Test func aDestinationThatAppearedAfterThePlanIsNotReplacedWithoutAsking() throws {
@@ -358,17 +480,20 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
     }
 }
 
-/// The live copy keeps a signed bundle's signature valid (what the mover
-/// checks before it removes any quarantine), and a bundle with an edited
-/// file or no signature fails the check. The bundle is a tiny one made
-/// here and signed ad hoc with /usr/bin/codesign.
+/// The staged copy must be the running app, on real signed bundles: tiny
+/// ones made here and signed ad hoc with /usr/bin/codesign. The expected
+/// identity is taken from bundle A, standing in for the running process
+/// (CodeIdentity.runningProcess() reads the same two things from the
+/// running code). A copy of A matches; B, a different bundle with a valid
+/// signature of its own, does not, nor does a tampered copy of A.
 @Suite struct CodeSignatureOnDiskTests {
-    static func makeSignedApp(at app: URL) throws {
+    static func makeSignedApp(at app: URL, identifier: String = "invalid.owlink.test.tiny", extra: String? = nil) throws {
         let macos = app.appendingPathComponent("Contents/MacOS")
         try FileManager.default.createDirectory(at: macos, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: macos.appendingPathComponent("Tiny"))
-        let info: [String: Any] = ["CFBundleIdentifier": "invalid.owlink.test.tiny", "CFBundleExecutable": "Tiny",
+        var info: [String: Any] = ["CFBundleIdentifier": identifier, "CFBundleExecutable": "Tiny",
                                    "CFBundlePackageType": "APPL", "CFBundleName": "Tiny"]
+        if let extra { info["OwlinkTestExtra"] = extra }
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: app.appendingPathComponent("Contents/Info.plist"))
         let p = Process()
@@ -379,24 +504,199 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         try #require(p.terminationStatus == 0)
     }
 
-    @Test func aCopiedSignedAppStaysValidAndATamperedOneDoesNot() throws {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("owlink-sig-\(UUID().uuidString)")
+    /// The check the mover used before: any intact signature.
+    static func anyValidSignature(_ url: URL) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return false }
+        let flags = SecCSFlags(rawValue: kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSStrictValidate)
+        return SecStaticCodeCheckValidity(code, flags, nil) == errSecSuccess
+    }
+
+    static func tmp(_ tag: String) -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("owlink-\(tag)-\(UUID().uuidString)")
+    }
+
+    @Test func onlyACopyOfTheRunningAppMatches() throws {
+        let tmp = Self.tmp("sig")
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let app = tmp.appendingPathComponent("src/Tiny.app")
-        try Self.makeSignedApp(at: app)
-        #expect(CodeSignature.isValid(app))
+        let a = tmp.appendingPathComponent("a/Tiny.app")
+        let b = tmp.appendingPathComponent("b/Tiny.app")
+        try Self.makeSignedApp(at: a)
+        try Self.makeSignedApp(at: b, identifier: "invalid.owlink.test.other")
+        let me = try #require(CodeIdentity.of(bundleAt: a))
         let copy = tmp.appendingPathComponent("Applications/Tiny.app")
         try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try LiveAppInstallFileSystem().copy(app, to: copy)
-        #expect(CodeSignature.isValid(copy))
+        try LiveAppInstallFileSystem(expectedCode: me).copy(a, to: copy)
+        #expect(LiveAppInstallFileSystem(expectedCode: me).signatureMatchesRunningApp(copy))
+        // B is validly signed (the old check passed it) but isn't this app.
+        #expect(Self.anyValidSignature(b))
+        #expect(!me.matches(bundleAt: b))
+        #expect(!LiveAppInstallFileSystem(expectedCode: me).signatureMatchesRunningApp(b))
+        // No identity to compare with: nothing matches.
+        #expect(!LiveAppInstallFileSystem(expectedCode: nil).signatureMatchesRunningApp(copy))
+        // A tampered copy, and a bundle with no signature, fail.
         let plist = copy.appendingPathComponent("Contents/Info.plist")
         var d = try Data(contentsOf: plist); d.append(contentsOf: Array("\n".utf8))
         try FileManager.default.removeItem(at: plist)
         try d.write(to: plist)
-        #expect(!CodeSignature.isValid(copy))
-        #expect(CodeSignature.isValid(app))
+        #expect(!me.matches(bundleAt: copy))
+        #expect(me.matches(bundleAt: a))
         let junk = tmp.appendingPathComponent("Junk.app/Contents")
         try FileManager.default.createDirectory(at: junk, withIntermediateDirectories: true)
-        #expect(!CodeSignature.isValid(junk.deletingLastPathComponent()))
+        #expect(!me.matches(bundleAt: junk.deletingLastPathComponent()))
+    }
+
+    @Test func theCodeHashPinsTheBuildEvenWhenTheRequirementPasses() throws {
+        // Same identifier, so a requirement on the identifier alone (as a
+        // looser designated requirement would be) passes both; the code
+        // hash tells them apart.
+        let tmp = Self.tmp("cdh")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let a = tmp.appendingPathComponent("a/Tiny.app")
+        let b = tmp.appendingPathComponent("b/Tiny.app")
+        try Self.makeSignedApp(at: a)
+        try Self.makeSignedApp(at: b, extra: "another build")
+        var req: SecRequirement?
+        try #require(SecRequirementCreateWithString("identifier \"invalid.owlink.test.tiny\"" as CFString, [], &req) == errSecSuccess)
+        let hashA = try #require(CodeIdentity.of(bundleAt: a)?.cdhash)
+        let loose = CodeIdentity(requirement: req!, cdhash: hashA)
+        #expect(loose.matches(bundleAt: a))
+        #expect(!loose.matches(bundleAt: b))
+        #expect(CodeIdentity(requirement: req!, cdhash: nil).matches(bundleAt: b))
+    }
+
+    @Test func everySliceOfAUniversalBinaryHasItsHash() throws {
+        let tmp = Self.tmp("arch")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let a = tmp.appendingPathComponent("Tiny.app")
+        try Self.makeSignedApp(at: a)   // /usr/bin/true: universal
+        let slices = CodeSignature.architectures(ofBundleAt: a)
+        #expect(slices.count >= 2, "\(slices)")
+        #expect(CodeSignature.cdhashes(ofBundleAt: a).count >= 2)
+    }
+
+    @Test func theRunningProcessHasAnIdentity() {
+        // The test runner is signed (at least ad hoc by the linker).
+        let me = CodeIdentity.runningProcess()
+        #expect(me != nil)
+        #expect(me?.cdhash?.count == 20)
+    }
+}
+
+/// The real renames and identities, and the mover end to end on real
+/// signed bundles in a temp folder (the Trash is a folder there too).
+@Suite struct AppMoverOnDiskTests {
+    /// LiveAppInstallFileSystem with the Trash replaced by a temp folder.
+    struct TempTrashFS: AppInstallFileSystem {
+        var live: LiveAppInstallFileSystem
+        var trashFolder: URL
+        func exists(_ url: URL) -> Bool { live.exists(url) }
+        func identity(_ url: URL) -> FileIdentity? { live.identity(url) }
+        func isWritableFolder(_ url: URL) -> Bool { live.isWritableFolder(url) }
+        func createFolder(_ url: URL) throws { try live.createFolder(url) }
+        func copy(_ from: URL, to: URL) throws { try live.copy(from, to: to) }
+        func renameExclusive(_ from: URL, to: URL) throws { try live.renameExclusive(from, to: to) }
+        func swap(_ a: URL, _ b: URL) throws { try live.swap(a, b) }
+        func remove(_ url: URL) throws { try live.remove(url) }
+        func trash(_ url: URL) throws -> URL? {
+            let t = trashFolder.appendingPathComponent(UUID().uuidString + "-" + url.lastPathComponent)
+            try FileManager.default.moveItem(at: url, to: t)
+            return t
+        }
+        func removeQuarantine(under url: URL) throws { try live.removeQuarantine(under: url) }
+        func signatureMatchesRunningApp(_ url: URL) -> Bool { live.signatureMatchesRunningApp(url) }
+        func isReadOnlyVolume(_ url: URL) -> Bool { live.isReadOnlyVolume(url) }
+    }
+
+    struct Setup {
+        var tmp, apps, trash, source, dest: URL
+        var fs: TempTrashFS
+        var folders: [URL]
+    }
+
+    /// tmp/Downloads/Tiny.app (the "running app"), tmp/Applications with an
+    /// older Tiny.app already in it.
+    static func setup() throws -> Setup {
+        let tmp = CodeSignatureOnDiskTests.tmp("mv")
+        let apps = tmp.appendingPathComponent("Applications", isDirectory: true)
+        let trash = tmp.appendingPathComponent("Trash", isDirectory: true)
+        let source = tmp.appendingPathComponent("Downloads/Tiny.app")
+        let dest = apps.appendingPathComponent("Tiny.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: trash, withIntermediateDirectories: true)
+        try CodeSignatureOnDiskTests.makeSignedApp(at: source)
+        try CodeSignatureOnDiskTests.makeSignedApp(at: dest, extra: "old version")
+        let me = try #require(CodeIdentity.of(bundleAt: source))
+        let fs = TempTrashFS(live: LiveAppInstallFileSystem(expectedCode: me), trashFolder: trash)
+        return Setup(tmp: tmp, apps: apps, trash: trash, source: source, dest: dest, fs: fs,
+                     folders: [apps, tmp.appendingPathComponent("home/Applications")])
+    }
+
+    static func marker(_ app: URL) -> String? {
+        (NSDictionary(contentsOf: app.appendingPathComponent("Contents/Info.plist")) as? [String: Any])?["OwlinkTestExtra"] as? String
+    }
+
+    @Test func renamesNeverOverwriteAndSwapsExchange() throws {
+        let tmp = CodeSignatureOnDiskTests.tmp("ren")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let a = tmp.appendingPathComponent("a"), b = tmp.appendingPathComponent("b")
+        try Data("A".utf8).write(to: a); try Data("B".utf8).write(to: b)
+        let ia = FileIdentity.of(a), ib = FileIdentity.of(b)
+        #expect(ia != nil && ia != ib)
+        let fs = LiveAppInstallFileSystem(expectedCode: nil)
+        #expect(throws: (any Error).self) { try fs.renameExclusive(a, to: b) }
+        #expect(try String(contentsOf: b, encoding: .utf8) == "B")
+        try fs.swap(a, b)
+        #expect(try String(contentsOf: a, encoding: .utf8) == "B")
+        #expect(FileIdentity.of(a) == ib && FileIdentity.of(b) == ia)
+        // A new file at a path is a different identity.
+        try FileManager.default.removeItem(at: a)
+        try Data("B".utf8).write(to: a)
+        #expect(FileIdentity.of(a) != ib)
+        #expect(FileIdentity.of(tmp.appendingPathComponent("none")) == nil)
+    }
+
+    @Test func replacingAnOlderCopySwapsAndTrashesTheOldOne() throws {
+        let s = try Self.setup()
+        defer { try? FileManager.default.removeItem(at: s.tmp) }
+        let p = try AppMovePlan.make(location: .elsewhere(quarantined: false), source: s.source, folders: s.folders, fs: s.fs)
+        #expect(p.destinationExists)
+        let out = try AppMover(fs: s.fs).install(p, replaceExisting: true)
+        #expect(out == .init(installed: s.dest))
+        #expect(Self.marker(s.dest) == nil)   // the new one
+        #expect(s.fs.signatureMatchesRunningApp(s.dest))
+        let trashed = try FileManager.default.contentsOfDirectory(at: s.trash, includingPropertiesForKeys: nil)
+        #expect(trashed.count == 2)   // the old app and the original
+        #expect(trashed.contains { Self.marker($0) == "old version" })
+        #expect(try FileManager.default.contentsOfDirectory(atPath: s.apps.path) == ["Tiny.app"])
+    }
+
+    @Test func anAppReplacedAtTheDestinationWhileThePromptIsOpenIsKept() throws {
+        let s = try Self.setup()
+        defer { try? FileManager.default.removeItem(at: s.tmp) }
+        let p = try AppMovePlan.make(location: .elsewhere(quarantined: false), source: s.source, folders: s.folders, fs: s.fs)
+        // Finder replaces it with another copy while the question is up.
+        try FileManager.default.removeItem(at: s.dest)
+        try CodeSignatureOnDiskTests.makeSignedApp(at: s.dest, extra: "dragged in")
+        #expect(throws: AppMoveError.destinationChanged(s.dest)) {
+            try AppMover(fs: s.fs).install(p, replaceExisting: true)
+        }
+        #expect(Self.marker(s.dest) == "dragged in")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: s.trash.path).isEmpty)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: s.apps.path) == ["Tiny.app"])
+        #expect(FileManager.default.fileExists(atPath: s.source.path))
+    }
+
+    @Test func aDifferentSignedAppAtTheSourcePathIsNotInstalled() throws {
+        let s = try Self.setup()
+        defer { try? FileManager.default.removeItem(at: s.tmp) }
+        let p = try AppMovePlan.make(location: .elsewhere(quarantined: false), source: s.source, folders: s.folders, fs: s.fs)
+        try FileManager.default.removeItem(at: s.source)
+        try CodeSignatureOnDiskTests.makeSignedApp(at: s.source, identifier: "invalid.owlink.test.other")
+        QuarantineOnDiskTests.setQ(s.source)
+        #expect(throws: AppMoveError.signatureInvalid) { try AppMover(fs: s.fs).install(p, replaceExisting: true) }
+        #expect(Self.marker(s.dest) == "old version")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: s.apps.path) == ["Tiny.app"])
+        #expect(Quarantine.has(s.source))
     }
 }
