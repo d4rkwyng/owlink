@@ -132,6 +132,9 @@ final class PreviewFolderGrants {
     private var grants = PreviewGrantSet()
     /// The URL each started scope was started on (stopped on the same one).
     private var startedURLs: [String: URL] = [:]
+    /// Each kept folder as it was when granted (device and inode, by its
+    /// resolved path): what is opened beneath it must still be that folder.
+    private var ids: [String: Beneath.FileID] = [:]
     /// Where the bookmarks are kept (tests: a suite of their own).
     private let defaults: UserDefaults
 
@@ -178,6 +181,14 @@ final class PreviewFolderGrants {
         let path = PreviewGrantSet.resolvedPath(url)
         guard !open.contains(where: { PreviewGrantSet.resolvedPath($0) == path }) else { return }
         open.append(url.standardizedFileURL)
+        ids[path] = Beneath.FileID(path: path, followLast: false)
+    }
+
+    /// The granted folder `root` (compared resolved) as it was when it was
+    /// granted; nil when `root` isn't one of the kept grants.
+    func identity(of root: URL) -> Beneath.FileID? {
+        loadIfNeeded()
+        return ids[PreviewGrantSet.resolvedPath(root)]
     }
 
     /// Appends one bookmark, unless the same resolved path is already stored.
@@ -208,6 +219,7 @@ final class PreviewFolderGrants {
             url.stopAccessingSecurityScopedResource()
         }
         open.removeAll { PreviewGrantSet.resolvedPath($0) == path }
+        ids[path] = nil
     }
 
     private var savedBookmarks: [Data] {

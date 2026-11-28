@@ -129,6 +129,44 @@ final class ImageInsertTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("images").path))
     }
 
+    /// The editor starts closing while the copy runs off the main thread:
+    /// no link goes into the closing editor (Sol round 2, should-fix 5).
+    func testNoLinkGoesInOnceTheEditorIsClosing() async throws {
+        let (e, _) = try editor()
+        let source = try png(named: "late.png")
+        let opened = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+        ImageStore.afterOpen = { opened.signal(); _ = proceed.wait(timeout: .now() + 10) }
+        defer { ImageStore.afterOpen = nil }
+        let insert = Task { await e.insertImageFiles([source]) }
+        // The copy has started (its folder is open) before the close.
+        while opened.wait(timeout: .now()) == .timedOut { await Task.yield() }
+        e.closeDocument()
+        proceed.signal()
+        let paths = await insert.value
+        XCTAssertNil(paths)
+        XCTAssertEqual(e.textView.text, "# Notes\n\n")
+    }
+
+    /// The granted folder itself replaced by a symbolic link to another
+    /// folder after the destination was worked out: refused, nothing written
+    /// in the folder the link leads to (Sol round 2, must-fix 3).
+    func testGrantReplacedByALinkIsRefused() throws {
+        let grant = try tempDir()
+        let other = try tempDir()
+        try FileManager.default.createDirectory(at: grant.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: other.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        let dest = try XCTUnwrap(EditorViewController.imageDestination(for: grant.appendingPathComponent("sub"), granted: grant,
+                                                                       container: try tempDir()))
+        let moved = grant.deletingLastPathComponent().appendingPathComponent(grant.lastPathComponent + "-moved")
+        try FileManager.default.moveItem(at: grant, to: moved)
+        dirs.append(moved)
+        try FileManager.default.createSymbolicLink(at: grant, withDestinationURL: other)
+        let copies = EditorViewController.copyImages([try png(named: "a.png")], to: dest)
+        XCTAssertEqual(copies.error, EditorViewController.imageStoreMessage(.outside))
+        XCTAssertTrue(copies.names.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: other.appendingPathComponent("sub/images").path))
+    }
+
     /// A picked file that is a symbolic link (to an image or anything else)
     /// is not followed: it isn't copied.
     func testSymlinkedSourceImageIsNotCopied() async throws {

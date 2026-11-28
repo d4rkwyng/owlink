@@ -586,4 +586,28 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(throws: ImageStore.Failure.notRegularFile) { _ = try store.copy(from: link, name: "l.png", followLink: false) }
         #expect(try store.copy(from: link, name: "l.png") == "l.png")
     }
+
+    /// iOS: the grant itself replaced, by a symbolic link to another folder
+    /// or by another folder renamed into its place, is refused: the root is
+    /// opened without following a final link and checked against the
+    /// folder as it was granted (Sol round 2, must-fix 3).
+    @Test func openBeneathRefusesAReplacedRoot() throws {
+        let (top, _, outside) = try layout()
+        defer { try? fm.removeItem(at: top) }
+        let grant = top.resolvingSymlinksInPath().appendingPathComponent("grant")
+        try fm.createDirectory(at: grant.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: outside.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        let id = try #require(Beneath.FileID(path: grant.path, followLast: false))
+        _ = try ImageStore.open(in: grant.appendingPathComponent("sub"), beneath: grant, rootID: id)
+        // Renamed away, and another folder in its place.
+        try fm.moveItem(at: grant, to: top.appendingPathComponent("was-grant"))
+        try fm.createDirectory(at: grant.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: grant.appendingPathComponent("sub"), beneath: grant, rootID: id) }
+        #expect(!fm.fileExists(atPath: grant.appendingPathComponent("sub/images").path))
+        // A symbolic link in its place: refused even with no identity to check.
+        try fm.removeItem(at: grant)
+        try fm.createSymbolicLink(at: grant, withDestinationURL: outside)
+        #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: grant.appendingPathComponent("sub"), beneath: grant) }
+        #expect(!fm.fileExists(atPath: outside.appendingPathComponent("sub/images").path))
+    }
 }

@@ -161,13 +161,25 @@ public final class ImageStore {
     /// kernel doesn't keep lookups beneath, any link) is refused with
     /// `Failure.outside`, so the grant is the boundary, not `folder`'s
     /// path. `folder` must be `root` or lexically below it (pass both
-    /// resolved). Then as `open(in:)`.
-    public static func open(in folder: URL, beneath root: URL) throws -> ImageStore {
+    /// resolved). `root` itself is opened without following a final
+    /// symbolic link, and when `rootID` is given (the root as it was when
+    /// it was granted) it must still be that folder: a root replaced by a
+    /// link, or by another folder, is refused with `Failure.outside`. Then
+    /// as `open(in:)`.
+    public static func open(in folder: URL, beneath root: URL, rootID: Beneath.FileID? = nil) throws -> ImageStore {
         let base = root.standardizedFileURL.pathComponents
         let path = folder.standardizedFileURL.pathComponents
         guard path.count >= base.count, Array(path.prefix(base.count)) == base else { throw Failure.outside }
-        let rfd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        guard rfd >= 0 else { throw posix(root.path) }
+        let rfd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard rfd >= 0 else {
+            let err = errno
+            if err == ELOOP || err == ENOTDIR { throw Failure.outside }
+            throw posix(root.path, err)
+        }
+        if let rootID, Beneath.FileID(fd: rfd) != rootID {
+            close(rfd)
+            throw Failure.outside
+        }
         let parts = Array(path.dropFirst(base.count))
         let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY)
         let err = errno

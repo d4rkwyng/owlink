@@ -241,7 +241,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     }
     private var pendingRecovery: Recovery?
     private var recoveryWriter: RecoveryWriter!
-    private var closing = false
+    /// The document is closing (Close, or a note opened from a link).
+    private(set) var closing = false
     /// Why the text is read-only right now (nothing: editable).
     private(set) var editGate: EditGate
     /// An iCloud conflict is being dealt with (copied, then asked).

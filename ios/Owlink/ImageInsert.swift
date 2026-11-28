@@ -169,10 +169,12 @@ extension EditorViewController {
         let doc = document
         let generation = self.generation
         let want = range ?? textView.selectedRange
-        let copied = await Task.detached(priority: .userInitiated) { Self.copyImages(images, to: dest) }.value
+        // The granted folder as it was granted (none for Owlink's own container).
+        let rootID = PreviewFolderGrants.shared.identity(of: dest.root)
+        let copied = await Task.detached(priority: .userInitiated) { Self.copyImages(images, to: dest, rootID: rootID) }.value
         withExtendedLifetime(staging) {}
-        // Back on the main thread: still this document, still editable.
-        guard document === doc, markdownEditable else { return nil }
+        // Back on the main thread: still this document, not closing, still editable.
+        guard document === doc, !closing, markdownEditable else { return nil }
         if let error = copied.error { showImageError(error) }
         guard let store = copied.store, !copied.names.isEmpty else {
             if copied.error == nil { showImageError(Self.imageStoreMessage(.notRegularFile)) }
@@ -191,8 +193,8 @@ extension EditorViewController {
         let loc = min(at.location == NSNotFound ? len : at.location, len)
         let r = NSRange(location: loc, length: min(at.length, len - loc))
         let s = MarkdownPaste.imageLinks(paths)
-        applyTextEdit(TextEdit(range: r, replacement: s, selection: NSRange(location: r.location + (s as NSString).length, length: 0)),
-                      actionName: String(localized: "Insert Image"))
+        guard applyTextEdit(TextEdit(range: r, replacement: s, selection: NSRange(location: r.location + (s as NSString).length, length: 0)),
+                            actionName: String(localized: "Insert Image")) else { return nil }
         if copied.failed { toast(String(localized: "Some files couldn’t be copied.")) }
         return paths
     }
@@ -206,13 +208,14 @@ extension EditorViewController {
         var error: String?
     }
 
-    /// The copies, off the main thread: "images" opened beneath `dest.root`,
-    /// each source opened without following a link.
-    nonisolated static func copyImages(_ images: [URL], to dest: (folder: URL, root: URL)) -> ImageCopies {
+    /// The copies, off the main thread: "images" opened beneath `dest.root`
+    /// (itself not a symbolic link, and still `rootID` when given), each
+    /// source opened without following a link.
+    nonisolated static func copyImages(_ images: [URL], to dest: (folder: URL, root: URL), rootID: Beneath.FileID? = nil) -> ImageCopies {
         var out = ImageCopies()
         let store: ImageStore
         do {
-            store = try ImageStore.open(in: dest.folder, beneath: dest.root)
+            store = try ImageStore.open(in: dest.folder, beneath: dest.root, rootID: rootID)
         } catch let failure as ImageStore.Failure {
             out.error = imageStoreMessage(failure)
             return out
