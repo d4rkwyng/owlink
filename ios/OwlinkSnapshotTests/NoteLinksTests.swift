@@ -465,6 +465,64 @@ final class NoteLinksTests: XCTestCase {
         for _ in 0..<100 where !closed { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
     }
 
+    /// Astra round 4, should-fix 3: the binary prompt's real "Open as
+    /// Text" action retries with the identity the note was checked to
+    /// have. The note replaced (by another binary file) while the prompt
+    /// is up is refused, not opened.
+    func testOpenAsTextRefusesABinaryNoteReplacedWhileAsked() throws {
+        let d = try vault()
+        let alpha = d.appendingPathComponent("Alpha.md")
+        try Self.binaryBytes.write(to: alpha)
+        let (e, note) = try linksEditor(d)
+        // A test: the browser offers no crash leftovers when it shows.
+        RecoveryOffer.skipLaunchOffer()
+        let browser = DocumentBrowserViewController()
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 402, height: 874))
+        window.rootViewController = browser
+        window.makeKeyAndVisible()
+        windows.append(window)
+        e.linkedNoteOpenerForTests = browser
+        e.dismissEditorForTests = { $0() }
+        var outcomes: [DocumentOpening.Outcome] = []
+        DocumentOpening.outcomeForTests = { url, o in
+            XCTAssertEqual(url, note.url)
+            outcomes.append(o)
+        }
+        defer { DocumentOpening.outcomeForTests = nil }
+        e.openLinked(note.url, expecting: note.id)
+        var deadline = Date().addingTimeInterval(10)
+        while outcomes.isEmpty || !(browser.presentedViewController is UIAlertController), Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        guard case .binary? = outcomes.first else { return XCTFail("first: \(outcomes)") }
+        let prompt = try XCTUnwrap(browser.presentedViewController as? UIAlertController, "the binary prompt is up")
+        XCTAssertEqual(prompt.title, "This looks like a binary file")
+        // Replaced while the prompt is up.
+        try FileManager.default.removeItem(at: alpha)
+        try (Self.binaryBytes + Data([7])).write(to: alpha)
+        prompt.dismiss(animated: false)
+        try tap("Open as Text", in: prompt)
+        deadline = Date().addingTimeInterval(10)
+        while outcomes.count < 2, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        XCTAssertEqual(outcomes.count, 2, "Open as Text opened it again")
+        guard outcomes.count == 2 else { return }
+        if case .opened(let doc) = outcomes[1] {
+            var closed = false
+            doc.close { _ in closed = true }
+            for _ in 0..<100 where !closed { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        }
+        guard case .refused = outcomes[1] else { return XCTFail("Open as Text on a replaced note: \(outcomes[1])") }
+        browser.presentedViewController?.dismiss(animated: false)
+    }
+
+    /// Calls an alert button's handler, as a tap on it does.
+    private func tap(_ title: String, in alert: UIAlertController) throws {
+        let action = try XCTUnwrap(alert.actions.first { $0.title == title }, title)
+        typealias Handler = @convention(block) (UIAlertAction) -> Void
+        let block = try XCTUnwrap(action.value(forKey: "handler") as AnyObject?, "handler")
+        unsafeBitCast(block, to: Handler.self)(action)
+    }
+
     /// Sol round 3, must-fix 3: the granted folder swapped for another
     /// (renamed into its place, or a link) after it was granted and before
     /// Backlinks or Tags first reads it: that folder is not read.
