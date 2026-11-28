@@ -983,7 +983,7 @@ extension DevChecks {
             },
             // Back to the big file's folder for the steps below.
             sync { app.application(NSApp, open: [bigText]) },
-            switchedTo(big, file: bigText, "back to the big file"),
+            until("back to the big file's folder", timeout: 4) { root() == big.path && app.currentFileURL == bigText },
             sync {
                 let was = root()
                 // Through a link outside the folder into it: inside, no switch.
