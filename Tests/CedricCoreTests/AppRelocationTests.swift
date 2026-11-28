@@ -589,11 +589,20 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(CodeSignature.cdhashes(ofBundleAt: a).count >= 2)
     }
 
-    @Test func theRunningProcessHasAnIdentity() {
-        // The test runner is signed (at least ad hoc by the linker).
-        let me = CodeIdentity.runningProcess()
-        #expect(me != nil)
-        #expect(me?.cdhash?.count == 20)
+    @Test func theRunningProcessMatchesItsOwnCodeOnDisk() throws {
+        // The test runner is signed (at least ad hoc by the linker). Its
+        // identity, read from the running code, must match the file it
+        // runs from: the same pairing a release Owlink relies on.
+        let me = try #require(CodeIdentity.runningProcess())
+        #expect(me.cdhash?.count == 20)
+        var code: SecCode?
+        try #require(SecCodeCopySelf([], &code) == errSecSuccess)
+        var path: CFURL?
+        var st: SecStaticCode?
+        try #require(SecCodeCopyStaticCode(code!, [], &st) == errSecSuccess)
+        try #require(SecCodeCopyPath(st!, [], &path) == errSecSuccess)
+        let url = path! as URL
+        #expect(me.matches(bundleAt: url), "\(url.path)")
     }
 }
 

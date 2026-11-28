@@ -541,10 +541,12 @@ public enum CodeSignature {
         return out
     }
 
-    /// (cputype, cpusubtype) of each slice of a universal main executable
-    /// (empty for a thin one or anything unreadable).
+    /// (cputype, cpusubtype) of each slice of a universal main executable,
+    /// or of `url` when it is an executable file (empty for a thin one or
+    /// anything unreadable).
     static func architectures(ofBundleAt url: URL) -> [(Int32, Int32)] {
-        guard let exe = Bundle(url: url)?.executableURL,
+        // A bundle's main executable, or `url` itself when it is one.
+        guard let exe = Bundle(url: url)?.executableURL ?? (url.hasDirectoryPath ? nil : url),
               let h = try? FileHandle(forReadingFrom: exe) else { return [] }
         defer { try? h.close() }
         guard let head = try? h.read(upToCount: 8 + 20 * 32), head.count >= 8 else { return [] }
