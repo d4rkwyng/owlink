@@ -173,6 +173,10 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertFalse(v.tabButtons[0].accessibilityTraits.contains(.selected))
             XCTAssertEqual(v.grid.table?.name, "Sightings")
             XCTAssertEqual(v.grid.table?[1, 0]?.text, "2024-03-15", "dates show as dates")
+            // A column is as wide as its values: the date isn't cut short.
+            let date = try XCTUnwrap(cv.cellForItem(at: SpreadsheetGridView.indexPath(row: 1, column: 0)) as? SpreadsheetGridCell)
+            XCTAssertLessThanOrEqual(date.label.intrinsicContentSize.width, date.label.bounds.width + 0.5,
+                                     "\(c.name): 2024-03-15 is truncated in a \(date.label.bounds.width) pt label")
             assertFills(v, "multi tab 2 \(c.name)")
             try await snapshot(w, "xlsx-multi-tab2-\(c.name)")
         }
