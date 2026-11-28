@@ -273,13 +273,19 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
 
     func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false,
                          asText: Bool = false) {
+        presentDocument(at: url, EditorOpenRequest(binaryOK: binaryOK, asText: asText, recovered: recovered, reopening: reopening))
+    }
+
+    private func presentDocument(at url: URL, _ request: EditorOpenRequest) {
+        let (recovered, reopening) = (request.recovered, request.reopening)
         // PDF, spreadsheet (.xlsx, .csv…) and Office / iWork files open
         // read-only in a viewer (`DocumentViewerRoute`: name, type, first
         // bytes). Not for "Open as Text" (binaryOK), the grid's "Edit as
         // Text" (asText), a crash-recovery restore, or a launch reopen:
-        // those open only the editor, and the last two skip a file that
-        // routes to a viewer other than CSV / TSV (below).
-        if !binaryOK, !asText, recovered == nil, !reopening, presentViewerIfNeeded(at: url) { return }
+        // those open only the editor, and the editor-only ones (all but
+        // Open as Text from an ordinary open) never open a file that
+        // routes to a viewer other than CSV / TSV (below), retry or not.
+        if request.mayShowViewer, presentViewerIfNeeded(at: url) { return }
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
         // the record (and its security scope).
@@ -292,21 +298,20 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 RecoveryOffer.reopenCancelled()
             }
         }
-        // A reopen or a restore goes to the editor only if the file is
-        // still the editor's: a viewer file (a PDF with no NUL bytes passes
-        // the editor's binary check) isn't opened, the reopen forgets its
+        // An editor-only open goes to the editor only if the file is still
+        // the editor's: a viewer file (a PDF with no NUL bytes passes the
+        // editor's binary check) isn't opened, the reopen forgets its
         // record, and a recovery record is left as it is (not cleared).
-        if !binaryOK, asText || recovered != nil || reopening {
-            let decision = DocumentViewerRoute.editorOnlyOpen(DocumentViewerRoute.route(for: url), reopening: reopening)
-            if !decision.opensEditor {
-                if recovered != nil { alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
-                finishReopen(false)
-                return
-            }
+        // Also for its Open as Text retry.
+        if !request.mayOpenInEditor(url) {
+            if !reopening { alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
+            finishReopen(false)
+            return
         }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
-        let doc = TextDocument(fileURL: url)
-        doc.openBinaryAnyway = binaryOK
+        // An editor-only open's read refuses a viewer file swapped in since
+        // the check above (even with Open as Text).
+        let doc = request.makeDocument(url)
         doc.open { [weak self] ok in
             guard let self else {
                 if ok { doc.close(completionHandler: nil) }
@@ -314,7 +319,7 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 return
             }
             // Check the coordinated read before handing the document to an editor.
-            if ok, !binaryOK, asText || reopening || recovered != nil {
+            if ok, request.editorOnly {
                 if !doc.mayPresentInEditor {
                     doc.close { _ in doc.discardOpenedCopy() }
                     if !reopening { self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
@@ -333,15 +338,21 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 return
             }
             guard ok else {
-                if !binaryOK, (try? Data(contentsOf: url, options: .mappedIfSafe)).map(TextCodec.looksBinary) == true {
+                // An editor-only open whose read got a viewer file: no
+                // Open as Text. The retry keeps the request editor-only.
+                switch request.failedOpen(document: doc, fileLooksBinary:
+                                            (try? Data(contentsOf: url, options: .mappedIfSafe)).map(TextCodec.looksBinary) == true) {
+                case .quiet:
+                    break
+                case .offerOpenAsText:
                     let a = UIAlertController(title: String(localized: "This looks like a binary file"),
                                               message: String(localized: "Open it as text anyway? Saving it may damage it."), preferredStyle: .alert)
                     a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
                     a.addAction(UIAlertAction(title: String(localized: "Open as Text"), style: .destructive) { _ in
-                        self.presentDocument(at: url, binaryOK: true, recovered: recovered)
+                        self.presentDocument(at: url, request.openingAsText)
                     })
                     self.present(a, animated: true)
-                } else {
+                case .couldNotOpen:
                     self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil)
                 }
                 return

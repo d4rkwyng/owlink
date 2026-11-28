@@ -19,9 +19,12 @@ final class TextDocument: UIDocument {
 
     enum OpenError: LocalizedError {
         case binary, undecodable, unencodable(TextEncoding)
+        /// An editor-only open read a viewer file (a PDF in place of a CSV).
+        case viewerFile
         var errorDescription: String? {
             switch self {
             case .binary: return String(localized: "This file looks like a binary file, not text.")
+            case .viewerFile: return String(localized: "This file opens in a viewer, not the text editor.")
             case .undecodable: return String(localized: "Owlink couldn’t read this file as text.")
             case .unencodable(let e): return String(localized: "Some characters can’t be saved as \(e.displayName). Choose UTF-8 in the document menu.")
             }
@@ -51,18 +54,27 @@ final class TextDocument: UIDocument {
     }
     /// What the save in progress writes (becomes `onDisk` if it succeeds).
     private var writing: (state: DiskState, breaks: LineBreaks?, bytes: Data?)?
-    /// The bytes as read or last written, unless over the copy store's cap.
+    /// The first bytes of the last read, recorded before the read is
+    /// accepted or refused (so a failed open can still tell a PDF).
     private var loadedPrefix = Data()
+    /// Whether those bytes are the editor's by their route (not a PDF,
+    /// Office or iWork file under this name).
     var mayPresentInEditor: Bool {
         let route = DocumentViewerRoute.route(fileName: fileURL.lastPathComponent, prefix: loadedPrefix)
         return DocumentViewerRoute.editorOnlyOpen(route, reopening: false).opensEditor
     }
+    /// The bytes as read or last written, unless over the copy store's cap.
     private var bytesOnDisk: Data?
     private var readHistory = ReadHistory()
     private var autosaveInProgress = false
     var language = LanguageChoice()
     /// Allows opening a file that looks binary (asked once).
     var openBinaryAnyway = false
+    /// An editor-only open (Edit as Text, a restore, a launch reopen): its
+    /// read refuses viewer content before the binary check, even with
+    /// `openBinaryAnyway`. For the open only (cleared when it finishes):
+    /// a later reload keeps its own behavior.
+    var refusesViewerContent = false
     /// Called on the main queue after the file was (re)read from disk.
     var onReload: (() -> Void)?
     /// Called on the main queue when the file changed on disk while there
@@ -141,11 +153,14 @@ final class TextDocument: UIDocument {
     override func load(fromContents contents: Any, ofType typeName: String?) throws {
         let data: Data
         if let d = contents as? Data { data = d } else if let w = contents as? FileWrapper, let d = w.regularFileContents { data = d } else { data = Data() }
+        // The route of the bytes read, before any rejection: a PDF with NUL
+        // bytes is a viewer file, not a binary file Open as Text could open.
+        loadedPrefix = Data(data.prefix(DocumentKind.prefixLength))
+        if refusesViewerContent, !mayPresentInEditor { throw OpenError.viewerFile }
         guard let decoded = TextCodec.decode(data) else { throw OpenError.undecodable }
         if decoded.looksBinary && !openBinaryAnyway { throw OpenError.binary }
         // The bytes as first opened (not on a reload after a change elsewhere).
         if openedCopy == nil { openedCopy = SaveSafetyStores.revert.keep(data, id: openedCopyID) }
-        loadedPrefix = Data(data.prefix(DocumentKind.prefixLength))
         bytesOnDisk = data.count <= SafetyCopyStore.maxBytes ? data : nil
         readHistory = ReadHistory()
         text = decoded.text
@@ -161,6 +176,13 @@ final class TextDocument: UIDocument {
         if !language.isManual { language = .forFile(named: fileURL.lastPathComponent, content: decoded.text) }
         firstUnsavedEdit = nil
         if let onReload { DispatchQueue.main.async(execute: onReload) }
+    }
+
+    override func open(completionHandler: ((Bool) -> Void)? = nil) {
+        super.open { ok in
+            self.refusesViewerContent = false
+            completionHandler?(ok)
+        }
     }
 
     override func updateChangeCount(_ change: UIDocument.ChangeKind) {
