@@ -130,26 +130,232 @@ import Testing
     /// aside, and the new copy stays live and readable.
     @Test func aWriteDuringSetAsideStaysLive() throws {
         let t = try temp(); defer { try? fm.removeItem(at: t) }
-        let writer = RecoveryStore(directory: t)
+        let arrived = DispatchSemaphore(value: 0)
+        var w = RecoveryStore(directory: t)
+        // Fires only when the writer finds the folder locked and is about to wait.
+        w.checkLockContended = { arrived.signal() }
+        let writer = w
         var reader = RecoveryStore(directory: t)
         let junk = reader.fileURL(forDocumentPath: "/docs/a.txt")
         try Data("not a plist".utf8).write(to: junk)
         let fresh = record(text: "new")
         let done = DispatchSemaphore(value: 0)
+        let blocked = Flag()
         reader.checkBeforeSetAside = { _ in
             DispatchQueue.global().async {
                 try? writer.write(fresh)
                 done.signal()
             }
-            // Without the folder lock the write would land here, before the move.
-            Thread.sleep(forTimeInterval: 0.3)
+            // The writer has reached the lock this read holds and waits there.
+            blocked.set(arrived.wait(timeout: .now() + 10) == .success && done.wait(timeout: .now()) == .timedOut)
         }
         #expect(reader.read(documentPath: "/docs/a.txt") == nil)
+        #expect(blocked.value, "the writer arrived and was held at the folder lock")
         #expect(done.wait(timeout: .now() + 10) == .success)
         #expect(writer.read(documentPath: "/docs/a.txt") == fresh)
         let aside = try setAside(in: t)
         #expect(aside.count == 1)
         #expect(try Data(contentsOf: aside[0]) == Data("not a plist".utf8))
+    }
+
+    /// A live file that opens but fails on read (EIO): a write keeps its
+    /// bytes (set aside, as a read does) or fails and leaves them live.
+    @Test func writeOverALiveFileThatFailsOnReadKeepsItsBytes() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "old"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var failing = store
+        failing.checkFailRead = true
+        do {
+            try failing.write(record(text: "new"))
+            let aside = try setAside(in: t)
+            #expect(aside.count == 1)
+            #expect(try aside.first.map { try Data(contentsOf: $0) } == bytes, "the old bytes were set aside")
+            #expect(store.read(documentPath: "/docs/a.txt")?.text == "new")
+        } catch {
+            #expect(try Data(contentsOf: live) == bytes, "a failed write leaves the live bytes")
+        }
+    }
+
+    /// The unreadable live file can't be set aside: the write fails and
+    /// the live bytes stay.
+    @Test func writeFailsWhenAnUnreadableLiveFileCantBeSetAside() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "old"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var stuck = store
+        stuck.checkFailRead = true
+        stuck.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try stuck.write(record(text: "new")) }
+        #expect(try Data(contentsOf: live) == bytes)
+        #expect(try setAside(in: t).isEmpty)
+    }
+
+    /// An lstat error other than ENOENT is not "no file": the bytes there
+    /// are kept (set aside, or the write fails), never replaced unseen.
+    @Test func anLstatErrorIsNotAbsence() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "old"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var statFails = store
+        statFails.checkStatErrno = EIO
+        do {
+            try statFails.write(record(text: "new"))
+            let aside = try setAside(in: t)
+            #expect(aside.count == 1)
+            #expect(try aside.first.map { try Data(contentsOf: $0) } == bytes)
+        } catch {
+            #expect(try Data(contentsOf: live) == bytes)
+        }
+        // Confirmed missing (ENOENT) is absence: nothing to keep.
+        var missing = RecoveryStore(directory: t)
+        missing.checkStatErrno = ENOENT
+        try missing.write(record("/docs/b.txt", text: "b"))
+        #expect(store.read(documentPath: "/docs/b.txt")?.text == "b")
+    }
+
+    /// A write that failed because the unreadable live copy couldn't be
+    /// kept, then a clear from another store value (the fault still
+    /// there): the only copy isn't deleted.
+    @Test func aClearAfterAFailedWriteKeepsTheOnlyCopy() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record(text: "old"))
+        let live = store.fileURL(forDocumentPath: "/docs/a.txt")
+        let bytes = try Data(contentsOf: live)
+        var stuck = store
+        stuck.checkFailRead = true
+        stuck.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try stuck.write(record(text: "new")) }
+        var other = RecoveryStore(directory: t)
+        other.checkFailRead = true
+        other.checkFailSetAside = true
+        other.clear(documentPath: "/docs/a.txt")
+        #expect(try Data(contentsOf: live) == bytes, "not deleted")
+        // Once it can be set aside, clear keeps the bytes there rather than delete them.
+        var unreadable = RecoveryStore(directory: t)
+        unreadable.checkFailRead = true
+        unreadable.clear(documentPath: "/docs/a.txt")
+        #expect(!fm.fileExists(atPath: live.path))
+        let aside = try setAside(in: t)
+        #expect(aside.count == 1)
+        #expect(try aside.first.map { try Data(contentsOf: $0) } == bytes)
+    }
+
+    // MARK: Recovery record identity (the file name is a hash of the path)
+
+    /// Every file in `dir` whose name carries `tag` (a set-aside copy).
+    func files(in dir: URL, tagged tag: String) throws -> [URL] {
+        try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.contains(tag) }
+    }
+
+    /// B's valid record under A's file name (a hash collision, or a
+    /// misplaced file): its bytes, and A's URL.
+    func foreignRecordAtA(_ store: RecoveryStore) throws -> (bytes: Data, url: URL) {
+        try store.write(record("/docs/b.txt", text: "b's only copy"))
+        let a = store.fileURL(forDocumentPath: "/docs/a.txt")
+        try fm.moveItem(at: store.fileURL(forDocumentPath: "/docs/b.txt"), to: a)
+        return (try Data(contentsOf: a), a)
+    }
+
+    /// write(A) over B's record keeps B's bytes (set aside beside it,
+    /// findable afterwards) and writes A's.
+    @Test func writeKeepsARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        try store.write(record("/docs/a.txt", text: "a"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "a")
+        let kept = try files(in: t, tagged: "foreign-")
+        #expect(kept.count == 1, "B's record set aside")
+        #expect(try kept.first.map { try Data(contentsOf: $0) } == bBytes, "byte for byte")
+        #expect(try kept.first.map { try PropertyListDecoder().decode(RecoveryRecord.self, from: Data(contentsOf: $0)) }?
+            .documentPath == "/docs/b.txt")
+        #expect(try Data(contentsOf: a) != bBytes)
+    }
+
+    /// B's record can't be set aside: write(A) throws and leaves it.
+    @Test func writeFailsWhenAnotherDocumentsRecordCantBeSetAside() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        var stuck = store
+        stuck.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try stuck.write(record("/docs/a.txt", text: "a")) }
+        #expect(try Data(contentsOf: a) == bBytes, "B's bytes untouched")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).count == 1, "nothing else made")
+    }
+
+    /// B's record is decoded, then removed externally before it can be set
+    /// aside, and the set-aside fails: write(A) has no proof B's bytes were
+    /// kept, so it throws and writes nothing where B was.
+    @Test func writeFailsWhenAnotherDocumentsRecordVanishesAsItsSetAsideFails() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (_, a) = try foreignRecordAtA(store)
+        var stuck = store
+        stuck.checkFailSetAside = true
+        stuck.checkForeignRecordFound = { url in try? FileManager.default.removeItem(at: url) }
+        #expect(throws: (any Error).self) { try stuck.write(record("/docs/a.txt", text: "a")) }
+        #expect(!fm.fileExists(atPath: a.path), "no record for A written where B was")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).isEmpty, "nothing else made")
+    }
+
+    /// clear(A) leaves B's record where it is, byte for byte.
+    @Test func clearLeavesARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(try Data(contentsOf: a) == bBytes)
+        #expect(try fm.contentsOfDirectory(atPath: t.path) == [a.lastPathComponent])
+    }
+
+    /// read and pending for A don't return B's record (and leave it).
+    @Test func readAndPendingIgnoreARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        #expect(store.read(documentPath: "/docs/a.txt") == nil)
+        #expect(store.pending(documentPath: "/docs/a.txt", documentModified: .distantPast) == nil)
+        #expect(try Data(contentsOf: a) == bBytes)
+    }
+
+    /// An older record of the same document is A's own: write replaces
+    /// it and clear deletes it, with no set-aside copy left.
+    @Test func aStaleRecordOfTheSameDocumentIsReplacedAndCleared() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record("/docs/a.txt", text: "old", at: Date(timeIntervalSinceNow: -3600)))
+        try store.write(record("/docs/a.txt", text: "new"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "new")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).count == 1, "no set-aside copy")
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(store.read(documentPath: "/docs/a.txt") == nil)
+        #expect(try fm.contentsOfDirectory(atPath: t.path).isEmpty)
+    }
+
+    /// No live file: write creates it; clear does nothing (no throw,
+    /// nothing made, not even the folder).
+    @Test func aMissingRecordIsWrittenAndClearIsANoOp() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let dir = t.appendingPathComponent("Recovery")
+        let store = RecoveryStore(directory: dir)
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(!fm.fileExists(atPath: dir.path))
+        try store.write(record("/docs/a.txt", text: "a"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "a")
+        #expect(try fm.contentsOfDirectory(atPath: dir.path) == [store.fileURL(forDocumentPath: "/docs/a.txt").lastPathComponent])
+        store.clear(documentPath: "/docs/a.txt")
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(try fm.contentsOfDirectory(atPath: dir.path).isEmpty)
     }
 
     /// A live file that is there but can't be read is set aside (bytes
@@ -219,7 +425,8 @@ import Testing
     }
 
     /// The throttle's own rule; RecoveryWriter's first write before
-    /// textChanged() returns is covered by the iOS tests (SaveSafetyEditorTests).
+    /// textChanged() returns is covered by the iOS tests
+    /// (SaveSafetyEditorTests.testRecoveryWriterCopiesTheFirstEditAtOnceAndDefersTheNext).
     @Test func firstRecoveryWriteIsImmediateThenAtMostEveryThreeSeconds() {
         #expect(RecoveryThrottle.delay(sinceLastWrite: nil) == 0, "the first edit writes at once")
         #expect(RecoveryThrottle.delay(sinceLastWrite: 0) == RecoveryThrottle.interval)
@@ -294,6 +501,13 @@ import Testing
         #expect(SavePolicy.showsSaveButton(saveAutomatically: false))
         #expect(!SavePolicy.showsSaveButton(saveAutomatically: true))
     }
+}
+
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var v = false
+    func set(_ b: Bool) { lock.lock(); v = b; lock.unlock() }
+    var value: Bool { lock.lock(); defer { lock.unlock() }; return v }
 }
 
 private final class Synced: @unchecked Sendable {
