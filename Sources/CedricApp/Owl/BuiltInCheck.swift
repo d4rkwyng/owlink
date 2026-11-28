@@ -4,8 +4,10 @@ import CedricAI
 
 /// CEDRIC_BUILTIN_CHECK=/out/dir: the built-in engine's downloads in the
 /// Settings › Cedric, in process, with real clicks. Needs CEDRIC_MODELS_DIR=<temp>
-/// and CEDRIC_AI_DEFAULTS=<suite> (CheckIsolation): without both it fails
-/// before Settings opens, so the real models and settings are left alone. Downloads the
+/// and CEDRIC_AI_DEFAULTS=cedric-check-<id> (CheckIsolation): without both it fails
+/// before Settings opens, so the real models and settings are left alone. The
+/// model is selected only once it is known to be cleanly Not downloaded (a
+/// pick of an installed model would apply and save it). Downloads the
 /// catalog model CEDRIC_BUILTIN_CHECK_MODEL (default: the 1.5B, the smallest)
 /// for real from Hugging Face.
 ///
@@ -26,7 +28,10 @@ enum BuiltInCheck {
 
     static func run(_ app: AppDelegate, out: String) {
         // Before Settings (and so BuiltInDownloads) exists: never the real models or settings.
-        if let why = CheckIsolation.problem() {
+        let models: URL
+        switch CheckIsolation.processModelsDirectory() {
+        case .success(let dir): models = dir
+        case .failure(let why):
             AICheck.check(false, "isolated run: \(why); nothing opened or clicked"); AICheck.finish(); return
         }
         try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
@@ -37,6 +42,10 @@ enum BuiltInCheck {
         }
         let downloads = BuiltInDownloads.shared
         AICheck.log("models dir: \(downloads.store.directory.path)")
+        // The folder the downloads use is the one the guard validated, not another reading of the path.
+        guard downloads.store.directory.path == models.path else {
+            AICheck.check(false, "the downloads use the validated models folder (\(models.path)); nothing clicked"); AICheck.finish(); return
+        }
         guard let i = LocalAISettings.Backend.allCases.firstIndex(of: .builtIn) else { return }
         sheet.presetPopup.selectItem(at: i)
         NSApp.sendAction(sheet.presetPopup.action!, to: sheet.presetPopup.target, from: sheet.presetPopup)
@@ -50,19 +59,35 @@ enum BuiltInCheck {
               let item = popup.itemArray.firstIndex(where: { $0.representedObject as? String == model }) else {
             AICheck.check(false, "Model popup item for \(model)"); AICheck.finish(); return
         }
+        // Before the target is selected: picking a model that is already
+        // installed applies and saves it, so only a model this run has not
+        // got (no model file, marker or partial file) is ever picked.
+        let store = downloads.store
+        let entries = [store.fileURL(for: m), store.directory.appendingPathComponent(m.fileName + ".verified"), store.partialURL(for: m)]
+        let found = entries.filter { CheckIsolation.entryExists($0.path) }.map(\.lastPathComponent)
+        guard downloads.state(m) == .notDownloaded, store.partialBytes(m) == 0, found.isEmpty else {
+            AICheck.check(false, "\(m.name) is not in a clean Not downloaded state (\(found)); nothing selected or clicked"); AICheck.finish(); return
+        }
+        AICheck.check(true, "\(m.name) is cleanly Not downloaded before it is selected")
         let before = sheet.settings.model
         popup.selectItem(at: item)
         NSApp.sendAction(popup.action!, to: popup.target, from: popup)
         AICheck.check(sheet.settings.model == before && sheet.builtInTarget == m.id && view.model == m,
                       "picking \(m.name) makes it the download target; the model in use stays \(before ?? "Automatic")")
-        let clean = downloads.state(m) == .notDownloaded && view.action.title == "Download"
-        AICheck.check(clean, "\(m.name): Download")
-        // Only a model this run has not got yet: stop before any click otherwise.
-        guard clean, downloads.store.partialBytes(m) == 0, !FileManager.default.fileExists(atPath: downloads.store.fileURL(for: m).path) else {
-            AICheck.check(false, "\(m.name) is not in a clean Not downloaded state; nothing clicked"); AICheck.finish(); return
+        // Download is pressed only while the row still shows this model, not downloaded.
+        func onTarget() -> Bool {
+            sheet.builtInTarget == m.id && view.model == m && popup.selectedItem?.representedObject as? String == m.id
+                && view.action.title == "Download" && downloads.state(m) == .notDownloaded
         }
+        guard onTarget() else {
+            AICheck.check(false, "\(m.name): Download (the displayed target is \(view.model?.name ?? "-"), \(view.action.title)); nothing clicked"); AICheck.finish(); return
+        }
+        AICheck.check(true, "\(m.name): Download")
         OwlCheck.after(0.3) {
             OwlCheck.snapshot(panel, "\(out)/0-models.png") {
+                guard onTarget() else {
+                    AICheck.check(false, "\(m.name) is still the displayed target before Download; not pressed"); AICheck.finish(); return
+                }
                 AICheck.press(view.action, "Download") { view.licenseConfirmationAlert != nil }
                 AICheck.wait("licence confirmation", timeout: 10, { view.licenseConfirmationAlert != nil }) { shown in
                     AICheck.check(shown, "Download presents the bundled licence before starting")

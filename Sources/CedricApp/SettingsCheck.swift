@@ -12,15 +12,16 @@ import CedricAI
 /// Settings… opens the Cedric tab, which has no Save or Cancel; the prose
 /// font (ProseFontCheck.swift). Snapshots: settings-general/editor/writing/cedric.png.
 /// Settings › Cedric on Built-in (run with CEDRIC_AI_BACKEND=builtIn, an
-/// empty CEDRIC_MODELS_DIR and a CEDRIC_AI_DEFAULTS suite of its own, as
-/// tools-check.sh does; without both folders isolated the check opens
-/// nothing, CheckIsolation): one Model popup lists Automatic and every
+/// empty CEDRIC_MODELS_DIR and a CEDRIC_AI_DEFAULTS=cedric-check-<id> suite
+/// of its own, as tools-check.sh does; without both, or with anything in
+/// the models folder, the check opens nothing, CheckIsolation): one Model popup lists Automatic and every
 /// catalog model with its tag, one action button on its row, one-line notes
 /// (also as laid out on an Intel Mac), and the tab at most
 /// `cedricTabMaxHeight` tall. A download target stays selected, with the
 /// same menu items, through progress; an installed model (a stand-in in the
-/// check's models folder) saves its ID to the suite, Automatic clears it,
-/// and the standard defaults' AI settings are untouched.
+/// check's models folder, created only if nothing has its name) saves its ID
+/// to the suite's persistent domain and Automatic saves a record without
+/// one; the standard defaults' AI settings are never read or written.
 /// CEDRIC_SETTINGS_APPEARANCE=light|dark (check only) draws the app, and so the
 /// Settings window, in Aqua or Dark Aqua for this run; the system appearance
 /// is left alone.
@@ -58,12 +59,22 @@ extension DevChecks {
     static func settingsCheck(_ app: AppDelegate) {
         // Before Settings (and so BuiltInDownloads) exists: the AI settings and
         // models must be the check's own, or its clicks could save or delete the user's.
-        if let why = CheckIsolation.problem() {
+        let models: URL
+        switch CheckIsolation.processModelsDirectory() {
+        case .success(let dir): models = dir
+        case .failure(let why):
             expect(false, "isolated run: \(why); Settings not opened")
             finish()
             return
         }
-        let standardAI = UserDefaults.standard.data(forKey: LocalAISettings.defaultsKey)
+        // The check puts a stand-in model there and removes it: only in an
+        // empty folder of the user's own, so no model that was there first
+        // can be mistaken for the check's.
+        if let why = CheckIsolation.ownedEmptyFolderProblem(models) {
+            expect(false, "an empty models folder of the check's own: \(why); Settings not opened")
+            finish()
+            return
+        }
         // owlHintSource: applying an AI choice may switch the owl's hint source.
         let restore = keepDefaults(MenuToggleSetting.allCases.map(\.defaultsKey) + ["styleCheck", "owlHintSource", SettingsPane.defaultsKey])
         switch DevEnvironment.values["CEDRIC_SETTINGS_APPEARANCE"] {
@@ -261,7 +272,7 @@ extension DevChecks {
                        "Cedric: back to this Mac's layout (no Intel notes)")
             },
         ]
-        plan += installedModelSteps(standardAI: standardAI)
+        plan += installedModelSteps(models: models)
         plan += [
             sync {
                 guard let s else { return }
@@ -338,12 +349,17 @@ extension DevChecks {
     }
 
     /// Built-in, with the check's own models folder and defaults suite
-    /// (CheckIsolation, checked before Settings opened): a stand-in
-    /// "installed" model (a sparse file of the catalog's size and its
-    /// .verified marker, as owl-check.sh makes) is a choice, so picking it
-    /// saves its ID; Automatic clears it. A saved ID the catalog doesn't
-    /// list says so. The standard defaults' AI settings stay as they were.
-    static func installedModelSteps(standardAI: Data?) -> [Step] {
+    /// (CheckIsolation, checked before Settings opened; `models` is the
+    /// validated folder, empty then): a stand-in "installed" model (a
+    /// sparse file of the catalog's size and its .verified marker, as
+    /// owl-check.sh makes) is a choice, so picking it saves its ID;
+    /// Automatic clears it. A saved ID the catalog doesn't list says so.
+    /// The stand-in's two files are created only if nothing has their
+    /// names, and only those two are removed. What was saved is read from
+    /// the suite's own persistent domain (never the standard defaults, and
+    /// never through LocalAISettings.load, whose fallback for a missing
+    /// record also has no model).
+    static func installedModelSteps(models: URL) -> [Step] {
         var ai: AISettingsSection? { SettingsWindowController.shared?.ai }
         let downloads = BuiltInDownloads.shared
         guard let m = downloads.catalog?.defaultModel ?? downloads.catalog?.models.first else {
@@ -351,18 +367,30 @@ extension DevChecks {
         }
         let file = downloads.store.fileURL(for: m)
         let marker = downloads.store.directory.appendingPathComponent(m.fileName + ".verified")
-        func saved() -> LocalAISettings { LocalAISettings.load(from: AIStore.defaults) }
+        let owned = CheckOwnedFiles()
+        var ready = false
         let legacy = "qwen-legacy-check-model"
         return [
             sync {
-                guard CheckIsolation.problem() == nil, ai?.settings.backend == .builtIn else { expect(false, "Cedric: isolated, on Built-in"); return }
-                FileManager.default.createFile(atPath: file.path, contents: nil)
-                if let h = try? FileHandle(forWritingTo: file) { try? h.truncate(atOffset: UInt64(m.sizeBytes)); try? h.close() }
-                try? (m.sha256 + "\n").write(to: marker, atomically: true, encoding: .utf8)
+                guard case .success(let dir) = CheckIsolation.processModelsDirectory(), dir.path == models.path,
+                      downloads.store.directory.path == models.path, ai?.settings.backend == .builtIn else {
+                    expect(false, "Cedric: isolated, on Built-in, the downloads in the validated models folder", downloads.store.directory.path)
+                    return
+                }
+                guard downloads.state(m) == .notDownloaded else { expect(false, "Cedric: \(m.name) is not downloaded before the stand-in", "\(downloads.state(m))"); return }
+                do {
+                    try owned.create(file, size: m.sizeBytes)
+                    try owned.create(marker, contents: Data((m.sha256 + "\n").utf8))
+                } catch {
+                    expect(false, "Cedric: the stand-in's files are new (nothing overwritten)", "\(error)")
+                    return
+                }
+                ready = true
                 downloads.rescanForCheck()
                 expect(downloads.state(m) == .installed, "Cedric: a stand-in \(m.name) is installed in the check's models folder")
             },
             sync {
+                guard ready else { return }
                 guard let ai, let i = ai.modelPopup.itemArray.firstIndex(where: { $0.representedObject as? String == m.id }) else {
                     expect(false, "Cedric: \(m.name) is in the Model menu"); return
                 }
@@ -373,9 +401,10 @@ extension DevChecks {
                        "Cedric: picking installed \(m.name) chooses it", ai.settings.model ?? "nil")
                 expect(ai.modelsView.model == m && ai.modelsView.action.title == "Delete", "…its button is Delete", ai.modelsView.action.title)
             },
-            waitFor("the suite saves \(m.id)") { saved().model == m.id && !AISettingsSection.applier.isBusy },
+            waitFor("the suite saves \(m.id)") { !ready || (savedRecord()?.model == m.id && !AISettingsSection.applier.isBusy) },
             sync {
-                expect(saved().model == m.id, "Cedric: \(m.id) is saved to the check's defaults suite", saved().model ?? "nil")
+                guard ready else { return }
+                expect(savedRecord()?.model == m.id, "Cedric: \(m.id) is saved in the check suite's persistent domain", describe(savedRecord()))
                 guard let ai else { return }
                 let applied = ai.applyCount
                 ai.modelPopup.selectItem(at: 0)
@@ -383,17 +412,25 @@ extension DevChecks {
                 expect(ai.settings.model == nil && ai.applyCount == applied + 1 && ai.modelsView.automatic, "Cedric: Automatic clears the choice", ai.settings.model ?? "nil")
                 expect(ai.modelPopup.titleOfSelectedItem?.contains(m.id) == true, "…and uses the installed model", ai.modelPopup.titleOfSelectedItem ?? "-")
             },
-            waitFor("the suite saves Automatic") { saved().model == nil && !AISettingsSection.applier.isBusy },
+            waitFor("the suite saves Automatic") {
+                guard ready else { return true }
+                guard let record = savedRecord() else { return false }
+                return record.model == nil && !AISettingsSection.applier.isBusy
+            },
             sync {
-                expect(saved().model == nil, "Cedric: Automatic (no model) is saved to the check's defaults suite", saved().model ?? "nil")
+                guard ready else { return }
+                // A record that decodes, with no model: a missing record is not "Automatic was saved".
+                let record = savedRecord()
+                expect(record != nil && record?.model == nil && record?.backend == .builtIn,
+                       "Cedric: Automatic (a saved record with no model) is in the check suite's persistent domain", describe(record))
                 // A saved ID the catalog doesn't list (an older build's, CEDRIC_AI_MODEL).
-                var old = saved()
+                guard var old = record else { return }
                 old.model = legacy
                 old.save(to: AIStore.defaults)
                 ai?.reloadIfIdle()
             },
             sync {
-                guard let ai else { return }
+                guard ready, let ai else { return }
                 let v = ai.modelsView
                 expect(ai.settings.model == legacy && ai.modelPopup.titleOfSelectedItem == legacy, "Cedric: a saved model the catalog doesn't list stays selected",
                        ai.modelPopup.titleOfSelectedItem ?? "-")
@@ -401,16 +438,39 @@ extension DevChecks {
                        && !v.status.stringValue.contains("No models are bundled") && v.status.toolTip == v.status.stringValue,
                        "…its status says it isn't in this build (tooltip too)", v.status.stringValue)
                 expect(ai.modelPopup.numberOfItems == 2 + (downloads.catalog?.models.count ?? 0), "…next to Automatic and every catalog model", "\(ai.modelPopup.numberOfItems)")
-                var back = saved()
-                back.model = nil
-                back.save(to: AIStore.defaults)
+                if var back = savedRecord() {
+                    back.model = nil
+                    back.save(to: AIStore.defaults)
+                }
                 ai.reloadIfIdle()
-                try? FileManager.default.removeItem(at: file)
-                try? FileManager.default.removeItem(at: marker)
+            },
+            sync {
+                // Whatever happened above: only the files this run created, if they are still those files.
+                let made = owned.paths.count
+                let left = owned.removeAll()
+                guard ready, let ai else { return }
                 downloads.rescanForCheck()
+                expect(made == 2 && left.isEmpty && !CheckIsolation.entryExists(file.path) && !CheckIsolation.entryExists(marker.path),
+                       "Cedric: the stand-in's two files, and only those, are removed", "\(made) made, left \(left)")
                 expect(ai.settings.model == nil && downloads.state(m) == .notDownloaded, "Cedric: back to Automatic, the stand-in removed")
-                expect(UserDefaults.standard.data(forKey: LocalAISettings.defaultsKey) == standardAI, "Cedric: the standard defaults' AI settings are untouched")
+                let record = savedRecord()
+                expect(record != nil && record?.model == nil, "Cedric: the check suite's record is back on Automatic", describe(record))
             },
         ]
+    }
+
+    /// The AI settings record in the check suite's own persistent domain
+    /// (CEDRIC_AI_DEFAULTS, a `cedric-check-…` name): nil when nothing is
+    /// saved there or it doesn't decode. Reads that one domain, with no
+    /// search list behind it and no default to fall back on.
+    static func savedRecord() -> LocalAISettings? {
+        guard let suite = DevEnvironment.values["CEDRIC_AI_DEFAULTS"], CheckIsolation.isCheckSuiteName(suite),
+              let data = UserDefaults(suiteName: suite)?.persistentDomain(forName: suite)?[LocalAISettings.defaultsKey] as? Data else { return nil }
+        return try? JSONDecoder().decode(LocalAISettings.self, from: data)
+    }
+
+    static func describe(_ record: LocalAISettings?) -> String {
+        guard let record else { return "no saved record" }
+        return "\(record.backend.rawValue), model \(record.model ?? "nil")"
     }
 }

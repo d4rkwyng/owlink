@@ -16,11 +16,13 @@ public struct ModelStore: Sendable {
         self.directory = directory
     }
 
-    /// CEDRIC_MODELS_DIR=/dir overrides it (the app checks use a temp dir).
+    /// CEDRIC_MODELS_DIR=/dir overrides it (the app checks use a temp dir):
+    /// the folder that path resolves to (symbolic links, then ".."), fixed
+    /// once per process, which is the one CheckIsolation validates. Never
+    /// the raw string, which could name a different folder by the time it
+    /// is opened.
     public static var defaultDirectory: URL {
-        if let dir = DevEnvironment.values["CEDRIC_MODELS_DIR"], !dir.isEmpty {
-            return URL(fileURLWithPath: dir, isDirectory: true)
-        }
+        if let dir = CheckIsolation.processModelsOverride { return dir }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent("Cedric/Models", isDirectory: true)

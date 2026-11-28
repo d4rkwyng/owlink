@@ -2042,13 +2042,21 @@ default model for real (optionally pausing and resuming with
 `CEDRIC_BUILTIN_PAUSE=1`) and runs the three owl snippets;
 `CEDRIC_APPLE_LIVE=1 swift test --filter LiveAppleTests` does the same on
 Apple Intelligence. `CEDRIC_BUILTIN_CHECK=/out CEDRIC_MODELS_DIR=/tmp/x
-CEDRIC_AI_DEFAULTS=<suite>` runs `BuiltInCheck` in the app: real clicks on
-Download, Pause, Resume and Delete in the sheet, with snapshots. It, and
-`CEDRIC_CHECK=settings`, fail before Settings opens unless both the models
-folder (an existing folder outside `~/Library`) and the AI defaults suite
-(not the app's standard domain) are the check's own (`CheckIsolation`);
-BuiltInCheck also stops before its first click unless the model is cleanly
-Not downloaded.
+CEDRIC_AI_DEFAULTS=cedric-check-<id>` runs `BuiltInCheck` in the app: real
+clicks on Download, Pause, Resume and Delete in the sheet, with snapshots.
+It, and `CEDRIC_CHECK=settings`, fail before Settings opens unless both the
+models folder (an existing folder outside `~/Library`) and the AI defaults
+suite (`cedric-check-` then letters, digits or hyphens: never the app's
+standard domain or another program's) are the check's own
+(`CheckIsolation`). The folder is resolved as the file system does
+(symbolic links, then `..`), its ancestors are compared with `~/Library` by
+device and inode, and `ModelStore` opens that resolved folder, not the
+string in the environment. The Settings check also needs the folder empty,
+creates its stand-in model's files only if nothing has their names, removes
+only those, and reads what was saved from the suite's own persistent domain.
+BuiltInCheck selects its model only once it is cleanly Not downloaded (no
+model, marker or partial file), and presses Download only while that model
+is still the one shown.
 
 ### Ask Cedric tool calls: the eval
 

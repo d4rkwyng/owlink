@@ -52,7 +52,8 @@ cedric_require_check_build "$APP"
 mkdir -p "$OUT"
 W=$(mktemp -d)
 # The settings check's own AI defaults suite (never the user's standard domain).
-SETTINGS_SUITE="cedric-tools-check-settings-$$-$RANDOM"
+# CheckIsolation takes only cedric-check-<letters, digits, hyphens> as a check suite.
+SETTINGS_SUITE="cedric-check-tools-settings-$$-$RANDOM"
 trap 'rm -rf "$W"; defaults delete "$SETTINGS_SUITE" >/dev/null 2>&1 || true; rm -f "$HOME/Library/Preferences/$SETTINGS_SUITE.plist"' EXIT
 cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$OUT"
