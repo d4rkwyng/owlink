@@ -132,6 +132,12 @@ final class PreviewFolderGrants {
     private var grants = PreviewGrantSet()
     /// The URL each started scope was started on (stopped on the same one).
     private var startedURLs: [String: URL] = [:]
+    /// Where the bookmarks are kept (tests: a suite of their own).
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = AppSettings.defaults) {
+        self.defaults = defaults
+    }
 
     /// The granted folder holding `folder` (the nearest), access started.
     func root(for folder: URL) -> URL? {
@@ -147,9 +153,15 @@ final class PreviewFolderGrants {
     func add(_ url: URL) -> Bool {
         loadIfNeeded()
         let path = PreviewGrantSet.resolvedPath(url)
+        // Bookmarks that fell out are let go once `apply` is done with
+        // `grants` (forgetting changes it too).
+        var dropped: [String] = []
         grants.apply(url, start: { self.start($0) }, store: { url in
-            self.storeBookmark(url)
+            guard let out = self.storeBookmark(url) else { return false }
+            dropped = out
+            return true
         })
+        for old in dropped { forget(old) }
         guard grants.started.contains(path) || FileManager.default.isReadableFile(atPath: url.path) else { return false }
         adopt(url)
         return true
@@ -170,22 +182,24 @@ final class PreviewFolderGrants {
 
     /// Appends one bookmark, unless the same resolved path is already stored.
     /// The caller (`PreviewGrantSet`) has already decided it is new. Past
-    /// `maxKept`, the oldest bookmarks are dropped and their folders let go.
-    private func storeBookmark(_ url: URL) -> Bool {
-        guard let b = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return false }
+    /// `maxKept`, the oldest bookmarks are dropped: their resolved paths
+    /// are returned, for the caller to let go (nil: nothing stored).
+    private func storeBookmark(_ url: URL) -> [String]? {
+        guard let b = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return nil }
         var saved = savedBookmarks
         saved.append(b)
         let dropped = saved.dropLast(Self.maxKept)
-        AppSettings.defaults.set(Array(saved.suffix(Self.maxKept)), forKey: Self.key)
+        defaults.set(Array(saved.suffix(Self.maxKept)), forKey: Self.key)
         let keep = PreviewGrantSet.resolvedPath(url)
+        var out: [String] = []
         for data in dropped {
             var stale = false
             guard let old = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
             let path = PreviewGrantSet.resolvedPath(old)
             guard path != keep else { continue }
-            forget(path)
+            out.append(path)
         }
-        return true
+        return out
     }
 
     /// `path`'s grant is no longer kept: not offered again, its access stopped.
@@ -197,7 +211,7 @@ final class PreviewFolderGrants {
     }
 
     private var savedBookmarks: [Data] {
-        (AppSettings.defaults.array(forKey: Self.key) as? [Data]) ?? []
+        (defaults.array(forKey: Self.key) as? [Data]) ?? []
     }
 
     private func loadIfNeeded() {
@@ -222,6 +236,6 @@ final class PreviewFolderGrants {
                 kept.append(data)
             }
         }
-        if changed { AppSettings.defaults.set(kept, forKey: Self.key) }
+        if changed { defaults.set(kept, forKey: Self.key) }
     }
 }

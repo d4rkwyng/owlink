@@ -124,4 +124,34 @@ final class PreviewRichTests: XCTestCase {
         XCTAssertTrue(page.contains("katex.min.css\">\n</head>"))
         XCTAssertTrue(page.contains("data-dark=\"1\"></script>\n</body>"))
     }
+
+    /// Folder grants past the kept twenty: adding the 21st through the
+    /// registry drops the oldest (its folder let go) without touching the
+    /// grant set while it is being changed (Sol round 2, must-fix 1).
+    func testTwentyFirstFolderGrantDropsTheOldest() throws {
+        let suite = "cedric-tests-grants-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let grants = PreviewFolderGrants(defaults: defaults)
+        var folders: [URL] = []
+        for k in 0...PreviewFolderGrants.maxKept {
+            let f = FileManager.default.temporaryDirectory.appendingPathComponent("grant-\(k)-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: f, withIntermediateDirectories: true)
+            temps.append(f)
+            folders.append(f)
+        }
+        for f in folders.prefix(PreviewFolderGrants.maxKept) { XCTAssertTrue(grants.add(f)) }
+        XCTAssertNotNil(grants.root(for: folders[0]))
+        XCTAssertEqual((defaults.array(forKey: "previewFolderGrants") as? [Data])?.count, PreviewFolderGrants.maxKept)
+        // The 21st: kept, and the oldest goes.
+        XCTAssertTrue(grants.add(folders[PreviewFolderGrants.maxKept]))
+        XCTAssertNotNil(grants.root(for: folders[PreviewFolderGrants.maxKept]))
+        XCTAssertNil(grants.root(for: folders[0]), "the oldest grant is let go")
+        XCTAssertNotNil(grants.root(for: folders[1]))
+        XCTAssertEqual((defaults.array(forKey: "previewFolderGrants") as? [Data])?.count, PreviewFolderGrants.maxKept)
+        // A fresh registry over the same bookmarks has the newest twenty.
+        let reloaded = PreviewFolderGrants(defaults: defaults)
+        XCTAssertNil(reloaded.root(for: folders[0]))
+        XCTAssertNotNil(reloaded.root(for: folders[PreviewFolderGrants.maxKept]))
+    }
 }
