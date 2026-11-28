@@ -70,9 +70,21 @@ extension AppDelegate {
         return v.isDirectory == true && v.isPackage != true
     }
 
+    /// The front tab's file when it is inside `folder` (links resolved),
+    /// so a folder open can select it once the listing lands.
+    func frontFile(inside folder: URL) -> URL? {
+        guard let file = currentFileURL else { return nil }
+        let root = folder.standardizedFileURL
+        let realRoot = root.resolvingSymlinksInPath()
+        let real = file.standardizedFileURL.resolvingSymlinksInPath()
+        if FolderTree.relativePath(of: real, in: realRoot) != nil { return file }
+        if FolderTree.eventRelativePath(real.path, roots: [root, realRoot]) != nil { return file }
+        return nil
+    }
+
     /// Opens `url` in the folder sidebar (replacing the folder open before)
     /// and shows it in the selected tab. `state`: restoring a session.
-    /// `reveal`: a file to select once the folder is listed.
+    /// `reveal`: a file to select once the folder is listed; if nil, the front tab's file is selected when it is inside the folder.
     /// `dock`: shows the sidebar in a given tab instead (text or viewer);
     /// false if that tab has gone, and the selected tab is used.
     func openFolder(_ url: URL, state: SessionFolder? = nil, reveal: URL? = nil, dock: ((FolderSidebar) -> Bool)? = nil) {
@@ -89,7 +101,12 @@ extension AppDelegate {
         FolderSidebar.pendingFolder = nil
         let s = FolderSidebar(root: url.standardizedFileURL, state: state)
         FolderSidebar.shared = s
-        s.pendingReveal = reveal
+        // After any folder open, select the front document if it is
+        // inside this folder. File › Open Folder does not pass reveal:
+        // (Open Enclosing Folder does). folderSidebarFollow only runs
+        // when a tab becomes key, which does not fire when the same tab
+        // stays in front.
+        s.pendingReveal = reveal ?? frontFile(inside: url)
         s.onOpen = { [weak self] node in self?.openFromFolder(node) }
         s.onCreateFile = { [weak self] node in self?.openFromFolder(node, asText: true) }
         s.onChange = { [weak self] in self?.scheduleSessionSave() }

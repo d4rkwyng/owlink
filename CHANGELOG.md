@@ -8,6 +8,7 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ### Fixed
 - **Clicking a binary file in the sidebar no longer decodes the whole file first.** A pcap or other file that looks binary is identified from its first 8 KB. The tab shows the “Open Anyway” bar at once; the bytes are decoded only if you ask to see them as text. Measured in the app on an M4 Pro (the sidebar-click benchmark), a click on a 5 MB capture took 394.5 ms to show its tab before, 313 ms of it decoding, and takes 57.3 ms now.
+- **File › Open Folder selects the current tab's file when it is in that folder.** Opening a folder that holds the front document now highlights it in the sidebar, the same way switching tabs does. Before, File › Open Folder listed the folder and left no row selected if that tab was already in front.
 - **Opening a file switches the folder sidebar to its folder.** A file opened from outside the folder shown in the sidebar (File › Open, Open Recent, a double-click or Open With in Finder, a file dropped on the Dock icon or a window, or `owlink file`) now shows its own folder in the sidebar, with the file selected. Before, the sidebar stayed on the folder opened earlier. A hidden sidebar stays hidden, and opening a file never loads a folder when none is open. Files opened from inside Owlink (the sidebar, Quick Open, links) leave the folder as it is.
 
 ## [0.6.0] - 2026-11-27

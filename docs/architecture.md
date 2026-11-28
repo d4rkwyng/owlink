@@ -1157,8 +1157,10 @@ File › Open Folder… (⇧⌘O), a folder dropped on the Dock icon or on an
 editor window (the text, or anywhere beside it: `FileDropStackView`), or
 `cedric some/dir` (all reach `AppDelegate.open`, which routes a folder
 that isn't a package to `openFolder`) shows a folder tree at the left of
-the editor. View › Show Folder Sidebar (⌃⌘1) hides and shows it; it is
-disabled until a folder is open. The model is `CedricCore/FolderTree.swift`
+the editor. After any folder open, the sidebar selects the front tab's
+file if that file is inside the folder (`pendingReveal`; File › Open
+Folder does not pass `reveal:` itself). View › Show Folder Sidebar
+(⌃⌘1) hides and shows it; it is disabled until a folder is open. The model is `CedricCore/FolderTree.swift`
 (tested in `FolderTreeTests.swift`); the app side is `FolderSidebar.swift`
 and `FolderWatcher.swift`. `cedric -w some/dir` returns at once: `-w`
 waits for each file's tab, a folder has none, so the app deletes the

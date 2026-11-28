@@ -117,7 +117,7 @@ too, and a dropped **folder** opens in the [folder sidebar](#folder-sidebar).
 **File › Open Folder…** (⇧⌘O), a folder dropped on the Dock icon or on
 a window, or `cedric some/folder` shows the folder as a tree at the left
 of the editor. **View › Show Folder Sidebar** (⌃⌘1) hides and shows it
-again. Until a folder is open nothing is loaded or watched.
+again. Until a folder is open nothing is loaded or watched. If the folder you open holds the current tab's file, that file is selected in the tree.
 While the sidebar shows a folder, a file you open from outside it (File ›
 Open…, Open Recent, Finder, a file dropped on the Dock icon or a window,
 or `cedric file`) switches the sidebar to that file's folder, with the
