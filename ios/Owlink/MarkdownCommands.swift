@@ -29,7 +29,7 @@ extension EditorViewController {
         #selector(markdownBodyMenu(_:)), #selector(markdownHeading1Menu(_:)), #selector(markdownHeading2Menu(_:)),
         #selector(markdownHeading3Menu(_:)), #selector(markdownBulletListMenu(_:)), #selector(markdownNumberedListMenu(_:)),
         #selector(toggleCheckboxMenu(_:)), #selector(markdownQuoteMenu(_:)), #selector(markdownCodeBlockMenu(_:)),
-        #selector(markdownTableMenu(_:)), #selector(formatTableMenu(_:)),
+        #selector(markdownTableMenu(_:)), #selector(formatTableMenu(_:)), #selector(markdownInsertImageFileMenu(_:)),
     ]
 
     @discardableResult

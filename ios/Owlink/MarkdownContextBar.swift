@@ -59,7 +59,11 @@ final class MarkdownContextBar: UIView {
             button.isPointerInteractionEnabled = true
             button.widthAnchor.constraint(equalToConstant: 44).isActive = true
             button.heightAnchor.constraint(equalToConstant: 44).isActive = true
-            if !item.choices.isEmpty {
+            if item.id == "image" {
+                // Photos, Files, or the empty image link (as before).
+                button.menu = editor.imageInsertMenu()
+                button.showsMenuAsPrimaryAction = true
+            } else if !item.choices.isEmpty {
                 button.menu = UIMenu(children: item.choices.map { choice in
                     UIAction(title: Self.choiceLabel(choice.command)) { [weak self] _ in self?.run(choice.command) }
                 })
@@ -188,7 +192,7 @@ final class MarkdownContextBar: UIView {
         case "quote": return String(localized: "Quote")
         case "codeBlock": return String(localized: "Code Block")
         case "table": return String(localized: "Insert Table")
-        case "image": return String(localized: "Image Link")
+        case "image": return String(localized: "Insert Image")
         case "preview": return String(localized: "Preview")
         case "explain": return String(localized: "Explain Selection")
         case "rewrite": return String(localized: "Rewrite Selection")

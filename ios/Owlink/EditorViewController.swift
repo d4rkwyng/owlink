@@ -248,6 +248,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     private var conflictResolver: ConflictResolver?
     /// A save failed: shown until one succeeds.
     let saveErrorBanner = SaveErrorBanner()
+    /// Insert Image's Files and Photos pickers report here.
+    let imagePickerDelegate = ImagePickerDelegate()
     /// "Isn't valid UTF-8, opened as Latin-1 (a guess)": made when first shown.
     var encodingNotice: EncodingNoticeBar?
     /// Keep was chosen: the guess is the user's, the notice doesn't come back.

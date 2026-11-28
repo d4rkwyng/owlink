@@ -175,6 +175,7 @@ enum MenuBar {
             key(String(localized: "Inline Code"), #selector(EditorViewController.markdownCodeMenu(_:)), "`", .control),
             key(String(localized: "Link"), #selector(EditorViewController.markdownLinkMenu(_:)), "k"),
             command(String(localized: "Image Link"), #selector(EditorViewController.markdownImageMenu(_:))),
+            command(String(localized: "Insert Image…"), #selector(EditorViewController.markdownInsertImageFileMenu(_:))),
             command(String(localized: "Body"), #selector(EditorViewController.markdownBodyMenu(_:))),
             key(String(localized: "Heading 1"), #selector(EditorViewController.markdownHeading1Menu(_:)), "1"),
             key(String(localized: "Heading 2"), #selector(EditorViewController.markdownHeading2Menu(_:)), "2"),
