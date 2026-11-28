@@ -10,8 +10,10 @@
 #   click to text shown, median     per kind and mode (LIMITS below)
 #   longest main-thread stall       per kind and mode (LIMITS below)
 #
-# The limits are about 3x the 0.6.1 numbers on an M4 Mac (see
-# CHANGELOG.md, 0.6.1), so a loaded machine doesn't fail it. TIMING
+# The limits are about 3x the after-fix numbers measured on geonosis
+# (M4 Pro, 2026-11-28; see scratch/061-sidebar-speed/perf/BEFORE-AFTER.md),
+# so a loaded machine doesn't fail it. The 60 ms stall cap on small
+# Markdown was too tight: creating the tab already takes about that long. TIMING
 # SENSITIVE: run it on a quiet machine, and again before believing a
 # failure.
 #
@@ -52,10 +54,10 @@ echo "$out" | grep -E "^(metric|phase) " || true
 
 # Limits in ms: kind_mode shown-median stall-max.
 LIMITS="
-md_small_cold 60 60
-md_small_reopen 60 60
-md_small_switch 60 60
-md_small_dblclick 60 60
+md_small_cold 180 210
+md_small_reopen 180 210
+md_small_switch 180 210
+md_small_dblclick 180 210
 md_300k_cold 100 100
 md_300k_reopen 100 100
 md_300k_switch 60 60

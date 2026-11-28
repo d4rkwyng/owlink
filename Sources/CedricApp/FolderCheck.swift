@@ -782,6 +782,7 @@ extension DevChecks {
             sync { app.application(NSApp, open: [welcome]) },
             switchedTo(b, file: welcome, "Finder open"),
             dockedInText(welcome, "Finder open"),
+            snapshot("061-sidebar-switch-welcome.png"),
             // An image: a viewer tab.
             sync { app.application(NSApp, open: [image]) },
             switchedTo(img, file: image, "image open"),
