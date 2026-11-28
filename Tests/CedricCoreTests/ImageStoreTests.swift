@@ -821,7 +821,119 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(perms(doc.appendingPathComponent("images").appendingPathComponent(name)) == want, "\(mode): \(String(want, radix: 8))")
     }
 
-    // MARK: r7 (Astra r6): the mode
+    // MARK: r7 (Astra r6): pinned staging identity, the mode
+
+    /// Unsets every r7 hook (and the r6 ones the r7 tests use).
+    func resetHooks() {
+        ImageStore.forceFallback = false
+        ImageStore.beforePublish = nil; ImageStore.writeFault = nil; ImageStore.leftBehind = nil
+        ImageStore.stagedLookup = nil
+    }
+
+    func birth(_ st: stat) -> [Int] { [Int(st.st_birthtimespec.tv_sec), Int(st.st_birthtimespec.tv_nsec)] }
+
+    /// r7 a (Astra r6 must-fix 1): another writer unlinks the staging entry
+    /// and makes a new file at its name whose inode number is the one ours
+    /// had (a reused number, stood in by `stagedLookup`: the new file's own
+    /// lookup with our device and inode; its birth time stays its own).
+    /// A device-and-inode check takes it for ours; it must be neither
+    /// published (the copy throws) nor removed by the cleanup (a failed
+    /// write), and it is left and reported. Two more: our file still in
+    /// place but the entry's birth time, or its generation, not ours: refused
+    /// (the check keys on them, not on the number alone).
+    @Test(arguments: storeModes) func aNewFileReusingTheStagingInodeNumberIsNeitherPublishedNorRemoved(mode: StoreMode) throws {
+        defer { resetHooks() }
+        for scenario in ["publish", "cleanup", "birth time", "generation"] {
+            resetHooks()
+            use(mode)
+            let (d, doc, outside) = try layout()
+            defer { try? fm.removeItem(at: d) }
+            let pic = outside.appendingPathComponent("p.png")
+            try Data(repeating: 5, count: 4096).write(to: pic)
+            let images = doc.appendingPathComponent("images")
+            let store = try ImageStore.open(in: doc)
+            let theirs = Data("the person's new file".utf8)
+            var left: [String] = []
+            ImageStore.leftBehind = { left.append($0) }
+            var swapped: String?
+            var oldCheckAccepts = false
+            // The staging entry unlinked, a new file made at its name, and lookups of it given our number.
+            func reuse() {
+                guard let name = staged(images).first else { return }
+                let at = images.appendingPathComponent(name)
+                var ours = stat(), now = stat()
+                guard lstat(at.path, &ours) == 0, unlink(at.path) == 0,
+                      fm.createFile(atPath: at.path, contents: theirs), lstat(at.path, &now) == 0 else { return }
+                swapped = name
+                ImageStore.stagedLookup = { n, st, rc in
+                    guard n == name, rc == 0 else { return }
+                    st.st_dev = ours.st_dev; st.st_ino = ours.st_ino
+                }
+                var fake = now
+                fake.st_dev = ours.st_dev; fake.st_ino = ours.st_ino
+                oldCheckAccepts = Beneath.FileID(fake) == Beneath.FileID(ours) && birth(fake) != birth(ours)
+            }
+            // Our file left in place; its lookup given another birth time or generation.
+            func respell(birthTime: Bool) {
+                guard let name = staged(images).first else { return }
+                swapped = name
+                ImageStore.stagedLookup = { n, st, rc in
+                    guard n == name, rc == 0 else { return }
+                    if birthTime { st.st_birthtimespec.tv_sec -= 1 } else { st.st_gen &+= 1 }
+                }
+                var real = stat()
+                guard fstatat(store.fd, name, &real, AT_SYMLINK_NOFOLLOW) == 0 else { return }
+                var fake = real
+                if birthTime { fake.st_birthtimespec.tv_sec -= 1 } else { fake.st_gen &+= 1 }
+                oldCheckAccepts = Beneath.FileID(fake) == Beneath.FileID(real)
+            }
+            let what = "\(mode), \(scenario)"
+            switch scenario {
+            case "publish":
+                ImageStore.beforePublish = reuse
+                #expect(throws: ImageStore.Failure.destinationChanged, "\(what)") { _ = try store.copy(from: pic, name: "q.png") }
+            case "cleanup":
+                ImageStore.writeFault = { _ in reuse(); return EIO }
+                #expect(posixCode { try store.copy(from: pic, name: "q.png") } == Int(EIO), "\(what): the write's error")
+            default:
+                ImageStore.beforePublish = { respell(birthTime: scenario == "birth time") }
+                #expect(throws: ImageStore.Failure.destinationChanged, "\(what)") { _ = try store.copy(from: pic, name: "q.png") }
+            }
+            resetHooks()
+            let name = try #require(swapped, "\(what): the staging entry was found")
+            #expect(oldCheckAccepts, "\(what): a device-and-inode check alone takes the entry for ours")
+            if scenario == "publish" || scenario == "cleanup" {
+                #expect(fm.contents(atPath: images.appendingPathComponent(name).path) == theirs, "\(what): the new file survives byte for byte")
+            } else {
+                #expect(fm.fileExists(atPath: images.appendingPathComponent(name).path), "\(what): the entry is left alone")
+            }
+            #expect(left == [name], "\(what): the entry is left and reported: \(left)")
+            #expect(listing(images) == [name], "\(what): nothing published under any name: \(listing(images))")
+            #expect(listing(doc) == ["images"] && listing(outside) == ["p.png"], "\(what): nothing written elsewhere")
+        }
+    }
+
+    /// r7 e (Astra r6 should-fix 4): the cleanup's lookup of the staging
+    /// entry fails with an error other than ENOENT (EIO): the entry is
+    /// left alone and reported, not taken as gone.
+    @Test(arguments: storeModes) func aStagingEntryThatCantBeLookedUpIsReportedNotTakenAsGone(mode: StoreMode) throws {
+        defer { resetHooks() }
+        use(mode)
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let images = doc.appendingPathComponent("images")
+        let store = try ImageStore.open(in: doc)
+        var left: [String] = []
+        ImageStore.leftBehind = { left.append($0) }
+        ImageStore.writeFault = { _ in
+            ImageStore.stagedLookup = { _, _, rc in rc = EIO }
+            return ENOSPC
+        }
+        #expect(posixCode { try store.write(Data(repeating: 1, count: 1000), name: "e.png") } == Int(ENOSPC), "\(mode): the write's error")
+        resetHooks()
+        #expect(left.count == 1 && left == staged(images), "\(mode): the entry is left alone and reported: \(left), \(listing(images))")
+        #expect(!listing(images).contains("e.png") && listing(doc) == ["images"] && listing(outside).isEmpty, "\(mode): nothing published")
+    }
 
     #if os(macOS)
     /// r7 c (Astra r6 must-fix 3): a published image has the mode a new

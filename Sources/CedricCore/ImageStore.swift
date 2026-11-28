@@ -33,18 +33,23 @@ import os
 ///   never the link; a folder, pipe or device is refused.
 /// - The bytes go to a hidden staging file in the held "images" (`openat`
 ///   with `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0666: the process umask
-///   gives it the mode any new file gets, and nothing changes it after;
-///   its identity taken at once), are flushed, and are published
-///   with `renameatx_np(images, tmp, images, name, RENAME_EXCL)`: both
-///   operands are single names relative to the held folder, so nothing is
-///   resolved through a path. A name already taken is never overwritten and
-///   the next free suffix is tried; the staging entry must still be the file
-///   made before each attempt. A volume that can't rename exclusively
-///   (ENOTSUP) refuses: nothing is published another way. A partial copy
-///   never has the final name.
+///   gives it the mode any new file gets, and nothing changes it after),
+///   are flushed, and are published with `renameatx_np(images, tmp, images,
+///   name, RENAME_EXCL)`: both operands are single names relative to the
+///   held folder, so nothing is resolved through a path. A name already
+///   taken is never overwritten and the next free suffix is tried. A volume
+///   that can't rename exclusively (ENOTSUP) refuses: nothing is published
+///   another way. A partial copy never has the final name.
+/// - The staging file stays open from its creation until the rename or the
+///   cleanup is done, so its inode can't be freed and its number reused.
+///   Before each rename and before the cleanup's unlink the entry (looked up
+///   without following) must be that file: the same device, inode, birth
+///   time and generation as the held descriptor, which still has exactly
+///   one link. Else the entry is left alone and logged.
 /// - On any failure after the staging file is made, it is removed only while
-///   the entry is still that file (device and inode); an entry another
-///   writer put there is left in place and logged.
+///   the entry is still that file; an entry another writer put there, or
+///   one that can't be looked up (an error other than ENOENT), is left in
+///   place and logged.
 /// - After the first open nothing here uses a path (no FileManager, no
 ///   path rename or unlink). The window between the last check and the
 ///   rename itself, and between the cleanup's identity check and its
@@ -124,6 +129,10 @@ public final class ImageStore {
     /// Checks only: called with a staging name the cleanup left in place
     /// because the entry there is no longer the file it made.
     nonisolated(unsafe) static var leftBehind: ((String) -> Void)?
+    /// Checks only: rewrites what a lookup of the staging entry found (its
+    /// `stat`, and 0 or the errno the lookup failed with): tests stand in
+    /// another file's identity, or an I/O error, here.
+    nonisolated(unsafe) static var stagedLookup: ((String, inout stat, inout Int32) -> Void)?
 
     /// `RENAME_RESOLVE_BENEATH` from sys/stdio.h, written as its value:
     /// older SDKs may not name it.
@@ -399,24 +408,24 @@ public final class ImageStore {
         // 0666 like any new file: the umask gives it the mode it keeps (nothing changes it after).
         let dst = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
         guard dst >= 0 else { throw Self.posix(tmp) }
-        // The staging file's identity, taken at once: a rename keeps it, so it names what was
-        // published, and the cleanup removes the entry only while it is still this file.
+        // Held open until the rename or the cleanup is done (this defer runs last): the inode
+        // can't be freed meanwhile, so no other file can get its number.
+        defer { close(dst) }
+        // The staging file's identity, taken at once: a rename keeps it, so it names what was published.
         guard let id = Beneath.FileID(fd: dst) else {
             let err = errno
-            close(dst)
             leave(tmp)
             throw Self.posix(tmp, err)
         }
         var done = false
-        defer { if !done { removeStaged(tmp, id) } }
+        defer { if !done { removeStaged(tmp, held: dst) } }
         var filled = fill(dst)
         var err = errno
         if DevEnvironment.checksEnabled, filled, let fault = Self.writeFault?(dst) { filled = false; err = fault }
         if filled, fsync(dst) != 0 { filled = false; err = errno }
-        guard filled else { close(dst); throw Self.posix(name, err) }
-        guard close(dst) == 0 else { throw Self.posix(name) }
+        guard filled else { throw Self.posix(name, err) }
         if DevEnvironment.checksEnabled { Self.beforePublish?() }
-        let out = try publish(tmp, as: name, staged: id)
+        let out = try publish(tmp, as: name, held: dst)
         done = true
         self.published.record(out, id)
         return out
@@ -426,9 +435,9 @@ public final class ImageStore {
     /// "images", both operands single names relative to it; never replaces
     /// one (`RENAME_EXCL`). Before each attempt the held folder must still
     /// be inside the boundary (`verify`) and the staging entry still the
-    /// file made. Any error but EEXIST (ENOTSUP from a volume that can't
+    /// file `held` has open (`isHeld`). Any error but EEXIST (ENOTSUP from a volume that can't
     /// rename exclusively among them) refuses: nothing is published another way.
-    private func publish(_ tmp: String, as name: String, staged id: Beneath.FileID) throws -> String {
+    private func publish(_ tmp: String, as name: String, held dst: Int32) throws -> String {
         // Names a rename found taken that a stat doesn't (the simulator's folders answer a stat
         // case-sensitively and a rename case-insensitively): skipped like any taken name.
         var clashed: Set<FolderTree.PathKey> = []
@@ -441,7 +450,7 @@ public final class ImageStore {
             guard Beneath.isName(candidate) else { throw Failure.badName }
             if DevEnvironment.checksEnabled { Self.beforeRename?(candidate) }
             try verify()
-            guard Beneath.FileID(at: fd, tmp) == id else { throw Failure.destinationChanged }
+            guard case .found(let entry) = stagedEntry(tmp), isHeld(dst, entry) else { throw Failure.destinationChanged }
             if renameatx_np(fd, tmp, fd, candidate, UInt32(RENAME_EXCL)) == 0 { return candidate }
             let err = errno
             // Taken meanwhile: the next free name is tried.
@@ -452,18 +461,56 @@ public final class ImageStore {
     }
 
     /// A failure after the staging file was made: the entry is removed only
-    /// while it is still that file (device and inode); one another writer
-    /// put there is left in place. (Darwin has no unlink by identity: the
-    /// window between this check and the unlink remains.)
-    private func removeStaged(_ tmp: String, _ id: Beneath.FileID) {
-        guard let now = Beneath.FileID(at: fd, tmp) else { return }  // nothing there: nothing left
-        if now == id, unlinkat(fd, tmp, 0) == 0 { return }
-        leave(tmp)
+    /// while it is still the file `held` has open (`isHeld`); one another
+    /// writer put there, or one that can't be looked up (an error other than
+    /// ENOENT), is left in place and logged. (Darwin has no unlink by
+    /// identity: the window between this check and the unlink remains.)
+    private func removeStaged(_ tmp: String, held dst: Int32) {
+        switch stagedEntry(tmp) {
+        case .missing:
+            return  // nothing there: nothing left
+        case .failed(let err):
+            leave(tmp, why: "its lookup failed (errno \(err))")
+        case .found(let entry):
+            if isHeld(dst, entry), unlinkat(fd, tmp, 0) == 0 { return }
+            leave(tmp, why: "not the staging file this copy made")
+        }
+    }
+
+    /// What a lookup of the staging entry found.
+    enum Lookup { case found(stat), missing, failed(Int32) }
+
+    /// What the staging entry `tmp` in the held folder is now (not followed).
+    private func stagedEntry(_ tmp: String) -> Lookup {
+        var st = stat()
+        var rc: Int32 = fstatat(fd, tmp, &st, AT_SYMLINK_NOFOLLOW) == 0 ? 0 : errno
+        if DevEnvironment.checksEnabled, let lookup = Self.stagedLookup { lookup(tmp, &st, &rc) }
+        return rc == 0 ? .found(st) : rc == ENOENT ? .missing : .failed(rc)
+    }
+
+    /// `entry` is the file `dst` has open, now (`isSame`).
+    private func isHeld(_ dst: Int32, _ entry: stat) -> Bool {
+        var held = stat()
+        return fstat(dst, &held) == 0 && Self.isSame(held: held, entry: entry)
+    }
+
+    /// The entry is the held file: the held file still has exactly one link
+    /// (not unlinked, not linked elsewhere too), and the entry has its
+    /// device, inode, birth time and generation (the generation is 0 where
+    /// it isn't given out, on both). The inode number alone can name another
+    /// file once ours is freed; ours is held open, and a file made later has
+    /// another birth time.
+    static func isSame(held: stat, entry: stat) -> Bool {
+        held.st_nlink == 1
+            && entry.st_dev == held.st_dev && entry.st_ino == held.st_ino
+            && entry.st_birthtimespec.tv_sec == held.st_birthtimespec.tv_sec
+            && entry.st_birthtimespec.tv_nsec == held.st_birthtimespec.tv_nsec
+            && entry.st_gen == held.st_gen
     }
 
     /// The staging name `tmp` is left in "images" (not, or not provably, the file made).
-    private func leave(_ tmp: String) {
-        Self.log.error("left \(tmp, privacy: .public) in images: not the staging file this copy made")
+    private func leave(_ tmp: String, why: String = "not the staging file this copy made") {
+        Self.log.error("left \(tmp, privacy: .public) in images: \(why, privacy: .public)")
         if DevEnvironment.checksEnabled { Self.leftBehind?(tmp) }
     }
 
