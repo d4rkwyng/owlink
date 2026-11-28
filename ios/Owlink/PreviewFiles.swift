@@ -114,17 +114,24 @@ private final class PreviewTaskBox: @unchecked Sendable {
 }
 
 /// Folders the person let the preview read (from the "Open the folder"
-/// hint), kept as bookmarks so the grant outlives the launch. A folder
-/// covers every document inside it. Each resolved path is stored once,
-/// and its security scope is started once for the app's lifetime.
+/// hint, and the Backlinks and Insert Image folder pickers), kept as
+/// bookmarks so the grant outlives the launch. A folder covers every
+/// document inside it. Each resolved path is stored once, and its security
+/// scope is started once while its bookmark is kept: a start that failed is
+/// not remembered (the next `add` tries again), and a folder whose bookmark
+/// falls out of the kept list (`maxKept`) has its access stopped.
 @MainActor
 final class PreviewFolderGrants {
     static let shared = PreviewFolderGrants()
     private static let key = "previewFolderGrants"
+    /// Bookmarks kept (the oldest dropped first).
+    static let maxKept = 20
     private var open: [URL] = []
     private var loaded = false
     /// One start and one bookmark per resolved path (see PreviewGrantSet).
     private var grants = PreviewGrantSet()
+    /// The URL each started scope was started on (stopped on the same one).
+    private var startedURLs: [String: URL] = [:]
 
     /// The granted folder holding `folder` (the nearest), access started.
     func root(for folder: URL) -> URL? {
@@ -134,12 +141,24 @@ final class PreviewFolderGrants {
             .max { $0.path.count < $1.path.count }
     }
 
-    func add(_ url: URL) {
+    /// Keeps `url` as a grant. False when Owlink still can't read it (its
+    /// security scope didn't start and it isn't readable without one).
+    @discardableResult
+    func add(_ url: URL) -> Bool {
         loadIfNeeded()
-        grants.apply(url, start: { _ = $0.startAccessingSecurityScopedResource() }, store: { url in
+        let path = PreviewGrantSet.resolvedPath(url)
+        grants.apply(url, start: { self.start($0) }, store: { url in
             self.storeBookmark(url)
         })
+        guard grants.started.contains(path) || FileManager.default.isReadableFile(atPath: url.path) else { return false }
         adopt(url)
+        return true
+    }
+
+    private func start(_ url: URL) -> Bool {
+        guard url.startAccessingSecurityScopedResource() else { return false }
+        startedURLs[PreviewGrantSet.resolvedPath(url)] = url
+        return true
     }
 
     /// Keeps `url` if its resolved path is not already open.
@@ -150,13 +169,31 @@ final class PreviewFolderGrants {
     }
 
     /// Appends one bookmark, unless the same resolved path is already stored.
-    /// The caller (`PreviewGrantSet`) has already decided it is new.
+    /// The caller (`PreviewGrantSet`) has already decided it is new. Past
+    /// `maxKept`, the oldest bookmarks are dropped and their folders let go.
     private func storeBookmark(_ url: URL) -> Bool {
         guard let b = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) else { return false }
         var saved = savedBookmarks
         saved.append(b)
-        AppSettings.defaults.set(Array(saved.suffix(20)), forKey: Self.key)
+        let dropped = saved.dropLast(Self.maxKept)
+        AppSettings.defaults.set(Array(saved.suffix(Self.maxKept)), forKey: Self.key)
+        let keep = PreviewGrantSet.resolvedPath(url)
+        for data in dropped {
+            var stale = false
+            guard let old = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+            let path = PreviewGrantSet.resolvedPath(old)
+            guard path != keep else { continue }
+            forget(path)
+        }
         return true
+    }
+
+    /// `path`'s grant is no longer kept: not offered again, its access stopped.
+    private func forget(_ path: String) {
+        if grants.forget(path), let url = startedURLs.removeValue(forKey: path) {
+            url.stopAccessingSecurityScopedResource()
+        }
+        open.removeAll { PreviewGrantSet.resolvedPath($0) == path }
     }
 
     private var savedBookmarks: [Data] {
@@ -176,11 +213,9 @@ final class PreviewFolderGrants {
                 continue
             }
             let count = grants.stored.count
-            grants.apply(url, start: { url in
-                if url.startAccessingSecurityScopedResource() || FileManager.default.isReadableFile(atPath: url.path) {
-                    self.adopt(url)
-                }
-            }, store: { _ in true })
+            grants.apply(url, start: { self.start($0) }, store: { _ in true })
+            let path = PreviewGrantSet.resolvedPath(url)
+            if grants.started.contains(path) || FileManager.default.isReadableFile(atPath: url.path) { adopt(url) }
             if grants.stored.count == count {
                 changed = true
             } else {

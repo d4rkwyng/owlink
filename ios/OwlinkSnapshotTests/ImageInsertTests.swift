@@ -11,6 +11,7 @@ final class ImageInsertTests: XCTestCase {
     private var dirs: [URL] = []
 
     override func tearDown() async throws {
+        EditorViewController.imageContainerForTests = nil
         for w in windows { w.isHidden = true; w.rootViewController = nil }
         windows = []
         for d in dirs { try? FileManager.default.removeItem(at: d) }
@@ -50,33 +51,37 @@ final class ImageInsertTests: XCTestCase {
         return url
     }
 
-    func testPickedImageIsCopiedAndLinkedAsOneUndo() throws {
+    func testPickedImageIsCopiedAndLinkedAsOneUndo() async throws {
         let (e, dir) = try editor()
         let source = try png(named: "my shot.png")
         e.textView.selectedRange = NSRange(location: (e.textView.text as NSString).length, length: 0)
-        let paths = try XCTUnwrap(e.insertImageFiles([source]))
+        let pathsResult = await e.insertImageFiles([source])
+        let paths = try XCTUnwrap(pathsResult)
         XCTAssertEqual(paths, ["images/my%20shot.png"])
         XCTAssertTrue(e.textView.text.hasSuffix("![](images/my%20shot.png)"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/my shot.png").path))
         XCTAssertEqual(try Data(contentsOf: dir.appendingPathComponent("images/my shot.png")), try Data(contentsOf: source))
         // The same name again: never overwritten, the next free name.
-        let again = try XCTUnwrap(e.insertImageFiles([source]))
+        let againResult = await e.insertImageFiles([source])
+        let again = try XCTUnwrap(againResult)
         XCTAssertEqual(again, ["images/my%20shot-2.png"])
         e.textView.undoManager?.undo()
         e.textView.undoManager?.undo()
         XCTAssertEqual(e.textView.text, "# Notes\n\n")
     }
 
-    func testOnlyImagesAndOnlyMarkdown() throws {
+    func testOnlyImagesAndOnlyMarkdown() async throws {
         let (e, dir) = try editor()
         let d = try tempDir()
         let text = d.appendingPathComponent("readme.txt")
         try Data("x".utf8).write(to: text)
-        XCTAssertNil(e.insertImageFiles([text]))
+        let none = await e.insertImageFiles([text])
+        XCTAssertNil(none)
         XCTAssertEqual(e.textView.text, "# Notes\n\n")
         XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images").path))
         e.setLanguage(.plain)
-        XCTAssertNil(e.insertImageFiles([try png(named: "a.png")]), "not in plain text")
+        let plain = await e.insertImageFiles([try png(named: "a.png")])
+        XCTAssertNil(plain, "not in plain text")
     }
 
     func testContextBarImageButtonOffersPhotosFilesAndLink() throws {
@@ -101,5 +106,103 @@ final class ImageInsertTests: XCTestCase {
         XCTAssertTrue(fallback.hasSuffix("-3"))
         XCTAssertFalse(fallback.contains("/"))
         XCTAssertTrue(EditorViewController.photoName(suggested: "  ", index: 0).hasPrefix("photo-"))
+    }
+    /// The document's folder reached through a symbolic link that leads out
+    /// of the folder Owlink may write in: refused, nothing written there
+    /// (the grant is checked against the resolved path, and the folder
+    /// opened beneath it).
+    func testDocumentFolderLinkedOutOfTheGrantIsRefused() throws {
+        let grant = try tempDir()
+        let outside = try tempDir()
+        let linked = grant.appendingPathComponent("linked")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: outside)
+        XCTAssertNil(EditorViewController.imageDestination(for: linked, granted: grant, container: try tempDir()),
+                     "a folder that resolves outside the grant has no destination")
+        let inside = grant.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: inside, withIntermediateDirectories: true)
+        let dest = try XCTUnwrap(EditorViewController.imageDestination(for: inside, granted: grant, container: try tempDir()))
+        XCTAssertEqual(dest.root, grant.resolvingSymlinksInPath().standardizedFileURL)
+        // The folder looked up beneath the grant: a link on the way out is refused even when asked directly.
+        let copies = EditorViewController.copyImages([try png(named: "a.png")],
+                                                     to: (folder: dest.root.appendingPathComponent("linked"), root: dest.root))
+        XCTAssertEqual(copies.error, EditorViewController.imageStoreMessage(.outside))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("images").path))
+    }
+
+    /// A picked file that is a symbolic link (to an image or anything else)
+    /// is not followed: it isn't copied.
+    func testSymlinkedSourceImageIsNotCopied() async throws {
+        let (e, dir) = try editor()
+        let real = try png(named: "real.png")
+        let link = try tempDir().appendingPathComponent("shot.png")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        let paths = await e.insertImageFiles([link])
+        XCTAssertNil(paths)
+        XCTAssertEqual(e.textView.text, "# Notes\n\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/shot.png").path))
+        dismissAlerts(e)
+    }
+
+    /// Photos with the same suggested name are staged apart, and both go in.
+    func testIdenticalPhotoNamesAreStagedApart() async throws {
+        let (e, dir) = try editor()
+        let staging = StagedImages(in: try tempDir())
+        let source = try png(named: "x.png")
+        var staged: [URL] = []
+        for i in 0..<2 {
+            let url = try XCTUnwrap(EditorViewController.stagedPhotoURL(in: staging.dir, index: i, name: "IMG_0001", ext: "png"))
+            try FileManager.default.copyItem(at: source, to: url)
+            staged.append(url)
+        }
+        XCTAssertNotEqual(staged[0], staged[1])
+        XCTAssertTrue(staged.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        let pathsResult = await e.insertImageFiles(staged, staging: staging)
+        let paths = try XCTUnwrap(pathsResult)
+        XCTAssertEqual(paths, ["images/IMG_0001.png", "images/IMG_0001-2.png"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/IMG_0001-2.png").path))
+    }
+
+    /// No folder access yet: the insertion waits for the grant and keeps
+    /// its staged photos until it goes in; a cancelled grant removes them.
+    func testStagedPhotosSurviveTheFolderGrant() async throws {
+        let (e, dir) = try editor()
+        let parent = try tempDir()
+        var staging: StagedImages? = StagedImages(in: parent)
+        let stagedDir = try XCTUnwrap(staging?.dir)
+        let photo = try XCTUnwrap(EditorViewController.stagedPhotoURL(in: stagedDir, index: 0, name: "IMG_0002", ext: "png"))
+        try FileManager.default.copyItem(at: try png(named: "y.png"), to: photo)
+        // As if the document's folder weren't writable: the grant is asked for.
+        EditorViewController.imageContainerForTests = try tempDir()
+        let first = await e.insertImageFiles([photo], staging: staging)
+        staging = nil
+        XCTAssertNil(first)
+        XCTAssertNotNil(e.imagePickerDelegate.pendingInsert)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: photo.path), "still staged while the grant is asked for")
+        // Granted (here: the container now holds the folder): it goes in, then the staging goes.
+        EditorViewController.imageContainerForTests = nil
+        dismissAlerts(e)
+        let pathsResult = await e.resumePendingImageInsert()
+        let paths = try XCTUnwrap(pathsResult)
+        XCTAssertEqual(paths, ["images/IMG_0002.png"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/IMG_0002.png").path))
+        XCTAssertNil(e.imagePickerDelegate.pendingInsert)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedDir.path), "removed once inserted")
+
+        // Cancelled: the staging is removed, nothing inserted.
+        var other: StagedImages? = StagedImages(in: parent)
+        let otherDir = try XCTUnwrap(other?.dir)
+        let photo2 = try XCTUnwrap(EditorViewController.stagedPhotoURL(in: otherDir, index: 0, name: "IMG_0003", ext: "png"))
+        try FileManager.default.copyItem(at: try png(named: "z.png"), to: photo2)
+        EditorViewController.imageContainerForTests = try tempDir()
+        _ = await e.insertImageFiles([photo2], staging: other)
+        other = nil
+        XCTAssertTrue(FileManager.default.fileExists(atPath: photo2.path))
+        e.imagePickerDelegate.pendingInsert = nil   // what the alert's Cancel does
+        XCTAssertFalse(FileManager.default.fileExists(atPath: otherDir.path), "removed when the grant is cancelled")
+        dismissAlerts(e)
+    }
+
+    private func dismissAlerts(_ e: EditorViewController) {
+        e.presentedViewController?.dismiss(animated: false)
     }
 }
