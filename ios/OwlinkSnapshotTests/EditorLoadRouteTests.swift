@@ -2,11 +2,17 @@ import XCTest
 import UIKit
 import CedricCore
 
-/// `TextDocument.load` refuses bytes the viewer route claims (a PDF read
-/// in place of the text that was classified), so a launch reopen or a
-/// recovery restore fails its open (its existing "couldn't open" path)
-/// rather than putting the PDF, or unsaved text over it, in the editor.
-/// "Open as Text" (`openBinaryAnyway`) still loads it.
+/// Intended: `TextDocument.load` refuses bytes the viewer route claims
+/// (a PDF read in place of the text that was classified), so a launch
+/// reopen or a recovery restore fails its open (its existing "couldn't
+/// open" path) rather than putting the PDF, or unsaved text over it, in
+/// the editor. "Open as Text" (`openBinaryAnyway`) still loads it.
+///
+/// The load-time refusal (b36cb8f) was reverted in e0fe06b pending a
+/// spec-first redesign (Astra r3: "Use Theirs" / "Keep Other Version"
+/// cleared the recovery record before a failed revertAfterChoice). The
+/// two tests that need that refusal are strict expected failures; see
+/// ~/Orchestrator/scratch/ios-docpreview/reload-race-spec.md.
 @MainActor
 final class EditorLoadRouteTests: XCTestCase {
     private func pdfBytes() throws -> Data {
@@ -21,6 +27,8 @@ final class EditorLoadRouteTests: XCTestCase {
     }
 
     func testLoadRefusesPDFBytesInAnExtensionlessTextFile() throws {
+        // A tracked known failure: strict, so it turns red once it passes.
+        XCTExpectFailure("Swap-to-PDF load race is reverted pending the spec-first redesign in ~/Orchestrator/scratch/ios-docpreview/reload-race-spec.md", strict: true)
         let pdf = try pdfBytes()
         XCTAssertFalse(TextCodec.looksBinary(pdf), "premise: the binary check alone accepts the sample PDF")
         let doc = document("notes")
@@ -52,6 +60,8 @@ final class EditorLoadRouteTests: XCTestCase {
     /// the reload's read is refused, and what was read before stays (the
     /// text, the on-disk snapshot, the opened copy). Nothing is written.
     func testReloadOfAFileReplacedByAPDFKeepsWhatWasRead() throws {
+        // A tracked known failure: strict, so it turns red once it passes.
+        XCTExpectFailure("Swap-to-PDF load race is reverted pending the spec-first redesign in ~/Orchestrator/scratch/ios-docpreview/reload-race-spec.md", strict: true)
         let doc = document("notes")
         try doc.load(fromContents: Data("plain notes\n".utf8), ofType: nil)
         let before = doc.onDisk

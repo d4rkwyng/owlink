@@ -217,10 +217,13 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertTrue(decision.forgetsLastOpenDocument)
     }
 
-    /// The editor's own read (`TextDocument.load`) asks the route again on
-    /// the bytes it got: a file classified as text and then replaced by a
-    /// PDF before the read (a launch reopen, a recovery restore, a reload
-    /// after a change on disk) isn't taken as text. "Open as Text" still is.
+    /// After a swap, the bytes themselves route to the viewer: an
+    /// extensionless file classified as text, then replaced by a PDF,
+    /// is a PDF by its header. The editor's own read (`TextDocument.load`)
+    /// should refuse those bytes unless "Open as Text"; that load-time
+    /// refusal is deferred (e0fe06b reverted b36cb8f). See
+    /// EditorLoadRouteTests (strict XCTExpectFailure) and
+    /// ~/Orchestrator/scratch/ios-docpreview/reload-race-spec.md.
     func testEditorLoadRefusesViewerContentSwappedInAfterClassification() throws {
         let pdfURL = samples.appendingPathComponent("sample.pdf")
         try XCTSkipUnless(FileManager.default.fileExists(atPath: pdfURL.path), "ios/Samples not reachable from this test host")
@@ -229,12 +232,13 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertEqual(DocumentViewerRoute.route(for: url), .editor, "premise: classified as the editor's")
         try pdfBytes.write(to: url)
         let read = try Data(contentsOf: url)
-        XCTAssertFalse(DocumentViewerRoute.editorMayLoad(fileName: "notes", data: read, openAsText: false))
-        XCTAssertFalse(DocumentViewerRoute.editorMayLoad(fileName: "paper.pdf", data: read, openAsText: false))
-        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "notes", data: read, openAsText: true), "Open as Text")
-        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "paper.pdf", data: read, openAsText: true), "Open as Text")
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "notes", prefix: read), .pdf)
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "paper.pdf", prefix: read), .pdf)
+        // "Open as Text" is a load-time bypass of this route, not a route itself.
     }
 
+    /// Text, CSV, Markdown, and extensionless text still route to the
+    /// editor, including a text-named file whose first bytes look like a PDF.
     func testEditorLoadKeepsText() {
         let cases: [(String, String)] = [
             ("notes.txt", "hello\n"), ("table.csv", "a,b\n1,2\n"), ("README.md", "# Title\n"),
@@ -244,9 +248,9 @@ final class DocumentViewerRouteTests: XCTestCase {
             ("paper.txt", "%PDF-1.7 pasted into a text file\n"), ("data.csv", "%PDF-,x\n"),
         ]
         for (name, text) in cases {
-            XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: name, data: Data(text.utf8), openAsText: false), name)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: Data(text.utf8)), .editor, name)
         }
-        XCTAssertTrue(DocumentViewerRoute.editorMayLoad(fileName: "empty", data: Data(), openAsText: false))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "empty", prefix: Data()), .editor)
     }
 
     // MARK: The bundled samples
