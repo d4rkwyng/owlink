@@ -1,4 +1,5 @@
 import UIKit
+import PDFKit
 import UniformTypeIdentifiers
 import CedricCore
 
@@ -257,6 +258,12 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
     }
 
     func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
+        // PDF and Office / iWork files open read-only in a viewer, as on
+        // the Mac (`DocumentViewerRoute`: name, type, first bytes). Not
+        // for "Open as Text" (binaryOK), a crash-recovery restore, or a
+        // launch reopen: only editor documents are remembered as
+        // `LastOpenDocument`, so a reopen is always the editor's.
+        if !binaryOK, recovered == nil, !reopening, presentViewerIfNeeded(at: url) { return }
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
         // the record (and its security scope).
@@ -320,6 +327,40 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
             self.present(nav, animated: true)
             finishReopen(true)
         }
+    }
+
+    /// Shows `url` in the read-only PDF or Quick Look viewer when its
+    /// route says so; false when it is the editor's (nothing shown).
+    ///
+    /// The file's security scope (a file picked in Files, or opened in
+    /// place from another app) is started before the first bytes are read
+    /// and kept by the viewer until Done (or until the viewer goes away);
+    /// every other way out stops it here. A viewer is deliberately not
+    /// remembered as `LastOpenDocument` (nor in `OpenDocuments`): the
+    /// launch reopen goes through `TextDocument`, and it would route a
+    /// PDF into the text editor. Viewers never write, so several windows
+    /// may show the same file.
+    @discardableResult
+    func presentViewerIfNeeded(at url: URL) -> Bool {
+        let access = ScopedFileAccess(url)
+        let viewer: UIViewController
+        switch DocumentViewerRoute.route(for: url) {
+        case .editor:
+            access.stop()
+            return false
+        case .pdf:
+            // A damaged PDF: an alert and no viewer (Mac parity).
+            guard let pdf = PDFDocument(url: url) else {
+                access.stop()
+                alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil)
+                return true
+            }
+            viewer = PDFViewerController(document: pdf, url: url, access: access)
+        case .quickLook(let format):
+            viewer = QuickLookViewerController(url: url, format: format, access: access)
+        }
+        present(DocumentViewers.navigationController(for: viewer, traits: traitCollection), animated: true)
+        return true
     }
 
     private func alert(_ title: String, _ message: String?) {

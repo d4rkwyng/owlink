@@ -341,6 +341,11 @@ final class TextDocument: UIDocument {
 
     /// The file types the document browser shows: text of any kind, and any
     /// other file (opened as text when it is text).
+    /// What the document browser shows: text, any file (`.data`), and
+    /// the PDF and Office / iWork types the read-only viewers open, named
+    /// so packages (`.rtfd`, an iWork package) show too
+    /// (`DocumentViewerRoute`).
     static let browsableTypes: [UTType] = [.text, .sourceCode, .script, .json, .xml, .yaml, .commaSeparatedText,
-                                            .propertyList, .data]
+                                            .propertyList, .data, .pdf, .rtfd]
+        + DocumentViewerRoute.officeTypes.compactMap { UTType($0.0) }
 }
