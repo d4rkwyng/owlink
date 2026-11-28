@@ -69,9 +69,40 @@ jobs:
             exit 1
           fi
 
+      # TAG must be an existing tag, refs/tags/<TAG> exactly: by hand, the
+      # input could otherwise name a branch or a commit, be built, and have
+      # the release action create a new tag of that name for it. The build
+      # checks out refs/tags/<TAG> itself, and the next step checks that
+      # this is what HEAD is.
+      - name: Check the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9][0-9A-Za-z._-]*$'; then
+            echo "::error::'$TAG' is not a release tag name (v<version>, e.g. v0.6.1)."
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_REF" != "refs/tags/$TAG" ]; then
+            echo "::error::pushed ref $GITHUB_REF is not refs/tags/$TAG."
+            exit 1
+          fi
+          # git/ref (singular) matches the whole ref name only, never a prefix.
+          if ! REF=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .ref 2>/dev/null) || [ "$REF" != "refs/tags/$TAG" ]; then
+            echo "::error::refs/tags/$TAG does not exist. Push the tag first; a branch or commit of that name is not built."
+            exit 1
+          fi
+          echo "refs/tags/$TAG exists"
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
-          ref: ${{ env.TAG }}
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Check the checkout is the tag
+        run: |
+          WANT=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}") || { echo "::error::refs/tags/$TAG is not in the checkout."; exit 1; }
+          HAVE=$(git rev-parse HEAD)
+          [ "$WANT" = "$HAVE" ] || { echo "::error::checked out $HAVE, but refs/tags/$TAG is $WANT."; exit 1; }
+          echo "building refs/tags/$TAG at $HAVE"
 
       - name: Toolchain
         run: swift --version && sw_vers && xcode-select -p && echo "macOS SDK $(xcrun --show-sdk-version) (Apple Intelligence engine needs 26+)"
