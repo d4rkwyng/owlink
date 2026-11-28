@@ -149,9 +149,39 @@ public final class ImageStore {
     /// fallback path `Failure.imagesIsLink` (before anything is made) when
     /// it is a symbolic link.
     public static func open(in folder: URL) throws -> ImageStore {
-        let kernel = useKernel
         let dfd = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard dfd >= 0 else { throw posix(folder.path) }
+        return try open(pinned: dfd, folder: folder)
+    }
+
+    /// Opens "images" in `folder`, where `folder` itself is looked up
+    /// beneath `root` (iOS: the folder the person granted, or the app's
+    /// own container) from `root`'s descriptor by `Beneath.open`: a
+    /// symbolic link on the way that leads out of `root` (or, where the
+    /// kernel doesn't keep lookups beneath, any link) is refused with
+    /// `Failure.outside`, so the grant is the boundary, not `folder`'s
+    /// path. `folder` must be `root` or lexically below it (pass both
+    /// resolved). Then as `open(in:)`.
+    public static func open(in folder: URL, beneath root: URL) throws -> ImageStore {
+        let base = root.standardizedFileURL.pathComponents
+        let path = folder.standardizedFileURL.pathComponents
+        guard path.count >= base.count, Array(path.prefix(base.count)) == base else { throw Failure.outside }
+        let rfd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard rfd >= 0 else { throw posix(root.path) }
+        let parts = Array(path.dropFirst(base.count))
+        let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY)
+        let err = errno
+        close(rfd)
+        guard dfd >= 0 else {
+            if err == ELOOP || err == ENOTDIR || err == Beneath.notCapable || err == EINVAL { throw Failure.outside }
+            throw posix(folder.path, err)
+        }
+        return try open(pinned: dfd, folder: folder)
+    }
+
+    /// `dfd`: the document's folder, opened (owned from here on).
+    private static func open(pinned dfd: Int32, folder: URL) throws -> ImageStore {
+        let kernel = useKernel
         let ifd: Int32
         do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch { close(dfd); throw error }
         let store = ImageStore(fd: ifd, root: dfd, folder: folder, kernel: kernel)
@@ -241,12 +271,16 @@ public final class ImageStore {
     }
 
     /// Copies the bytes `source` holds (a symbolic link is followed and its
-    /// target read) into "images" as `name` or the first free "name-2.ext"…
-    /// Returns the name it got.
-    public func copy(from source: URL, name: String) throws -> String {
+    /// target read, unless `followLink` is false: then a link is refused
+    /// with `Failure.notRegularFile`) into "images" as `name` or the first
+    /// free "name-2.ext"… Returns the name it got.
+    public func copy(from source: URL, name: String, followLink: Bool = true) throws -> String {
         // O_NONBLOCK: opening a named pipe doesn't wait for a writer.
-        let src = Darwin.open(source.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
-        guard src >= 0 else { throw Self.posix(source.path) }
+        let src = Darwin.open(source.path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | (followLink ? 0 : O_NOFOLLOW))
+        guard src >= 0 else {
+            if !followLink, errno == ELOOP { throw Failure.notRegularFile }
+            throw Self.posix(source.path)
+        }
         defer { close(src) }
         var st = stat()
         guard fstat(src, &st) == 0 else { throw Self.posix(source.path) }

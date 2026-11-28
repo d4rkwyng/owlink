@@ -556,4 +556,29 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(listing(doc.appendingPathComponent("images")).isEmpty, "the staging file is removed")
         #expect(listing(doc) == ["images"], "and none is left in the document's folder")
     }
+    /// iOS: the document's folder is looked up beneath the grant, so a
+    /// document folder that is a link out of the grant is refused, and a
+    /// picked source that is a symbolic link is refused when links aren't
+    /// followed (Sol review, 0.6.0).
+    @Test func openBeneathRefusesAFolderLinkOutAndNoFollowRefusesALinkedSource() throws {
+        let (root, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: root) }
+        let grant = root.resolvingSymlinksInPath()
+        // doc/ is in the grant: opened, and a copy lands there.
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([1, 2, 3]).write(to: pic)
+        let store = try ImageStore.open(in: doc.resolvingSymlinksInPath(), beneath: grant)
+        #expect(try store.copy(from: pic, name: "p.png", followLink: false) == "p.png")
+        // A linked document folder that leads out of the grant.
+        let linked = root.appendingPathComponent("linked")
+        try fm.createSymbolicLink(at: linked, withDestinationURL: outside)
+        #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: grant.appendingPathComponent("linked"), beneath: grant) }
+        #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: outside.resolvingSymlinksInPath(), beneath: doc.resolvingSymlinksInPath()) }
+        #expect(!fm.fileExists(atPath: outside.appendingPathComponent("images").path), "nothing made outside the grant")
+        // A picked source that is a link: refused without following, copied with.
+        let link = root.appendingPathComponent("link.png")
+        try fm.createSymbolicLink(at: link, withDestinationURL: pic)
+        #expect(throws: ImageStore.Failure.notRegularFile) { _ = try store.copy(from: link, name: "l.png", followLink: false) }
+        #expect(try store.copy(from: link, name: "l.png") == "l.png")
+    }
 }

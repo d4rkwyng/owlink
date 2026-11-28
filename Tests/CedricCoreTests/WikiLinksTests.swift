@@ -223,6 +223,34 @@ private func writeTree(_ files: [String: String]) throws -> URL {
         #expect(scan.backlinks(to: "Alpha.md", in: notes).map(\.source) == ["Small.md"])
     }
 
+    /// iOS reads notes through the granted folder's descriptor
+    /// (`readBeneath`): a note replaced by a link out, or reached through a
+    /// folder link that leads out, is skipped, never read.
+    @Test func readBeneathSkipsLinksOut() throws {
+        let root = try writeTree(["Alpha.md": "a\n", "Beta.md": "[[Alpha]]\n", "Gone.md": "[[Alpha]]\n"])
+        let outside = try writeTree(["Secret.md": "[[Alpha]] secret\n", "dir/Deep.md": "[[Alpha]] deep\n"])
+        let fm = FileManager.default
+        try fm.removeItem(at: root.appendingPathComponent("Gone.md"))
+        try fm.createSymbolicLink(at: root.appendingPathComponent("Gone.md"), withDestinationURL: outside.appendingPathComponent("Secret.md"))
+        try fm.createSymbolicLink(at: root.appendingPathComponent("out"), withDestinationURL: outside.appendingPathComponent("dir"))
+        let fd = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        #expect(fd >= 0)
+        defer { close(fd) }
+        if case .read(_, _, let data) = BacklinkScan.readBeneath("Beta.md", root: fd) {
+            #expect(String(decoding: data, as: UTF8.self) == "[[Alpha]]\n")
+        } else { Issue.record("Beta.md should be read") }
+        guard case .skipped = BacklinkScan.readBeneath("Gone.md", root: fd) else { Issue.record("a note replaced by a link is read"); return }
+        guard case .skipped = BacklinkScan.readBeneath("out/Deep.md", root: fd) else { Issue.record("a folder link out is followed"); return }
+        guard case .gone = BacklinkScan.readBeneath("Missing.md", root: fd) else { Issue.record("a missing note isn't gone"); return }
+        guard case .skipped = BacklinkScan.readBeneath("Beta.md", root: fd, maxBytes: 3) else { Issue.record("over maxBytes is read"); return }
+        let names = ["Alpha.md", "Beta.md", "Gone.md", "out/Deep.md"]
+        let notes = NoteIndex(paths: names)
+        var scan = BacklinkScan(root: root)
+        scan.update(notes: names, dirty: nil, read: { BacklinkScan.readBeneath($0, root: fd) })
+        #expect(scan.backlinks(to: "Alpha.md", in: notes).map(\.source) == ["Beta.md"])
+        #expect(scan.isPartial && scan.skipped == 2)
+    }
+
     @Test func selfLinksAndBinariesLeftOut() throws {
         var bin = Data("[[Alpha]]".utf8); bin.append(0)
         let root = try writeTree(["Alpha.md": "[[Alpha]] me\n"])

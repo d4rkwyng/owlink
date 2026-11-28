@@ -132,16 +132,27 @@ public struct PreviewGrantSet: Equatable, Sendable {
     /// started; `store` is skipped when it is already stored. A `false`
     /// from `store` leaves the path unstored, so a later call can try the
     /// bookmark again without starting access a second time.
-    public mutating func apply(_ url: URL, start: (URL) -> Void, store: (URL) -> Bool) {
+    ///
+    /// `start` returns whether access started: only a start that worked is
+    /// remembered, so a failed one is tried again by the next `apply`.
+    public mutating func apply(_ url: URL, start: (URL) -> Bool, store: (URL) -> Bool) {
         let decision = decide(url)
-        if decision.start {
-            start(url)
+        if decision.start, start(url) {
             started.insert(Self.resolvedPath(url))
         }
         if decision.store, store(url) {
             let path = Self.resolvedPath(url)
             if !stored.contains(path) { stored.append(path) }
         }
+    }
+
+    /// `path` (a resolved path) is no longer kept: its bookmark fell out of
+    /// the stored list. Returns whether its access had been started (the
+    /// caller then stops it).
+    @discardableResult
+    public mutating func forget(_ path: String) -> Bool {
+        stored.removeAll { $0 == path }
+        return started.remove(path) != nil
     }
 }
 

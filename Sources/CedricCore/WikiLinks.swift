@@ -418,8 +418,12 @@ public struct BacklinkScan: Sendable {
     /// or normalization variant of a note folder still rescans it, and of
     /// two canonically equivalent folders only the one that changed. A
     /// miss alone never leaves a changed folder's notes unread.
+    ///
+    /// `read`: how each note is read (iOS: `readBeneath`, through the
+    /// granted folder's descriptor). Nil reads by path, as the Mac always has.
     public mutating func update(notes: [String], dirty: Set<FolderTree.PathKey>?, tags: Bool = false, cancelled: () -> Bool = { false },
-                                identity: (String) -> Beneath.FileID? = FolderTree.identity) {
+                                identity: (String) -> Beneath.FileID? = FolderTree.identity,
+                                read: ((String) -> NoteRead)? = nil) {
         let list = notes.sorted()
         skipped = max(0, list.count - Self.maxFiles)
         lastRead = 0
@@ -454,6 +458,17 @@ public struct BacklinkScan: Sendable {
             if cancelled() { return }
             let complete = files[rel].map { !tags || $0.tags != nil } ?? false
             if let changed, complete, !changed.contains(folder(rel)) { continue }
+            if let read {
+                switch read(rel) {
+                case .gone: files[rel] = nil
+                case .skipped: files[rel] = nil; skipped += 1
+                case .read(let size, let date, let data):
+                    if complete, let e = files[rel], e.size == size, e.modified == date { continue }
+                    lastRead += 1
+                    files[rel] = Entry(size: size, modified: date, refs: Self.refs(in: data), tags: tags ? Self.tags(in: data) : nil)
+                }
+                continue
+            }
             let url = root.appendingPathComponent(rel)
             guard let a = try? fm.attributesOfItem(atPath: url.path), let size = (a[.size] as? NSNumber)?.intValue,
                   let date = a[.modificationDate] as? Date else { files[rel] = nil; continue }
@@ -463,6 +478,48 @@ public struct BacklinkScan: Sendable {
             lastRead += 1
             files[rel] = Entry(size: size, modified: date, refs: Self.refs(in: data), tags: tags ? Self.tags(in: data) : nil)
         }
+    }
+
+    /// One note as `update`'s `read` hands it over.
+    public enum NoteRead: Sendable {
+        /// Not there (or not a note any more): dropped, not counted.
+        case gone
+        /// Left out (a link, not a regular file, too big, unreadable, over a
+        /// budget): dropped and counted, so the result is partial.
+        case skipped
+        case read(size: Int, modified: Date, data: Data)
+    }
+
+    /// The note at `rel` (a relative path) beneath the folder `root` has
+    /// open, read through one descriptor (`Beneath.open`: never leaving
+    /// the folder, the last component never followed) that must be a
+    /// regular file of at most `maxBytes`. A note replaced by a symbolic
+    /// link, or reached through one that leads out, is skipped: what was
+    /// checked is what is read.
+    public static func readBeneath(_ rel: String, root: Int32, maxBytes: Int = maxFileBytes) -> NoteRead {
+        let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        let fd = Beneath.open(parts, beneath: root, flags: O_RDONLY | O_NONBLOCK)
+        guard fd >= 0 else { return errno == ENOENT ? .gone : .skipped }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, st.st_mode & S_IFMT == S_IFREG else { return .skipped }
+        let size = Int(st.st_size)
+        guard size <= maxBytes else { return .skipped }
+        let modified = Date(timeIntervalSince1970: TimeInterval(st.st_mtimespec.tv_sec) + TimeInterval(st.st_mtimespec.tv_nsec) / 1e9)
+        var data = Data(count: size)
+        var off = 0
+        let ok = data.withUnsafeMutableBytes { raw -> Bool in
+            while off < size {
+                let n = Darwin.read(fd, raw.baseAddress! + off, size - off)
+                if n < 0 { if errno == EINTR { continue }; return false }
+                if n == 0 { break }
+                off += n
+            }
+            return true
+        }
+        guard ok else { return .skipped }
+        if off < size { data.count = off }
+        return .read(size: size, modified: modified, data: data)
     }
 
     static func refs(in data: Data) -> [WikiLinks.Ref] {

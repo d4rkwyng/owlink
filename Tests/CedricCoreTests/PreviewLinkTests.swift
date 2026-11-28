@@ -90,7 +90,7 @@ import Testing
         var starts = 0
         var stores = 0
         func add(_ url: URL, storeSucceeds: Bool = true) {
-            grants.apply(url, start: { _ in starts += 1 }, store: { _ in
+            grants.apply(url, start: { _ in starts += 1; return true }, store: { _ in
                 guard storeSucceeds else { return false }
                 stores += 1
                 return true
@@ -113,10 +113,24 @@ import Testing
         var loaded = PreviewGrantSet()
         var loadedStarts = 0
         for url in [vault, vault, via, other] {
-            loaded.apply(url, start: { _ in loadedStarts += 1 }, store: { _ in true })
+            loaded.apply(url, start: { _ in loadedStarts += 1; return true }, store: { _ in true })
         }
         #expect(loadedStarts == 2, "loading duplicate bookmarks starts each resolved path once")
         #expect(loaded.stored.count == 2)
+
+        // A start that failed is not remembered: the next apply tries again.
+        var retry = PreviewGrantSet()
+        var tries = 0
+        retry.apply(vault, start: { _ in tries += 1; return false }, store: { _ in true })
+        #expect(retry.started.isEmpty && tries == 1)
+        retry.apply(vault, start: { _ in tries += 1; return true }, store: { _ in true })
+        #expect(tries == 2 && retry.started == [PreviewGrantSet.resolvedPath(vault)])
+        // Forgotten (evicted): stopped if it was started, and no longer stored.
+        let first = retry.forget(PreviewGrantSet.resolvedPath(vault))
+        #expect(first)
+        #expect(retry.started.isEmpty && retry.stored.isEmpty)
+        let second = retry.forget(PreviewGrantSet.resolvedPath(vault))
+        #expect(!second)
     }
 
     @Test func previewRoutingKeepsSecurityRules() throws {
