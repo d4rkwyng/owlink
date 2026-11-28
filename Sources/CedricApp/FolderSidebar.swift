@@ -143,19 +143,23 @@ extension AppDelegate {
     /// tab, or a big file's tab once its background read is done). A
     /// refused or failed open switches nothing; other tabs and unsaved
     /// text are untouched. A file already open, opened again from
-    /// outside, switches too (its tab comes to the front). Of several
-    /// files opened at once only the last switches the folder: it is the
-    /// one whose tab ends up in front.
+    /// outside, switches too (its tab comes to the front). For a batch, the last immediate open switches the folder.
+    /// A background read that subsequently brings its tab forward switches then.
     func openFromOutside(_ urls: [URL]) {
-        for (i, u) in urls.enumerated() { openFromOutside(u, switchesFolder: i == urls.count - 1) }
+        var submitting = true
+        for (index, url) in urls.enumerated() {
+            let last = index == urls.count - 1
+            openFromOutside(url, switchesFolder: { last || !submitting })
+        }
+        submitting = false
     }
 
     @discardableResult
-    func openFromOutside(_ url: URL, switchesFolder: Bool = true, then: ((EditorWindowController) -> Void)? = nil,
+    func openFromOutside(_ url: URL, switchesFolder: @escaping () -> Bool = { true }, then: ((EditorWindowController) -> Void)? = nil,
                          failed: (() -> Void)? = nil) -> EditorWindowController? {
         let std = url.standardizedFileURL
         let tab = open(url, background: true, then: { [weak self] tab in
-            if switchesFolder {
+            if switchesFolder() {
                 self?.switchFolder(forOutsideOpenOf: tab.doc.fileURL ?? std) { [weak tab] s in
                     guard let tab, self?.tabs.contains(where: { $0 === tab }) == true else { return false }
                     s.show(in: tab)
@@ -165,7 +169,7 @@ extension AppDelegate {
             then?(tab)
         }, failed: failed)
         // A viewer tab (made now, or brought to the front): no `then`.
-        if switchesFolder, tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
+        if switchesFolder(), tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
             switchFolder(forOutsideOpenOf: viewer.fileURL) { [weak self] s in
                 guard let self, let v = self.viewerTab(for: std), v === viewer, v.sidebarHost?.split != nil else { return false }
                 s.show(in: v)

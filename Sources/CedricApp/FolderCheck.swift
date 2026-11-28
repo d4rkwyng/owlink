@@ -836,6 +836,7 @@ extension DevChecks {
         let cliFile = write("switch/CLI/cli.md", "cli\n")
         let dropFile = write("switch/Drop/drop.md", "drop\n")
         let bigText = write("switch/Big/big.log", "")
+        let readGate = DispatchSemaphore(value: 0)
         let bigLine = "a line of a big log, read in the background\n"
         try? Data(String(repeating: bigLine, count: AppDelegate.backgroundOpenBytes / bigLine.utf8.count + 1000).utf8).write(to: bigText)
         let small = write("switch/Big/small.txt", "small\n")
@@ -911,10 +912,20 @@ extension DevChecks {
             switchedTo(drop, file: dropFile, "two files at once"),
             dockedInText(dropFile, "two files at once"),
             // A text file of 16 MB or more: read in the background, switched once its tab is there.
-            sync { app.application(NSApp, open: [bigText]) },
+            sync {
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [bigText, welcome])
+            },
+            switchedTo(b, file: welcome, "mixed batch while big file waits"),
+            sync {
+                expect(app.currentFileURL == welcome && app.backgroundReading == bigText.standardizedFileURL,
+                       "small file is in front while the big file waits")
+                readGate.signal()
+            },
             until("big file: its tab arrives", timeout: 20) { textTab(bigText) != nil },
             switchedTo(big, file: bigText, "big file"),
             dockedInText(bigText, "big file"),
+            sync { expect(app.currentFileURL == bigText, "mixed batch leaves the big file in front") },
             sync {
                 let was = root()
                 // Through a link outside the folder into it: inside, no switch.
