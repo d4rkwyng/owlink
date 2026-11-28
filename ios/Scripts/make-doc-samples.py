@@ -4,6 +4,10 @@
   sample.pdf   a valid two-page PDF whose first page reads "Owlink PDF sample"
   sample.xlsx  a minimal valid workbook (one sheet, shared strings, styles)
                whose first cell reads "Owlink XLSX sample"
+  multi-sheet.xlsx  three sheets (Owls, Sightings, Notes): shared and
+               rich-text strings, numbers, a percent, dates, booleans, an
+               error and gaps, for the grid viewer and its screenshots
+  sample.csv   a small CSV (quoted fields, embedded commas and quotes)
 
 Both are generated from scratch (no user files) and are deterministic: the
 zip entries carry a fixed timestamp, so re-running gives the same bytes.
@@ -115,8 +119,127 @@ def make_xlsx(path):
             z.writestr(info, text.encode('utf-8'))
 
 
+def esc(t):
+    return t.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+
+def col(i):
+    s = ''
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def sheet_xml(rows, extra=''):
+    """rows: lists of cells, each None (empty) or (type, value, style)."""
+    out = []
+    for r, cells in enumerate(rows, 1):
+        cs = []
+        for c, cell in enumerate(cells or []):
+            if cell is None:
+                continue
+            t, v, st = cell
+            ref = '%s%d' % (col(c), r)
+            sa = ' s="%d"' % st if st else ''
+            if t == 'n':
+                cs.append('<c r="%s"%s><v>%s</v></c>' % (ref, sa, v))
+            else:
+                cs.append('<c r="%s" t="%s"%s><v>%s</v></c>' % (ref, t, sa, esc(str(v))))
+        if cs:
+            out.append('<row r="%d">%s</row>' % (r, ''.join(cs)))
+    return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            '<sheetData>%s%s</sheetData></worksheet>' % (''.join(out), extra))
+
+
+NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+NS_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+NS_PKG = 'http://schemas.openxmlformats.org/package/2006/relationships'
+WS_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml'
+
+
+def make_multi_xlsx(path):
+    strings = []
+
+    def s(text):
+        if text not in strings:
+            strings.append(text)
+        return ('s', strings.index(text), 0)
+
+    owls = [
+        [s('Owl'), s('Scientific name'), s('Wingspan (cm)'), s('Weight (g)'), s('Nocturnal'), s('Share of sightings')],
+        [s('Barn owl'), s('Tyto alba'), ('n', 95, 0), ('n', 470, 0), ('b', 1, 0), ('n', 0.18, 2)],
+        [s('Snowy owl'), s('Bubo scandiacus'), ('n', 150, 0), ('n', 2100, 0), ('b', 0, 0), ('n', 0.07, 2)],
+        [s('Great horned owl'), s('Bubo virginianus'), ('n', 127, 0), ('n', 1400, 0), ('b', 1, 0), ('n', 0.31, 2)],
+        [s('Tawny owl'), s('Strix aluco'), ('n', 99, 0), ('n', 520, 0), ('b', 1, 0), ('n', 0.22, 2)],
+        [s('Elf owl'), s('Micrathene whitneyi'), ('n', 27, 0), ('n', 40, 0), ('b', 1, 0), ('n', 0.04, 2)],
+        [s('Burrowing owl'), s('Athene cunicularia'), ('n', 53, 0), ('n', 150, 0), ('b', 0, 0), ('n', 0.11, 2)],
+        [s('Long-eared owl'), s('Asio otus'), ('n', 95, 0), ('n', 290, 0), ('b', 1, 0), ('n', 0.07, 2)],
+        None,
+        [s('Total'), None, None, ('n', 4970, 0), None, ('n', 1, 2)],
+    ]
+    sightings = [[s('Date'), s('Owl'), s('Count'), s('Place'), s('Ratio')]]
+    places = ['Marsh trail', 'North meadow', 'Old barn', 'Pine ridge']
+    names = ['Barn owl', 'Snowy owl', 'Tawny owl', 'Great horned owl', 'Elf owl']
+    for i in range(40):
+        ratio = ('e', '#DIV/0!', 0) if i == 6 else ('n', round(1 + (i % 9) / 8, 3), 0)
+        sightings.append([('n', 45366 + i * 3, 1), s(names[i % 5]), ('n', 1 + (i * 7) % 5, 0), s(places[i % 4]), ratio])
+    notes = [[s('Notes')], [s('Read-only: Owlink never changes this file.')], None, None,
+             [None, None, s('A gap above and to the left')]]
+    rich = len(strings)
+    sst = ''.join('<si><t xml:space="preserve">%s</t></si>' % esc(t) for t in strings)
+    sst += '<si><r><rPr><b/></rPr><t>Rich</t></r><r><t xml:space="preserve"> text runs</t></r></si>'
+    sheets = ['Owls', 'Sightings', 'Notes']
+    files = {
+        'xl/worksheets/sheet1.xml': sheet_xml(owls),
+        'xl/worksheets/sheet2.xml': sheet_xml(sightings),
+        'xl/worksheets/sheet3.xml': sheet_xml(notes, '<row r="7"><c r="A7" t="s"><v>%d</v></c></row>' % rich),
+        '[Content_Types].xml': XLSX['[Content_Types].xml'].replace(
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="%s"/>' % WS_TYPE,
+            ''.join('<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="%s"/>' % (i, WS_TYPE) for i in (1, 2, 3))),
+        '_rels/.rels': XLSX['_rels/.rels'],
+        'xl/workbook.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<workbook xmlns="%s" xmlns:r="%s"><sheets>%s</sheets></workbook>' % (
+                NS_MAIN, NS_REL, ''.join('<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (n, i, i)
+                                         for i, n in enumerate(sheets, 1))),
+        'xl/_rels/workbook.xml.rels': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<Relationships xmlns="%s">%s'
+            '<Relationship Id="rId4" Type="%s/sharedStrings" Target="sharedStrings.xml"/>'
+            '<Relationship Id="rId5" Type="%s/styles" Target="styles.xml"/></Relationships>' % (
+                NS_PKG, ''.join('<Relationship Id="rId%d" Type="%s/worksheet" Target="worksheets/sheet%d.xml"/>' % (i, NS_REL, i)
+                                for i in (1, 2, 3)), NS_REL, NS_REL),
+        'xl/sharedStrings.xml': '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+            '<sst xmlns="%s">%s</sst>' % (NS_MAIN, sst),
+        'xl/styles.xml': XLSX['xl/styles.xml'].replace(
+            '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>',
+            '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+            '<xf numFmtId="14" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/>'
+            '<xf numFmtId="9" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'),
+    }
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for name in sorted(files):
+            info = zipfile.ZipInfo(name, date_time=(2026, 11, 27, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(info, files[name].encode('utf-8'))
+
+
+CSV_SAMPLE = '\n'.join([
+    'Owl,Region,Wingspan (cm),Last seen,Note',
+    'Barn owl,Worldwide,95,2024-03-15,"Hunts by sound, in total darkness"',
+    'Snowy owl,Arctic,150,2024-01-02,Active by day',
+    'Great horned owl,Americas,127,2023-12-24,"Also called the ""tiger owl"""',
+    'Tawny owl,Europe,99,2024-02-11,',
+    'Elf owl,Southwest US,27,2024-04-30,Smallest on the list',
+]) + '\n'
+
+
 if __name__ == '__main__':
     make_pdf(os.path.join(OUT, 'sample.pdf'))
     make_xlsx(os.path.join(OUT, 'sample.xlsx'))
-    for n in ('sample.pdf', 'sample.xlsx'):
+    make_multi_xlsx(os.path.join(OUT, 'multi-sheet.xlsx'))
+    with open(os.path.join(OUT, 'sample.csv'), 'w', newline='\n') as f:
+        f.write(CSV_SAMPLE)
+    for n in ('sample.pdf', 'sample.xlsx', 'multi-sheet.xlsx', 'sample.csv'):
         print(n, os.path.getsize(os.path.join(OUT, n)), 'bytes')

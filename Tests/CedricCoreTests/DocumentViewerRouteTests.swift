@@ -2,7 +2,8 @@ import XCTest
 import UniformTypeIdentifiers
 @testable import CedricCore
 
-/// Where Owlink for iPhone and iPad opens a file: PDF and Office / iWork in
+/// Where Owlink for iPhone and iPad opens a file: PDF, spreadsheets (.xlsx,
+/// .xlsm, .csv, .tsv: the grid) and other Office / iWork files in
 /// read-only viewers, everything else in the text editor. Decided by the
 /// name's extension and UTType (plus a `%PDF-` header on a file with no or
 /// an odd extension), never by sniffing the whole file.
@@ -35,14 +36,21 @@ final class DocumentViewerRouteTests: XCTestCase {
     // MARK: Office and iWork -> Quick Look
 
     func testOOXMLByExtension() throws {
-        XCTAssertEqual(try route("book.xlsx", zip), .quickLook(.spreadsheet))
-        XCTAssertEqual(try route("book.xlsm", zip), .quickLook(.spreadsheet))
+        XCTAssertEqual(try route("book.xlsx", zip), .spreadsheet(.xlsx))
+        XCTAssertEqual(try route("book.xlsm", zip), .spreadsheet(.xlsx))
         XCTAssertEqual(try route("letter.docx", zip), .quickLook(.word))
         XCTAssertEqual(try route("letter.docm", zip), .quickLook(.word))
         XCTAssertEqual(try route("letter.dotx", zip), .quickLook(.word))
         XCTAssertEqual(try route("deck.pptx", zip), .quickLook(.presentation))
         XCTAssertEqual(try route("deck.pptm", zip), .quickLook(.presentation))
-        XCTAssertEqual(try route("UPPER.XLSX", zip), .quickLook(.spreadsheet))
+        XCTAssertEqual(try route("UPPER.XLSX", zip), .spreadsheet(.xlsx))
+    }
+
+    /// A password-protected .xlsx is an OLE2 container (EncryptedPackage):
+    /// the grid, which says it is protected, not Quick Look.
+    func testEncryptedXLSXGoesToTheGrid() throws {
+        XCTAssertEqual(try route("secret.xlsx", ole), .spreadsheet(.xlsx))
+        XCTAssertEqual(try route("secret.xlsm", ole), .spreadsheet(.xlsx))
     }
 
     func testLegacyOfficeByExtension() throws {
@@ -56,7 +64,7 @@ final class DocumentViewerRouteTests: XCTestCase {
     /// the viewer, which says it can't show it, rather than the editor.
     func testDamagedOfficeFileStillGoesToTheViewer() throws {
         XCTAssertEqual(try route("broken.docx", Array("not a zip at all".utf8)), .quickLook(.word))
-        XCTAssertEqual(try route("empty.xlsx", []), .quickLook(.spreadsheet))
+        XCTAssertEqual(try route("empty.xlsx", []), .spreadsheet(.xlsx), "the grid says it can't read it")
     }
 
     /// An RTF saved with a `.doc` name is text (Mac parity).
@@ -98,21 +106,26 @@ final class DocumentViewerRouteTests: XCTestCase {
     // MARK: Text stays in the editor
 
     func testTextFilesGoToTheEditor() throws {
-        XCTAssertEqual(try route("table.csv", Array("a,b\n1,2\n".utf8)), .editor)
         XCTAssertEqual(try route("notes.txt", Array("hello".utf8)), .editor)
         XCTAssertEqual(try route("README.md", Array("# Title".utf8)), .editor)
         XCTAssertEqual(try route("data.json", Array("{}".utf8)), .editor)
         XCTAssertEqual(try route("main.swift", Array("let x = 1".utf8)), .editor)
         // A text file that happens to start with "%PDF-" is still text.
         XCTAssertEqual(try route("about-pdf.txt", pdf), .editor)
-        XCTAssertEqual(try route("empty.csv", []), .editor)
     }
 
-    /// A CSV is never a Quick Look file, whatever it holds.
-    func testCSVIsNeverQuickLook() throws {
-        XCTAssertEqual(try route("sheet.csv", zip), .editor)
+    /// CSV and TSV open in the read-only grid (Edit as Text opens the
+    /// editor), whatever they hold: never Quick Look.
+    func testCSVAndTSVGoToTheGrid() throws {
+        XCTAssertEqual(try route("table.csv", Array("a,b\n1,2\n".utf8)), .spreadsheet(.csv))
+        XCTAssertEqual(try route("TABLE.CSV", Array("a,b\n".utf8)), .spreadsheet(.csv))
+        XCTAssertEqual(try route("table.tsv", Array("a\tb\n".utf8)), .spreadsheet(.tsv))
+        XCTAssertEqual(try route("empty.csv", []), .spreadsheet(.csv))
+        XCTAssertEqual(try route("sheet.csv", zip), .spreadsheet(.csv))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "sheet.csv", prefix: zip,
-                                                 contentType: .commaSeparatedText), .editor)
+                                                 contentType: .commaSeparatedText), .spreadsheet(.csv))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.csv", prefix: Array("%PDF-,x\n".utf8)), .spreadsheet(.csv))
+        XCTAssertTrue(SpreadsheetFormat.csv.isText && SpreadsheetFormat.tsv.isText && !SpreadsheetFormat.xlsx.isText)
     }
 
     func testOtherBinaryFilesKeepTodaysEditorPath() throws {
@@ -132,7 +145,7 @@ final class DocumentViewerRouteTests: XCTestCase {
         let sheet = try XCTUnwrap(UTType("org.openxmlformats.spreadsheetml.sheet"))
         let doc = try XCTUnwrap(UTType("com.microsoft.word.doc"))
         let ppt = try XCTUnwrap(UTType("org.openxmlformats.presentationml.presentation"))
-        XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: zip, contentType: sheet), .quickLook(.spreadsheet))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: zip, contentType: sheet), .spreadsheet(.xlsx))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: ole, contentType: doc), .quickLook(.word))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment", prefix: zip, contentType: ppt), .quickLook(.presentation))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "attachment.bin", prefix: [], contentType: .pdf), .pdf)
@@ -151,7 +164,7 @@ final class DocumentViewerRouteTests: XCTestCase {
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "sample.pdf", prefix: pdf, contentType: type), .pdf)
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "damaged.pdf", prefix: [], contentType: type), .pdf)
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "scan", prefix: pdf, contentType: type), .pdf)
-            XCTAssertEqual(DocumentViewerRoute.route(fileName: "book.xlsx", prefix: zip, contentType: type), .quickLook(.spreadsheet))
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "book.xlsx", prefix: zip, contentType: type), .spreadsheet(.xlsx))
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "letter.docx", prefix: zip, contentType: type), .quickLook(.word))
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "old.xls", prefix: ole, contentType: type), .quickLook(.spreadsheet))
             XCTAssertEqual(DocumentViewerRoute.route(fileName: "talk.key", prefix: zip, contentType: type), .quickLook(.keynote))
@@ -164,20 +177,26 @@ final class DocumentViewerRouteTests: XCTestCase {
         }
     }
 
-    /// The other way: a text name wins over viewer metadata (a CSV the
-    /// provider calls a PDF or a spreadsheet is still the editor's).
+    /// The other way: a text name wins over viewer metadata (a .txt the
+    /// provider calls a PDF or a spreadsheet is still the editor's; a CSV
+    /// is still the grid's).
     func testTextNameBeatsViewerContentType() throws {
         let sheet = try XCTUnwrap(UTType("org.openxmlformats.spreadsheetml.sheet"))
-        for name in ["table.csv", "notes.txt", "README.md"] {
+        for name in ["notes.txt", "README.md"] {
             XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: pdf, contentType: .pdf), .editor, name)
             XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: zip, contentType: sheet), .editor, name)
         }
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "table.csv", prefix: pdf, contentType: .pdf), .spreadsheet(.csv))
+        XCTAssertEqual(DocumentViewerRoute.route(fileName: "table.csv", prefix: zip, contentType: sheet), .spreadsheet(.csv))
     }
 
     func testKindNames() {
         XCTAssertEqual(OfficeFormat.spreadsheet.kindName, "Excel spreadsheet")
         XCTAssertEqual(OfficeFormat.word.kindName, "Word document")
         XCTAssertEqual(OfficeFormat.keynote.kindName, "Keynote presentation")
+        XCTAssertEqual(SpreadsheetFormat.xlsx.kindName, "Excel spreadsheet")
+        XCTAssertEqual(SpreadsheetFormat.csv.kindName, "CSV file")
+        XCTAssertEqual(SpreadsheetFormat.tsv.kindName, "TSV file")
     }
 
     // MARK: Launch reopen and crash-recovery restore
@@ -187,7 +206,7 @@ final class DocumentViewerRouteTests: XCTestCase {
     /// reopen forgets its last-open record (and ends as "not opened"), and
     /// a pending recovery record is never cleared (its text stays offered).
     func testEditorOnlyOpenSkipsViewerFiles() {
-        let viewerRoutes: [DocumentViewerRoute] = [.pdf, .quickLook(.spreadsheet), .quickLook(.rtfd)]
+        let viewerRoutes: [DocumentViewerRoute] = [.pdf, .quickLook(.spreadsheet), .quickLook(.rtfd), .spreadsheet(.xlsx)]
         for route in viewerRoutes {
             let reopen = DocumentViewerRoute.editorOnlyOpen(route, reopening: true)
             XCTAssertFalse(reopen.opensEditor, "\(route)")
@@ -198,11 +217,15 @@ final class DocumentViewerRouteTests: XCTestCase {
             XCTAssertFalse(restore.forgetsLastOpenDocument, "\(route)")
             XCTAssertFalse(restore.clearsRecoveryRecord, "\(route)")
         }
-        for reopening in [true, false] {
-            let text = DocumentViewerRoute.editorOnlyOpen(.editor, reopening: reopening)
-            XCTAssertTrue(text.opensEditor)
-            XCTAssertFalse(text.forgetsLastOpenDocument)
-            XCTAssertFalse(text.clearsRecoveryRecord)
+        // CSV and TSV are text: a reopen (after Edit as Text) or a restore
+        // opens them in the editor, as before they opened in the grid.
+        for route in [DocumentViewerRoute.editor, .spreadsheet(.csv), .spreadsheet(.tsv)] {
+            for reopening in [true, false] {
+                let text = DocumentViewerRoute.editorOnlyOpen(route, reopening: reopening)
+                XCTAssertTrue(text.opensEditor, "\(route)")
+                XCTAssertFalse(text.forgetsLastOpenDocument, "\(route)")
+                XCTAssertFalse(text.clearsRecoveryRecord, "\(route)")
+            }
         }
     }
 
@@ -237,20 +260,26 @@ final class DocumentViewerRouteTests: XCTestCase {
         // "Open as Text" is a load-time bypass of this route, not a route itself.
     }
 
-    /// Text, CSV, Markdown, and extensionless text still route to the
-    /// editor, including a text-named file whose first bytes look like a PDF.
+    /// Text, Markdown, and extensionless text still route to the editor,
+    /// including a text-named file whose first bytes look like a PDF; CSV
+    /// routes to the grid, and its editor-only opens still open the editor.
     func testEditorLoadKeepsText() {
         let cases: [(String, String)] = [
-            ("notes.txt", "hello\n"), ("table.csv", "a,b\n1,2\n"), ("README.md", "# Title\n"),
+            ("notes.txt", "hello\n"), ("README.md", "# Title\n"),
             ("notes", "plain text, no extension\n"), ("notes", "%PDF notes (no dash)\n"),
             ("pdf-notes", "% PDF-ish\n"), ("Makefile", "all:\n\techo hi\n"),
             // A text name keeps the editor whatever the first bytes are (as the route).
-            ("paper.txt", "%PDF-1.7 pasted into a text file\n"), ("data.csv", "%PDF-,x\n"),
+            ("paper.txt", "%PDF-1.7 pasted into a text file\n"),
         ]
         for (name, text) in cases {
             XCTAssertEqual(DocumentViewerRoute.route(fileName: name, prefix: Data(text.utf8)), .editor, name)
         }
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "empty", prefix: Data()), .editor)
+        for name in ["table.csv", "data.csv"] {
+            let r = DocumentViewerRoute.route(fileName: name, prefix: Data("a,b\n".utf8))
+            XCTAssertEqual(r, .spreadsheet(.csv), name)
+            XCTAssertTrue(DocumentViewerRoute.editorOnlyOpen(r, reopening: true).opensEditor, name)
+        }
     }
 
     // MARK: The bundled samples
@@ -265,7 +294,9 @@ final class DocumentViewerRouteTests: XCTestCase {
         let xlsxURL = samples.appendingPathComponent("sample.xlsx")
         try XCTSkipUnless(FileManager.default.fileExists(atPath: pdfURL.path), "ios/Samples not reachable from this test host")
         XCTAssertEqual(DocumentViewerRoute.route(for: pdfURL), .pdf)
-        XCTAssertEqual(DocumentViewerRoute.route(for: xlsxURL), .quickLook(.spreadsheet))
+        XCTAssertEqual(DocumentViewerRoute.route(for: xlsxURL), .spreadsheet(.xlsx))
+        XCTAssertEqual(DocumentViewerRoute.route(for: samples.appendingPathComponent("multi-sheet.xlsx")), .spreadsheet(.xlsx))
+        XCTAssertEqual(DocumentViewerRoute.route(for: samples.appendingPathComponent("sample.csv")), .spreadsheet(.csv))
         XCTAssertEqual(DocumentViewerRoute.route(for: samples.appendingPathComponent("sample.swift")), .editor)
         let sheet = try XLSXSheet.firstSheetCSV(url: xlsxURL)
         XCTAssertEqual(sheet.name, "Owls")
