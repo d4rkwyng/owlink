@@ -209,6 +209,58 @@ final class ViewerSnapshotTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: url), csv)
     }
 
+    func testQueuedSheetsAndDismissal() async throws {
+        let url = try sample("multi-sheet.xlsx")
+        let queue = DispatchQueue(label: "test.sheet.loads")
+        let starts = expectation(description: "Only the latest queued sheet starts")
+        starts.assertForOverFulfill = true
+        let viewer = SpreadsheetViewerController(url: url, format: .xlsx, access: ScopedFileAccess(url),
+                                                queue: queue, willReadSheet: { _ in starts.fulfill() })
+        _ = host(viewer, Self.configs[0])
+        await viewer.loaded()
+        queue.suspend()
+        viewer.selectSheet(1)
+        XCTAssertNil(viewer.grid.table, "The previous sheet must no longer be copyable")
+        viewer.selectSheet(2)
+        viewer.selectSheet(1)
+        queue.resume()
+        await viewer.loaded()
+        XCTAssertEqual(viewer.grid.table?.name, "Sightings")
+        XCTAssertEqual(viewer.cachedSheetCount, 1)
+
+        queue.suspend()
+        viewer.selectSheet(2)
+        viewer.tearDown()
+        queue.resume()
+        await withCheckedContinuation { done in queue.async { done.resume() } }
+        await fulfillment(of: [starts], timeout: 2)
+        XCTAssertNil(viewer.grid.table)
+        XCTAssertEqual(viewer.cachedSheetCount, 0)
+    }
+
+    func testDismissDuringSheetReadDropsFollowingRequest() async throws {
+        let url = try sample("multi-sheet.xlsx")
+        let queue = DispatchQueue(label: "test.sheet.dismiss")
+        let entered = expectation(description: "First sheet read started")
+        let release = DispatchSemaphore(value: 0)
+        let viewer = SpreadsheetViewerController(url: url, format: .xlsx, access: ScopedFileAccess(url),
+                                                queue: queue, willReadSheet: { index in
+            XCTAssertEqual(index, 1)
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+        })
+        _ = host(viewer, Self.configs[0])
+        await viewer.loaded()
+        viewer.selectSheet(1)
+        await fulfillment(of: [entered], timeout: 2)
+        viewer.selectSheet(2)
+        viewer.tearDown()
+        release.signal()
+        await withCheckedContinuation { done in queue.async { done.resume() } }
+        XCTAssertNil(viewer.grid.table)
+        XCTAssertEqual(viewer.cachedSheetCount, 0)
+    }
+
     func testCSV() async throws {
         for c in Self.configs {
             let (w, v) = try await spreadsheet(try sample("sample.csv"), .csv, c)

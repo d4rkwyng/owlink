@@ -439,6 +439,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     private(set) var state: State = .loading
     private(set) var selectedSheet = 0
     private var workbook: Workbook?
+    var cachedSheetCount: Int { tables.count }
     private var tables: [Int: SpreadsheetTable] = [:]
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var loadGeneration = 0
@@ -446,9 +447,14 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     /// the file in the editor.
     var onEditAsText: (() -> Void)?
 
-    private static let queue = DispatchQueue(label: "owlink.spreadsheet", qos: .userInitiated)
+    private let queue: DispatchQueue
+    private let willReadSheet: (@Sendable (Int) -> Void)?
 
-    init(url: URL, format: SpreadsheetFormat, access: ScopedFileAccess, limits: SpreadsheetLimits = .standard) {
+    init(url: URL, format: SpreadsheetFormat, access: ScopedFileAccess, limits: SpreadsheetLimits = .standard,
+         queue: DispatchQueue = DispatchQueue(label: "owlink.spreadsheet", qos: .userInitiated),
+         willReadSheet: (@Sendable (Int) -> Void)? = nil) {
+        self.queue = queue
+        self.willReadSheet = willReadSheet
         self.fileURL = url
         self.format = format
         self.access = access
@@ -550,7 +556,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
         let url = fileURL, format = format, limits = limits
         loadGeneration += 1
         let gen = loadGeneration
-        Self.queue.async { [weak self] in
+        queue.async { [weak self] in
             let result: Result<(Workbook?, SpreadsheetTable), Error> = Result {
                 if format == .xlsx {
                     let wb = try Workbook(url: url, limits: limits)
@@ -583,8 +589,9 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
         if let t = tables[index] { showTable(t); return }
         state = .loading
         spinner.startAnimating()
-        let gen = loadGeneration, limits = limits
-        Self.queue.async { [weak self] in
+        let gen = loadGeneration, limits = limits, willReadSheet = willReadSheet
+        queue.async { [weak self] in
+            willReadSheet?(index)
             let result = Result { try wb.table(at: index, limits: limits) }
             DispatchQueue.main.async {
                 guard let self else { return }
