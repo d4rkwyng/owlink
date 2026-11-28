@@ -821,13 +821,13 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(perms(doc.appendingPathComponent("images").appendingPathComponent(name)) == want, "\(mode): \(String(want, radix: 8))")
     }
 
-    // MARK: r7 (Astra r6): pinned staging identity, the mode
+    // MARK: r7 (Astra r6): pinned staging identity, bound baselines, byte paths, the mode
 
     /// Unsets every r7 hook (and the r6 ones the r7 tests use).
     func resetHooks() {
         ImageStore.forceFallback = false
         ImageStore.beforePublish = nil; ImageStore.writeFault = nil; ImageStore.leftBehind = nil
-        ImageStore.stagedLookup = nil
+        ImageStore.afterBoundaryOpen = nil; ImageStore.stagedLookup = nil; ImageStore.kernelPathFault = nil
     }
 
     func birth(_ st: stat) -> [Int] { [Int(st.st_birthtimespec.tv_sec), Int(st.st_birthtimespec.tv_nsec)] }
@@ -913,6 +913,104 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         }
     }
 
+    /// r7 b (Astra r6 must-fix 2): the boundary moved between its open and
+    /// the first `F_GETPATH` (iOS: the grant; the Mac: the document's
+    /// folder) is not adopted as the baseline: open throws and nothing,
+    /// not even "images", is made in the moved folder.
+    @Test(arguments: storeModes) func aBoundaryMovedBeforeItsPathIsRecordedIsRefused(mode: StoreMode) throws {
+        defer { resetHooks() }
+        use(mode)
+        // iOS: the grant.
+        let (top, grant, sub, _, _, id) = try grantLayout()
+        defer { try? fm.removeItem(at: top) }
+        let movedGrant = top.resolvingSymlinksInPath().appendingPathComponent("moved-grant")
+        ImageStore.afterBoundaryOpen = { try? FileManager.default.moveItem(at: grant, to: movedGrant) }
+        #expect(throws: ImageStore.Failure.outside, "\(mode): iOS") { _ = try ImageStore.open(in: sub, beneath: grant, rootID: id) }
+        ImageStore.afterBoundaryOpen = nil
+        #expect(fm.fileExists(atPath: movedGrant.path) && !fm.fileExists(atPath: grant.path), "the move happened")
+        #expect(listing(movedGrant) == ["sub"] && listing(movedGrant.appendingPathComponent("sub")).isEmpty,
+                "\(mode): nothing made in the moved grant: \(listing(movedGrant.appendingPathComponent("sub")))")
+        // The control: unmoved, it opens.
+        try fm.moveItem(at: movedGrant, to: grant)
+        _ = try ImageStore.open(in: sub, beneath: grant, rootID: id)
+        // The Mac: the document's folder.
+        let (d, doc, _) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let movedDoc = d.appendingPathComponent("moved-doc")
+        ImageStore.afterBoundaryOpen = { try? FileManager.default.moveItem(at: doc, to: movedDoc) }
+        #expect(throws: ImageStore.Failure.outside, "\(mode): Mac") { _ = try ImageStore.open(in: doc) }
+        ImageStore.afterBoundaryOpen = nil
+        #expect(fm.fileExists(atPath: movedDoc.path) && !fm.fileExists(atPath: doc.path), "the move happened")
+        #expect(listing(movedDoc).isEmpty, "\(mode): nothing made in the moved document folder: \(listing(movedDoc))")
+        try fm.moveItem(at: movedDoc, to: doc)
+        _ = try ImageStore.open(in: doc)
+    }
+
+    /// The path the kernel has for `path` (opened), as bytes.
+    func kernelBytes(_ path: String) -> [UInt8]? {
+        let fd = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buf) != -1 else { return nil }
+        return buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+    }
+
+    /// r7 d (Astra r6 must-fix 2, second half): kernel paths are compared
+    /// as bytes. The boundary renamed to another spelling that Swift
+    /// `String` == calls equal is another path: the copy is refused. NFC to
+    /// NFD (a real rename: APFS keeps the spelling it is given), and a name
+    /// against a non-UTF-8 one (`kernelPathFault`: APFS refuses such names)
+    /// whose decoding is the same text. Both entry points.
+    @Test(arguments: storeModes) func aBoundaryRespelledIsAnotherPath(mode: StoreMode) throws {
+        defer { resetHooks() }
+        let nfc = "caf\u{E9}", nfd = "cafe\u{301}", repl = "f\u{FFFD}"
+        let nonUTF8: [UInt8] = [0x66, 0xFF]
+        #expect(nfc == nfd && Array(nfc.utf8) != Array(nfd.utf8), "String == folds the two spellings")
+        #expect(String(decoding: nonUTF8, as: UTF8.self) == repl && Array(repl.utf8) != nonUTF8, "decoded, the non-UTF-8 name is the other")
+        for entry in ["Mac", "iOS"] {
+            for respelling in ["NFC to NFD", "non-UTF-8"] {
+                resetHooks()
+                use(mode)
+                let what = "\(mode), \(entry), \(respelling)"
+                let top = tempDir().resolvingSymlinksInPath()
+                try fm.createDirectory(at: top, withIntermediateDirectories: true)
+                defer { try? fm.removeItem(at: top) }
+                let name = respelling == "non-UTF-8" ? repl : nfc
+                let boundary = top.appendingPathComponent(name)
+                #expect(Darwin.mkdir(top.path + "/" + name, 0o755) == 0, "\(what)")
+                let docFolder = entry == "Mac" ? boundary : boundary.appendingPathComponent("sub")
+                if entry == "iOS" { try fm.createDirectory(at: docFolder, withIntermediateDirectories: false) }
+                let id = try #require(Beneath.FileID(path: boundary.path, followLast: false))
+                let store = entry == "Mac" ? try ImageStore.open(in: docFolder) : try ImageStore.open(in: docFolder, beneath: boundary, rootID: id)
+                let before = try #require(kernelBytes(boundary.path))
+                var after: [UInt8]?
+                ImageStore.beforePublish = {
+                    if respelling == "NFC to NFD" {
+                        _ = Darwin.rename(top.path + "/" + nfc, top.path + "/" + nfd)
+                        after = self.kernelBytes(top.path + "/" + nfd)
+                    } else {
+                        let from = Array(repl.utf8)
+                        ImageStore.kernelPathFault = { bytes in
+                            guard let r = bytes.indices.first(where: { bytes[$0...].starts(with: from) }) else { return }
+                            bytes.replaceSubrange(r..<(r + from.count), with: nonUTF8)
+                        }
+                        var now = before
+                        ImageStore.kernelPathFault?(&now)
+                        after = now
+                    }
+                }
+                #expect(throws: ImageStore.Failure.destinationChanged, "\(what)") { _ = try store.write(Data([7]), name: "q.png") }
+                resetHooks()
+                let now = try #require(after, "\(what): respelled")
+                #expect(now != before && String(decoding: now, as: UTF8.self) == String(decoding: before, as: UTF8.self),
+                        "\(what): another spelling, the same text")
+                let images = docFolder.appendingPathComponent("images")
+                #expect(listing(images).isEmpty, "\(what): nothing published or left staged: \(listing(images))")
+            }
+        }
+    }
+
     /// r7 e (Astra r6 should-fix 4): the cleanup's lookup of the staging
     /// entry fails with an error other than ENOENT (EIO): the entry is
     /// left alone and reported, not taken as gone.
@@ -933,6 +1031,19 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         resetHooks()
         #expect(left.count == 1 && left == staged(images), "\(mode): the entry is left alone and reported: \(left), \(listing(images))")
         #expect(!listing(images).contains("e.png") && listing(doc) == ["images"] && listing(outside).isEmpty, "\(mode): nothing published")
+    }
+
+    /// r7 (Astra r6 should-fix 4b): the store's descriptors are
+    /// close-on-exec, the Mac's second handle on the folder too.
+    @Test func theStoresHandlesAreCloseOnExec() throws {
+        let (top, grant, sub, _, _, id) = try grantLayout()
+        defer { try? fm.removeItem(at: top) }
+        for (entry, store) in [("Mac", try ImageStore.open(in: sub)), ("iOS", try ImageStore.open(in: sub, beneath: grant, rootID: id))] {
+            for (which, fd) in [("boundary", store.boundaryFD), ("images", store.fd)] {
+                let flags = fcntl(fd, F_GETFD)
+                #expect(flags != -1 && flags & FD_CLOEXEC != 0, "\(entry) \(which): F_GETFD \(flags)")
+            }
+        }
     }
 
     #if os(macOS)

@@ -17,17 +17,25 @@ import os
 ///   a link to a folder inside the document's folder is followed, one that
 ///   leads out, or back to the folder itself, is refused
 ///   (`Failure.outside`). Elsewhere (the fallback) only a real folder is
-///   used (`O_NOFOLLOW`; `Failure.imagesIsLink`). The boundary's path as
-///   the kernel reports it (`F_GETPATH`) and the folders' identities
-///   (device and inode) are recorded.
+///   used (`O_NOFOLLOW`; `Failure.imagesIsLink`). The folders' identities
+///   (device and inode) are recorded, and the boundary's path is taken
+///   from its own descriptor (`F_GETPATH`) right after it is opened and
+///   bound to the location asked for (round 7): it must be, byte for byte,
+///   that location resolved once with `realpath` (iOS the grant's path,
+///   the Mac the folder's), and the entry at that path (not followed) must
+///   be the folder held. A boundary moved between its open and that check
+///   is refused (`Failure.outside`) before anything is made in it.
 /// - `verify`, at open and again before staging and before each publishing
 ///   attempt: the boundary is still at its recorded path; the document's
 ///   folder is still found beneath it at the same components (iOS); "images"
 ///   looked up again by the same rule is still the held folder; and the held
 ///   folder's own path (`F_GETPATH`) is still below the document's folder as
-///   recorded. Else `Failure.destinationChanged`: a folder moved out of the
-///   grant, or an "images" moved away or swapped for another folder or a
-///   link, gets nothing.
+///   recorded. Paths are compared as the bytes the kernel reports, never as
+///   Swift text (`String` == calls two canonically equivalent spellings, or
+///   two undecodable ones, equal). Else `Failure.destinationChanged`: a
+///   folder moved out of the grant, or to another spelling of its path, or
+///   an "images" moved away or swapped for another folder or a link, gets
+///   nothing.
 /// - A copy reads the source through one descriptor that must be a
 ///   regular file (`fstat`): a symbolic link's target's bytes are copied,
 ///   never the link; a folder, pipe or device is refused.
@@ -102,9 +110,10 @@ public final class ImageStore {
     private let boundary: Int32
     private let below: [String]
     /// Recorded at open: the boundary's and the document folder's paths as
-    /// the kernel reports them (`F_GETPATH`), and the folders' identities.
-    private let boundaryPath: [String]
-    private let folderPath: [String]
+    /// the kernel reports them (`F_GETPATH`), as bytes, and the folders'
+    /// identities.
+    private let boundaryPath: [UInt8]
+    private let folderPath: [UInt8]
     private let rootID: Beneath.FileID
     private let imagesID: Beneath.FileID
     /// Each published name (by its bytes) and the file it was given.
@@ -129,10 +138,19 @@ public final class ImageStore {
     /// Checks only: called with a staging name the cleanup left in place
     /// because the entry there is no longer the file it made.
     nonisolated(unsafe) static var leftBehind: ((String) -> Void)?
+    /// Checks only: called right after the boundary (iOS the grant, the Mac
+    /// the document's folder) is opened, before its path is recorded (tests
+    /// move it here).
+    nonisolated(unsafe) static var afterBoundaryOpen: (() -> Void)?
     /// Checks only: rewrites what a lookup of the staging entry found (its
     /// `stat`, and 0 or the errno the lookup failed with): tests stand in
     /// another file's identity, or an I/O error, here.
     nonisolated(unsafe) static var stagedLookup: ((String, inout stat, inout Int32) -> Void)?
+    /// Checks only: rewrites the bytes of a path the kernel reports
+    /// (`F_GETPATH`): tests stand in another spelling of it here.
+    nonisolated(unsafe) static var kernelPathFault: ((inout [UInt8]) -> Void)?
+    /// Tests: the boundary descriptor the store holds.
+    var boundaryFD: Int32 { boundary }
 
     /// `RENAME_RESOLVE_BENEATH` from sys/stdio.h, written as its value:
     /// older SDKs may not name it.
@@ -173,7 +191,7 @@ public final class ImageStore {
     }
 
     private init(fd: Int32, root: Int32, folder: URL, kernel: Bool, boundary: Int32, below: [String],
-                 boundaryPath: [String], folderPath: [String], rootID: Beneath.FileID, imagesID: Beneath.FileID) {
+                 boundaryPath: [UInt8], folderPath: [UInt8], rootID: Beneath.FileID, imagesID: Beneath.FileID) {
         self.fd = fd; self.root = root; self.folder = folder; self.kernel = kernel
         self.boundary = boundary; self.below = below
         self.boundaryPath = boundaryPath; self.folderPath = folderPath
@@ -185,12 +203,23 @@ public final class ImageStore {
     /// `Failure.outside` when it leads out of `folder`, and on the
     /// fallback path `Failure.imagesIsLink` (before anything is made) when
     /// it is a symbolic link.
+    ///
+    /// `folder` is resolved once (`realpath`: links in it, `/var` for
+    /// `/private/var`, the case it has on disk) and that path opened without
+    /// following a final link: the same folder as opening `folder` itself.
+    /// Its path as the kernel then reports it must be that one, byte for
+    /// byte, and the entry there the folder opened (`bound`), else
+    /// `Failure.outside`: a folder moved meanwhile is never adopted.
     public static func open(in folder: URL) throws -> ImageStore {
-        let dfd = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard let authorized = realPath(folder.path) else { throw posix(folder.path) }
+        let dfd = withCPath(authorized) { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
         guard dfd >= 0 else { throw posix(folder.path) }
-        let bfd = dup(dfd)
+        if DevEnvironment.checksEnabled { afterBoundaryOpen?() }
+        guard bound(dfd, to: authorized) else { close(dfd); throw Failure.outside }
+        // Close-on-exec, as every descriptor here.
+        let bfd = fcntl(dfd, F_DUPFD_CLOEXEC, 0)
         guard bfd >= 0 else { let err = errno; close(dfd); throw posix(folder.path, err) }
-        return try open(pinned: dfd, folder: folder, boundary: bfd, below: [])
+        return try open(pinned: dfd, folder: folder, boundary: bfd, below: [], boundaryPath: authorized)
     }
 
     /// Opens "images" in `folder`, where `folder` itself is looked up
@@ -204,11 +233,16 @@ public final class ImageStore {
     /// it was granted) it must still be that folder: a root replaced by a
     /// link, or by another folder, is refused with `Failure.outside`. Then
     /// as `open(in:)`, with `root` held as the boundary `verify` checks
-    /// against before each publishing step.
+    /// against before each publishing step. `root`'s path is resolved once
+    /// first (`realpath`); right after it is opened its path as the kernel
+    /// reports it must be that one, byte for byte, and the entry there the
+    /// folder opened (`bound`), else `Failure.outside` before anything is
+    /// looked up or made in it: a grant moved meanwhile is never adopted.
     public static func open(in folder: URL, beneath root: URL, rootID: Beneath.FileID? = nil) throws -> ImageStore {
         let base = root.standardizedFileURL.pathComponents
         let path = folder.standardizedFileURL.pathComponents
         guard path.count >= base.count, Array(path.prefix(base.count)) == base else { throw Failure.outside }
+        let authorized = realPath(root.path)
         let rfd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard rfd >= 0 else {
             let err = errno
@@ -219,32 +253,43 @@ public final class ImageStore {
             close(rfd)
             throw Failure.outside
         }
+        if DevEnvironment.checksEnabled { afterBoundaryOpen?() }
+        guard let authorized, bound(rfd, to: authorized) else {
+            close(rfd)
+            throw Failure.outside
+        }
         let parts = Array(path.dropFirst(base.count))
-        let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY, walk: true)
+        let dfd = parts.isEmpty ? fcntl(rfd, F_DUPFD_CLOEXEC, 0) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY, walk: true)
         let err = errno
         guard dfd >= 0 else {
             close(rfd)
             if err == ELOOP || err == ENOTDIR || err == Beneath.notCapable || err == EINVAL { throw Failure.outside }
             throw posix(folder.path, err)
         }
-        return try open(pinned: dfd, folder: folder, boundary: rfd, below: parts)
+        return try open(pinned: dfd, folder: folder, boundary: rfd, below: parts, boundaryPath: authorized)
     }
 
     /// `dfd`: the document's folder, opened, and `boundary` the folder it
-    /// was opened beneath (`below` it), both owned from here on. The paths
-    /// and identities are recorded and checked once (`verify`) before
-    /// `afterOpen`; a failure there is `Failure.outside`.
-    private static func open(pinned dfd: Int32, folder: URL, boundary: Int32, below: [String]) throws -> ImageStore {
+    /// was opened beneath (`below` it), both owned from here on;
+    /// `boundaryPath` the boundary's path, bound to it. The document
+    /// folder's path must be `below` the boundary's before "images" is
+    /// opened or made in it. The paths and identities are recorded and
+    /// checked once (`verify`) before `afterOpen`; a failure there is
+    /// `Failure.outside`.
+    private static func open(pinned dfd: Int32, folder: URL, boundary: Int32, below: [String], boundaryPath: [UInt8]) throws -> ImageStore {
+        guard let folderPath = kernelPath(of: dfd),
+              components(folderPath).count == components(boundaryPath).count + below.count, isBelow(folderPath, boundaryPath, orAt: below.isEmpty)
+        else {
+            close(dfd); close(boundary)
+            throw Failure.outside
+        }
         let kernel = useKernel
         let ifd: Int32
         do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch {
             close(dfd); close(boundary)
             throw error
         }
-        guard let boundaryPath = kernelPath(of: boundary), let folderPath = kernelPath(of: dfd),
-              folderPath.count == boundaryPath.count + below.count, Array(folderPath.prefix(boundaryPath.count)) == boundaryPath,
-              let rootID = Beneath.FileID(fd: dfd), let imagesID = Beneath.FileID(fd: ifd)
-        else {
+        guard let rootID = Beneath.FileID(fd: dfd), let imagesID = Beneath.FileID(fd: ifd) else {
             close(ifd); close(dfd); close(boundary)
             throw Failure.outside
         }
@@ -256,13 +301,48 @@ public final class ImageStore {
     }
 
     /// The path the kernel has for what `fd` has open (`F_GETPATH`), as
-    /// components; nil when it can't say.
-    static func kernelPath(of fd: Int32) -> [String]? {
+    /// its bytes (no decoding); nil when it can't say.
+    static func kernelPath(of fd: Int32) -> [UInt8]? {
         var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         guard fcntl(fd, F_GETPATH, &buf) != -1 else { return nil }
-        let path = String(cString: buf)
-        guard path.hasPrefix("/") else { return nil }
-        return (path as NSString).pathComponents
+        var bytes = buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        if DevEnvironment.checksEnabled { kernelPathFault?(&bytes) }
+        guard bytes.first == 0x2F else { return nil }
+        return bytes
+    }
+
+    /// `path` resolved (`realpath`), as bytes; nil (errno set) when it can't be.
+    static func realPath(_ path: String) -> [UInt8]? {
+        guard let resolved = Darwin.realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return Array(UnsafeBufferPointer(start: resolved, count: strlen(resolved))).map { UInt8(bitPattern: $0) }
+    }
+
+    /// `body` with `path`'s bytes as a C string.
+    static func withCPath<T>(_ path: [UInt8], _ body: (UnsafePointer<CChar>) -> T) -> T {
+        (path.map { CChar(bitPattern: $0) } + [0]).withUnsafeBufferPointer { body($0.baseAddress!) }
+    }
+
+    /// The folder `fd` has open is at `path`: the kernel's path for it is
+    /// `path`, byte for byte, and the entry at `path` (a final link not
+    /// followed) is that folder (device and inode).
+    static func bound(_ fd: Int32, to path: [UInt8]) -> Bool {
+        guard let here = kernelPath(of: fd), here == path else { return false }
+        var st = stat()
+        guard withCPath(path, { fstatat(AT_FDCWD, $0, &st, AT_SYMLINK_NOFOLLOW) }) == 0 else { return false }
+        return Beneath.FileID(st) == Beneath.FileID(fd: fd)
+    }
+
+    /// A path's components, as bytes.
+    static func components(_ path: [UInt8]) -> [ArraySlice<UInt8>] {
+        path.split(separator: 0x2F, omittingEmptySubsequences: true)
+    }
+
+    /// `path` is strictly below `top` (or, `orAt`, is `top`), component by
+    /// component, compared as bytes.
+    static func isBelow(_ path: [UInt8], _ top: [UInt8], orAt: Bool = false) -> Bool {
+        let p = components(path), t = components(top)
+        return (orAt ? p.count >= t.count : p.count > t.count) && Array(p.prefix(t.count)) == t
     }
 
     /// The held "images" is still inside the boundary, where it was opened:
@@ -273,7 +353,7 @@ public final class ImageStore {
     /// own path is still below the document's folder's recorded path.
     /// Else `Failure.destinationChanged`.
     func verify() throws {
-        guard Self.kernelPath(of: boundary) == boundaryPath else { throw Failure.destinationChanged }
+        guard let now = Self.kernelPath(of: boundary), now == boundaryPath else { throw Failure.destinationChanged }
         if !below.isEmpty {
             let now = Beneath.open(below, beneath: boundary, flags: O_RDONLY | O_DIRECTORY, walk: true)
             guard now >= 0 else { throw Failure.destinationChanged }
@@ -283,7 +363,7 @@ public final class ImageStore {
         guard let again = try? Self.openImages(in: root, folder: folder, create: false, kernel: kernel) else { throw Failure.destinationChanged }
         defer { close(again) }
         guard Beneath.FileID(fd: again) == imagesID, Beneath.FileID(fd: fd) == imagesID,
-              let here = Self.kernelPath(of: fd), here.count > folderPath.count, Array(here.prefix(folderPath.count)) == folderPath
+              let here = Self.kernelPath(of: fd), Self.isBelow(here, folderPath)
         else { throw Failure.destinationChanged }
     }
 
