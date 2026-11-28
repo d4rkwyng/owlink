@@ -208,16 +208,15 @@ public final class ImageStore {
     /// fallback path `Failure.imagesIsLink` (before anything is made) when
     /// it is a symbolic link.
     ///
-    /// `folder` is resolved once (`realpath`: links in it, `/var` for
-    /// `/private/var`, the case it has on disk) and that path opened without
-    /// following a final link: the same folder as opening `folder` itself.
-    /// Its path as the kernel then reports it must be that one, byte for
-    /// byte, and the entry there the folder opened (`bound`), else
-    /// `Failure.outside`: a folder moved meanwhile is never adopted.
+    /// Captures the canonical bytes of `folder.path` with `realpath`, then
+    /// opens the original path once, following symlinks. Before creating
+    /// "images", the descriptor's `F_GETPATH` bytes must match the capture,
+    /// and the entry there (checked without following a final link) must
+    /// match the descriptor's device and inode. A mismatch throws `Failure.outside`.
     public static func open(in folder: URL) throws -> ImageStore {
         guard let authorized = realPath(folder.path) else { throw posix(folder.path) }
         if DevEnvironment.checksEnabled { afterPathCaptured?() }
-        let dfd = withCPath(authorized) { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+        let dfd = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard dfd >= 0 else { throw posix(folder.path) }
         if DevEnvironment.checksEnabled { afterBoundaryOpen?() }
         guard bound(dfd, to: authorized) else { close(dfd); throw Failure.outside }
@@ -227,22 +226,15 @@ public final class ImageStore {
         return try open(pinned: dfd, folder: folder, boundary: bfd, below: [], boundaryPath: authorized)
     }
 
-    /// Opens "images" in `folder`, where `folder` itself is looked up
-    /// beneath `root` (iOS: the folder the person granted, or the app's
-    /// own container) from `root`'s descriptor one component at a time
-    /// (`O_NOFOLLOW | O_DIRECTORY` each): a symbolic link on the way is
-    /// refused with `Failure.outside`, so the grant is the boundary, not
-    /// `folder`'s path. `folder` must be `root` or lexically below it (pass
-    /// both resolved). `root` itself is opened without following a final
-    /// symbolic link, and when `rootID` is given (the root as it was when
-    /// it was granted) it must still be that folder: a root replaced by a
-    /// link, or by another folder, is refused with `Failure.outside`. Then
-    /// as `open(in:)`, with `root` held as the boundary `verify` checks
-    /// against before each publishing step. `root`'s path is resolved once
-    /// first (`realpath`); right after it is opened its path as the kernel
-    /// reports it must be that one, byte for byte, and the entry there the
-    /// folder opened (`bound`), else `Failure.outside` before anything is
-    /// looked up or made in it: a grant moved meanwhile is never adopted.
+    /// Opens "images" in `folder`, which must be `root` or lexically beneath it.
+    /// Captures the canonical bytes of `root.path` with `realpath`, then opens
+    /// the original root path once, following ancestor symlinks and refusing
+    /// a final symlink. The descriptor must match the granted `rootID` when
+    /// supplied. Its `F_GETPATH` bytes must match the capture, and the entry
+    /// there (checked without following a final link) must match its device
+    /// and inode. A mismatch throws `Failure.outside` before the walk into
+    /// `folder`, which opens each component relative to the held directory
+    /// with `O_NOFOLLOW | O_DIRECTORY`.
     public static func open(in folder: URL, beneath root: URL, rootID: Beneath.FileID? = nil) throws -> ImageStore {
         let base = root.standardizedFileURL.pathComponents
         let path = folder.standardizedFileURL.pathComponents
