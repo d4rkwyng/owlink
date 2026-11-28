@@ -281,10 +281,11 @@ final class ViewerSnapshotTests: XCTestCase {
             let page = try XCTUnwrap(v.document?.page(at: 0))
             let pageWidth = v.pdfView.convert(page.bounds(for: v.pdfView.displayBox), from: page).width
             XCTAssertGreaterThan(pageWidth, v.view.bounds.width * 0.85, "the page is \(pageWidth) pt wide")
-            // Page 1 starts below the bar, not behind it.
-            let top = v.pdfView.convert(page.bounds(for: v.pdfView.displayBox), from: page).minY
-            let barBottom = v.view.safeAreaInsets.top
-            XCTAssertGreaterThanOrEqual(top, barBottom - 1, "\(c.name): page 1's top is at \(top), the bar ends at \(barBottom)")
+            // Where page 1's top sits against the bar is checked in the
+            // running app (OwlinkUITests.testOpenPDFReadOnly): in this
+            // hostless bundle PDFKit lays the document out under the bar
+            // whatever the viewer asks, and its coordinates disagree with
+            // what it draws.
             XCTAssertEqual(v.pageLabel.text?.trimmingCharacters(in: .whitespaces), "1 of 2")
             XCTAssertNotNil(barItem(v, "viewer.share"))
             XCTAssertNotNil(barItem(v, "viewer.pdf.search"))

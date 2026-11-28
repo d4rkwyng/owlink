@@ -129,6 +129,10 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["viewer.pdf.search"].exists, "no search button")
         XCTAssertTrue(app.buttons["viewer.pdf.thumbnails"].exists, "no thumbnails button")
         XCTAssertFalse(app.buttons["viewer.editAsText"].exists, "a PDF offers Edit as Text")
+        // Page 1's first line is below the bar, not behind it.
+        let firstLine = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Owlink PDF sample'")).firstMatch
+        let bar = app.navigationBars.firstMatch
+        XCTAssertGreaterThanOrEqual(firstLine.frame.minY, bar.frame.maxY, "page 1 is under the bar")
         let opened = XCTAttachment(screenshot: app.screenshot())
         opened.name = "pdf-viewer-open"
         opened.lifetime = .keepAlways
