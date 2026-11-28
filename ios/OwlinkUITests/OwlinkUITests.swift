@@ -129,6 +129,10 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["viewer.pdf.search"].exists, "no search button")
         XCTAssertTrue(app.buttons["viewer.pdf.thumbnails"].exists, "no thumbnails button")
         XCTAssertFalse(app.buttons["viewer.editAsText"].exists, "a PDF offers Edit as Text")
+        let opened = XCTAttachment(screenshot: app.screenshot())
+        opened.name = "pdf-viewer-open"
+        opened.lifetime = .keepAlways
+        add(opened)
         app.buttons["viewer.pdf.thumbnails"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["viewer.pdf.thumbnails"].waitForExistence(timeout: 5))
         let shot = XCTAttachment(screenshot: app.screenshot())

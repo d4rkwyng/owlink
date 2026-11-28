@@ -300,12 +300,12 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         guard pdfView.document != nil, pdfView.bounds.width > 0 else { return }
-        if !showedFirstPage, let first = pdfView.document?.page(at: 0) {
+        if !showedFirstPage, pdfView.document?.page(at: 0) != nil {
             showedFirstPage = true
             fittedSize = pdfView.bounds.size
             pdfView.layoutIfNeeded()
             fitToWidth()
-            pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: first.bounds(for: pdfView.displayBox).maxY)))
+            showFirstPageTop()
             updatePageLabel()
         } else if pdfView.bounds.size != fittedSize {
             // Rotated (or resized): fit again, at the same place; on the
@@ -315,16 +315,42 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
             pdfView.layoutIfNeeded()
             fitToWidth()
             if let first = pdfView.document?.page(at: 0), dest == nil || dest?.page == first {
-                pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: first.bounds(for: pdfView.displayBox).maxY)))
+                showFirstPageTop()
             } else if let dest {
                 pdfView.go(to: dest)
             }
         }
     }
 
+    /// The page's width fills the view. (Setting autoScales again here
+    /// would let PDFKit scroll on its own later.)
     private func fitToWidth() {
-        pdfView.autoScales = true
         pdfView.scaleFactor = pdfView.scaleFactorForSizeToFit
+    }
+
+    /// Page 1 from its top, just below the bar. PDFKit puts the
+    /// destination at the top of its view, under the bar (whose height it
+    /// doesn't always allow for), so where the page landed is measured and
+    /// put right.
+    private func showFirstPageTop() {
+        guard let first = pdfView.document?.page(at: 0) else { return }
+        let top = first.bounds(for: pdfView.displayBox).maxY
+        pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: top)))
+        pdfView.layoutIfNeeded()
+        let landed = pdfView.convert(first.bounds(for: pdfView.displayBox), from: first).minY
+        let want = pdfView.safeAreaInsets.top
+        let scale = max(pdfView.scaleFactor, 0.01)
+        if abs(landed - want) > 0.5 {
+            pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: top + (want - landed) / scale)))
+        }
+    }
+
+    /// The bar's height can settle after the first layout: page 1, if the
+    /// reader is still there, goes back below it.
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        guard showedFirstPage, let first = pdfView.document?.page(at: 0), pdfView.currentPage == first else { return }
+        showFirstPageTop()
     }
 
     deinit {
@@ -342,6 +368,11 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
     // MARK: Thumbnails and find
 
     func toggleThumbnails() {
+        // Showing the strip makes PDFKit scroll to the current page's top
+        // under the bar: page 1 is put back below it.
+        defer {
+            if let first = pdfView.document?.page(at: 0), pdfView.currentPage == first { showFirstPageTop() }
+        }
         let show = thumbnailView.isHidden
         thumbnailView.isHidden = !show
         thumbnailHeight.constant = show ? 76 : 0
@@ -392,7 +423,10 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        if isLocked { askForPassword() }
+        if isLocked { askForPassword(); return }
+        // Insets are final once on screen: page 1 sits right below the bar
+        // (measured, so a top already right stays where it is).
+        if let first = pdfView.document?.page(at: 0), pdfView.currentPage == first { showFirstPageTop() }
     }
 
     private func close() {
