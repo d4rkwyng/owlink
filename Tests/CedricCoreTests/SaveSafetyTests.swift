@@ -248,6 +248,101 @@ import Testing
         #expect(try aside.first.map { try Data(contentsOf: $0) } == bytes)
     }
 
+    // MARK: Recovery record identity (the file name is a hash of the path)
+
+    /// Every file in `dir` whose name carries `tag` (a set-aside copy).
+    func files(in dir: URL, tagged tag: String) throws -> [URL] {
+        try fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.contains(tag) }
+    }
+
+    /// B's valid record under A's file name (a hash collision, or a
+    /// misplaced file): its bytes, and A's URL.
+    func foreignRecordAtA(_ store: RecoveryStore) throws -> (bytes: Data, url: URL) {
+        try store.write(record("/docs/b.txt", text: "b's only copy"))
+        let a = store.fileURL(forDocumentPath: "/docs/a.txt")
+        try fm.moveItem(at: store.fileURL(forDocumentPath: "/docs/b.txt"), to: a)
+        return (try Data(contentsOf: a), a)
+    }
+
+    /// write(A) over B's record keeps B's bytes (set aside beside it,
+    /// findable afterwards) and writes A's.
+    @Test func writeKeepsARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        try store.write(record("/docs/a.txt", text: "a"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "a")
+        let kept = try files(in: t, tagged: "foreign-")
+        #expect(kept.count == 1, "B's record set aside")
+        #expect(try kept.first.map { try Data(contentsOf: $0) } == bBytes, "byte for byte")
+        #expect(try kept.first.map { try PropertyListDecoder().decode(RecoveryRecord.self, from: Data(contentsOf: $0)) }?
+            .documentPath == "/docs/b.txt")
+        #expect(try Data(contentsOf: a) != bBytes)
+    }
+
+    /// B's record can't be set aside: write(A) throws and leaves it.
+    @Test func writeFailsWhenAnotherDocumentsRecordCantBeSetAside() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        var stuck = store
+        stuck.checkFailSetAside = true
+        #expect(throws: (any Error).self) { try stuck.write(record("/docs/a.txt", text: "a")) }
+        #expect(try Data(contentsOf: a) == bBytes, "B's bytes untouched")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).count == 1, "nothing else made")
+    }
+
+    /// clear(A) leaves B's record where it is, byte for byte.
+    @Test func clearLeavesARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(try Data(contentsOf: a) == bBytes)
+        #expect(try fm.contentsOfDirectory(atPath: t.path) == [a.lastPathComponent])
+    }
+
+    /// read and pending for A don't return B's record (and leave it).
+    @Test func readAndPendingIgnoreARecordThatBelongsToAnotherDocument() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        let (bBytes, a) = try foreignRecordAtA(store)
+        #expect(store.read(documentPath: "/docs/a.txt") == nil)
+        #expect(store.pending(documentPath: "/docs/a.txt", documentModified: .distantPast) == nil)
+        #expect(try Data(contentsOf: a) == bBytes)
+    }
+
+    /// An older record of the same document is A's own: write replaces
+    /// it and clear deletes it, with no set-aside copy left.
+    @Test func aStaleRecordOfTheSameDocumentIsReplacedAndCleared() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let store = RecoveryStore(directory: t)
+        try store.write(record("/docs/a.txt", text: "old", at: Date(timeIntervalSinceNow: -3600)))
+        try store.write(record("/docs/a.txt", text: "new"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "new")
+        #expect(try fm.contentsOfDirectory(atPath: t.path).count == 1, "no set-aside copy")
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(store.read(documentPath: "/docs/a.txt") == nil)
+        #expect(try fm.contentsOfDirectory(atPath: t.path).isEmpty)
+    }
+
+    /// No live file: write creates it; clear does nothing (no throw,
+    /// nothing made, not even the folder).
+    @Test func aMissingRecordIsWrittenAndClearIsANoOp() throws {
+        let t = try temp(); defer { try? fm.removeItem(at: t) }
+        let dir = t.appendingPathComponent("Recovery")
+        let store = RecoveryStore(directory: dir)
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(!fm.fileExists(atPath: dir.path))
+        try store.write(record("/docs/a.txt", text: "a"))
+        #expect(store.read(documentPath: "/docs/a.txt")?.text == "a")
+        #expect(try fm.contentsOfDirectory(atPath: dir.path) == [store.fileURL(forDocumentPath: "/docs/a.txt").lastPathComponent])
+        store.clear(documentPath: "/docs/a.txt")
+        store.clear(documentPath: "/docs/a.txt")
+        #expect(try fm.contentsOfDirectory(atPath: dir.path).isEmpty)
+    }
+
     /// A live file that is there but can't be read is set aside (bytes
     /// kept), not left for a later write to replace.
     @Test func anUnreadableFileIsSetAsideOnRead() throws {
