@@ -4,7 +4,8 @@ import QuickLook
 import CedricCore
 
 // Read-only viewers for PDF and Office / iWork files, as on the Mac (its
-// PDF and Quick Look tabs). `DocumentViewerRoute` decides which file goes
+// PDF and Quick Look tabs); spreadsheets have their own grid
+// (SpreadsheetViewer.swift). `DocumentViewerRoute` decides which file goes
 // where; `DocumentBrowserViewController.presentDocument` presents them.
 //
 // Nothing here writes to, moves or deletes the file: there is no save path,
@@ -92,6 +93,21 @@ enum DocumentViewers {
         return parts.joined(separator: " · ")
     }
 
+    /// Share: the system share sheet with the file's URL (also Open In).
+    /// Nothing is written; the viewer keeps its file access while it is up.
+    @MainActor static func shareItem(for vc: UIViewController, url: URL) -> UIBarButtonItem {
+        let item = UIBarButtonItem(image: UIImage(systemName: "square.and.arrow.up"), style: .plain, target: nil, action: nil)
+        item.primaryAction = UIAction(title: String(localized: "Share"), image: UIImage(systemName: "square.and.arrow.up")) { [weak vc, weak item] _ in
+            guard let vc, vc.presentedViewController == nil else { return }
+            let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+            sheet.popoverPresentationController?.sourceItem = item
+            vc.present(sheet, animated: true)
+        }
+        item.accessibilityIdentifier = "viewer.share"
+        item.accessibilityLabel = String(localized: "Share")
+        return item
+    }
+
     /// Title (the file name), subtitle, and Done, which closes the viewer
     /// and ends its file access.
     @MainActor static func configure(_ vc: UIViewController, url: URL, subtitle: String, done: @escaping () -> Void) {
@@ -106,29 +122,65 @@ enum DocumentViewers {
 
 // MARK: PDF
 
-/// A PDF, read-only: PDFKit's view, fitted to the width, scrolling
-/// continuously down the pages, with the current page shown at the bottom.
+/// A PDF, read-only: PDFKit's view, fitted to the width on open and on
+/// rotation, scrolling continuously down the pages, with "n of m" at the
+/// bottom, a thumbnail strip, find (PDFKit's find navigator), and Share.
+/// A password-protected PDF asks for its password (unlocked in memory
+/// only); a damaged or empty one shows why, with Share still there.
 final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentViewer {
     let fileURL: URL
-    let document: PDFDocument
+    let document: PDFDocument?
     private let access: ScopedFileAccess
     let pdfView = PDFView()
     let pageLabel = UILabel()
+    let thumbnailView = PDFThumbnailView()
+    let messageView = UIView()
+    private let messageContent = UIContentUnavailableView(configuration: .empty())
     private var pageObserver: NSObjectProtocol?
+    private var shareItem: UIBarButtonItem!
+    private lazy var searchItem: UIBarButtonItem = {
+        let i = UIBarButtonItem(image: UIImage(systemName: "magnifyingglass"), primaryAction: UIAction { [weak self] _ in self?.find() })
+        i.accessibilityIdentifier = "viewer.pdf.search"
+        i.accessibilityLabel = String(localized: "Find in PDF")
+        return i
+    }()
+    private lazy var thumbnailsItem: UIBarButtonItem = {
+        let i = UIBarButtonItem(image: UIImage(systemName: "rectangle.grid.1x2"), primaryAction: UIAction { [weak self] _ in self?.toggleThumbnails() })
+        i.accessibilityIdentifier = "viewer.pdf.thumbnails"
+        i.accessibilityLabel = String(localized: "Page Thumbnails")
+        return i
+    }()
+    private var thumbnailHeight: NSLayoutConstraint!
+    private var pageLabelBottom: NSLayoutConstraint!
 
-    init(document: PDFDocument, url: URL, access: ScopedFileAccess) {
+    init(document: PDFDocument?, url: URL, access: ScopedFileAccess) {
         self.document = document
         self.fileURL = url
         self.access = access
         super.init(nibName: nil, bundle: nil)
-        let pages = document.pageCount
-        let kind = pages == 1 ? String(localized: "PDF, 1 page") : String(localized: "PDF, \(pages) pages")
+        let kind: String
+        if let document, !document.isLocked {
+            let pages = document.pageCount
+            kind = pages == 1 ? String(localized: "PDF, 1 page") : String(localized: "PDF, \(pages) pages")
+        } else {
+            kind = String(localized: "PDF")
+        }
         DocumentViewers.configure(self, url: url, subtitle: DocumentViewers.subtitle(kind: kind, url: url)) { [weak self] in
             self?.close()
         }
+        shareItem = DocumentViewers.shareItem(for: self, url: url)
+        updateBarItems()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    var isLocked: Bool { document?.isLocked ?? false }
+    private var hasPages: Bool { (document?.pageCount ?? 0) > 0 }
+
+    private func updateBarItems() {
+        let usable = document != nil && !isLocked && hasPages
+        navigationItem.rightBarButtonItems = usable ? [shareItem, searchItem, thumbnailsItem] : [shareItem]
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -139,9 +191,19 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
         pdfView.autoScales = true
         pdfView.backgroundColor = .secondarySystemBackground
         pdfView.delegate = self
-        pdfView.document = document
         pdfView.accessibilityIdentifier = "viewer.pdf"
+        pdfView.isFindInteractionEnabled = true
         view.addSubview(pdfView)
+
+        thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+        thumbnailView.layoutMode = .horizontal
+        thumbnailView.thumbnailSize = CGSize(width: 44, height: 58)
+        thumbnailView.backgroundColor = .systemBackground.withAlphaComponent(0.92)
+        thumbnailView.pdfView = pdfView
+        thumbnailView.isHidden = true
+        thumbnailView.accessibilityIdentifier = "viewer.pdf.thumbnails"
+        thumbnailView.accessibilityLabel = String(localized: "Page Thumbnails")
+        view.addSubview(thumbnailView)
 
         pageLabel.translatesAutoresizingMaskIntoConstraints = false
         pageLabel.font = .preferredFont(forTextStyle: .footnote)
@@ -153,35 +215,116 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
         pageLabel.layer.masksToBounds = true
         pageLabel.accessibilityIdentifier = "viewer.pdf.page"
         view.addSubview(pageLabel)
+
+        messageView.translatesAutoresizingMaskIntoConstraints = false
+        messageContent.translatesAutoresizingMaskIntoConstraints = false
+        messageView.addSubview(messageContent)
+        messageView.backgroundColor = .systemBackground
+        messageView.isHidden = true
+        messageView.accessibilityIdentifier = "viewer.message"
+        view.addSubview(messageView)
+
+        thumbnailHeight = thumbnailView.heightAnchor.constraint(equalToConstant: 0)
+        pageLabelBottom = pageLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8)
         NSLayoutConstraint.activate([
             // Full height: PDFKit's scroll view insets itself for the bar.
             pdfView.topAnchor.constraint(equalTo: view.topAnchor),
             pdfView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             pdfView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             pdfView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbnailView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            thumbnailView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            thumbnailView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
+            thumbnailHeight,
             pageLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            pageLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            pageLabelBottom,
             pageLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
             pageLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 72),
+            messageView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            messageView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            messageView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            messageView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            messageContent.topAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.topAnchor),
+            messageContent.bottomAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.bottomAnchor),
+            messageContent.leadingAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.leadingAnchor),
+            messageContent.trailingAnchor.constraint(equalTo: messageView.safeAreaLayoutGuide.trailingAnchor),
         ])
         pageObserver = NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: pdfView, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.updatePageLabel() }
         }
-        updatePageLabel()
+        showDocumentOrState()
+    }
+
+    /// The pages, or why there are none: damaged, locked, empty.
+    private func showDocumentOrState() {
+        var c = UIContentUnavailableConfiguration.empty()
+        if document == nil {
+            c.image = UIImage(systemName: "exclamationmark.triangle")
+            c.text = String(localized: "Can’t Open This PDF")
+            c.secondaryText = String(localized: "The file is damaged or isn’t a PDF. Use Share to open it in another app.")
+        } else if isLocked {
+            c.image = UIImage(systemName: "lock.fill")
+            c.text = String(localized: "Password Protected")
+            c.secondaryText = String(localized: "Enter the password to view this PDF.")
+            var b = UIButton.Configuration.filled()
+            b.title = String(localized: "Enter Password")
+            c.button = b
+            c.buttonProperties.primaryAction = UIAction { [weak self] _ in self?.askForPassword() }
+        } else if !hasPages {
+            c.image = UIImage(systemName: "doc")
+            c.text = String(localized: "No Pages")
+            c.secondaryText = String(localized: "This PDF has no pages.")
+        } else {
+            messageView.isHidden = true
+            pdfView.isHidden = false
+            if pdfView.document !== document { pdfView.document = document }
+            showedFirstPage = false
+            view.setNeedsLayout()
+            updatePageLabel()
+            updateBarItems()
+            return
+        }
+        messageContent.configuration = c
+        messageView.accessibilityLabel = [c.text, c.secondaryText].compactMap { $0 }.joined(separator: ". ")
+        messageView.isHidden = false
+        pdfView.isHidden = true
+        pageLabel.isHidden = true
+        updateBarItems()
     }
 
     private var showedFirstPage = false
+    private var fittedSize: CGSize = .zero
 
-    /// Once laid out at its real size, show page 1 from its top: fitting
-    /// the width before then left the first page scrolled under the bar.
+    /// Once laid out at its real size, show page 1 from its top, fitted to
+    /// the width; after a rotation (or a new window size), fit again.
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        guard !showedFirstPage, pdfView.bounds.width > 0, let first = document.page(at: 0) else { return }
-        showedFirstPage = true
-        pdfView.layoutIfNeeded()
+        guard pdfView.document != nil, pdfView.bounds.width > 0 else { return }
+        if !showedFirstPage, let first = pdfView.document?.page(at: 0) {
+            showedFirstPage = true
+            fittedSize = pdfView.bounds.size
+            pdfView.layoutIfNeeded()
+            fitToWidth()
+            pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: first.bounds(for: pdfView.displayBox).maxY)))
+            updatePageLabel()
+        } else if pdfView.bounds.size != fittedSize {
+            // Rotated (or resized): fit again, at the same place; on the
+            // first page, at its top (under the bar, not behind it).
+            fittedSize = pdfView.bounds.size
+            let dest = pdfView.currentDestination
+            pdfView.layoutIfNeeded()
+            fitToWidth()
+            if let first = pdfView.document?.page(at: 0), dest == nil || dest?.page == first {
+                pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: first.bounds(for: pdfView.displayBox).maxY)))
+            } else if let dest {
+                pdfView.go(to: dest)
+            }
+        }
+    }
+
+    private func fitToWidth() {
+        pdfView.autoScales = true
         pdfView.scaleFactor = pdfView.scaleFactorForSizeToFit
-        pdfView.go(to: PDFDestination(page: first, at: CGPoint(x: 0, y: first.bounds(for: pdfView.displayBox).maxY)))
-        updatePageLabel()
     }
 
     deinit {
@@ -189,10 +332,67 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
     }
 
     func updatePageLabel() {
-        let count = document.pageCount
-        let current = pdfView.currentPage.map { document.index(for: $0) + 1 } ?? 1
+        let count = document?.pageCount ?? 0
+        let current = pdfView.currentPage.flatMap { p in document.map { $0.index(for: p) + 1 } } ?? 1
         pageLabel.text = "  " + String(localized: "\(current) of \(count)") + "  "
-        pageLabel.isHidden = count == 0
+        pageLabel.accessibilityLabel = String(localized: "Page \(current) of \(count)")
+        pageLabel.isHidden = count == 0 || isLocked || document == nil
+    }
+
+    // MARK: Thumbnails and find
+
+    func toggleThumbnails() {
+        let show = thumbnailView.isHidden
+        thumbnailView.isHidden = !show
+        thumbnailHeight.constant = show ? 76 : 0
+        pageLabelBottom.constant = show ? -84 : -8
+        thumbnailsItem.isSelected = show
+        view.layoutIfNeeded()
+    }
+
+    private func find() {
+        pdfView.findInteraction.presentFindNavigator(showingReplace: false)
+    }
+
+    // MARK: Password
+
+    /// Unlocks the document in memory (nothing is written).
+    @discardableResult
+    func unlock(password: String) -> Bool {
+        guard let document, document.isLocked, document.unlock(withPassword: password) else { return false }
+        let pages = document.pageCount
+        let kind = pages == 1 ? String(localized: "PDF, 1 page") : String(localized: "PDF, \(pages) pages")
+        if #available(iOS 26.0, *) { navigationItem.subtitle = DocumentViewers.subtitle(kind: kind, url: fileURL) }
+        showDocumentOrState()
+        return true
+    }
+
+    private func askForPassword(wrong: Bool = false) {
+        guard presentedViewController == nil else { return }
+        let a = UIAlertController(title: String(localized: "Password Protected"),
+                                  message: wrong ? String(localized: "That password is incorrect. Try again.")
+                                                 : String(localized: "Enter the password for “\(fileURL.lastPathComponent)”."),
+                                  preferredStyle: .alert)
+        a.addTextField { f in
+            f.isSecureTextEntry = true
+            f.placeholder = String(localized: "Password")
+            f.accessibilityIdentifier = "viewer.pdf.password"
+        }
+        a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+        let ok = UIAlertAction(title: String(localized: "Unlock"), style: .default) { [weak self, weak a] _ in
+            guard let self else { return }
+            if !self.unlock(password: a?.textFields?.first?.text ?? "") {
+                DispatchQueue.main.async { self.askForPassword(wrong: true) }
+            }
+        }
+        a.addAction(ok)
+        a.preferredAction = ok
+        present(a, animated: true)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        if isLocked { askForPassword() }
     }
 
     private func close() {
@@ -220,8 +420,8 @@ final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentView
 
 /// An Office or iWork document (or an RTFD package), read-only, in Quick
 /// Look. QLPreviewController is a child here, not the presented screen, so
-/// its own share and markup buttons don't show: this screen's bar has
-/// only the file name and Done.
+/// its own share and markup buttons don't show: this screen's bar has the
+/// file name, Done and Share.
 final class QuickLookViewerController: UIViewController, QLPreviewControllerDataSource, QLPreviewControllerDelegate, DocumentViewer {
     let fileURL: URL
     let format: OfficeFormat
@@ -245,10 +445,14 @@ final class QuickLookViewerController: UIViewController, QLPreviewControllerData
         DocumentViewers.configure(self, url: url, subtitle: DocumentViewers.subtitle(kind: format.kindName, url: url)) { [weak self] in
             self?.close()
         }
+        navigationItem.rightBarButtonItems = [DocumentViewers.shareItem(for: self, url: url)]
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Quick Look fills the space under the bar, edge to edge (its content
+    /// keeps clear of the home indicator itself); how it scales what it
+    /// draws inside is its own.
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .systemBackground
@@ -256,18 +460,21 @@ final class QuickLookViewerController: UIViewController, QLPreviewControllerData
         container.translatesAutoresizingMaskIntoConstraints = false
         container.accessibilityIdentifier = "viewer.quicklook"
         view.addSubview(container)
+        preview.dataSource = self
+        preview.delegate = self
+        addChild(preview)
+        preview.view.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(preview.view)
         NSLayoutConstraint.activate([
             container.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             container.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             container.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            preview.view.topAnchor.constraint(equalTo: container.topAnchor),
+            preview.view.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            preview.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            preview.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
         ])
-        preview.dataSource = self
-        preview.delegate = self
-        addChild(preview)
-        preview.view.frame = container.bounds
-        preview.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        container.addSubview(preview.view)
         preview.didMove(toParent: self)
     }
 

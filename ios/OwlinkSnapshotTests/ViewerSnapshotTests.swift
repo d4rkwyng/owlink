@@ -25,7 +25,7 @@ final class ViewerSnapshotTests: XCTestCase {
     struct Config {
         let pad: Bool
         let dark: Bool
-        var size: CGSize { pad ? EditorSnapshotTests.iPad : EditorSnapshotTests.iPhone }
+        var size: CGSize { pad ? CGSize(width: 1032, height: 1376) : CGSize(width: 402, height: 874) }
         var name: String { (pad ? "ipad" : "iphone") + "-" + (dark ? "dark" : "light") }
     }
 
@@ -64,6 +64,8 @@ final class ViewerSnapshotTests: XCTestCase {
             nav.traitOverrides.verticalSizeClass = .regular
             nav.traitOverrides.userInterfaceIdiom = .pad
         }
+        // One window on screen at a time: a covered window draws blank.
+        for old in windows { old.isHidden = true }
         let w = UIWindow(frame: CGRect(origin: .zero, size: c.size))
         w.overrideUserInterfaceStyle = c.dark ? .dark : .light
         w.rootViewController = nav
@@ -83,7 +85,18 @@ final class ViewerSnapshotTests: XCTestCase {
         return (w, v)
     }
 
-    private func snapshot(_ w: UIWindow, _ name: String) throws {
+    /// The window as a PNG. In this hostless bundle drawHierarchy fails
+    /// and layer.render draws a window holding a prominent (tinted glass)
+    /// bar button as blank white, so Done is drawn plain for the picture
+    /// (and put back after).
+    private func snapshot(_ w: UIWindow, _ name: String) async throws {
+        let items = ((w.rootViewController as? UINavigationController)?.viewControllers ?? [])
+            .compactMap { $0.navigationItem.leftBarButtonItem }
+        let styles = items.map(\.style)
+        for i in items { i.style = .plain }
+        defer { for (i, s) in zip(items, styles) { i.style = s } }
+        w.layoutIfNeeded()
+        try? await Task.sleep(for: .milliseconds(400))
         w.layoutIfNeeded()
         let format = UIGraphicsImageRendererFormat()
         format.scale = 2
@@ -129,7 +142,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertNotNil(barItem(v, "viewer.share"), "no Share button")
             XCTAssertNil(barItem(v, "viewer.editAsText"), "an .xlsx offers Edit as Text")
             XCTAssertEqual(v.grid.collectionView.accessibilityIdentifier, "viewer.grid")
-            try snapshot(w, "xlsx-single-\(c.name)")
+            try await snapshot(w, "xlsx-single-\(c.name)")
         }
     }
 
@@ -150,7 +163,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertEqual(colHeader?.accessibilityLabel, "Column B")
             XCTAssertTrue(colHeader?.accessibilityTraits.contains(.header) ?? false)
             XCTAssertEqual(cv.cellForItem(at: SpreadsheetGridView.indexPath(row: 2, column: -1))?.accessibilityLabel, "Row 3")
-            try snapshot(w, "xlsx-multi-\(c.name)")
+            try await snapshot(w, "xlsx-multi-\(c.name)")
 
             v.selectSheet(1)
             await v.loaded()
@@ -161,7 +174,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertEqual(v.grid.table?.name, "Sightings")
             XCTAssertEqual(v.grid.table?[1, 0]?.text, "2024-03-15", "dates show as dates")
             assertFills(v, "multi tab 2 \(c.name)")
-            try snapshot(w, "xlsx-multi-tab2-\(c.name)")
+            try await snapshot(w, "xlsx-multi-tab2-\(c.name)")
         }
     }
 
@@ -173,7 +186,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertNil(v.tabBar)
             XCTAssertNotNil(barItem(v, "viewer.share"))
             XCTAssertNotNil(barItem(v, "viewer.editAsText"), "a CSV has Edit as Text")
-            try snapshot(w, "csv-\(c.name)")
+            try await snapshot(w, "csv-\(c.name)")
         }
     }
 
@@ -186,7 +199,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertEqual(v.noticeLabel.text, "Showing the first 100 rows of 401.")
             XCTAssertGreaterThan(v.noticeLabel.convert(v.noticeLabel.bounds, to: v.view).height, 10)
             assertFills(v, "truncated \(c.name)")
-            try snapshot(w, "truncated-\(c.name)")
+            try await snapshot(w, "truncated-\(c.name)")
         }
     }
 
@@ -198,7 +211,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertTrue(v.grid.isHidden)
             XCTAssertFalse(v.messageView.isHidden)
             XCTAssertNotNil(barItem(v, "viewer.share"), "Share stays available")
-            try snapshot(w, "error-\(c.name)")
+            try await snapshot(w, "error-\(c.name)")
         }
     }
 
@@ -212,7 +225,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertEqual(v.state, .failed(.passwordProtected))
             XCTAssertFalse(v.messageView.isHidden)
             XCTAssertNotNil(barItem(v, "viewer.share"))
-            try snapshot(w, "password-\(c.name)")
+            try await snapshot(w, "password-\(c.name)")
         }
     }
 
@@ -269,12 +282,12 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertNotNil(barItem(v, "viewer.pdf.search"))
             XCTAssertNotNil(barItem(v, "viewer.pdf.thumbnails"))
             XCTAssertNil(barItem(v, "viewer.editAsText"))
-            try snapshot(w, "pdf-\(c.name)")
+            try await snapshot(w, "pdf-\(c.name)")
             v.toggleThumbnails()
             w.layoutIfNeeded()
             XCTAssertFalse(v.thumbnailView.isHidden)
             XCTAssertEqual(v.thumbnailView.accessibilityIdentifier, "viewer.pdf.thumbnails")
-            try snapshot(w, "pdf-thumbnails-\(c.name)")
+            try await snapshot(w, "pdf-thumbnails-\(c.name)")
         }
     }
 
@@ -298,7 +311,7 @@ final class ViewerSnapshotTests: XCTestCase {
             XCTAssertFalse(v.messageView.isHidden)
             XCTAssertNotNil(barItem(v, "viewer.share"))
             XCTAssertNil(barItem(v, "viewer.pdf.search"), "search before unlocking")
-            try snapshot(w, "pdf-password-\(c.name)")
+            try await snapshot(w, "pdf-password-\(c.name)")
             XCTAssertFalse(v.unlock(password: "wrong"))
             XCTAssertTrue(v.isLocked)
             XCTAssertTrue(v.unlock(password: "owl"))
@@ -316,9 +329,12 @@ final class ViewerSnapshotTests: XCTestCase {
         XCTAssertNil(v.document)
         XCTAssertFalse(v.messageView.isHidden)
         XCTAssertNotNil(barItem(v, "viewer.share"))
-        try snapshot(w, "pdf-error-\(c.name)")
-        let emptyURL = try tempDir().appendingPathComponent("empty.pdf")
-        XCTAssertTrue(PDFDocument().write(to: emptyURL))
+        try await snapshot(w, "pdf-error-\(c.name)")
+        // A valid PDF with no pages (PDFKit won't write one).
+        let body = "%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [] /Count 0 >> endobj\n"
+        let xref = body.utf8.count
+        let pdf = body + "xref\n0 3\n0000000000 65535 f \n0000000009 00000 n \n0000000058 00000 n \ntrailer << /Size 3 /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n"
+        let emptyURL = try file("empty.pdf", Data(pdf.utf8))
         let (_, e) = pdfViewer(emptyURL, c)
         if let doc = e.document {
             XCTAssertEqual(doc.pageCount, 0)

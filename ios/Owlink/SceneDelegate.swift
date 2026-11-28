@@ -271,13 +271,15 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         presentDocument(at: url, reopening: true)
     }
 
-    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
-        // PDF and Office / iWork files open read-only in a viewer, as on
-        // the Mac (`DocumentViewerRoute`: name, type, first bytes). Not
-        // for "Open as Text" (binaryOK), a crash-recovery restore, or a
-        // launch reopen: those open only the editor, and skip a file that
-        // routes to a viewer (below).
-        if !binaryOK, recovered == nil, !reopening, presentViewerIfNeeded(at: url) { return }
+    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false,
+                         asText: Bool = false) {
+        // PDF, spreadsheet (.xlsx, .csv…) and Office / iWork files open
+        // read-only in a viewer (`DocumentViewerRoute`: name, type, first
+        // bytes). Not for "Open as Text" (binaryOK), the grid's "Edit as
+        // Text" (asText), a crash-recovery restore, or a launch reopen:
+        // those open only the editor, and the last two skip a file that
+        // routes to a viewer other than CSV / TSV (below).
+        if !binaryOK, !asText, recovered == nil, !reopening, presentViewerIfNeeded(at: url) { return }
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
         // the record (and its security scope).
@@ -355,7 +357,7 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         }
     }
 
-    /// Shows `url` in the read-only PDF or Quick Look viewer when its
+    /// Shows `url` in the read-only PDF, spreadsheet or Quick Look viewer when its
     /// route says so; false when it is the editor's (nothing shown).
     ///
     /// The file's security scope (a file picked in Files, or opened in
@@ -375,13 +377,20 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
             access.stop()
             return false
         case .pdf:
-            // A damaged PDF: an alert and no viewer (Mac parity).
-            guard let pdf = PDFDocument(url: url) else {
-                access.stop()
-                alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil)
-                return true
+            // A damaged PDF: the viewer says so (Share still works).
+            viewer = PDFViewerController(document: PDFDocument(url: url), url: url, access: access)
+        case .spreadsheet(let format):
+            let grid = SpreadsheetViewerController(url: url, format: format, access: access)
+            // CSV / TSV: Edit as Text closes the grid (ending its access)
+            // and opens the file in the editor, like Open as Text.
+            grid.onEditAsText = { [weak self, weak grid] in
+                guard let self, let grid else { return }
+                self.dismiss(animated: true) {
+                    grid.tearDown()
+                    self.presentDocument(at: url, asText: true)
+                }
             }
-            viewer = PDFViewerController(document: pdf, url: url, access: access)
+            viewer = grid
         case .quickLook(let format):
             viewer = QuickLookViewerController(url: url, format: format, access: access)
         }
