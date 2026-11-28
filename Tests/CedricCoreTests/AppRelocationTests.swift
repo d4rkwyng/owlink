@@ -508,10 +508,15 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
 /// running code). A copy of A matches; B, a different bundle with a valid
 /// signature of its own, does not, nor does a tampered copy of A.
 @Suite struct CodeSignatureOnDiskTests {
-    static func makeSignedApp(at app: URL, identifier: String = "invalid.owlink.test.tiny", extra: String? = nil) throws {
+    /// - executable: what Contents/MacOS/Tiny is a copy of.
+    /// - designatedByIdentifier: sign with an explicit designated requirement
+    ///   on the identifier, as a Developer ID signature carries (with its
+    ///   anchor and team), instead of the implicit cdhash one ad hoc gets.
+    static func makeSignedApp(at app: URL, identifier: String = "invalid.owlink.test.tiny", extra: String? = nil,
+                              executable: String = "/usr/bin/true", designatedByIdentifier: Bool = false) throws {
         let macos = app.appendingPathComponent("Contents/MacOS")
         try FileManager.default.createDirectory(at: macos, withIntermediateDirectories: true)
-        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/usr/bin/true"), to: macos.appendingPathComponent("Tiny"))
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: executable), to: macos.appendingPathComponent("Tiny"))
         var info: [String: Any] = ["CFBundleIdentifier": identifier, "CFBundleExecutable": "Tiny",
                                    "CFBundlePackageType": "APPL", "CFBundleName": "Tiny"]
         if let extra { info["OwlinkTestExtra"] = extra }
@@ -519,7 +524,9 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
             .write(to: app.appendingPathComponent("Contents/Info.plist"))
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        p.arguments = ["--force", "--sign", "-", app.path]
+        p.arguments = ["--force", "--sign", "-"]
+            + (designatedByIdentifier ? ["-r=designated => identifier \"\(identifier)\""] : [])
+            + [app.path]
         p.standardError = FileHandle.nullDevice
         try p.run(); p.waitUntilExit()
         try #require(p.terminationStatus == 0)
@@ -596,20 +603,76 @@ final class FakeInstallFS: AppInstallFileSystem, @unchecked Sendable {
         #expect(CodeSignature.cdhashes(ofBundleAt: a).count >= 2)
     }
 
-    @Test func theRunningProcessMatchesItsOwnCodeOnDisk() throws {
-        // The test runner is signed (at least ad hoc by the linker). Its
-        // identity, read from the running code, must match the file it
-        // runs from: the same pairing a release Owlink relies on.
-        let me = try #require(CodeIdentity.runningProcess())
-        #expect(me.cdhash?.count == 20)
+    /// CodeIdentity.runningProcess()'s steps, on a running process given by
+    /// its pid instead of SecCodeCopySelf: the designated requirement of the
+    /// running code's static code, and the running code's own hash.
+    static func identity(ofRunning pid: pid_t) -> CodeIdentity? {
         var code: SecCode?
-        try #require(SecCodeCopySelf([], &code) == errSecSuccess)
-        var path: CFURL?
+        let attrs = [kSecGuestAttributePid as String: NSNumber(value: pid)] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(nil, attrs, [], &code) == errSecSuccess, let code else { return nil }
         var st: SecStaticCode?
-        try #require(SecCodeCopyStaticCode(code!, [], &st) == errSecSuccess)
-        try #require(SecCodeCopyPath(st!, [], &path) == errSecSuccess)
-        let url = path! as URL
-        #expect(me.matches(bundleAt: url), "\(url.path)")
+        guard SecCodeCopyStaticCode(code, [], &st) == errSecSuccess, let st else { return nil }
+        var req: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(st, [], &req) == errSecSuccess, let req else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(unsafeBitCast(code, to: SecStaticCode.self), [], &info) == errSecSuccess,
+              let hash = (info as? [String: Any])?[kSecCodeInfoUnique as String] as? Data
+        else { return nil }
+        return CodeIdentity(requirement: req, cdhash: hash)
+    }
+
+    @Test func theTestRunnerHasARunningIdentity() {
+        // Whatever runs the tests (swift test's helper, xctest) is signed,
+        // at least ad hoc by the linker, so its identity can be read.
+        #expect(CodeIdentity.runningProcess()?.cdhash?.count == 20)
+    }
+
+    @Test func aRunningAppMatchesItsOwnCodeOnDisk() throws {
+        // Not the test runner: it is the toolchain's binary, and an ad hoc
+        // universal one (CI's swiftpm-testing-helper) has an implicit
+        // designated requirement naming only the running slice's hash, so
+        // it fails the all-architectures check against its own file. A
+        // tiny app here instead, arm64 and x86_64 as a release is, signed
+        // with an explicit requirement as a Developer ID app is, started
+        // and read by its pid. (Built here: the system's own binaries are
+        // arm64e, which an older macOS may not run once re-signed ad hoc.)
+        let tmp = Self.tmp("run")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        let exe = tmp.appendingPathComponent("waiter")
+        let src = tmp.appendingPathComponent("waiter.c")
+        try Data("#include <unistd.h>\nint main(void) { pause(); return 0; }\n".utf8).write(to: src)
+        let cc = Process()
+        cc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        cc.arguments = ["clang", "-arch", "arm64", "-arch", "x86_64", src.path, "-o", exe.path]
+        try cc.run()
+        cc.waitUntilExit()
+        try #require(cc.terminationStatus == 0)
+        let a = tmp.appendingPathComponent("a/Tiny.app")
+        let other = tmp.appendingPathComponent("other/Tiny.app")
+        let rebuilt = tmp.appendingPathComponent("rebuilt/Tiny.app")
+        try Self.makeSignedApp(at: a, executable: exe.path, designatedByIdentifier: true)
+        try Self.makeSignedApp(at: other, identifier: "invalid.owlink.test.other", executable: exe.path,
+                               designatedByIdentifier: true)
+        try Self.makeSignedApp(at: rebuilt, extra: "another build", executable: exe.path, designatedByIdentifier: true)
+        #expect(CodeSignature.architectures(ofBundleAt: a).count == 2)
+
+        let p = Process()
+        p.executableURL = a.appendingPathComponent("Contents/MacOS/Tiny")
+        try p.run()
+        defer { p.terminate(); p.waitUntilExit() }
+        let me = try #require(Self.identity(ofRunning: p.processIdentifier))
+        #expect(me.cdhash?.count == 20)
+        #expect(me.matches(bundleAt: a))
+        // A different app, and the same app built differently (its
+        // requirement passes, its hash doesn't), don't.
+        #expect(!me.matches(bundleAt: other))
+        #expect(!me.matches(bundleAt: rebuilt))
+        // And the mover's check, on a copy of it.
+        let copy = tmp.appendingPathComponent("Applications/Tiny.app")
+        try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try LiveAppInstallFileSystem(expectedCode: me).copy(a, to: copy)
+        #expect(LiveAppInstallFileSystem(expectedCode: me).signatureMatchesRunningApp(copy))
     }
 }
 
