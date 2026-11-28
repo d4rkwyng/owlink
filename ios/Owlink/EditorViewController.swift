@@ -2693,6 +2693,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if let l = RulesHintProvider.guessedLanguage(shown.hint) { fixTitle = String(localized: "Use \(l.displayName)") }
         if shown.hint.id == RulesHintProvider.saveCopyID { fixTitle = String(localized: "Save") }
         hintBar.show(shown.hint, fixTitle: fixTitle, ignoreTitle: ignoreTitle, more: shownHints.count > 1)
+        owl.markShown(shown)
         if hintBar.isHidden {
             hintBar.alpha = 0
             hintBar.isHidden = false
@@ -2783,7 +2784,28 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self?.moveOwl(to: .default)
         }
         let top: [UIMenuElement] = [ask, check] + (checkScriptAction().map { [$0] } ?? [])
-        return UIMenu(children: top + [UIMenu(options: .displayInline, children: [hints, reset])])
+        let recent: [UIMenuElement] = recentHintsMenu().map { [$0] } ?? []
+        return UIMenu(children: top + recent + [UIMenu(options: .displayInline, children: [hints, reset])])
+    }
+
+    /// Recent Hints: the last hints his bubble showed, to see again (the
+    /// Mac's popover list, 0.5.3). Nil when there are none.
+    func recentHintsMenu() -> UIMenu? {
+        guard !owl.recent.isEmpty else { return nil }
+        let items = owl.recent.map { entry in
+            UIAction(title: entry.hint.title) { [weak self] _ in self?.showRecentHint(entry) }
+        }
+        let m = UIMenu(title: String(localized: "Recent Hints"), image: UIImage(systemName: "clock"), children: items)
+        m.accessibilityIdentifier = "owl.recentHints"
+        return m
+    }
+
+    func showRecentHint(_ entry: OwlCoordinator.Shown) {
+        let text = (textView.textStorage.string as NSString).copy() as! NSString
+        let stale = owl.showAgain(entry, text: text, generation: generation)
+        bubbleOpen = true
+        showHint()
+        if stale { toast(String(localized: "The text this hint was about has changed.")) }
     }
 
     /// "Check Script for Risks…", only for a script (the overflow menu and the owl's).

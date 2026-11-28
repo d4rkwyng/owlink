@@ -156,4 +156,40 @@ final class EditorOwl {
     }
 
     func cancel() { task?.cancel(); aiTask?.cancel() }
+
+    // MARK: Recent hints (Mac 0.5.3)
+
+    /// Hints shown in his bubble, most recent first, at most `recentLimit`
+    /// (the shared `OwlCoordinator.Shown`, so a replay checks the text the
+    /// same way the Mac's does).
+    private(set) var recent: [OwlCoordinator.Shown] = []
+    static let recentLimit = 8
+
+    /// `s` was shown in the bubble.
+    func markShown(_ s: Shown, now: Date = Date()) {
+        let range = s.hint.range.map { NSRange(location: $0.location + s.offset, length: $0.length) }
+        let entry = OwlCoordinator.Shown(hint: s.hint, documentID: documentID, date: now, documentRange: range, expected: s.seen)
+        if recent.first?.hint == entry.hint, recent.first?.documentRange == range { return }
+        recent.removeAll { $0.hint.id == s.hint.id }
+        recent.insert(entry, at: 0)
+        if recent.count > Self.recentLimit { recent.removeLast(recent.count - Self.recentLimit) }
+    }
+
+    /// A recent hint, again, as the current one (even one dismissed). With
+    /// the text at its range unchanged it keeps its highlight and Fix it;
+    /// otherwise title and detail only. True when it was stale.
+    @discardableResult
+    func showAgain(_ entry: OwlCoordinator.Shown, text: NSString, generation: Int) -> Bool {
+        let r = OwlCoordinator.replay(entry, document: text)
+        let h = r.hint
+        let hint = OwlHint(id: h.id, kind: h.kind, title: h.title, detail: h.detail, range: r.documentRange,
+                           replacement: r.isStale ? nil : h.replacement, source: h.source)
+        dismissed.remove(hint.id)
+        hints.removeAll { $0.hint.id == hint.id }
+        hints.insert(Shown(hint: hint, offset: 0, generation: generation, seen: r.expected), at: 0)
+        if hints.count > 4 { hints.removeLast(hints.count - 4) }
+        current = 0
+        onChange?()
+        return r.isStale
+    }
 }
