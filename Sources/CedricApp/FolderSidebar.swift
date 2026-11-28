@@ -70,18 +70,6 @@ extension AppDelegate {
         return v.isDirectory == true && v.isPackage != true
     }
 
-    /// The front tab's file when it is inside `folder` (links resolved),
-    /// so a folder open can select it once the listing lands.
-    func frontFile(inside folder: URL) -> URL? {
-        guard let file = currentFileURL else { return nil }
-        let root = folder.standardizedFileURL
-        let realRoot = root.resolvingSymlinksInPath()
-        let real = file.standardizedFileURL.resolvingSymlinksInPath()
-        if FolderTree.relativePath(of: real, in: realRoot) != nil { return file }
-        if FolderTree.eventRelativePath(real.path, roots: [root, realRoot]) != nil { return file }
-        return nil
-    }
-
     /// Opens `url` in the folder sidebar (replacing the folder open before)
     /// and shows it in the selected tab. `state`: restoring a session.
     /// `reveal`: a file to select once the folder is listed; if nil, the front tab's file is selected when it is inside the folder.
@@ -101,12 +89,14 @@ extension AppDelegate {
         FolderSidebar.pendingFolder = nil
         let s = FolderSidebar(root: url.standardizedFileURL, state: state)
         FolderSidebar.shared = s
-        // After any folder open, select the front document if it is
-        // inside this folder. File › Open Folder does not pass reveal:
-        // (Open Enclosing Folder does). folderSidebarFollow only runs
-        // when a tab becomes key, which does not fire when the same tab
-        // stays in front.
-        s.pendingReveal = reveal ?? frontFile(inside: url)
+        if let reveal, let path = FolderTree.relativePath(of: reveal, in: s.rootURL) {
+            s.folderOpenPath = { path }
+        } else {
+            s.folderOpenPath = { [weak self, weak s] in
+                guard let s, let file = reveal ?? self?.currentFileURL else { return nil }
+                return s.pathForFolderOpen(file)
+            }
+        }
         s.onOpen = { [weak self] node in self?.openFromFolder(node) }
         s.onCreateFile = { [weak self] node in self?.openFromFolder(node, asText: true) }
         s.onChange = { [weak self] in self?.scheduleSessionSave() }
@@ -376,6 +366,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     var onPrepareFileOperation: (() -> Void)?
     private var renamingNode: FolderNode?
     /// Selected when the root is first listed (Open Enclosing Folder).
+    fileprivate var folderOpenPath: (() -> String?)?
     var pendingReveal: URL?
     /// Hidden items shown after being created or renamed here.
     private var revealedHiddenURLs = Set<URL>()
@@ -679,6 +670,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
                 }
             }
         }
+        if folderOpenPath != nil { revealFolderOpenTarget() }
         if let u = pendingReveal, u.deletingLastPathComponent().standardizedFileURL == node.url.standardizedFileURL,
            let rel = FolderTree.relativePath(of: u, in: rootURL), let found = root.descendant(rel),
            outline.row(forItem: found) >= 0 {
@@ -752,6 +744,29 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     }
 
     // MARK: Selection
+
+    fileprivate func pathForFolderOpen(_ file: URL) -> String? {
+        let real = file.standardizedFileURL.resolvingSymlinksInPath()
+        guard let resolved = FolderTree.eventRelativePath(real.path, roots: [rootURL.resolvingSymlinksInPath()]) else { return nil }
+        return FolderTree.relativePath(of: file, in: rootURL) ?? resolved.rel
+    }
+
+    /// Each expansion starts its own listing. Read the target again when
+    /// that listing arrives, since the front tab may have changed.
+    private func revealFolderOpenTarget() {
+        guard let path = folderOpenPath?() else { folderOpenPath = nil; return }
+        var node = root
+        for part in FolderTree.components(path) {
+            guard let child = node.child(named: part) else { folderOpenPath = nil; return }
+            node = child
+            if child.isDirectory {
+                outline.expandItem(child)
+                if child.isLoading { return }
+            }
+        }
+        folderOpenPath = nil
+        reveal(node.url)
+    }
 
     /// Selects the row of `url` if its folder is listed and expanded (no
     /// folder is expanded for it).
@@ -963,6 +978,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
            !FolderTree.alwaysHidden.contains(url.lastPathComponent) {
             revealedHiddenURLs.insert(url.standardizedFileURL)
         }
+        folderOpenPath = nil
         pendingReveal = url
         if parent !== root { outline.expandItem(parent) }
         load(parent)

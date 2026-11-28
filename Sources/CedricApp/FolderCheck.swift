@@ -794,6 +794,22 @@ extension DevChecks {
             until("Open Folder selects the real row for the alias tab") {
                 sidebar?.selectedNode?.url == other
             },
+            // Both calls run on the main thread before the queued listing can apply.
+            sync {
+                _ = app.open(readme)
+                app.openFolder(a)
+                _ = app.open(nested)
+                expect(sidebar?.root.isLoaded == false && app.currentFileURL == nested,
+                       "front tab changed before the first listing arrived")
+            },
+            until("implicit reveal follows the new front tab") { sidebar?.selectedNode?.url == nested },
+            sync {
+                app.openFolder(a, reveal: readme)
+                _ = app.open(aliasFile)
+                expect(sidebar?.root.isLoaded == false && app.currentFileURL == aliasFile,
+                       "front tab changed during the explicit reveal")
+            },
+            until("explicit reveal keeps the requested file") { sidebar?.selectedNode?.url == readme },
             sync { app.closeFolder() },
         ]
     }
