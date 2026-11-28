@@ -51,7 +51,10 @@ BIN="$APP/Contents/MacOS/Cedric"
 cedric_require_check_build "$APP"
 mkdir -p "$OUT"
 W=$(mktemp -d)
-trap 'rm -rf "$W"' EXIT
+# The settings check's own AI defaults suite (never the user's standard domain).
+# CheckIsolation takes only cedric-check-<letters, digits, hyphens> as a check suite.
+SETTINGS_SUITE="cedric-check-tools-settings-$$-$RANDOM"
+trap 'rm -rf "$W"; defaults delete "$SETTINGS_SUITE" >/dev/null 2>&1 || true; rm -f "$HOME/Library/Preferences/$SETTINGS_SUITE.plist"' EXIT
 cedric_isolate "$W"
 export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_CHECK_OUT="$OUT"
 # The recent check's snapshot of the recent-documents list: a fixed file in
@@ -86,7 +89,17 @@ for c in $DEFAULT; do
 done
 for c in $CHECKS; do
     echo "== $c"
-    if ! env CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    # settings: Settings › Cedric on the Built-in engine (its compact Model
+    # chooser), with an empty models folder and an AI defaults suite of its
+    # own (it saves a model choice there), no inherited model or address,
+    # and a spy in place of llama.cpp. The check refuses to run without both.
+    extra=()
+    if [ $c = settings ]; then
+        mkdir -p "$W/models"
+        extra=(-u CEDRIC_AI_MODEL -u CEDRIC_AI_URL CEDRIC_AI_BACKEND=builtIn "CEDRIC_MODELS_DIR=$W/models"
+               "CEDRIC_AI_DEFAULTS=$SETTINGS_SUITE" CEDRIC_BUILTIN_SPY=1)
+    fi
+    if ! env ${extra[@]+"${extra[@]}"} CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
         | grep -E "^check:" | tee "$OUT/$c.txt"; then fail=1; fi
     grep -q "check: done .* 0 failed" "$OUT/$c.txt" || { echo "tools-check: $c FAILED" >&2; fail=1; }
     [ $c != recent ] || recent_restore

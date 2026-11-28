@@ -23,11 +23,10 @@ public struct BuiltInEngine: AIEngine {
         catalog == nil ? "This copy of Owlink is missing its model list (Resources/AI/models.json)." : nil
     }
     public var needsAddress: Bool { false }
-    public var note: String? {
-        LlamaRuntime.isSlowHardware
-            ? "Slow on Intel Macs: the built-in model runs on the CPU here. Another Mac on your network will be much faster."
-            : nil
-    }
+    /// The caveat on Intel Macs (`note` there).
+    public static let slowHardwareNote = "Slow on Intel Macs: the built-in model runs on the CPU here. Another Mac on your network will be much faster."
+
+    public var note: String? { LlamaRuntime.isSlowHardware ? Self.slowHardwareNote : nil }
 
     /// The downloaded (installed) models, in catalog order.
     public var installedModels: [BuiltInModel] { catalog.map(store.installed(in:)) ?? [] }

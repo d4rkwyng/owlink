@@ -1209,9 +1209,13 @@ Settings…; off by default) use a local model only. Each choice there
 applies at once: ticking "Ask a local model for hints" or picking where
 the AI runs or a model switches the engine without a Save. The network
 address applies when you press Return or leave the field, and only once
-it is a local one. Test Connection and each built-in model's Download,
+it is a local one. Test Connection and the built-in model's Download,
 Pause and Delete stay buttons, so nothing is downloaded or loaded until
-you click. Automatic checks (and automatic AI grammar) are **off** by
+you click. For the built-in engine, the Model menu lists every model
+Owlink can download, each tagged recommended, non-commercial or with its
+size; pick one that isn't downloaded yet and the button beside the menu
+downloads it, while the model in use stays as it was. The (i) button
+shows the model's details and license. Automatic checks (and automatic AI grammar) are **off** by
 default for LM Studio, Ollama and custom servers. The first time you
 enable them, Cedric explains that visible text goes to the named server
 on your local network, not the cloud. If they were already on for a

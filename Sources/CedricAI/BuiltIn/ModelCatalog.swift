@@ -66,6 +66,37 @@ public struct BuiltInModel: Codable, Sendable, Equatable, Identifiable {
         return String(format: "%gB · %@ · %.1f GB", parametersB, quantization, gb)
     }
 
+    /// "2.5 GB": the download size, as `shortDescription` shows it.
+    public var sizeLabel: String { String(format: "%.1f GB", Double(sizeBytes) / 1_000_000_000) }
+
+    /// Settings › Cedric's Model menu tag: "recommended" for the default,
+    /// else "non-commercial" when the license is (so it shows before any
+    /// download), else the download size.
+    public var menuTag: String {
+        if isDefault { return "recommended" }
+        if isNonCommercial { return "non-commercial" }
+        return sizeLabel
+    }
+
+    /// "Qwen2.5 Coder 3B (non-commercial)": the Model menu's title.
+    public var menuTitle: String { "\(name) (\(menuTag))" }
+
+    /// The full description the Model menu's tooltip and info popover show:
+    /// summary, parameters, quantization, size, license, memory and source.
+    public var details: String {
+        var lines = [summary.isEmpty ? name : "\(name). \(summary)", shortDescription, "License: \(license)."]
+        if isNonCommercial { lines.append("NON-COMMERCIAL license: not for commercial use.") }
+        lines.append("Wants \(minRAMGB) GB of memory or more.")
+        lines.append("Source: \(url.host ?? "")\(url.path)")
+        return lines.joined(separator: "\n")
+    }
+
+    /// The Model menu's first item for the built-in engine: the model
+    /// Automatic picks, or a hint to download one when none is installed.
+    public static func automaticTitle(suggested id: String?) -> String {
+        id.map { "Automatic (\($0))" } ?? "Automatic (download a model)"
+    }
+
     /// True when this Mac has less memory than the model wants.
     public func needsMoreMemory(physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory) -> Bool {
         physicalMemory < UInt64(minRAMGB) * 1_073_741_824

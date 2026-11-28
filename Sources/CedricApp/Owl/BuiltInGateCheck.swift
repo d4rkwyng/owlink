@@ -115,8 +115,10 @@ enum BuiltInGateCheck {
             let box = section.launchBox
             check(!box.isHiddenOrHasHiddenAncestor, "Load model at launch is shown for Built-in")
             check(box.title == "Load model at launch" && box.state == .off, "titled, and off (\(box.state.rawValue))")
-            check(section.launchNote.stringValue == LocalAISettings.loadModelAtLaunchNote && !section.launchNote.isHiddenOrHasHiddenAncestor,
-                  "with its note")
+            check(section.launchNote.stringValue == LocalAISettings.loadModelAtLaunchShortNote && !section.launchNote.isHiddenOrHasHiddenAncestor,
+                  "with its one-line note")
+            check(section.launchNote.toolTip == LocalAISettings.loadModelAtLaunchNote && box.toolTip == LocalAISettings.loadModelAtLaunchNote,
+                  "and the full note as the tooltip")
             OwlHistoryCapCheck.shot(panel, "\(out)/builtin-3-settings.png") {
                 panel.close()
                 OwlCheck.finish(out)

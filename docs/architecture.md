@@ -2008,12 +2008,25 @@ cookies, no cache, no identifiers, User-Agent `Cedric`. Nothing is sent
 about the user or their code, and there is no telemetry. Inference is
 fully local; the owl's text never leaves the process.
 
-**Settings sheet.** With Built-in selected, a "Download:" row lists the
-catalog: name (the default marked recommended), size, licence, a memory
-warning where it applies, and per-model Download / Pause / Resume / Cancel
-/ Delete with a progress bar and status. The Model menu offers the
-downloaded models; Automatic picks the default if downloaded. Test
-Connection loads the model and times a first answer.
+**Settings sheet.** With Built-in selected, one "Model:" popup is both the
+choice and the download chooser: Automatic first ("Automatic (<id>)", or
+"Automatic (download a model)" when none is installed), then every catalog
+model, installed or not, titled with a tag (`BuiltInModel.menuTitle`):
+"recommended" for the default, else "non-commercial" when the license is,
+else the size. Picking Automatic or an installed model saves it as today;
+picking one that isn't downloaded only makes it the download target (the
+saved model stays in effect, and a finished download doesn't switch it).
+Beside the popup, one button (Download / Pause / Resume / Delete, plus
+Cancel while downloading or paused) and an (i) button whose popover, like
+the tooltip, has the full description (`BuiltInModel.details`: summary,
+parameters, quantization, size, license, memory, Hugging Face source). One
+status line under it shows the state and progress of the shown model (with
+Automatic: the model it uses, else the default), and one line says where
+downloads go (the full path in its tooltip). Downloading is still
+`BuiltInDownloads` → `ModelDownloader`, and Download still shows the
+bundled license (NON-COMMERCIAL marked) before anything starts. Test
+Connection loads the model and times a first answer. The tab is about 60%
+of its old height (`SettingsCheck.cedricTabMaxHeight`).
 
 **Tests.** `BuiltInTests.swift`: the bundled catalog (valid, pinned, one
 default) and its validation; the downloader against a URLProtocol fake
@@ -2028,9 +2041,22 @@ Qwen3 `/no_think`, the scheduler's timeout cancelling a generation).
 default model for real (optionally pausing and resuming with
 `CEDRIC_BUILTIN_PAUSE=1`) and runs the three owl snippets;
 `CEDRIC_APPLE_LIVE=1 swift test --filter LiveAppleTests` does the same on
-Apple Intelligence. `CEDRIC_BUILTIN_CHECK=/out CEDRIC_MODELS_DIR=/tmp/x`
-runs `BuiltInCheck` in the app: real clicks on Download, Pause, Resume and
-Delete in the sheet, with snapshots.
+Apple Intelligence. `CEDRIC_BUILTIN_CHECK=/out CEDRIC_MODELS_DIR=/tmp/x
+CEDRIC_AI_DEFAULTS=cedric-check-<id>` runs `BuiltInCheck` in the app: real
+clicks on Download, Pause, Resume and Delete in the sheet, with snapshots.
+It, and `CEDRIC_CHECK=settings`, fail before Settings opens unless both the
+models folder (an existing folder outside `~/Library`) and the AI defaults
+suite (`cedric-check-` then letters, digits or hyphens: never the app's
+standard domain or another program's) are the check's own
+(`CheckIsolation`). The folder is resolved as the file system does
+(symbolic links, then `..`), its ancestors are compared with `~/Library` by
+device and inode, and `ModelStore` opens that resolved folder, not the
+string in the environment. The Settings check also needs the folder empty,
+creates its stand-in model's files only if nothing has their names, removes
+only those, and reads what was saved from the suite's own persistent domain.
+BuiltInCheck selects its model only once it is cleanly Not downloaded (no
+model, marker or partial file), and presses Download only while that model
+is still the one shown.
 
 ### Ask Cedric tool calls: the eval
 

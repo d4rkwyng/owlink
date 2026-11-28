@@ -16,11 +16,13 @@ public struct ModelStore: Sendable {
         self.directory = directory
     }
 
-    /// CEDRIC_MODELS_DIR=/dir overrides it (the app checks use a temp dir).
+    /// CEDRIC_MODELS_DIR=/dir overrides it (the app checks use a temp dir):
+    /// the folder that path resolves to (symbolic links, then ".."), fixed
+    /// once per process, which is the one CheckIsolation validates. Never
+    /// the raw string, which could name a different folder by the time it
+    /// is opened.
     public static var defaultDirectory: URL {
-        if let dir = DevEnvironment.values["CEDRIC_MODELS_DIR"], !dir.isEmpty {
-            return URL(fileURLWithPath: dir, isDirectory: true)
-        }
+        if let dir = CheckIsolation.processModelsOverride { return dir }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent("Cedric/Models", isDirectory: true)
@@ -31,6 +33,10 @@ public struct ModelStore: Sendable {
     public func fileURL(for model: BuiltInModel) -> URL { directory.appendingPathComponent(model.fileName) }
     func markerURL(for model: BuiltInModel) -> URL { directory.appendingPathComponent(model.fileName + ".verified") }
     public func partialURL(for model: BuiltInModel) -> URL { partialDirectory.appendingPathComponent(model.fileName + ".part") }
+
+    public func cleanTargetEntries(for model: BuiltInModel) -> [URL] {
+        [fileURL(for: model), markerURL(for: model), stampURL(for: model), partialURL(for: model)]
+    }
 
     public func isInstalled(_ model: BuiltInModel) -> Bool {
         let fm = FileManager.default
@@ -108,11 +114,10 @@ public struct ModelStore: Sendable {
 
     public func installed(in catalog: ModelCatalog) -> [BuiltInModel] { catalog.models.filter(isInstalled) }
 
-    /// Removes the model, its marker and any partial download.
+    /// Removes the model, its verification marker, its load-check stamp, and any partial download.
     public func delete(_ model: BuiltInModel) throws {
         let fm = FileManager.default
-        for url in [fileURL(for: model), markerURL(for: model), stampURL(for: model), partialURL(for: model)]
-        where fm.fileExists(atPath: url.path) {
+        for url in cleanTargetEntries(for: model) where fm.fileExists(atPath: url.path) {
             try fm.removeItem(at: url)
         }
     }

@@ -6,6 +6,9 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [Unreleased]
 
+### Changed
+- **Settings › Cedric is about half as tall.** The built-in engine's five download rows are now one Model menu: each model is tagged recommended, non-commercial or with its size, and one button beside it downloads, pauses, resumes or deletes the model shown, with its progress on one line. Picking a model that isn't downloaded doesn't change the model in use. Full details (license, memory, source) are in the (i) button and tooltips, and long notes are one line with the full text in a tooltip. A saved model this build doesn't list now says so, instead of saying no models are bundled.
+
 ## [0.6.0] - 2026-11-27
 
 ### Added
