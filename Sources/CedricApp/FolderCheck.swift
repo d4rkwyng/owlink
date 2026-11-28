@@ -840,6 +840,16 @@ extension DevChecks {
         let bigLine = "a line of a big log, read in the background\n"
         try? Data(String(repeating: bigLine, count: AppDelegate.backgroundOpenBytes / bigLine.utf8.count + 1000).utf8).write(to: bigText)
         let small = write("switch/Big/small.txt", "small\n")
+        // The reverse batch (small file first) and a trailing read that fails.
+        let bigText2 = write("switch/Big/big2.log", "")
+        try? fm.removeItem(at: bigText2)
+        try? fm.copyItem(at: bigText, to: bigText2)
+        let gone = folder("Gone")
+        let goneBig = write("switch/Gone/gone.log", "")
+        try? fm.removeItem(at: goneBig)
+        try? fm.copyItem(at: bigText, to: goneBig)
+        var alerts = 0
+        var dismissTimer: Timer?
         let outsideFiles = ["click.md", "quick.md", "link.md", "wiki.md", "restored.md"].map { write("switch/Other/\($0)", "\($0)\n") }
         let hiddenFile = write("switch/Hidden/hidden.md", "hidden\n")
         let closedFile = write("switch/Hidden/closed.md", "closed\n")
@@ -926,6 +936,54 @@ extension DevChecks {
             switchedTo(big, file: bigText, "big file"),
             dockedInText(bigText, "big file"),
             sync { expect(app.currentFileURL == bigText, "mixed batch leaves the big file in front") },
+            // The reverse order, the sidebar in a third folder: the small file,
+            // in front at once, switches the folder when the batch is in,
+            // while the big file still waits; the big file's tab then switches again.
+            sync { app.openFolder(a) },
+            until("reverse batch: folder A is listed first", timeout: 4) { root() == a.path && sidebar?.root.isLoaded == true },
+            sync {
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [welcome, bigText2])
+            },
+            switchedTo(b, file: welcome, "reverse batch while big file waits"),
+            dockedInText(welcome, "reverse batch while big file waits"),
+            sync {
+                expect(app.currentFileURL == welcome && app.backgroundReading == bigText2.standardizedFileURL,
+                       "reverse batch: small file is in front while the big file waits")
+                readGate.signal()
+            },
+            until("reverse batch: the big file's tab arrives", timeout: 20) { textTab(bigText2) != nil },
+            switchedTo(big, file: bigText2, "reverse batch big file"),
+            dockedInText(bigText2, "reverse batch big file"),
+            sync { expect(app.currentFileURL == bigText2, "reverse batch leaves the big file in front") },
+            // A trailing read that fails (gone before its turn): the sidebar
+            // stays on the small file's folder, the file the batch left in front.
+            sync {
+                expect(root() != b.path && root() != gone.path, "failed batch: the sidebar starts in a third folder", "root=\(root())")
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [welcome, goneBig])
+                expect(app.backgroundReading == goneBig.standardizedFileURL, "failed batch: the big file waits to be read")
+                try? fm.removeItem(at: goneBig)
+                // Its "couldn't open" alert is answered.
+                let dismiss = Timer(timeInterval: 0.2, repeats: true) { _ in
+                    MainActor.assumeIsolated { if NSApp.modalWindow != nil { alerts += 1; NSApp.abortModal() } }
+                }
+                RunLoop.main.add(dismiss, forMode: .modalPanel)
+                dismissTimer = dismiss
+                readGate.signal()
+            },
+            until("failed batch: the read is over", timeout: 20) { app.backgroundOpens.isEmpty && alerts == 1 },
+            sync {
+                dismissTimer?.invalidate()
+                expect(root() == b.path && selected() == welcome.lastPathComponent,
+                       "failed batch: the sidebar stays on the small file's folder", "root=\(root()) selected=\(selected())")
+                expect(docked(textTab(welcome)?.window) && app.currentFileURL == welcome,
+                       "failed batch: the small file is in front, the sidebar docked in its tab", "root=\(root())")
+                expect(textTab(goneBig) == nil, "failed batch: the gone file has no tab")
+            },
+            // Back to the big file's folder for the steps below.
+            sync { app.application(NSApp, open: [bigText]) },
+            switchedTo(big, file: bigText, "back to the big file"),
             sync {
                 let was = root()
                 // Through a link outside the folder into it: inside, no switch.
