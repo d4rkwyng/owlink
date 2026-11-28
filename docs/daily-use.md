@@ -68,9 +68,12 @@ unit-tested in `Tests/CedricCoreTests/DailyUseTests.swift`. Each marker's
 comment names the branch that fixes it:
 
 - `sidebar-follow`: fix/0.6.1-sidebar-speed
-- `settings-cedric-tall`: fix/cedric-settings-compact
+- `settings-cedric-tall`: fix/cedric-settings-compact (draft PR #26; stays known-bug on main)
 - `longline-wrap`: fix/0.6.1-longline-wrap
 - `md-detect`: fix/0.6.1-md-detect
+- `open-folder-select`: File › Open Folder lists the folder that holds the
+  selected tab's file but does not select that file (Open Enclosing Folder
+  does, via `reveal:`). No fix branch yet.
 
 ## Speed budgets
 

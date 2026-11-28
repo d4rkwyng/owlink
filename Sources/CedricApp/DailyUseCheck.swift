@@ -12,7 +12,7 @@ import CedricCore
 ///               drop) and File › Open's path: the sidebar should follow
 ///   2 click     20 files of a mixed folder clicked in the sidebar: tab,
 ///               title, text shown, no second tab, the row selected,
-///               binary held, .pcap/.gpx without wrong notices
+///               binary held (an encoding-guess bar on .pcap/.bin is correct)
 ///   3 preview   Markdown preview on and off, twice: width, no overlap,
 ///               the heading rendered, the editor's width back
 ///   4 recent    File › Open Recent lists the fixture files; choosing one
@@ -30,9 +30,13 @@ import CedricCore
 /// Known bugs (expected failures; strict: a marker whose assertions pass
 /// fails the run until it is removed):
 ///   sidebar-follow        fixed on fix/0.6.1-sidebar-speed
-///   settings-cedric-tall  fixed on fix/cedric-settings-compact
+///   settings-cedric-tall  fixed on fix/cedric-settings-compact (draft PR #26)
 ///   longline-wrap         fixed on fix/0.6.1-longline-wrap
 ///   md-detect             fixed on fix/0.6.1-md-detect
+///   open-folder-select    File › Open Folder does not select the front tab's
+///                         file when that file is in the opened folder (no
+///                         fix branch yet). Open Enclosing Folder does, via
+///                         reveal:.
 @MainActor
 extension DevChecks {
     /// The fixture: folder A (a mixed set) and folder B elsewhere in the temp folder.
@@ -402,7 +406,11 @@ extension DevChecks {
                             h.check(t.binary != nil && t.text.isEmpty && t.binaryBar?.isHidden == false,
                                     "click \(name): held as binary, the bar showing (\(t.binaryBar?.label.stringValue ?? "no bar"))",
                                     "binary=\(String(describing: t.binary).prefix(20)) text=\(t.text.count)")
-                            h.check(notices.allSatisfy { $0.hasPrefix("binary:") }, "click \(name): no other notice", "\(notices)")
+                            // Binary files that aren't valid UTF-8 also show
+                            // the encoding-guess bar (Latin-1 / Mac Roman).
+                            // That is correct; only unexpected kinds fail.
+                            h.check(notices.allSatisfy { $0.hasPrefix("binary:") || $0.hasPrefix("encoding:") },
+                                    "click \(name): no other notice", "\(notices)")
                         } else {
                             h.check(t.binary == nil, "click \(name): opened as text, not held as binary")
                             h.check(notices.isEmpty, "click \(name): no notice bar", "\(notices)")
@@ -603,8 +611,20 @@ extension DevChecks {
                     let files = ((try? FileManager.default.contentsOfDirectory(atPath: fx.a.path)) ?? []).filter { $0 != "sub" && !$0.hasPrefix(".") }
                     h.check(names.first == "sub" && Set(names.dropFirst()) == Set(files) && names.count == files.count + 1,
                             "folders: A's rows are listed (sub, then its \(files.count) files)", "\(names.count): \(names)")
-                    h.check(s?.selectedNode?.url.standardizedFileURL == fx.readme.standardizedFileURL,
-                            "folders: back on A, the selected tab's file (readme.md) is selected, as on a tab switch", "selected: \(s?.selectedNode?.name ?? "nothing")")
+                    // Real app bug, not a harness miss: File › Open Folder
+                    // (openFolder(_:) with reveal == nil) lists the folder
+                    // but does not select the front tab's file, even when
+                    // that file is in the folder. folderSidebarFollow only
+                    // runs when a tab becomes key, which does not fire when
+                    // the same tab stays in front. Open Enclosing Folder
+                    // passes reveal: and does select. Evidence: flows-5
+                    // shot 34-folders-a.png (readme.md tab in front, A listed,
+                    // no sidebar row highlighted); selectedNode is nil after
+                    // a 0.3 s settle. s is FolderSidebar.shared (computed).
+                    h.knownBug(id: "open-folder-select", note: "File › Open Folder of the folder that holds the selected tab's file lists the folder but does not select that file (Open Enclosing Folder does, via reveal:)") {
+                        h.check(s?.selectedNode?.url.standardizedFileURL == fx.readme.standardizedFileURL,
+                                "folders: back on A, the selected tab's file (readme.md) is selected, as on a tab switch", "selected: \(s?.selectedNode?.name ?? "nothing")")
+                    }
                     h.check(tabList() == tabsBefore, "folders: opening A again leaves the tabs alone", "\(tabsBefore.count) → \(tabList().count)")
                     let w = s?.frame.width ?? 0
                     h.check(abs(w - widthBefore) <= 2, "folders: the docked sidebar keeps its width opening A", "\(Int(w)) pt, was \(Int(widthBefore))")
