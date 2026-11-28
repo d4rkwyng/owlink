@@ -1,51 +1,55 @@
 import Foundation
 import Darwin
+import os
 
 /// The "images" folder next to a Markdown document, where pasted, dropped
 /// and picked images are copied. Every step goes through file descriptors
-/// so that what was checked is what gets written (Astra review, 0.6):
+/// so that what was checked is what gets written (Astra review, 0.6; the
+/// handle-based publish, round 6):
 ///
-/// - The document's folder is opened once and pinned. "images" is opened
-///   beneath it with `O_RESOLVE_BENEATH` (made with `mkdirat` if
-///   missing): the kernel follows a symbolic link only while it stays
-///   inside the document's folder, and refuses one that leads out. An
-///   "images" that leads back to the document's folder itself is refused
-///   (device and inode). No path strings are compared.
+/// - Opened once: a boundary (iOS: the folder grant, opened without
+///   following a final link and checked against its identity as granted;
+///   the Mac: the document's folder itself), the document's folder (iOS:
+///   walked from the grant one component at a time, `O_NOFOLLOW |
+///   O_DIRECTORY` each), and "images" in it (made with `mkdirat` if
+///   missing). Where the kernel keeps lookups beneath a folder
+///   (`containmentEnforced`), "images" is opened with `O_RESOLVE_BENEATH`:
+///   a link to a folder inside the document's folder is followed, one that
+///   leads out, or back to the folder itself, is refused
+///   (`Failure.outside`). Elsewhere (the fallback) only a real folder is
+///   used (`O_NOFOLLOW`; `Failure.imagesIsLink`). The boundary's path as
+///   the kernel reports it (`F_GETPATH`) and the folders' identities
+///   (device and inode) are recorded.
+/// - `verify`, at open and again before staging and before each publishing
+///   attempt: the boundary is still at its recorded path; the document's
+///   folder is still found beneath it at the same components (iOS); "images"
+///   looked up again by the same rule is still the held folder; and the held
+///   folder's own path (`F_GETPATH`) is still below the document's folder as
+///   recorded. Else `Failure.destinationChanged`: a folder moved out of the
+///   grant, or an "images" moved away or swapped for another folder or a
+///   link, gets nothing.
 /// - A copy reads the source through one descriptor that must be a
 ///   regular file (`fstat`): a symbolic link's target's bytes are copied,
 ///   never the link; a folder, pipe or device is refused.
-/// - Before any byte is written, "images" is opened beneath the pinned
-///   document folder again and must still be the pinned folder (else
-///   `Failure.destinationChanged`). The bytes go to a hidden staging file
-///   directly in the pinned document folder (`O_EXCL`), are flushed, and
-///   are then published as `images/<name>` relative to that same folder
-///   with one exclusive rename (`renameatx_np` with `RENAME_EXCL |
-///   RENAME_RESOLVE_BENEATH`): the kernel resolves the whole destination
-///   beneath the document's folder, so an "images" moved out of it (or
-///   swapped for a link out) receives neither the staged bytes nor the
-///   published file. A name already taken is never overwritten and the
-///   next free suffix is tried; a failure removes the staging file. A
-///   partial copy never has the final name. An "images" on another volume
-///   than the document's folder is reported (`Failure.otherVolume`) before
-///   the staging file is made, not after a large copy.
-/// - Where the kernel doesn't enforce beneath lookups for both the open
-///   and the rename (`containmentEnforced` is false: macOS 15), the
-///   folder-by-folder fallback is used instead (Derek, 0.6): "images" is
-///   opened from the pinned document folder with `O_NOFOLLOW |
-///   O_DIRECTORY` (made with `mkdirat` relative to it if missing), so any
-///   symbolic link there, to a folder inside or out, is refused
-///   (`Failure.imagesIsLink`) before anything is made or written. The
-///   bytes are staged in the pinned "images" itself (`O_CREAT | O_EXCL |
-///   O_NOFOLLOW`, one hidden name) and published with
-///   `renameatx_np(images, tmp, images, name, RENAME_EXCL)`: both operands
-///   are single names relative to the held folder, so an "images" swapped
-///   for another folder or a link after it was checked can't redirect the
-///   file, which lands in the folder that was opened or nowhere. Before
-///   staging and again just before the rename, the held folder's ".." must
-///   still be the pinned document folder (else
-///   `Failure.destinationChanged`, the staging file removed): an "images"
-///   moved out of the document's folder gets no published file, except in
-///   the window between that last check and the rename itself.
+/// - The bytes go to a hidden staging file in the held "images" (`openat`
+///   with `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600, its identity taken at
+///   once), are flushed, given the mode a new file gets, and are published
+///   with `renameatx_np(images, tmp, images, name, RENAME_EXCL)`: both
+///   operands are single names relative to the held folder, so nothing is
+///   resolved through a path. A name already taken is never overwritten and
+///   the next free suffix is tried; the staging entry must still be the file
+///   made before each attempt. A volume that can't rename exclusively
+///   (ENOTSUP) refuses: nothing is published another way. A partial copy
+///   never has the final name.
+/// - On any failure after the staging file is made, it is removed only while
+///   the entry is still that file (device and inode); an entry another
+///   writer put there is left in place and logged.
+/// - After the first open nothing here uses a path (no FileManager, no
+///   path rename or unlink). The window between the last check and the
+///   rename itself, and between the cleanup's identity check and its
+///   unlink, remains (Darwin has no rename or unlink by identity).
+/// - An "images" on another volume than the document's folder is reported
+///   (`Failure.otherVolume`) before the staging file is made.
 /// - The document's folder stays open until the links go in. `link(for:)`,
 ///   called just before the Markdown is inserted, checks that the
 ///   document's folder path is still that folder, that "images" looked up
@@ -77,17 +81,30 @@ public final class ImageStore {
         case otherVolume
     }
 
-    /// The pinned "images" folder.
+    /// The pinned "images" folder: everything is staged and published here.
     public let fd: Int32
-    /// Whether this store uses the kernel-enforced beneath lookups (else
-    /// the folder-by-folder fallback). Fixed when it is opened.
+    /// Whether this store opens "images" with the kernel keeping the lookup
+    /// beneath the document's folder (else the no-link fallback). Fixed
+    /// when it is opened.
     let kernel: Bool
     /// The pinned document folder, and the path the links are relative to.
     private let root: Int32
     private let folder: URL
+    /// The boundary held for the store's life: iOS the verified grant, the
+    /// Mac the document's folder (a second descriptor). `below`: the
+    /// document folder's components beneath it (empty: it is the folder).
+    private let boundary: Int32
+    private let below: [String]
+    /// Recorded at open: the boundary's and the document folder's paths as
+    /// the kernel reports them (`F_GETPATH`), and the folders' identities.
+    private let boundaryPath: [String]
+    private let folderPath: [String]
+    private let rootID: Beneath.FileID
+    private let imagesID: Beneath.FileID
     /// Each published name (by its bytes) and the file it was given.
     private var published = Publications()
-    /// Called after "images" is opened and checked (tests swap folders here).
+    /// Checks only (`DevEnvironment.checksEnabled`), like the hooks below:
+    /// called after "images" is opened and checked (tests swap folders here).
     nonisolated(unsafe) public static var afterOpen: (() -> Void)?
     /// Called after the bytes are staged, just before they are published
     /// (tests move folders here).
@@ -100,6 +117,12 @@ public final class ImageStore {
     nonisolated(unsafe) static var forceFallback = false
     /// Tests: behave as if "images" were on another volume.
     nonisolated(unsafe) static var forceOtherVolume = false
+    /// Checks only: called with the staging file once it is filled; an
+    /// errno returned is a write that failed there (ENOSPC, EIO).
+    nonisolated(unsafe) static var writeFault: ((Int32) -> Int32?)?
+    /// Checks only: called with a staging name the cleanup left in place
+    /// because the entry there is no longer the file it made.
+    nonisolated(unsafe) static var leftBehind: ((String) -> Void)?
 
     /// `RENAME_RESOLVE_BENEATH` from sys/stdio.h, written as its value:
     /// older SDKs may not name it.
@@ -139,10 +162,14 @@ public final class ImageStore {
         return renameatx_np(d, "f", d, "g", flags) == 0
     }
 
-    private init(fd: Int32, root: Int32, folder: URL, kernel: Bool) {
+    private init(fd: Int32, root: Int32, folder: URL, kernel: Bool, boundary: Int32, below: [String],
+                 boundaryPath: [String], folderPath: [String], rootID: Beneath.FileID, imagesID: Beneath.FileID) {
         self.fd = fd; self.root = root; self.folder = folder; self.kernel = kernel
+        self.boundary = boundary; self.below = below
+        self.boundaryPath = boundaryPath; self.folderPath = folderPath
+        self.rootID = rootID; self.imagesID = imagesID
     }
-    deinit { close(fd); close(root) }
+    deinit { close(fd); close(root); close(boundary) }
 
     /// Opens (making it if needed) "images" in `folder`; throws
     /// `Failure.outside` when it leads out of `folder`, and on the
@@ -151,21 +178,23 @@ public final class ImageStore {
     public static func open(in folder: URL) throws -> ImageStore {
         let dfd = Darwin.open(folder.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard dfd >= 0 else { throw posix(folder.path) }
-        return try open(pinned: dfd, folder: folder)
+        let bfd = dup(dfd)
+        guard bfd >= 0 else { let err = errno; close(dfd); throw posix(folder.path, err) }
+        return try open(pinned: dfd, folder: folder, boundary: bfd, below: [])
     }
 
     /// Opens "images" in `folder`, where `folder` itself is looked up
     /// beneath `root` (iOS: the folder the person granted, or the app's
-    /// own container) from `root`'s descriptor by `Beneath.open`: a
-    /// symbolic link on the way that leads out of `root` (or, where the
-    /// kernel doesn't keep lookups beneath, any link) is refused with
-    /// `Failure.outside`, so the grant is the boundary, not `folder`'s
-    /// path. `folder` must be `root` or lexically below it (pass both
-    /// resolved). `root` itself is opened without following a final
+    /// own container) from `root`'s descriptor one component at a time
+    /// (`O_NOFOLLOW | O_DIRECTORY` each): a symbolic link on the way is
+    /// refused with `Failure.outside`, so the grant is the boundary, not
+    /// `folder`'s path. `folder` must be `root` or lexically below it (pass
+    /// both resolved). `root` itself is opened without following a final
     /// symbolic link, and when `rootID` is given (the root as it was when
     /// it was granted) it must still be that folder: a root replaced by a
     /// link, or by another folder, is refused with `Failure.outside`. Then
-    /// as `open(in:)`.
+    /// as `open(in:)`, with `root` held as the boundary `verify` checks
+    /// against before each publishing step.
     public static func open(in folder: URL, beneath root: URL, rootID: Beneath.FileID? = nil) throws -> ImageStore {
         let base = root.standardizedFileURL.pathComponents
         let path = folder.standardizedFileURL.pathComponents
@@ -181,24 +210,71 @@ public final class ImageStore {
             throw Failure.outside
         }
         let parts = Array(path.dropFirst(base.count))
-        let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY)
+        let dfd = parts.isEmpty ? dup(rfd) : Beneath.open(parts, beneath: rfd, flags: O_RDONLY | O_DIRECTORY, walk: true)
         let err = errno
-        close(rfd)
         guard dfd >= 0 else {
+            close(rfd)
             if err == ELOOP || err == ENOTDIR || err == Beneath.notCapable || err == EINVAL { throw Failure.outside }
             throw posix(folder.path, err)
         }
-        return try open(pinned: dfd, folder: folder)
+        return try open(pinned: dfd, folder: folder, boundary: rfd, below: parts)
     }
 
-    /// `dfd`: the document's folder, opened (owned from here on).
-    private static func open(pinned dfd: Int32, folder: URL) throws -> ImageStore {
+    /// `dfd`: the document's folder, opened, and `boundary` the folder it
+    /// was opened beneath (`below` it), both owned from here on. The paths
+    /// and identities are recorded and checked once (`verify`) before
+    /// `afterOpen`; a failure there is `Failure.outside`.
+    private static func open(pinned dfd: Int32, folder: URL, boundary: Int32, below: [String]) throws -> ImageStore {
         let kernel = useKernel
         let ifd: Int32
-        do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch { close(dfd); throw error }
-        let store = ImageStore(fd: ifd, root: dfd, folder: folder, kernel: kernel)
-        afterOpen?()
+        do { ifd = try openImages(in: dfd, folder: folder, create: true, kernel: kernel) } catch {
+            close(dfd); close(boundary)
+            throw error
+        }
+        guard let boundaryPath = kernelPath(of: boundary), let folderPath = kernelPath(of: dfd),
+              folderPath.count == boundaryPath.count + below.count, Array(folderPath.prefix(boundaryPath.count)) == boundaryPath,
+              let rootID = Beneath.FileID(fd: dfd), let imagesID = Beneath.FileID(fd: ifd)
+        else {
+            close(ifd); close(dfd); close(boundary)
+            throw Failure.outside
+        }
+        let store = ImageStore(fd: ifd, root: dfd, folder: folder, kernel: kernel, boundary: boundary, below: below,
+                               boundaryPath: boundaryPath, folderPath: folderPath, rootID: rootID, imagesID: imagesID)
+        do { try store.verify() } catch { throw Failure.outside }
+        if DevEnvironment.checksEnabled { afterOpen?() }
         return store
+    }
+
+    /// The path the kernel has for what `fd` has open (`F_GETPATH`), as
+    /// components; nil when it can't say.
+    static func kernelPath(of fd: Int32) -> [String]? {
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(fd, F_GETPATH, &buf) != -1 else { return nil }
+        let path = String(cString: buf)
+        guard path.hasPrefix("/") else { return nil }
+        return (path as NSString).pathComponents
+    }
+
+    /// The held "images" is still inside the boundary, where it was opened:
+    /// the boundary is at its recorded path; the document's folder is
+    /// still found beneath it at the same components (no link followed)
+    /// with the same identity; "images" looked up in it again, by the rule
+    /// it was opened with, is still the held folder; and the held folder's
+    /// own path is still below the document's folder's recorded path.
+    /// Else `Failure.destinationChanged`.
+    func verify() throws {
+        guard Self.kernelPath(of: boundary) == boundaryPath else { throw Failure.destinationChanged }
+        if !below.isEmpty {
+            let now = Beneath.open(below, beneath: boundary, flags: O_RDONLY | O_DIRECTORY, walk: true)
+            guard now >= 0 else { throw Failure.destinationChanged }
+            defer { close(now) }
+            guard Beneath.FileID(fd: now) == rootID else { throw Failure.destinationChanged }
+        }
+        guard let again = try? Self.openImages(in: root, folder: folder, create: false, kernel: kernel) else { throw Failure.destinationChanged }
+        defer { close(again) }
+        guard Beneath.FileID(fd: again) == imagesID, Beneath.FileID(fd: fd) == imagesID,
+              let here = Self.kernelPath(of: fd), here.count > folderPath.count, Array(here.prefix(folderPath.count)) == folderPath
+        else { throw Failure.destinationChanged }
     }
 
     /// "images" in the folder `dfd` has open, made if `create` and missing.
@@ -259,13 +335,6 @@ public final class ImageStore {
         return ifd
     }
 
-    /// Fallback: the held "images" is still directly in the pinned
-    /// document folder (its ".." is that folder).
-    private func heldImagesInRoot() -> Bool {
-        guard let up = Beneath.FileID(at: fd, ".."), let rootID = Beneath.FileID(fd: root) else { return false }
-        return up == rootID
-    }
-
     /// The link to insert for `name` (published by this store):
     /// "images/<name>", encoded, once it is checked to lead to the file
     /// written. Throws `Failure.destinationChanged` when it doesn't.
@@ -316,95 +385,103 @@ public final class ImageStore {
         }
     }
 
-    /// "images" as it is now in the pinned document folder (beneath it),
-    /// which must still be the pinned "images".
-    private func currentImages() throws -> Int32 {
-        guard let now = try? Self.openImages(in: root, folder: folder, create: false, kernel: kernel) else { throw Failure.destinationChanged }
-        guard Beneath.FileID(fd: now) == Beneath.FileID(fd: fd) else { close(now); throw Failure.destinationChanged }
-        return now
-    }
+    /// The mode a new file made with 0666 gets under this process's umask,
+    /// learned once from a probe file in a fresh temporary folder (removed
+    /// after): the staging file is made 0600 and given this mode before it
+    /// is published, so images keep the mode they always had (0644 under
+    /// umask 022).
+    static let newFileMode: mode_t = {
+        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("cedric-mode-probe.XXXXXX").utf8CString)
+        guard let made = mkdtemp(&template) else { return 0o644 }
+        let base = String(cString: made)
+        defer { rmdir(base) }
+        let f = Darwin.open(base + "/f", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
+        guard f >= 0 else { return 0o644 }
+        defer { close(f); unlink(base + "/f") }
+        var st = stat()
+        guard fstat(f, &st) == 0 else { return 0o644 }
+        return st.st_mode & 0o777
+    }()
+
+    static let log = Logger(subsystem: "CedricCore", category: "ImageStore")
 
     private func stage(_ name: String, fill: (Int32) -> Bool) throws -> String {
         guard Beneath.isName(name) else { throw Failure.badName }
         // Checked before any byte is written.
-        let images = try currentImages()
-        defer { close(images) }
-        // The staged file is renamed into "images": both must be on one volume.
-        // (A mount that changes after this still fails at the rename, below.)
-        guard let imagesID = Beneath.FileID(fd: images), let rootID = Beneath.FileID(fd: root) else { throw Self.posix(name) }
+        try verify()
+        // Reported before anything is staged (as before the staging moved into "images").
         guard imagesID.dev == rootID.dev, !Self.forceOtherVolume else { throw Failure.otherVolume }
-        // Fallback: the held folder must still be in the document's folder.
-        if !kernel, !heldImagesInRoot() { throw Failure.destinationChanged }
-        // Kernel path: staged directly in the pinned document folder, never in an
-        // "images" that moved. Fallback: staged in the held "images" (one name).
-        let stageDir = kernel ? root : fd
         let tmp = ".cedric-image-\(UUID().uuidString).tmp"
         guard Beneath.isName(tmp) else { throw Failure.badName }
-        let dst = openat(stageDir, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
+        let dst = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard dst >= 0 else { throw Self.posix(tmp) }
-        var published = false
-        defer { if !published { unlinkat(stageDir, tmp, 0) } }
-        let filled = fill(dst)
-        let err = errno
-        guard filled, fsync(dst) == 0 else { close(dst); throw Self.posix(name, filled ? errno : err) }
-        // The staged file's identity: a rename keeps it, so it names what was published.
-        let id = Beneath.FileID(fd: dst)
-        guard close(dst) == 0, let id else { throw Self.posix(name) }
-        Self.beforePublish?()
-        let out = try kernel ? publish(tmp, as: name, hint: images) : publishInHeld(tmp, as: name)
-        published = true
+        // The staging file's identity, taken at once: a rename keeps it, so it names what was
+        // published, and the cleanup removes the entry only while it is still this file.
+        guard let id = Beneath.FileID(fd: dst) else {
+            let err = errno
+            close(dst)
+            leave(tmp)
+            throw Self.posix(tmp, err)
+        }
+        var done = false
+        defer { if !done { removeStaged(tmp, id) } }
+        var filled = fill(dst)
+        var err = errno
+        if DevEnvironment.checksEnabled, filled, let fault = Self.writeFault?(dst) { filled = false; err = fault }
+        if filled, fsync(dst) != 0 { filled = false; err = errno }
+        if filled, fchmod(dst, Self.newFileMode) != 0 { filled = false; err = errno }
+        guard filled else { close(dst); throw Self.posix(name, err) }
+        guard close(dst) == 0 else { throw Self.posix(name) }
+        if DevEnvironment.checksEnabled { Self.beforePublish?() }
+        let out = try publish(tmp, as: name, staged: id)
+        done = true
         self.published.record(out, id)
         return out
     }
 
-    /// Renames the staged file to `images/<first free name>`, resolved by
-    /// the kernel beneath the pinned document folder; never replaces one.
-    /// `hint` ("images" as checked) only suggests which names are free.
-    private func publish(_ tmp: String, as name: String, hint: Int32) throws -> String {
+    /// Renames the staged file to the first free name in the held
+    /// "images", both operands single names relative to it; never replaces
+    /// one (`RENAME_EXCL`). Before each attempt the held folder must still
+    /// be inside the boundary (`verify`) and the staging entry still the
+    /// file made. Any error but EEXIST (ENOTSUP from a volume that can't
+    /// rename exclusively among them) refuses: nothing is published another way.
+    private func publish(_ tmp: String, as name: String, staged id: Beneath.FileID) throws -> String {
+        // Names a rename found taken that a stat doesn't (the simulator's folders answer a stat
+        // case-sensitively and a rename case-insensitively): skipped like any taken name.
+        var clashed: Set<FolderTree.PathKey> = []
         func taken(_ n: String) -> Bool {
             var st = stat()
-            return fstatat(hint, n, &st, AT_SYMLINK_NOFOLLOW) == 0
-        }
-        for _ in 0..<10_000 {
-            let candidate = MarkdownPaste.uniqueName(name, exists: taken)
-            Self.beforeRename?(candidate)
-            if renameatx_np(root, tmp, root, "images/" + candidate, UInt32(RENAME_EXCL) | Self.renameResolveBeneath) == 0 {
-                return candidate
-            }
-            let err = errno
-            guard err == EEXIST else {
-                // ENOENT: "images" is gone from the folder; ENOTCAPABLE (Beneath.notCapable): it leads out now.
-                if err == ENOENT || err == Beneath.notCapable { throw Failure.destinationChanged }
-                throw Self.posix(candidate, err)
-            }
-            // Taken in "images" as it is now but free in the folder checked: "images" changed.
-            if !taken(candidate) { throw Failure.destinationChanged }
-        }
-        throw Self.posix(name, EEXIST)
-    }
-
-    /// Fallback: renames the staged file (in the held "images") to the
-    /// first free name there, both operands single names relative to that
-    /// folder's descriptor; never replaces one (`RENAME_EXCL`). Throws
-    /// `Failure.destinationChanged` if the parent check immediately before
-    /// a rename attempt observes that the held folder has moved out of the
-    /// document's folder.
-    private func publishInHeld(_ tmp: String, as name: String) throws -> String {
-        func taken(_ n: String) -> Bool {
-            var st = stat()
-            return fstatat(fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0
+            return fstatat(fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0 || clashed.contains(FolderTree.PathKey(n))
         }
         for _ in 0..<10_000 {
             let candidate = MarkdownPaste.uniqueName(name, exists: taken)
             guard Beneath.isName(candidate) else { throw Failure.badName }
-            Self.beforeRename?(candidate)
-            guard heldImagesInRoot() else { throw Failure.destinationChanged }
+            if DevEnvironment.checksEnabled { Self.beforeRename?(candidate) }
+            try verify()
+            guard Beneath.FileID(at: fd, tmp) == id else { throw Failure.destinationChanged }
             if renameatx_np(fd, tmp, fd, candidate, UInt32(RENAME_EXCL)) == 0 { return candidate }
             let err = errno
             // Taken meanwhile: the next free name is tried.
             guard err == EEXIST else { throw Self.posix(candidate, err) }
+            clashed.insert(FolderTree.PathKey(candidate))
         }
         throw Self.posix(name, EEXIST)
+    }
+
+    /// A failure after the staging file was made: the entry is removed only
+    /// while it is still that file (device and inode); one another writer
+    /// put there is left in place. (Darwin has no unlink by identity: the
+    /// window between this check and the unlink remains.)
+    private func removeStaged(_ tmp: String, _ id: Beneath.FileID) {
+        guard let now = Beneath.FileID(at: fd, tmp) else { return }  // nothing there: nothing left
+        if now == id, unlinkat(fd, tmp, 0) == 0 { return }
+        leave(tmp)
+    }
+
+    /// The staging name `tmp` is left in "images" (not, or not provably, the file made).
+    private func leave(_ tmp: String) {
+        Self.log.error("left \(tmp, privacy: .public) in images: not the staging file this copy made")
+        if DevEnvironment.checksEnabled { Self.leftBehind?(tmp) }
     }
 
     /// What this store published: each name by its UTF-8 bytes, with the

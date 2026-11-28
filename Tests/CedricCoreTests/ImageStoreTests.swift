@@ -170,7 +170,8 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(isSymlink(images), "the swap happened")
         #expect(listing(moved).isEmpty, "the folder behind the link out gets nothing")
         #expect(listing(doc) == ["images"], "the staging file is removed")
-        // Moved out and a new "images" made in its place: the file stays inside, and no link is given.
+        // Moved out and a new "images" made in its place: refused, and neither folder gets
+        // anything (r6: this was published in the new folder, with no link given).
         try fm.removeItem(at: images)
         try fm.removeItem(at: moved)
         ImageStore.beforePublish = nil
@@ -179,11 +180,11 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
             try? FileManager.default.moveItem(at: images, to: moved)
             try? FileManager.default.createDirectory(at: images, withIntermediateDirectories: false)
         }
-        let name = try store.write(Data([7]), name: "n.png")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.write(Data([7]), name: "n.png") }
         #expect(listing(moved).isEmpty, "the moved-out folder gets nothing")
-        #expect(fm.contents(atPath: images.appendingPathComponent(name).path) == Data([7]), "published inside the document's folder")
+        #expect(listing(images).isEmpty, "the new folder gets nothing")
         #expect(listing(doc) == ["images"], "no staging file is left")
-        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: name) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "n.png") }
     }
 
     /// Where the kernel can't keep the open and the rename beneath the
@@ -222,9 +223,10 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
     }
 
     /// A store keeps the path it was opened with: one opened on the kernel
-    /// path stages in the document's folder even after the fallback is
-    /// forced; one opened after stages in "images" (Derek, 0.6: this was
-    /// the forced post-open refusal test before the fallback).
+    /// path stays on it after the fallback is forced. Both stage in the
+    /// held "images" (r6: the kernel path staged in the document's folder
+    /// before the handle-based publish; Derek, 0.6: this was the forced
+    /// post-open refusal test before the fallback).
     @Test(.enabled(if: ImageStore.containmentEnforced, needsContainment)) func aStoreKeepsThePathItWasOpenedWith() throws {
         let (d, doc, outside) = try layout()
         defer { try? fm.removeItem(at: d) }
@@ -242,11 +244,11 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(store.kernel)
         #expect(try store.copy(from: pic, name: "p.png") == "p.png")
         #expect(try store.write(Data([3]), name: "w.png") == "w.png")
-        #expect(stagedIn == ["doc", "doc"], "the kernel path stages in the document's folder: \(stagedIn)")
+        #expect(stagedIn == ["images", "images"], "the kernel path stages in the held images folder: \(stagedIn)")
         let fallback = try ImageStore.open(in: doc)
         #expect(!fallback.kernel)
         #expect(try fallback.write(Data([4]), name: "x.png") == "x.png")
-        #expect(stagedIn == ["doc", "doc", "images"], "the fallback stages in the held images folder: \(stagedIn)")
+        #expect(stagedIn == ["images", "images", "images"], "the fallback stages in the held images folder: \(stagedIn)")
         #expect(listing(doc) == ["images"] && listing(images) == ["p.png", "w.png", "x.png"], "published, no staging file left")
         #expect(listing(outside) == ["p.png"], "nothing written outside")
     }
@@ -293,8 +295,9 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
 
     /// The fallback's race: "images" is swapped after the bytes are staged
     /// in it and before they are published. Swapped for another folder or
-    /// for a link out, the file is published in the folder that was opened
-    /// (now under another name) and nowhere else, and no link is given.
+    /// for a link out, nothing is published anywhere and the staging file is
+    /// removed (r6: it was published in the folder that was opened, now
+    /// under another name, with no link given).
     /// Moved out of the document's folder, nothing is published and the
     /// staging file is removed. Swapped right after open, nothing is
     /// staged.
@@ -313,12 +316,10 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
             try? FileManager.default.moveItem(at: images, to: was1)
             try? FileManager.default.createDirectory(at: images, withIntermediateDirectories: false)
         }
-        let first = try store.write(Data([7]), name: "n.png")
-        #expect(first == "n.png")
-        #expect(listing(was1) == ["n.png"] && fm.contents(atPath: was1.appendingPathComponent("n.png").path) == Data([7]),
-                "published in the folder that was opened, no staging file left")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.write(Data([7]), name: "n.png") }
+        #expect(listing(was1).isEmpty, "the folder that was opened keeps neither staged bytes nor a file")
         #expect(listing(images).isEmpty, "the new folder gets nothing")
-        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: first) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "n.png") }
         // Swapped for a link out.
         try fm.removeItem(at: images)
         ImageStore.beforePublish = nil
@@ -328,12 +329,11 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
             try? FileManager.default.moveItem(at: images, to: was2)
             try? FileManager.default.createSymbolicLink(at: images, withDestinationURL: outside)
         }
-        let second = try store.copy(from: pic, name: "p.png")
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "p.png") }
         #expect(isSymlink(images), "the swap happened")
-        #expect(listing(was2) == ["p.png"] && fm.contents(atPath: was2.appendingPathComponent("p.png").path) == Data([9]),
-                "published in the folder that was opened, no staging file left")
+        #expect(listing(was2).isEmpty, "the folder that was opened keeps neither staged bytes nor a file")
         #expect(listing(outside).isEmpty, "the folder behind the link out gets nothing")
-        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: second) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.link(for: "p.png") }
         // Moved out of the document's folder.
         try fm.removeItem(at: images)
         ImageStore.beforePublish = nil
@@ -609,5 +609,215 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         try fm.createSymbolicLink(at: grant, withDestinationURL: outside)
         #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: grant.appendingPathComponent("sub"), beneath: grant) }
         #expect(!fm.fileExists(atPath: outside.appendingPathComponent("sub/images").path))
+    }
+
+    /// iOS (Astra round 4, must-fix 2): the document's folder, opened
+    /// beneath the grant, moved out of the grant (to a sibling on the same
+    /// volume) while a copy is going on: nothing is published there, the
+    /// staged file is removed, and the copy throws. The grant stays held
+    /// and the folder is looked up beneath it again before publishing.
+    @Test(arguments: storeModes) func aDocumentFolderMovedOutOfTheGrantBeforePublishReceivesNothing(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false; ImageStore.beforePublish = nil }
+        let (top, _, outside) = try layout()
+        defer { try? fm.removeItem(at: top) }
+        let grant = top.resolvingSymlinksInPath().appendingPathComponent("grant")
+        let sub = grant.appendingPathComponent("sub"), moved = top.resolvingSymlinksInPath().appendingPathComponent("moved")
+        try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([4, 5, 6]).write(to: pic)
+        let id = try #require(Beneath.FileID(path: grant.path, followLast: false))
+        // The control: left alone, it publishes.
+        let kept = try ImageStore.open(in: sub, beneath: grant, rootID: id)
+        #expect(try kept.copy(from: pic, name: "p.png", followLink: false) == "p.png")
+        #expect(try kept.link(for: "p.png") == "images/p.png")
+        // Moved out of the grant between the open and the publish.
+        let store = try ImageStore.open(in: sub, beneath: grant, rootID: id)
+        ImageStore.beforePublish = { try? FileManager.default.moveItem(at: sub, to: moved) }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "q.png", followLink: false) }
+        ImageStore.beforePublish = nil
+        #expect(fm.fileExists(atPath: moved.path), "the move happened")
+        #expect(listing(moved.appendingPathComponent("images")) == ["p.png"], "\(mode): nothing published in the moved folder")
+        #expect(listing(moved) == ["images"], "\(mode): no staging file left in the moved folder")
+        #expect(listing(grant).isEmpty, "nothing made in the grant in its place")
+    }
+
+    // MARK: r6 fault injection (handle-based publishing)
+
+    /// The staging names in `u`.
+    func staged(_ u: URL) -> [String] { listing(u).filter { $0.hasPrefix(".cedric-image-") } }
+
+    /// The POSIX code `body` throws (nil: none thrown; -1: another error).
+    func posixCode(_ body: () throws -> Any) -> Int? {
+        do { _ = try body(); return nil } catch {
+            let e = error as NSError
+            return e.domain == NSPOSIXErrorDomain ? e.code : -1
+        }
+    }
+
+    /// A staging file found in `dirs` replaced (renamed over) by another
+    /// writer's file holding `bytes`: a new file, not ours. Returns its URL.
+    func replaceStaged(in dirs: [URL], with bytes: Data) -> URL? {
+        for dir in dirs {
+            guard let name = staged(dir).first else { continue }
+            let theirs = dir.appendingPathComponent("theirs.part"), at = dir.appendingPathComponent(name)
+            guard (try? bytes.write(to: theirs)) != nil, rename(theirs.path, at.path) == 0 else { return nil }
+            return at
+        }
+        return nil
+    }
+
+    /// A grant with sub/ in it (both resolved), and where sub/ is moved out to.
+    func grantLayout() throws -> (top: URL, grant: URL, sub: URL, moved: URL, outside: URL, id: Beneath.FileID) {
+        let (top, _, outside) = try layout()
+        let base = top.resolvingSymlinksInPath()
+        let grant = base.appendingPathComponent("grant")
+        let sub = grant.appendingPathComponent("sub")
+        try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+        let id = try #require(Beneath.FileID(path: grant.path, followLast: false))
+        return (top, grant, sub, base.appendingPathComponent("moved"), outside, id)
+    }
+
+    /// r6 a (Astra/Sol r5 must-fix 1): the first candidate is taken
+    /// (EEXIST) and the document's folder moves out of the grant before the
+    /// retry: the retry publishes nothing in the moved folder, and the copy
+    /// throws.
+    @Test(arguments: storeModes) func aDocumentFolderMovedOutOfTheGrantDuringANameRetryReceivesNothing(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false; ImageStore.beforeRename = nil }
+        let (top, grant, sub, moved, outside, id) = try grantLayout()
+        defer { try? fm.removeItem(at: top) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([4, 5, 6]).write(to: pic)
+        let store = try ImageStore.open(in: sub, beneath: grant, rootID: id)
+        let decoy = Data("decoy".utf8)
+        var tried: [String] = []
+        ImageStore.beforeRename = { name in
+            tried.append(name)
+            if tried.count == 1 { try? decoy.write(to: sub.appendingPathComponent("images").appendingPathComponent(name)) }
+            if tried.count == 2 { try? FileManager.default.moveItem(at: sub, to: moved) }
+        }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "c.png", followLink: false) }
+        ImageStore.beforeRename = nil
+        #expect(tried == ["c.png", "c-2.png"], "\(mode): a retry after EEXIST: \(tried)")
+        #expect(fm.fileExists(atPath: moved.path), "the move happened")
+        #expect(listing(moved.appendingPathComponent("images")) == ["c.png"], "\(mode): nothing published in the moved folder")
+        #expect(fm.contents(atPath: moved.appendingPathComponent("images/c.png").path) == decoy, "the file that took the name is untouched")
+        #expect(listing(moved) == ["images"], "\(mode): no staging file left in the moved folder")
+        #expect(listing(grant).isEmpty, "nothing made in the grant in its place")
+    }
+
+    /// r6 b: "images" renamed away after the check and replaced, by another
+    /// folder or by a link out: nothing lands in the replacement or behind
+    /// the link, the renamed original keeps nothing, and the copy throws.
+    @Test(arguments: storeModes) func anImagesFolderSwappedAfterTheCheckReceivesNothing(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false; ImageStore.beforePublish = nil }
+        for byLink in [false, true] {
+            let (d, doc, outside) = try layout()
+            defer { try? fm.removeItem(at: d) }
+            let pic = d.appendingPathComponent("p.png")
+            try Data([9]).write(to: pic)
+            let images = doc.appendingPathComponent("images"), was = doc.appendingPathComponent("was-images")
+            try fm.createDirectory(at: images, withIntermediateDirectories: true)
+            let store = try ImageStore.open(in: doc)
+            ImageStore.beforePublish = {
+                try? FileManager.default.moveItem(at: images, to: was)
+                if byLink { try? FileManager.default.createSymbolicLink(at: images, withDestinationURL: outside) }
+                else { try? FileManager.default.createDirectory(at: images, withIntermediateDirectories: false) }
+            }
+            let what = "\(mode), \(byLink ? "a link out" : "another folder")"
+            #expect(throws: ImageStore.Failure.destinationChanged, "\(what)") { _ = try store.copy(from: pic, name: "p.png") }
+            ImageStore.beforePublish = nil
+            #expect(byLink ? isSymlink(images) : !isSymlink(images) && fm.fileExists(atPath: images.path), "\(what): the swap happened")
+            if !byLink { #expect(listing(images).isEmpty, "\(what): nothing lands in the replacement") }
+            #expect(listing(outside).isEmpty, "\(what): nothing behind the link")
+            #expect(listing(was).isEmpty, "\(what): the renamed original keeps neither staged bytes nor a file")
+            #expect(listing(doc) == ["images", "was-images"], "\(what): no staging file beside them")
+        }
+    }
+
+    /// r6 c (Astra r5 must-fix 2): the staging entry replaced by another
+    /// writer, then the copy refused (the document's folder moved out of
+    /// the grant): the other writer's file survives byte for byte, the copy
+    /// throws, and the entry is left and reported, not removed.
+    @Test(arguments: storeModes) func aStagingEntryReplacedByAnotherWriterSurvivesARefusal(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false; ImageStore.beforePublish = nil; ImageStore.leftBehind = nil }
+        let (top, grant, sub, moved, outside, id) = try grantLayout()
+        defer { try? fm.removeItem(at: top) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data([4, 5, 6]).write(to: pic)
+        let store = try ImageStore.open(in: sub, beneath: grant, rootID: id)
+        let theirs = Data("another writer's file".utf8)
+        var replaced: URL?
+        var left: [String] = []
+        ImageStore.leftBehind = { left.append($0) }
+        ImageStore.beforePublish = {
+            replaced = self.replaceStaged(in: [sub, sub.appendingPathComponent("images")], with: theirs)
+            try? FileManager.default.moveItem(at: sub, to: moved)
+        }
+        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "q.png", followLink: false) }
+        ImageStore.beforePublish = nil
+        let at = try #require(replaced, "the staging entry was found and replaced")
+        let rel = Array(at.pathComponents.dropFirst(sub.pathComponents.count))
+        let now = rel.reduce(moved) { $0.appendingPathComponent($1) }
+        #expect(fm.contents(atPath: now.path) == theirs, "\(mode): the other writer's file survives byte for byte")
+        #expect(left == [at.lastPathComponent], "\(mode): the entry is left and reported: \(left)")
+        #expect(!listing(moved.appendingPathComponent("images")).contains("q.png"), "\(mode): nothing published")
+        #expect(listing(grant).isEmpty)
+    }
+
+    /// r6 d: the write fails partway (ENOSPC, EIO): the copy throws that
+    /// error, nothing is published under any name, and the staging file is
+    /// removed only while it is still the file made (replaced, it is left
+    /// and reported).
+    @Test(arguments: storeModes) func aFailedWriteMidCopyPublishesNothing(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false; ImageStore.writeFault = nil; ImageStore.leftBehind = nil }
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let pic = outside.appendingPathComponent("p.png")
+        try Data(repeating: 3, count: 64 * 1024).write(to: pic)
+        let images = doc.appendingPathComponent("images")
+        let store = try ImageStore.open(in: doc)
+        var left: [String] = []
+        ImageStore.leftBehind = { left.append($0) }
+        // Out of space partway: a partial staging file, ours.
+        ImageStore.writeFault = { fd in _ = ftruncate(fd, 100); return ENOSPC }
+        #expect(posixCode { try store.copy(from: pic, name: "p.png") } == Int(ENOSPC), "\(mode): the write's error")
+        #expect(listing(images).isEmpty && listing(doc) == ["images"], "\(mode): nothing published, the staging file removed")
+        #expect(left.isEmpty)
+        // An I/O error, with the staging entry replaced by another writer meanwhile.
+        let theirs = Data("another writer's file".utf8)
+        var replaced: URL?
+        ImageStore.writeFault = { _ in
+            replaced = self.replaceStaged(in: [doc, images], with: theirs)
+            return EIO
+        }
+        #expect(posixCode { try store.copy(from: pic, name: "p.png") } == Int(EIO), "\(mode): the write's error")
+        let at = try #require(replaced, "the staging entry was found and replaced")
+        #expect(fm.contents(atPath: at.path) == theirs, "\(mode): the other writer's file survives byte for byte")
+        #expect(left == [at.lastPathComponent], "\(mode): the entry is left and reported: \(left)")
+        #expect(listing(images).allSatisfy { $0.hasPrefix(".cedric-image-") }, "\(mode): nothing published under any name: \(listing(images))")
+        // The same store still works afterwards.
+        ImageStore.writeFault = nil
+        #expect(try store.copy(from: pic, name: "p.png") == "p.png")
+        #expect(fm.contents(atPath: images.appendingPathComponent("p.png").path) == fm.contents(atPath: pic.path))
+    }
+
+    /// r6: the staging file is made 0600, but a published image has the
+    /// mode any new file gets here (as a plain write gives), as before.
+    @Test(arguments: storeModes) func aPublishedImageHasTheUsualFileMode(mode: StoreMode) throws {
+        use(mode)
+        defer { ImageStore.forceFallback = false }
+        let (d, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: d) }
+        let plain = outside.appendingPathComponent("plain.png")
+        try Data([1]).write(to: plain)
+        let name = try ImageStore.open(in: doc).copy(from: plain, name: "p.png")
+        func perms(_ u: URL) -> Int? { (try? fm.attributesOfItem(atPath: u.path)[.posixPermissions]) as? Int }
+        let want = try #require(perms(plain))
+        #expect(perms(doc.appendingPathComponent("images").appendingPathComponent(name)) == want, "\(mode): \(String(want, radix: 8))")
     }
 }
