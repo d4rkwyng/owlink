@@ -68,6 +68,36 @@ final class CSVPreviewTests: XCTestCase {
         XCTAssertNil(sortedHeader.accessibilityValue)
     }
 
+    /// The "#" cell above the row numbers restores file order, as on the Mac.
+    func testRowNumberHeaderRestoresFileOrder() async throws {
+        let text = "Name,Value\nalpha,10\nbeta,2\ngamma,7\n"
+        let editor = editor(text)
+        editor.togglePreview()
+        let grid = try XCTUnwrap(editor.preview?.csv)
+        try await waitForRender(grid)
+        let hash = try XCTUnwrap(grid.headerForTesting.subviews.compactMap { $0 as? UIButton }
+            .first { $0.accessibilityIdentifier == "preview.csv.header.fileOrder" })
+        XCTAssertEqual(hash.configuration?.title, "#")
+        XCTAssertTrue(hash.accessibilityTraits.contains(.notEnabled), "nothing to restore yet")
+        // A tap while in file order does nothing (no render).
+        let before = grid.renders
+        hash.sendActions(for: .primaryActionTriggered)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(grid.renders, before)
+        grid.sort(column: 1)
+        try await waitForRender(grid, after: before)
+        XCTAssertEqual(grid.order, [2, 3, 1])
+        XCTAssertFalse(hash.accessibilityTraits.contains(.notEnabled))
+        hash.sendActions(for: .primaryActionTriggered)
+        try await waitForRender(grid, after: before + 1)
+        XCTAssertEqual(grid.order, [1, 2, 3])
+        XCTAssertNil(grid.sortColumnForTesting)
+        XCTAssertEqual(editor.textView.text, text)
+        // Column buttons are still one per column, "#" not among them.
+        XCTAssertEqual(grid.headerForTesting.subviews.compactMap { $0 as? UIButton }
+            .filter { $0.accessibilityIdentifier?.hasPrefix("preview.csv.header.") == true }.count, 3)
+    }
+
     func testTSVFocusJumpsToField() async throws {
         let text = "name\tvalue\nalpha\t7\n"
         let editor = editor(text, extension: "tsv")

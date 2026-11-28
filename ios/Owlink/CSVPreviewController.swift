@@ -13,6 +13,10 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
     private let content = UIView()
     let table = UITableView(frame: .zero, style: .plain)
     private let header = UIView()
+    /// The "#" cell above the row numbers: a tap restores file order, as
+    /// the Mac's "#" header cell does (a third tap on a sorted column too).
+    private let fileOrderButton = UIButton(type: .system)
+    private var columnButtons: [UIButton] = []
     let note = UILabel()
     private(set) var data = CSV.Table()
     private(set) var order: [Int] = []
@@ -66,6 +70,11 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
         header.backgroundColor = UIColor(hex: palette.gutterBackground)
         header.accessibilityIdentifier = "preview.csv.header"
         content.addSubview(header)
+        fileOrderButton.accessibilityIdentifier = "preview.csv.header.fileOrder"
+        fileOrderButton.accessibilityLabel = String(localized: "Row number")
+        fileOrderButton.accessibilityHint = String(localized: "Restores file order")
+        fileOrderButton.addAction(UIAction { [weak self] _ in self?.restoreFileOrder() }, for: .primaryActionTriggered)
+        header.addSubview(fileOrderButton)
         table.dataSource = self
         table.rowHeight = rowHeight
         table.separatorStyle = .none
@@ -171,6 +180,16 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
         if pending != nil { sortPending() } else { sortDisplayedData() }
     }
 
+    /// Back to file order (the "#" cell). Nothing to do when not sorted.
+    func restoreFileOrder() {
+        guard sortColumn != nil else { return }
+        sortColumn = nil
+        ascending = true
+        sortRevision += 1
+        announceSort = true
+        if pending != nil { sortPending() } else { sortDisplayedData() }
+    }
+
     private func sortPending() {
         guard let pending else { return }
         let table = pending.table
@@ -220,14 +239,15 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
     private func apply() {
         let headerCells = data.rows.first ?? []
         let visibleColumns = min(data.columnCount, Self.maxColumns)
-        if header.subviews.count != visibleColumns {
-            header.subviews.forEach { $0.removeFromSuperview() }
-            for column in 0..<visibleColumns {
+        if columnButtons.count != visibleColumns {
+            columnButtons.forEach { $0.removeFromSuperview() }
+            columnButtons = (0..<visibleColumns).map { column in
                 let button = UIButton(type: .system)
                 button.tag = column
                 button.accessibilityIdentifier = "preview.csv.header.\(column)"
                 button.addAction(UIAction { [weak self] _ in self?.sort(column: column) }, for: .primaryActionTriggered)
                 header.addSubview(button)
+                return button
             }
         }
         let fontWidth = max(6, scaledFont.pointSize * 0.62)
@@ -242,8 +262,19 @@ final class CSVPreviewController: UIViewController, UITableViewDataSource {
         columnWidth = columnWidths.max() ?? 150
         let starts = columnWidths.reduce(into: [rowWidth]) { $0.append($0.last! + $1) }
         columnStarts = starts
-        for (column, item) in header.subviews.enumerated() {
-            guard let button = item as? UIButton else { continue }
+        var hash = UIButton.Configuration.plain()
+        hash.title = "#"
+        hash.contentInsets = .zero
+        fileOrderButton.configuration = hash
+        fileOrderButton.titleLabel?.font = UIFont.monospacedSystemFont(ofSize: scaledFont.pointSize, weight: .semibold)
+        // Lit while sorted, as the Mac's "#" cell is: a tap does something.
+        fileOrderButton.tintColor = sortColumn == nil ? UIColor(hex: palette.gutterForeground) : .tintColor
+        fileOrderButton.backgroundColor = UIColor(hex: palette.gutterBackground)
+        fileOrderButton.layer.borderWidth = 0.5
+        fileOrderButton.layer.borderColor = UIColor(hex: palette.currentLine).cgColor
+        fileOrderButton.frame = CGRect(x: 0, y: 0, width: rowWidth, height: headerHeight)
+        fileOrderButton.accessibilityTraits = sortColumn == nil ? [.button, .notEnabled] : .button
+        for (column, button) in columnButtons.enumerated() {
             let title = column < headerCells.count && !headerCells[column].isEmpty
                 ? headerCells[column] : String(localized: "Column \(column + 1)")
             var config = UIButton.Configuration.plain()
