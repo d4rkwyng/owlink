@@ -820,4 +820,94 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         let want = try #require(perms(plain))
         #expect(perms(doc.appendingPathComponent("images").appendingPathComponent(name)) == want, "\(mode): \(String(want, radix: 8))")
     }
+
+    // MARK: r7 (Astra r6): the mode
+
+    #if os(macOS)
+    /// r7 c (Astra r6 must-fix 3): a published image has the mode a new
+    /// file made 0666 gets under the umask at the time, never wider: 0600
+    /// under 077, 0644 under 022, under 077 still with no file descriptor to
+    /// spare (a probe file couldn't be made), and 0600 after the umask is
+    /// narrowed between two copies.
+    /// Each runs in its own process (an exit test), so no other test sees
+    /// the umask.
+    @Test func aPublishedImageIsNeverWiderThanTheUmaskGives() async throws {
+        let runs: [(String, ExitTest.Result?)] = [
+            ("077", await #expect(processExitsWith: .success, observing: [\.standardErrorContent]) {
+                publishedModeExit(umask: 0o077, starved: false, thenUmask: 0)
+            }),
+            ("022", await #expect(processExitsWith: .success, observing: [\.standardErrorContent]) {
+                publishedModeExit(umask: 0o022, starved: false, thenUmask: 0)
+            }),
+            ("077, no descriptor to spare", await #expect(processExitsWith: .success, observing: [\.standardErrorContent]) {
+                publishedModeExit(umask: 0o077, starved: true, thenUmask: 0)
+            }),
+            ("022 then 077", await #expect(processExitsWith: .success, observing: [\.standardErrorContent]) {
+                publishedModeExit(umask: 0o022, starved: false, thenUmask: 0o077)
+            }),
+        ]
+        for (label, result) in runs {
+            let r = try #require(result, "umask \(label): the process didn't exit 0")
+            let said = String(decoding: r.standardErrorContent, as: UTF8.self).split(separator: "\n").filter { $0.hasPrefix("r7 mode: ") && $0 != "r7 mode: done" }
+            #expect(said.isEmpty, "umask \(label): \(said.joined(separator: "; "))")
+            if said.isEmpty { #expect(String(decoding: r.standardErrorContent, as: UTF8.self).contains("r7 mode: done"), "umask \(label): the check ran") }
+        }
+    }
+    #endif
 }
+
+#if os(macOS)
+/// r7 c, in an exit test's own process: under `umask`, a copy is published
+/// with the mode a new 0666 file gets. `starved`: the copy runs with no file
+/// descriptor to spare beyond the ones it needs itself (the fewest that let
+/// it succeed), so nothing else, like a probe file in a temporary folder,
+/// can be made meanwhile (TMPDIR can't stand in a missing temporary folder:
+/// NSTemporaryDirectory doesn't read it here). `thenUmask` non-zero: a
+/// second copy under that umask. Exits 0 either way (a failed exit test
+/// returns no output); what was wrong goes to stderr as an "r7 mode: "
+/// line, and "r7 mode: done" when all held.
+func publishedModeExit(umask mask: mode_t, starved: Bool, thenUmask later: mode_t) -> Never {
+    func fail(_ s: String) -> Never { FileHandle.standardError.write(Data(("r7 mode: " + s + "\n").utf8)); exit(0) }
+    let base = FileManager.default.temporaryDirectory.path
+    umask(mask)
+    var template = Array((base + "/cedric-r7-mode.XXXXXX").utf8CString)
+    guard let made = mkdtemp(&template) else { fail("mkdtemp \(errno)") }
+    let doc = URL(fileURLWithPath: String(cString: made))
+    func check(_ m: mode_t, _ got: String) {
+        var st = stat()
+        guard lstat(doc.appendingPathComponent("images").appendingPathComponent(got).path, &st) == 0 else { fail("no \(got)") }
+        let want = 0o666 & ~m
+        if st.st_mode & 0o777 != want {
+            fail("umask \(String(m, radix: 8)): \(got) is \(String(st.st_mode & 0o777, radix: 8)), want \(String(want, radix: 8))")
+        }
+    }
+    do {
+        let store = try ImageStore.open(in: doc)
+        if starved {
+            var lim = rlimit()
+            guard getrlimit(RLIMIT_NOFILE, &lim) == 0 else { fail("getrlimit") }
+            lim.rlim_cur = 256
+            guard setrlimit(RLIMIT_NOFILE, &lim) == 0 else { fail("setrlimit \(errno)") }
+            var spare: [Int32] = []
+            while true { let f = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC); if f < 0 { break }; spare.append(f) }
+            guard errno == EMFILE, !spare.isEmpty else { fail("descriptors not exhausted: \(errno)") }
+            var got: String?
+            var freed = 0
+            while got == nil, freed < 8, let f = spare.popLast() {
+                close(f); freed += 1
+                got = try? store.write(Data([1, 2, 3]), name: "a.png")
+            }
+            spare.forEach { close($0) }
+            guard let got else { fail("no copy with \(freed) descriptors free") }
+            FileHandle.standardError.write(Data("r7 info: published with \(freed) descriptor(s) free\n".utf8))
+            check(mask, got)
+        } else {
+            check(mask, try store.write(Data([1, 2, 3]), name: "a.png"))
+        }
+        if later != 0 { umask(later); check(later, try store.write(Data([4]), name: "b.png")) }
+    } catch { fail("umask \(String(mask, radix: 8)): \(error)") }
+    try? FileManager.default.removeItem(at: doc)
+    FileHandle.standardError.write(Data("r7 mode: done\n".utf8))
+    exit(0)
+}
+#endif

@@ -32,8 +32,9 @@ import os
 ///   regular file (`fstat`): a symbolic link's target's bytes are copied,
 ///   never the link; a folder, pipe or device is refused.
 /// - The bytes go to a hidden staging file in the held "images" (`openat`
-///   with `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0600, its identity taken at
-///   once), are flushed, given the mode a new file gets, and are published
+///   with `O_CREAT | O_EXCL | O_NOFOLLOW`, mode 0666: the process umask
+///   gives it the mode any new file gets, and nothing changes it after;
+///   its identity taken at once), are flushed, and are published
 ///   with `renameatx_np(images, tmp, images, name, RENAME_EXCL)`: both
 ///   operands are single names relative to the held folder, so nothing is
 ///   resolved through a path. A name already taken is never overwritten and
@@ -385,24 +386,6 @@ public final class ImageStore {
         }
     }
 
-    /// The mode a new file made with 0666 gets under this process's umask,
-    /// learned once from a probe file in a fresh temporary folder (removed
-    /// after): the staging file is made 0600 and given this mode before it
-    /// is published, so images keep the mode they always had (0644 under
-    /// umask 022).
-    static let newFileMode: mode_t = {
-        var template = Array((NSTemporaryDirectory() as NSString).appendingPathComponent("cedric-mode-probe.XXXXXX").utf8CString)
-        guard let made = mkdtemp(&template) else { return 0o644 }
-        let base = String(cString: made)
-        defer { rmdir(base) }
-        let f = Darwin.open(base + "/f", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
-        guard f >= 0 else { return 0o644 }
-        defer { close(f); unlink(base + "/f") }
-        var st = stat()
-        guard fstat(f, &st) == 0 else { return 0o644 }
-        return st.st_mode & 0o777
-    }()
-
     static let log = Logger(subsystem: "CedricCore", category: "ImageStore")
 
     private func stage(_ name: String, fill: (Int32) -> Bool) throws -> String {
@@ -413,7 +396,8 @@ public final class ImageStore {
         guard imagesID.dev == rootID.dev, !Self.forceOtherVolume else { throw Failure.otherVolume }
         let tmp = ".cedric-image-\(UUID().uuidString).tmp"
         guard Beneath.isName(tmp) else { throw Failure.badName }
-        let dst = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        // 0666 like any new file: the umask gives it the mode it keeps (nothing changes it after).
+        let dst = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
         guard dst >= 0 else { throw Self.posix(tmp) }
         // The staging file's identity, taken at once: a rename keeps it, so it names what was
         // published, and the cleanup removes the entry only while it is still this file.
@@ -429,7 +413,6 @@ public final class ImageStore {
         var err = errno
         if DevEnvironment.checksEnabled, filled, let fault = Self.writeFault?(dst) { filled = false; err = fault }
         if filled, fsync(dst) != 0 { filled = false; err = errno }
-        if filled, fchmod(dst, Self.newFileMode) != 0 { filled = false; err = errno }
         guard filled else { close(dst); throw Self.posix(name, err) }
         guard close(dst) == 0 else { throw Self.posix(name) }
         if DevEnvironment.checksEnabled { Self.beforePublish?() }
