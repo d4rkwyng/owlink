@@ -1157,12 +1157,32 @@ File › Open Folder… (⇧⌘O), a folder dropped on the Dock icon or on an
 editor window (the text, or anywhere beside it: `FileDropStackView`), or
 `cedric some/dir` (all reach `AppDelegate.open`, which routes a folder
 that isn't a package to `openFolder`) shows a folder tree at the left of
-the editor. View › Show Folder Sidebar (⌃⌘1) hides and shows it; it is
-disabled until a folder is open. The model is `CedricCore/FolderTree.swift`
+the editor. After any folder open, the sidebar selects the front tab's
+file if that file is inside the folder (`pendingReveal`; File › Open
+Folder does not pass `reveal:` itself). View › Show Folder Sidebar
+(⌃⌘1) hides and shows it; it is disabled until a folder is open. The model is `CedricCore/FolderTree.swift`
 (tested in `FolderTreeTests.swift`); the app side is `FolderSidebar.swift`
 and `FolderWatcher.swift`. `cedric -w some/dir` returns at once: `-w`
 waits for each file's tab, a folder has none, so the app deletes the
 folder's wait marker as it opens it (the `cli` check).
+
+Opening a file from outside the app switches the folder (0.6.1). The
+user's own entry points (File › Open, Open Recent, `application(_:open:)`
+and the launch's files, `FileDrop.open`, `cedric://open?path=`) call
+`AppDelegate.openFromOutside` (`FolderSidebar.swift`) instead of `open`;
+the app's own opens (sidebar clicks, Quick Open, links, Find in Files,
+the owl, restore) keep calling `open` and never switch. The rule is
+`FolderTree.folderToSwitchTo` (`FolderSwitchPolicyTests`): only with a
+sidebar shown, only for a regular file outside the loaded root (links
+resolved on both sides, then by identity), never a volume root. Then
+`openFolder(_:reveal:dock:)` docks it in the file's own tab once that tab
+exists (a viewer tab, or a big file's tab after its background read).
+For several files opened at once, the last one whose tab is up at once
+switches the folder when the batch is submitted; a file read in the
+background switches it again when its tab comes to the front (if that
+read fails, the folder stays where the batch left it). At launch the
+switch waits for the first frame, after the session's sidebar is rebuilt.
+The `folder` check drives each entry point and the opens that must not switch.
 
 Open in Terminal Here (File menu, the sidebar's row and header menus;
 `OpenInTerminal.swift`, the folder from `CedricCore/TerminalHere.swift`,

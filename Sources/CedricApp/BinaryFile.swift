@@ -97,11 +97,32 @@ extension EditorWindowController {
         showBinaryBar()
     }
 
-    /// Open Anyway: the decoded text, read-only.
+    /// Open Anyway: the decoded text, read-only. If the open path skipped
+    /// the decode (0.6.1: a binary file's first 8 KB were enough to tell),
+    /// the bytes are read and decoded now, with detection, and applied to
+    /// the document (encoding and line endings).
+    ///
+    /// That read failing (the file gone, unreadable, a volume away)
+    /// shows the error and changes nothing: the tab stays held, with Open
+    /// Anyway to try again. Shown read-only with the empty placeholder and
+    /// marked saved instead, Allow Editing and ⌘S wrote an empty file over
+    /// the original, whose stamp the failed read never changed.
     func openBinaryAnyway() {
         guard case .held(let text) = binary else { return }
+        var shown = text
+        if shown.isEmpty, let url = doc.fileURL {
+            do {
+                let (d, mod) = try EditorDocument.read(url, shareBytes: true)
+                doc.apply(d)
+                doc.noteDisk(mod)
+                shown = d.text
+            } catch {
+                showError(error)
+                return
+            }
+        }
         binary = .readOnly
-        setText(text)
+        setText(shown)
         doc.markSaved()
         setEditable(false)
         showBinaryBar()

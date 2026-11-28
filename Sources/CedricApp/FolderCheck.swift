@@ -711,7 +711,314 @@ extension DevChecks {
             sync { app.closeFolder() },
         ]
         steps += steps9
+        steps += folderSwitchSteps(app)
+        steps += openFolderSelectSteps(app)
         run(steps)
+    }
+
+
+    /// 0.6.1: File › Open Folder (`openFolder(_:)` with `reveal == nil`,
+    /// the path after the panel) should select the front tab's file when
+    /// that file is inside the opened folder. `folderSidebarFollow` only
+    /// runs when a tab becomes key, which does not fire when the same tab
+    /// stays in front. File › Open Enclosing Folder already selects, via
+    /// `reveal:`. These steps call `openFolder` without `reveal:` on
+    /// purpose — the product fix belongs after any folder open or listing,
+    /// not at the Open Folder call site.
+    static func openFolderSelectSteps(_ app: AppDelegate) -> [Step] {
+        let a = dir.appendingPathComponent("select/A", isDirectory: true)
+        let b = dir.appendingPathComponent("select/B", isDirectory: true)
+        let readme = write("select/A/readme.md", "# readme\n")
+        let other = write("select/A/other.md", "other\n")
+        let nested = write("select/A/sub/readme.md", "nested\n")
+        let alias = a.deletingLastPathComponent().appendingPathComponent("Alias", isDirectory: true)
+        let aliasFile = alias.appendingPathComponent(other.lastPathComponent)
+        _ = write("select/B/outside.md", "outside\n")
+        var sidebar: FolderSidebar? { FolderSidebar.shared }
+        func root() -> String { sidebar?.rootURL.path ?? "nil" }
+        func selected() -> String { sidebar?.selectedNode?.url.lastPathComponent ?? "nil" }
+        return [
+            sync {
+                guard app.open(readme) != nil else { expect(false, "opened readme.md"); return }
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "readme.md's tab is in front before Open Folder")
+            },
+            // File › Open Folder's path after the panel: no reveal:.
+            sync { app.openFolder(a) },
+            until("Open Folder A: listed with the front tab's file selected", timeout: 4) {
+                root() == a.path && sidebar?.root.isLoaded == true && sidebar?.isShown == true && selected() == "readme.md"
+            },
+            sync {
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "Open Folder leaves the same tab in front")
+            },
+            snapshot("061-open-folder-select-a.png"),
+            sync { app.openFolder(b) },
+            until("Open Folder B: listed", timeout: 4) {
+                root() == b.path && sidebar?.root.isLoaded == true
+            },
+            sync {
+                expect(selected() == "nil",
+                       "Open Folder of a folder that does not hold the front tab's file selects nothing",
+                       "selected: \(selected())")
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "opening B leaves readme.md in front")
+            },
+            sync { app.openFolder(a) },
+            until("Open Folder A again: the front tab's file is selected", timeout: 4) {
+                root() == a.path && sidebar?.root.isLoaded == true && selected() == "readme.md"
+            },
+            // Open Enclosing Folder still selects via reveal:.
+            sync { app.openFolder(b) },
+            until("B listed before Open Enclosing Folder", timeout: 4) {
+                root() == b.path && sidebar?.root.isLoaded == true
+            },
+            sync { app.openEnclosingFolderMenu(nil) },
+            until("Open Enclosing Folder shows A with readme.md selected", timeout: 4) {
+                root() == a.path && selected() == "readme.md"
+            },
+            sync {
+                _ = app.open(nested)
+                app.openFolder(a)
+            },
+            until("Open Folder expands sub and selects its readme") {
+                sidebar?.selectedNode?.url == nested
+            },
+            sync {
+                do { try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: a) }
+                catch { expect(false, "created Alias: \(error)"); return }
+                _ = app.open(aliasFile)
+                expect(app.currentFileURL == aliasFile, "front tab uses the alias spelling")
+                app.openFolder(a)
+            },
+            until("Open Folder selects the real row for the alias tab") {
+                sidebar?.selectedNode?.url == other
+            },
+            // Both calls run on the main thread before the queued listing can apply.
+            sync {
+                _ = app.open(readme)
+                app.openFolder(a)
+                _ = app.open(nested)
+                expect(sidebar?.root.isLoaded == false && app.currentFileURL == nested,
+                       "front tab changed before the first listing arrived")
+            },
+            until("implicit reveal follows the new front tab") { sidebar?.selectedNode?.url == nested },
+            sync {
+                app.openFolder(a, reveal: readme)
+                _ = app.open(aliasFile)
+                expect(sidebar?.root.isLoaded == false && app.currentFileURL == aliasFile,
+                       "front tab changed during the explicit reveal")
+            },
+            until("explicit reveal keeps the requested file") { sidebar?.selectedNode?.url == readme },
+            sync { app.closeFolder() },
+        ]
+    }
+
+    /// 0.6.1 bug 1: a file opened from outside the app (Finder / Open With
+    /// / the Dock icon as `application(_:open:)`, Open Recent, a drop, the
+    /// cedric script) while the sidebar shows another folder switches the
+    /// sidebar to the file's folder, the file selected, the sidebar docked
+    /// in the file's own tab (text, image, PDF, a big file read in the
+    /// background). Opens from inside the app (a sidebar click, Quick Open,
+    /// a preview or wiki link, a restored tab) and a hidden or closed
+    /// sidebar leave the folder alone; so do a refused file and a file
+    /// reached through a link into the loaded folder.
+    static func folderSwitchSteps(_ app: AppDelegate) -> [Step] {
+        let fm = FileManager.default
+        func folder(_ name: String) -> URL { dir.appendingPathComponent("switch/\(name)", isDirectory: true) }
+        let a = folder("A"), b = folder("B"), img = folder("Img"), pdf = folder("PDF"), recent = folder("Recent"),
+            cli = folder("CLI"), drop = folder("Drop"), big = folder("Big"), other = folder("Other")
+        _ = write("switch/A/a1.md", "# A\n")
+        _ = write("switch/A/sub/a2.md", "# A2\n")
+        let welcome = write("switch/B/Welcome.md", "# Welcome\n")
+        _ = write("switch/B/zz-other.md", "other\n")
+        let recentFile = write("switch/Recent/recent.md", "recent\n")
+        let cliFile = write("switch/CLI/cli.md", "cli\n")
+        let dropFile = write("switch/Drop/drop.md", "drop\n")
+        let bigText = write("switch/Big/big.log", "")
+        let readGate = DispatchSemaphore(value: 0)
+        let bigLine = "a line of a big log, read in the background\n"
+        try? Data(String(repeating: bigLine, count: AppDelegate.backgroundOpenBytes / bigLine.utf8.count + 1000).utf8).write(to: bigText)
+        let small = write("switch/Big/small.txt", "small\n")
+        // The reverse batch (small file first) and a trailing read that fails.
+        let bigText2 = write("switch/Big/big2.log", "")
+        try? fm.removeItem(at: bigText2)
+        try? fm.copyItem(at: bigText, to: bigText2)
+        let gone = folder("Gone")
+        let goneBig = write("switch/Gone/gone.log", "")
+        try? fm.removeItem(at: goneBig)
+        try? fm.copyItem(at: bigText, to: goneBig)
+        var alerts = 0
+        var dismissTimer: Timer?
+        let outsideFiles = ["click.md", "quick.md", "link.md", "wiki.md", "restored.md"].map { write("switch/Other/\($0)", "\($0)\n") }
+        let hiddenFile = write("switch/Hidden/hidden.md", "hidden\n")
+        let closedFile = write("switch/Hidden/closed.md", "closed\n")
+        let image = img.appendingPathComponent("pic.tiff")
+        let pdfFile = pdf.appendingPathComponent("doc.pdf")
+        let fifo = other.appendingPathComponent("pipe")
+        // A link outside the loaded folder into it.
+        let linkIntoBig = dir.appendingPathComponent("switch/big-link")
+        var sidebar: FolderSidebar? { FolderSidebar.shared }
+        func root() -> String { sidebar?.rootURL.path ?? "nil" }
+        func selected() -> String { sidebar?.selectedNode?.url.lastPathComponent ?? "nil" }
+        func textTab(_ u: URL) -> EditorWindowController? { app.tabs.first { $0.doc.fileURL?.standardizedFileURL == u.standardizedFileURL } }
+        func docked(_ w: NSWindow?) -> Bool { w != nil && sidebar?.window === w && sidebar?.isShown == true }
+        func switchedTo(_ f: URL, file: URL, _ what: String) -> (@escaping () -> Void) -> Void {
+            until("\(what): the sidebar shows \(f.lastPathComponent) with \(file.lastPathComponent) selected", timeout: 4) {
+                root() == f.path && selected() == file.lastPathComponent
+            }
+        }
+        func dockedInText(_ file: URL, _ what: String) -> (@escaping () -> Void) -> Void {
+            sync { expect(docked(textTab(file)?.window), "\(what): the sidebar is docked in the file's tab",
+                          "root=\(root()) sidebar window=\(sidebar?.window?.title ?? "nil")") }
+        }
+        func unchanged(_ was: String, _ what: String) {
+            expect(root() == was, "\(what) leaves the folder alone", "root=\(root()) was \(was)")
+        }
+        return [
+            sync {
+                let pdfMade = makePDF(pdfFile, pages: 1)
+                let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4, bitsPerSample: 8, samplesPerPixel: 4,
+                                           hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+                try? fm.createDirectory(at: img, withIntermediateDirectories: true)
+                try? rep?.tiffRepresentation?.write(to: image)
+                expect(pdfMade && fm.fileExists(atPath: image.path) && mkfifo(fifo.path, 0o600) == 0
+                       && (try? fm.createSymbolicLink(atPath: linkIntoBig.path, withDestinationPath: big.path)) != nil,
+                       "switch fixtures made")
+                app.openFolder(a)
+            },
+            until("folder A is listed", timeout: 4) { root() == a.path && sidebar?.root.isLoaded == true && sidebar?.isShown == true },
+            // Finder double-click / Open With / a file dropped on the Dock icon.
+            sync { app.application(NSApp, open: [welcome]) },
+            switchedTo(b, file: welcome, "Finder open"),
+            dockedInText(welcome, "Finder open"),
+            snapshot("061-sidebar-switch-welcome.png"),
+            // An image: a viewer tab.
+            sync { app.application(NSApp, open: [image]) },
+            switchedTo(img, file: image, "image open"),
+            sync { expect(docked(app.viewerTab(for: image)?.window), "image open: the sidebar is docked in the image tab", "root=\(root())") },
+            // A PDF dropped on a window.
+            sync { FileDrop.open([pdfFile]) },
+            switchedTo(pdf, file: pdfFile, "PDF drop"),
+            sync { expect(docked(app.viewerTab(for: pdfFile)?.window), "PDF drop: the sidebar is docked in the PDF tab", "root=\(root())") },
+            // File › Open Recent.
+            sync {
+                let item = NSMenuItem()
+                item.representedObject = recentFile
+                app.openRecentItem(item)
+            },
+            switchedTo(recent, file: recentFile, "Open Recent"),
+            dockedInText(recentFile, "Open Recent"),
+            // The cedric script (cedric://open?path=…, with its token).
+            sync { openURL(app, "cedric://open?path=" + (cliFile.path.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")) },
+            switchedTo(cli, file: cliFile, "cedric script"),
+            dockedInText(cliFile, "cedric script"),
+            // A file already open, opened again from outside: brought to front, folder switched.
+            sync { app.application(NSApp, open: [welcome]) },
+            switchedTo(b, file: welcome, "re-opening an open file"),
+            dockedInText(welcome, "re-opening an open file"),
+            // Several files at once: the last one's folder.
+            sync { app.application(NSApp, open: [recentFile, dropFile]) },
+            switchedTo(drop, file: dropFile, "two files at once"),
+            dockedInText(dropFile, "two files at once"),
+            // A text file of 16 MB or more: read in the background, switched once its tab is there.
+            sync {
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [bigText, welcome])
+            },
+            switchedTo(b, file: welcome, "mixed batch while big file waits"),
+            sync {
+                expect(app.currentFileURL == welcome && app.backgroundReading == bigText.standardizedFileURL,
+                       "small file is in front while the big file waits")
+                readGate.signal()
+            },
+            until("big file: its tab arrives", timeout: 20) { textTab(bigText) != nil },
+            switchedTo(big, file: bigText, "big file"),
+            dockedInText(bigText, "big file"),
+            sync { expect(app.currentFileURL == bigText, "mixed batch leaves the big file in front") },
+            // The reverse order, the sidebar in a third folder: the small file,
+            // in front at once, switches the folder when the batch is in,
+            // while the big file still waits; the big file's tab then switches again.
+            sync { app.openFolder(a) },
+            until("reverse batch: folder A is listed first", timeout: 4) { root() == a.path && sidebar?.root.isLoaded == true },
+            sync {
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [welcome, bigText2])
+            },
+            switchedTo(b, file: welcome, "reverse batch while big file waits"),
+            dockedInText(welcome, "reverse batch while big file waits"),
+            sync {
+                expect(app.currentFileURL == welcome && app.backgroundReading == bigText2.standardizedFileURL,
+                       "reverse batch: small file is in front while the big file waits")
+                readGate.signal()
+            },
+            until("reverse batch: the big file's tab arrives", timeout: 20) { textTab(bigText2) != nil },
+            switchedTo(big, file: bigText2, "reverse batch big file"),
+            dockedInText(bigText2, "reverse batch big file"),
+            sync { expect(app.currentFileURL == bigText2, "reverse batch leaves the big file in front") },
+            // A trailing read that fails (gone before its turn): the sidebar
+            // stays on the small file's folder, the file the batch left in front.
+            sync {
+                expect(root() != b.path && root() != gone.path, "failed batch: the sidebar starts in a third folder", "root=\(root())")
+                AppDelegate.backgroundReadGateForChecks = readGate
+                app.application(NSApp, open: [welcome, goneBig])
+                expect(app.backgroundReading == goneBig.standardizedFileURL, "failed batch: the big file waits to be read")
+                try? fm.removeItem(at: goneBig)
+                // Its "couldn't open" alert is answered.
+                let dismiss = Timer(timeInterval: 0.2, repeats: true) { _ in
+                    MainActor.assumeIsolated { if NSApp.modalWindow != nil { alerts += 1; NSApp.abortModal() } }
+                }
+                RunLoop.main.add(dismiss, forMode: .modalPanel)
+                dismissTimer = dismiss
+                readGate.signal()
+            },
+            until("failed batch: the read is over", timeout: 20) { app.backgroundOpens.isEmpty && alerts == 1 },
+            sync { dismissTimer?.invalidate() },
+            // Folder B's listing runs on its own; wait for it before checking.
+            switchedTo(b, file: welcome, "failed batch after the read"),
+            sync {
+                expect(root() == b.path && selected() == welcome.lastPathComponent,
+                       "failed batch: the sidebar stays on the small file's folder", "root=\(root()) selected=\(selected())")
+                expect(docked(textTab(welcome)?.window) && app.currentFileURL == welcome,
+                       "failed batch: the small file is in front, the sidebar docked in its tab", "root=\(root())")
+                expect(textTab(goneBig) == nil, "failed batch: the gone file has no tab")
+            },
+            // Back to the big file's folder for the steps below.
+            sync { app.application(NSApp, open: [bigText]) },
+            until("back to the big file's folder", timeout: 4) { root() == big.path && app.currentFileURL == bigText },
+            sync {
+                let was = root()
+                // Through a link outside the folder into it: inside, no switch.
+                app.application(NSApp, open: [linkIntoBig.appendingPathComponent("small.txt")])
+                unchanged(was, "a file reached through a link into the folder")
+                expect(textTab(small) != nil || app.tabs.contains { $0.doc.fileURL?.lastPathComponent == "small.txt" }, "the linked file opened")
+                // Refused (a FIFO): no switch.
+                app.application(NSApp, open: [fifo])
+                unchanged(was, "a refused file")
+                // Opens from inside the app.
+                let (click, quick, link, wiki, restored) = (outsideFiles[0], outsideFiles[1], outsideFiles[2], outsideFiles[3], outsideFiles[4])
+                app.openFromFolder(FolderNode(url: click, entry: FolderEntry(name: click.lastPathComponent, isDirectory: false)))
+                unchanged(was, "a sidebar click")
+                CommandPalette.openFile(quick)
+                unchanged(was, "Quick Open")
+                guard let host = textTab(bigText) else { expect(false, "big file tab for the link opens"); return }
+                host.previewLink(.openInCedric(link))
+                unchanged(was, "a preview link")
+                host.openWikiNote(wiki, heading: nil)
+                unchanged(was, "a wiki link")
+                app.restoreTab(SessionTab(path: restored.path), into: nil)
+                unchanged(was, "a restored tab")
+                expect([click, quick, link, wiki, restored].allSatisfy { textTab($0) != nil }, "the inside-the-app opens made their tabs")
+                // Hidden: the folder stays, still hidden.
+                sidebar?.hide()
+                app.application(NSApp, open: [hiddenFile])
+                expect(root() == was && sidebar?.isShown == false, "a hidden sidebar is not switched or shown", "root=\(root())")
+                // No folder open: none is opened.
+                app.closeFolder()
+                app.application(NSApp, open: [closedFile])
+                expect(FolderSidebar.shared == nil && FolderSidebar.pendingFolder == nil, "no folder open: none is opened")
+            },
+        ]
     }
 }
 

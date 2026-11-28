@@ -98,7 +98,7 @@ extension AppDelegate: NSMenuDelegate {
 
     @objc func openRecentItem(_ sender: NSMenuItem) {
         guard let url = sender.representedObject as? URL else { return }
-        open(url, background: true)
+        openFromOutside([url])
     }
 
     @objc func clearRecentMenu(_ sender: Any?) {

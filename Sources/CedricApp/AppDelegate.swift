@@ -148,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
             toOpen += list.split(separator: ":").map { URL(fileURLWithPath: String($0)) }
         }
-        for url in toOpen { open(url, background: true) }
+        openFromOutside(toOpen)
         pendingOpen = []
         // A big file still reading: its tab is the launch's window.
         if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
@@ -163,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard launched else { pendingOpen += urls; return }
-        for url in urls { open(url, background: true) }
+        openFromOutside(urls)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -487,7 +487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // to take the new-file branch below: an empty tab that saved over
         // a file put back there, while the read's text was thrown away.
         if backgroundOpens[pendingStd] != nil || FileManager.default.fileExists(atPath: path) {
-            open(url, background: true, then: arrived, failed: failed)
+            openFromOutside(url, then: arrived, failed: failed)
         } else {
             // A new file: an empty tab that saves there.
             let doc = EditorDocument(fileURL: url, untitledName: url.lastPathComponent)
@@ -522,7 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @discardableResult
     func makeTab(_ doc: EditorDocument, text: String, in group: NSWindow? = nil, newWindow: Bool = false, show: Bool = true,
                  tabIndex: Int? = nil, prepared: EditorWindowController.PreparedText? = nil) -> EditorWindowController {
-        let tab = EditorWindowController(doc: doc, text: text, prepared: prepared)
+        let tab = OpenSignpost.interval("tab init") { EditorWindowController(doc: doc, text: text, prepared: prepared) }
         if let path = doc.fileURL?.path { tab.editing.wordGoal = FileWordGoals.goal(for: path, in: fileWordGoals) }
         tab.onChange = { [weak self] _ in self?.scheduleSessionSave() }
         tab.onClose = { [weak self] t in
@@ -548,14 +548,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             tg.insertWindow(window, at: min(tabIndex, tg.windows.count))
             adoptFloat(of: host, for: window)
         } else if let host, host !== window, host.isVisible {
-            host.addTabbedWindow(window, ordered: .above)
+            OpenSignpost.interval("addTabbedWindow") { host.addTabbedWindow(window, ordered: .above) }
             adoptFloat(of: host, for: window)
         } else {
             window.center()
         }
         PerfTrace.mark("tab_built")
         if show {
-            window.makeKeyAndOrderFront(nil)
+            OpenSignpost.interval("makeKeyAndOrderFront") { window.makeKeyAndOrderFront(nil) }
             // A check (and a launch that never becomes key) still has this
             // tab current once it is ordered front. The bar was refreshed
             // earlier, while it was not, so its buttons stayed disabled.
@@ -583,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.canChooseDirectories = false
         if let dir = currentTab?.doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         guard panel.runModal() == .OK else { return }
-        panel.urls.forEach { open($0, background: true) }
+        openFromOutside(panel.urls)
     }
 
     /// Set while the command palette validates the whole menu, or the
@@ -673,7 +673,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         // A PDF (by its first bytes, or its name) opens in a viewer tab.
         if !asText {
-            switch DocumentKind.detect(url: std) {
+            switch OpenSignpost.interval("DocumentKind.detect", { DocumentKind.detect(url: std) }) {
             case .pdf: openPDF(std); return nil
             // An image (by its signature, or its name) in an image tab; SVG stays text.
             case .image: openImage(std); return nil
@@ -684,18 +684,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             case .text: break
             }
         }
-        if background, let size = (try? std.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size >= Self.backgroundOpenBytes {
+        if background, let size = OpenSignpost.interval("file size", { (try? std.resourceValues(forKeys: [.fileSizeKey]))?.fileSize }),
+           size >= Self.backgroundOpenBytes {
             openInBackground(std, then: then, failed: failed)
             return nil
         }
         do {
             // The text goes into the tab's storage (a copy) and is let go.
-            let (d, mod) = try EditorDocument.read(std, shareBytes: true)
+            let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true, forOpen: true) }
             PerfTrace.mark("read_decode")
-            let language = LanguageChoice.forFile(named: std.lastPathComponent, content: d.text)
+            let language = OpenSignpost.interval("LanguageChoice") { LanguageChoice.forFile(named: std.lastPathComponent, content: d.text) }
             PerfTrace.mark("detect_language")
-            let certificate = Certificates.isCertificateText(d.text, fileName: std.lastPathComponent)
-            let tab = showRead(std, d, mod, language: language, certificate: certificate, prepared: nil)
+            let certificate = OpenSignpost.interval("certificate sniff") { Certificates.isCertificateText(d.text, fileName: std.lastPathComponent) }
+            let tab = OpenSignpost.interval("showRead") { showRead(std, d, mod, language: language, certificate: certificate, prepared: nil) }
             then?(tab)
             return tab
         } catch {
@@ -714,12 +715,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         doc.languageChoice = language
         let blank = tabs.count == 1 && tabs[0].doc.fileURL == nil && !tabs[0].doc.isDirty && tabs[0].text.isEmpty ? tabs[0] : nil
         // A binary file: nothing shown until Open Anyway (BinaryFile.swift).
-        let tab = makeTab(doc, text: d.looksBinary ? "" : d.text, prepared: d.looksBinary ? nil : prepared)
-        if d.looksBinary { tab.holdBinary(d.text) }
+        let tab = OpenSignpost.interval("makeTab") { makeTab(doc, text: d.looksBinary ? "" : d.text, prepared: d.looksBinary ? nil : prepared) }
+        if d.looksBinary { OpenSignpost.interval("holdBinary") { tab.holdBinary(d.text) } }
         blank?.window?.close()
-        OwlHub.shared.activity(in: tab)
-        tab.readQuarantineForOwl()
-        noteRecent(std)
+        OpenSignpost.interval("owl activity") { OwlHub.shared.activity(in: tab) }
+        OpenSignpost.interval("owl quarantine") { tab.readQuarantineForOwl() }
+        OpenSignpost.interval("noteRecent") { noteRecent(std) }
         // A certificate file (or PEM text): the Certificate panel beside it, a turn later.
         if certificate, !CertificatePanel.closedByUser {
             DispatchQueue.main.async { [weak tab] in
@@ -820,7 +821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// index, the saved-text fingerprint, the language and the certificate
     /// sniff. The text is immutable until the tab copies it.
     nonisolated static func readInBackground(_ std: URL) throws -> BackgroundRead {
-        let (d, mod) = try EditorDocument.read(std, shareBytes: true)
+        let (d, mod) = try OpenSignpost.interval("EditorDocument.read") { try EditorDocument.read(std, shareBytes: true, forOpen: true) }
         let name = std.lastPathComponent
         let text = d.text
         let ns = text as NSString
@@ -1439,7 +1440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// `place` nil: in a new window (not ordered in). Else into that
     /// window's tab group at that position.
     @discardableResult
-    private func restoreTab(_ st: SessionTab, into place: (host: NSWindow, index: Int)?) -> NSWindowController? {
+    func restoreTab(_ st: SessionTab, into place: (host: NSWindow, index: Int)?) -> NSWindowController? {
         // A PDF tab (or, from before PDF tabs, a .pdf file opened as text with nothing unsaved).
         if st.pdf != nil || st.explicitText != true && !st.hasBuffer && st.path.map(DocumentKind.hasPDFExtension) == true {
             return restorePDFTab(st, into: place)

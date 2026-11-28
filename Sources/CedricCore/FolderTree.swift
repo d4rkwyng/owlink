@@ -158,6 +158,51 @@ public enum FolderTree {
         return URL(fileURLWithPath: parent.path, isDirectory: true)
     }
 
+    /// The folder the sidebar switches to when the user opens `file` from
+    /// outside the app (0.6.1: File › Open, Open Recent, Finder / Open
+    /// With / the Dock icon, a drop, the cedric script), or nil to leave
+    /// it alone. A switch needs all of:
+    /// - a folder loaded and its sidebar shown (`loadedRoot`,
+    ///   `sidebarShown`): hidden, only remembered or none, nothing is
+    ///   loaded or shown (the 0.2.0 rule: no folder until the user opens one);
+    /// - `file` a regular file (a link followed), not a folder or a package;
+    /// - `file` outside the loaded root, by where it really is: both the
+    ///   file and the root with their links resolved, compared by the bytes
+    ///   (`relativePath`), then by identity (`eventRelativePath`: another
+    ///   spelling of the root). The path as given decides nothing. A path
+    ///   through a link into the root (or /var for /private/var, /tmp for
+    ///   /private/tmp) is inside it; a path under the root that goes
+    ///   through a link out of it (root A, A/link → B, A/link/file.md) is
+    ///   outside, in B, and switches;
+    /// - its folder not a volume root (a whole disk is never listed
+    ///   unasked): neither the folder as given nor the one the file is
+    ///   really in (a link to a file at the top of a disk).
+    /// The folder returned is the file's enclosing folder as given
+    /// (unresolved, A/link above), as File › Open Enclosing Folder opens
+    /// it. The resolved one only answers the two questions above.
+    /// `isRegularFile`: a seam for tests.
+    public static func folderToSwitchTo(opening file: URL, loadedRoot: URL?, sidebarShown: Bool,
+                                        isRegularFile: (String) -> Bool = FolderTree.isRegularFile) -> URL? {
+        guard sidebarShown, let root = loadedRoot, file.isFileURL else { return nil }
+        let std = file.standardizedFileURL
+        guard isRegularFile(std.path), let folder = enclosingFolder(of: std) else { return nil }
+        let realFile = std.resolvingSymlinksInPath()
+        guard let realFolder = enclosingFolder(of: realFile) else { return nil }
+        for f in [folder, realFolder] {
+            guard f.path != "/", (try? f.resourceValues(forKeys: [.isVolumeKey]))?.isVolume != true else { return nil }
+        }
+        let realRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        if relativePath(of: realFile, in: realRoot) != nil { return nil }
+        if eventRelativePath(realFile.path, roots: [realRoot]) != nil { return nil }
+        return folder
+    }
+
+    /// Whether `path` is a regular file (a symbolic link followed).
+    public static func isRegularFile(_ path: String) -> Bool {
+        var st = stat()
+        return stat(path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFREG
+    }
+
     /// Whether two paths or names are the same UTF-8 bytes. Swift's `==`
     /// is canonical equivalence. Same bytes is only ever a fast "yes, the
     /// same name"; different bytes never mean "a different file": APFS

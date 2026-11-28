@@ -72,14 +72,16 @@ extension AppDelegate {
 
     /// Opens `url` in the folder sidebar (replacing the folder open before)
     /// and shows it in the selected tab. `state`: restoring a session.
-    /// `reveal`: a file to select once the folder is listed.
-    func openFolder(_ url: URL, state: SessionFolder? = nil, reveal: URL? = nil) {
+    /// `reveal`: a file to select once the folder is listed; if nil, the front tab's file is selected when it is inside the folder.
+    /// `dock`: shows the sidebar in a given tab instead (text or viewer);
+    /// false if that tab has gone, and the selected tab is used.
+    func openFolder(_ url: URL, state: SessionFolder? = nil, reveal: URL? = nil, dock: ((FolderSidebar) -> Bool)? = nil) {
         // At launch (a folder dropped on the Dock icon, CEDRIC_OPEN): after
         // the first frame, once the window's tab exists.
-        guard AfterFirstFrame.passed, let tab = currentTab ?? tabs.last else {
+        guard AfterFirstFrame.passed, dock != nil || (currentTab ?? tabs.last) != nil else {
             AfterFirstFrame.run { [weak self] in
-                guard let self, AfterFirstFrame.passed, (self.currentTab ?? self.tabs.last) != nil else { return }
-                self.openFolder(url, state: state, reveal: reveal)
+                guard let self, AfterFirstFrame.passed, dock != nil || (self.currentTab ?? self.tabs.last) != nil else { return }
+                self.openFolder(url, state: state, reveal: reveal, dock: dock)
             }
             return
         }
@@ -87,7 +89,14 @@ extension AppDelegate {
         FolderSidebar.pendingFolder = nil
         let s = FolderSidebar(root: url.standardizedFileURL, state: state)
         FolderSidebar.shared = s
-        s.pendingReveal = reveal
+        if let reveal, let path = FolderTree.relativePath(of: reveal, in: s.rootURL) {
+            s.folderOpenPath = { path }
+        } else {
+            s.folderOpenPath = { [weak self, weak s] in
+                guard let s, let file = reveal ?? self?.currentFileURL else { return nil }
+                return s.pathForFolderOpen(file)
+            }
+        }
         s.onOpen = { [weak self] node in self?.openFromFolder(node) }
         s.onCreateFile = { [weak self] node in self?.openFromFolder(node, asText: true) }
         s.onChange = { [weak self] in self?.scheduleSessionSave() }
@@ -104,12 +113,99 @@ extension AppDelegate {
             self.findInFilesMenu(nil)
             self.findInFiles?.folderField.stringValue = dir.path
         }
-        if state?.visible ?? true { s.show(in: tab) }
+        if state?.visible ?? true, dock?(s) != true, let tab = currentTab ?? tabs.last { s.show(in: tab) }
         // Backlinks and Tags panes follow the new folder (the notification);
         // an open `[[` list goes (wikiFolderChanged).
         NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
         tabs.forEach { $0.wikiFolderChanged() }
         scheduleSessionSave()
+    }
+
+    // MARK: Opening a file from outside the app (0.6.1)
+
+    /// Opens files the user opened from outside the app: File › Open,
+    /// Open Recent, Finder / Open With / a file dropped on the Dock icon
+    /// (`application(_:open:)`, and the files a launch was given there,
+    /// with CEDRIC_OPEN in check builds: the same loop), a file dropped on
+    /// a window or its text (`FileDrop.open`) and the cedric script
+    /// (`cedric://open?path=`). Opens from inside the app (a sidebar
+    /// click, Quick Open, wiki and preview links, Find in Files, the owl,
+    /// Replace in Files, session restore) call `open` and never switch.
+    ///
+    /// The decision (0.6.1 bug 1, `FolderTree.folderToSwitchTo`): the
+    /// folder sidebar switches to the file's folder, the file selected
+    /// once it is listed, only when a folder is loaded AND its sidebar is
+    /// shown (hidden, only remembered from the session, or none: nothing
+    /// is loaded, the 0.2.0 rule) AND the file is a regular file outside
+    /// the loaded folder (links resolved on both sides: a path through a
+    /// link into the folder is inside). Then the sidebar docks in the
+    /// file's own tab (a text tab, a PDF, image, Office or certificate
+    /// tab, or a big file's tab once its background read is done). A
+    /// refused or failed open switches nothing; other tabs and unsaved
+    /// text are untouched. A file already open, opened again from
+    /// outside, switches too (its tab comes to the front).
+    ///
+    /// Several files at once: each immediate open (its tab up at once,
+    /// text or viewer) hands its switch to the batch, which runs only the
+    /// last one's once every file is submitted. A file read in the
+    /// background switches again when its tab comes to the front; if that
+    /// read fails, the sidebar stays on the last immediate file's folder.
+    func openFromOutside(_ urls: [URL]) {
+        var lastImmediate: (() -> Void)?
+        for url in urls {
+            openFromOutside(url, immediate: { lastImmediate = $0 })
+        }
+        lastImmediate?()
+    }
+
+    /// `immediate`: given the folder switch for a tab that is up at once
+    /// (to run it later); without it, the switch runs now.
+    @discardableResult
+    func openFromOutside(_ url: URL, immediate: ((@escaping () -> Void) -> Void)? = nil,
+                         then: ((EditorWindowController) -> Void)? = nil,
+                         failed: (() -> Void)? = nil) -> EditorWindowController? {
+        let std = url.standardizedFileURL
+        // `then` runs inside `open` for a tab made (or brought forward) at once.
+        var inOpen = true
+        let tab = open(url, background: true, then: { [weak self] tab in
+            let doSwitch: () -> Void = { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.switchFolder(forOutsideOpenOf: tab.doc.fileURL ?? std) { [weak tab] s in
+                    guard let tab, self.tabs.contains(where: { $0 === tab }) else { return false }
+                    s.show(in: tab)
+                    return true
+                }
+            }
+            if inOpen, let immediate { immediate(doSwitch) } else { doSwitch() }
+            then?(tab)
+        }, failed: failed)
+        inOpen = false
+        // A viewer tab (made now, or brought to the front): no `then`.
+        if tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
+            let doSwitch: () -> Void = { [weak self] in
+                self?.switchFolder(forOutsideOpenOf: viewer.fileURL) { [weak self] s in
+                    guard let self, let v = self.viewerTab(for: std), v === viewer, v.sidebarHost?.split != nil else { return false }
+                    s.show(in: v)
+                    return true
+                }
+            }
+            if let immediate { immediate(doSwitch) } else { doSwitch() }
+        }
+        return tab
+    }
+
+    /// `file`'s tab is there: switches the sidebar to its folder if
+    /// `FolderTree.folderToSwitchTo` says so. At launch, after the first
+    /// frame, once a sidebar saved in the session is rebuilt (its
+    /// `restoreFolder` block is queued before the launch's files open).
+    private func switchFolder(forOutsideOpenOf file: URL, dock: @escaping (FolderSidebar) -> Bool) {
+        guard AfterFirstFrame.passed else {
+            AfterFirstFrame.run { [weak self] in self?.switchFolder(forOutsideOpenOf: file, dock: dock) }
+            return
+        }
+        guard let s = FolderSidebar.shared,
+              let dir = FolderTree.folderToSwitchTo(opening: file, loadedRoot: s.rootURL, sidebarShown: s.isShown) else { return }
+        openFolder(dir, reveal: file, dock: dock)
     }
 
     func closeFolder() {
@@ -129,11 +225,13 @@ extension AppDelegate {
         // background: the same when its tab comes.
         let beside: (EditorWindowController) -> Void = { tab in
             guard FolderSidebar.shared === s, s.isShown else { return }
-            s.show(in: tab)
-            s.reveal(tab.doc.fileURL)
-            tab.window?.makeFirstResponder(s.outline)
+            OpenSignpost.interval("beside") {
+                OpenSignpost.interval("beside show") { s.show(in: tab) }
+                OpenSignpost.interval("beside reveal") { s.reveal(tab.doc.fileURL) }
+                OpenSignpost.interval("beside makeFirstResponder") { _ = tab.window?.makeFirstResponder(s.outline) }
+            }
         }
-        let tab = open(node.url, asText: asText, background: true, then: beside)
+        let tab = OpenSignpost.interval("openFromFolder open") { open(node.url, asText: asText, background: true, then: beside) }
         if tab != nil || backgroundOpens[node.url.standardizedFileURL] != nil {
             return
         } else if s.isShown, let viewer = viewerTab(for: node.url) {
@@ -287,6 +385,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     var onPrepareFileOperation: (() -> Void)?
     private var renamingNode: FolderNode?
     /// Selected when the root is first listed (Open Enclosing Folder).
+    fileprivate var folderOpenPath: (() -> String?)?
     var pendingReveal: URL?
     /// Hidden items shown after being created or renamed here.
     private var revealedHiddenURLs = Set<URL>()
@@ -590,6 +689,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
                 }
             }
         }
+        if folderOpenPath != nil { revealFolderOpenTarget() }
         if let u = pendingReveal, u.deletingLastPathComponent().standardizedFileURL == node.url.standardizedFileURL,
            let rel = FolderTree.relativePath(of: u, in: rootURL), let found = root.descendant(rel),
            outline.row(forItem: found) >= 0 {
@@ -664,6 +764,29 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
 
     // MARK: Selection
 
+    fileprivate func pathForFolderOpen(_ file: URL) -> String? {
+        let real = file.standardizedFileURL.resolvingSymlinksInPath()
+        guard let resolved = FolderTree.eventRelativePath(real.path, roots: [rootURL.resolvingSymlinksInPath()]) else { return nil }
+        return FolderTree.relativePath(of: file, in: rootURL) ?? resolved.rel
+    }
+
+    /// Each expansion starts its own listing. Read the target again when
+    /// that listing arrives, since the front tab may have changed.
+    private func revealFolderOpenTarget() {
+        guard let path = folderOpenPath?() else { folderOpenPath = nil; return }
+        var node = root
+        for part in FolderTree.components(path) {
+            guard let child = node.child(named: part) else { folderOpenPath = nil; return }
+            node = child
+            if child.isDirectory {
+                outline.expandItem(child)
+                if child.isLoading { return }
+            }
+        }
+        folderOpenPath = nil
+        reveal(node.url)
+    }
+
     /// Selects the row of `url` if its folder is listed and expanded (no
     /// folder is expanded for it).
     func reveal(_ url: URL?) {
@@ -684,6 +807,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func clicked(_ sender: Any?) {
         let row = outline.clickedRow
         guard row >= 0, let n = outline.item(atRow: row) as? FolderNode, !n.isDirectory else { return }
+        SidebarOpenTrace.clicked(n.url)
         onOpen?(n)
     }
 
@@ -691,6 +815,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
     @objc func doubleClicked(_ sender: Any?) {
         let row = outline.clickedRow
         guard row >= 0, let n = outline.item(atRow: row) as? FolderNode else { return }
+        if !n.isDirectory { SidebarOpenTrace.clicked(n.url, double: true) }
         toggleOrOpen(n)
     }
 
@@ -872,6 +997,7 @@ final class FolderSidebar: NSView, NSOutlineViewDataSource, NSOutlineViewDelegat
            !FolderTree.alwaysHidden.contains(url.lastPathComponent) {
             revealedHiddenURLs.insert(url.standardizedFileURL)
         }
+        folderOpenPath = nil
         pendingReveal = url
         if parent !== root { outline.expandItem(parent) }
         load(parent)

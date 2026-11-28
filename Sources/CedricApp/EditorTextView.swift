@@ -730,6 +730,7 @@ final class EditorTextView: NSTextView {
 
     override func drawBackground(in rect: NSRect) {
         super.drawBackground(in: rect)
+        SidebarOpenTrace.drew(self)
         guard let tlm = textLayoutManager else { return }
         let origin = textContainerOrigin
 

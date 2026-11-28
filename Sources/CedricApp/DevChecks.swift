@@ -249,7 +249,7 @@ enum DevChecks {
         case "spell": spellTypesCheck(app)
         case "spellopen": spellOpenCheck(app)
         default:
-            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
+            if !editingCheck(name, app), !pdfCheck(name, app), !imageCheck(name, app), !binaryCheck(name, app), !readOnlyCheck(name, app), !fileNoticesCheck(name, app), !bigFileCheck(name, app), !bigOpenCheck(name, app), !sidebarClickCheck(name, app) { print("check: unknown check \(name)"); exit(2) }
         }
     }
 
