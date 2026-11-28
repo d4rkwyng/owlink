@@ -553,7 +553,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
         Self.queue.async { [weak self] in
             let result: Result<(Workbook?, SpreadsheetTable), Error> = Result {
                 if format == .xlsx {
-                    let wb = try Workbook(url: url)
+                    let wb = try Workbook(url: url, limits: limits)
                     return (wb, try wb.table(at: 0, limits: limits))
                 }
                 return (nil, try DelimitedText.table(url: url, limits: limits))

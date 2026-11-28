@@ -142,8 +142,8 @@ public struct Workbook: Sendable {
     private let shared: [String]
     private let styles: [NumberStyle]
 
-    public init(url: URL) throws {
-        try self.init(data: Data(contentsOf: url, options: .mappedIfSafe))
+    public init(url: URL, limits: SpreadsheetLimits = .standard) throws {
+        try self.init(data: Data(contentsOf: url, options: .mappedIfSafe), limits: limits)
     }
 
     public init(data: Data, limits: SpreadsheetLimits = .standard) throws {
@@ -152,7 +152,7 @@ public struct Workbook: Sendable {
         }
         guard let zip = try? ZipArchive(data: data) else { throw SpreadsheetError.notAWorkbook }
         self.zip = zip
-        guard let wb = try? zip.contents(of: "xl/workbook.xml") else {
+        guard let workbookEntry = zip.entry("xl/workbook.xml") else {
             // No workbook part: a workbook only if it still has sheets.
             let parts = zip.entries.map(\.name).filter { $0.hasPrefix("xl/worksheets/") && $0.hasSuffix(".xml") && !$0.contains("/_rels/") }
             guard !parts.isEmpty else { throw SpreadsheetError.notAWorkbook }
@@ -160,11 +160,12 @@ public struct Workbook: Sendable {
                 Sheet(name: "Sheet\(i + 1)", path: p, isHidden: false, isChart: false)
             }
             date1904 = false
-            shared = Self.sharedStrings(zip, limits: limits)
-            styles = Self.numberStyles(zip)
+            shared = try Self.sharedStrings(zip, limits: limits)
+            styles = try Self.numberStyles(zip, limits: limits)
             return
         }
-        let rels = (try? zip.contents(of: "xl/_rels/workbook.xml.rels")).map { XMLScan.elements($0, named: "Relationship") } ?? []
+        let wb = try Self.metadata(zip, entry: workbookEntry, limits: limits)
+        let rels = try zip.entry("xl/_rels/workbook.xml.rels").map { try Self.metadata(zip, entry: $0, limits: limits) }.map { XMLScan.elements($0, named: "Relationship") } ?? []
         var targets: [String: String] = [:]
         for r in rels {
             if let id = r["Id"], let t = r["Target"] { targets[id] = t }
@@ -186,8 +187,8 @@ public struct Workbook: Sendable {
         sheets = list
         let pr = XMLScan.elements(wb, named: "workbookPr").first?["date1904"]?.lowercased()
         date1904 = pr == "1" || pr == "true"
-        shared = Self.sharedStrings(zip, limits: limits)
-        styles = Self.numberStyles(zip)
+        shared = try Self.sharedStrings(zip, limits: limits)
+        styles = try Self.numberStyles(zip, limits: limits)
     }
 
     /// An OLE2 compound file holding an "EncryptedPackage" stream (its
@@ -198,13 +199,20 @@ public struct Workbook: Sendable {
         return data.range(of: name) != nil
     }
 
-    static func sharedStrings(_ zip: ZipArchive, limits: SpreadsheetLimits) -> [String] {
-        guard let e = zip.entry("xl/sharedStrings.xml"), let d = try? zip.prefix(of: e, maxBytes: limits.maxBytes) else { return [] }
+    static func sharedStrings(_ zip: ZipArchive, limits: SpreadsheetLimits) throws -> [String] {
+        guard let e = zip.entry("xl/sharedStrings.xml") else { return [] }
+        guard let d = try? zip.prefix(of: e, maxBytes: limits.maxBytes) else { throw SpreadsheetError.damaged }
         return XLSXSheet.sharedStrings(d.data)
     }
 
-    static func numberStyles(_ zip: ZipArchive) -> [NumberStyle] {
-        guard let d = try? zip.contents(of: "xl/styles.xml") else { return [] }
+    private static func metadata(_ zip: ZipArchive, entry: ZipArchive.Entry, limits: SpreadsheetLimits) throws -> Data {
+        do { return try zip.contents(of: entry, maxBytes: limits.maxBytes) }
+        catch { throw SpreadsheetError.damaged }
+    }
+
+    static func numberStyles(_ zip: ZipArchive, limits: SpreadsheetLimits) throws -> [NumberStyle] {
+        guard let entry = zip.entry("xl/styles.xml") else { return [] }
+        let d = try metadata(zip, entry: entry, limits: limits)
         let p = StylesParser()
         let x = XMLParser(data: d)
         x.delegate = p
@@ -250,9 +258,7 @@ extension ZipArchive {
     /// The first `maxBytes` of an entry, inflated, and whether that was
     /// less than all of it. A deflated entry is only inflated that far.
     func prefix(of e: Entry, maxBytes: Int) throws -> (data: Data, truncated: Bool) {
-        guard e.size > maxBytes else { return (try contents(of: e), false) }
-        if e.method == 0 { return (try contents(of: e).prefix(maxBytes), true) }
-        return (try inflatedPrefix(of: e, maxBytes: maxBytes), true)
+        (try inflatedPrefix(of: e, maxBytes: maxBytes), e.size > maxBytes)
     }
 }
 
@@ -318,7 +324,7 @@ struct NumberStyle: Sendable, Equatable {
             kind = .date(date: hasY || hasD || (hasM && !time), time: time, seconds: hasS)
         } else if plain.contains("%") {
             let decimals = plain.split(separator: ".").dropFirst().first.map { $0.filter { $0 == "0" }.count } ?? 0
-            kind = .percent(decimals: decimals)
+            kind = decimals <= 15 ? .percent(decimals: decimals) : .general
         } else {
             kind = .general
         }
@@ -338,7 +344,8 @@ struct NumberStyle: Sendable, Equatable {
             return SpreadsheetCell(String(format: "%.\(decimals)f%%", v * 100), kind: .number)
         case let .date(date, time, seconds):
             // Outside Excel's dates (it shows ####): the number itself.
-            guard v >= 0, v < Self.maxSerial + 1 else { return SpreadsheetCell(Self.general(v), kind: .number) }
+            let lastDay = date1904 ? 2_957_003.0 : Self.maxSerial
+            guard v >= 0, (v * 86_400).rounded() < (lastDay + 1) * 86_400 else { return SpreadsheetCell(Self.general(v), kind: .number) }
             return SpreadsheetCell(Self.dateText(serial: v, date1904: date1904, date: date, time: time, seconds: seconds), kind: .date)
         }
     }
@@ -507,6 +514,12 @@ private final class SheetReader: NSObject, XMLParserDelegate {
         case "rPh": inRPh = false
         case "c":
             guard !capped, row >= 0, col >= 0, col < SpreadsheetLimits.maxColumns, let cell = cell() else { return }
+            guard pending.count < maxCells - cellTotal else {
+                capped = true
+                pending.removeAll()
+                if dimensionRows != nil { stoppedEarly = true; parser.abortParsing() }
+                return
+            }
             pending.append((col, cell))
         case "row":
             guard row >= 0 else { return }

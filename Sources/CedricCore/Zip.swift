@@ -71,54 +71,42 @@ public struct ZipArchive: Sendable {
         return try contents(of: e)
     }
 
-    public func contents(of e: Entry) throws -> Data {
-        let n = data.count
-        func u16(_ o: Int) -> Int { Int(data[data.startIndex + o]) | Int(data[data.startIndex + o + 1]) << 8 }
+    public func contents(of e: Entry, maxBytes: Int = Self.maxEntrySize) throws -> Data {
+        guard e.size <= maxBytes else { throw ZipError.tooLarge }
+        return try inflatedPrefix(of: e, maxBytes: e.size)
+    }
+
+    /// Borrow the compressed input from the archive and allocate only the requested output.
+    public func inflatedPrefix(of e: Entry, maxBytes: Int) throws -> Data {
         let h = e.localHeaderOffset
-        guard h + 30 <= n, u16(h) | u16(h + 2) << 16 == 0x0403_4B50 else { throw ZipError.damaged }
+        guard data.count >= 30, (0...data.count - 30).contains(h),
+              e.size >= 0, e.compressedSize >= 0, maxBytes >= 0 else { throw ZipError.damaged }
+        func u16(_ o: Int) -> Int {
+            Int(data[data.startIndex + o]) | Int(data[data.startIndex + o + 1]) << 8
+        }
+        guard u16(h) == 0x4B50, u16(h + 2) == 0x0403 else { throw ZipError.damaged }
         let start = h + 30 + u16(h + 26) + u16(h + 28)
-        guard start + e.compressedSize <= n else { throw ZipError.damaged }
-        guard e.size <= Self.maxEntrySize else { throw ZipError.tooLarge }
-        let raw = data.subdata(in: (data.startIndex + start)..<(data.startIndex + start + e.compressedSize))
+        guard e.compressedSize <= data.count - start else { throw ZipError.damaged }
+        let count = min(e.size, maxBytes)
         switch e.method {
-        case 0: return raw
+        case 0:
+            guard e.size == e.compressedSize else { throw ZipError.damaged }
+            let first = data.startIndex + start
+            return data.subdata(in: first..<(first + count))
         case 8:
-            if e.size == 0 { return Data() }
-            guard !raw.isEmpty else { throw ZipError.damaged }
-            var out = Data(count: e.size)
+            if count == 0 { return Data() }
+            guard e.compressedSize > 0 else { throw ZipError.damaged }
+            var out = Data(count: count)
             let written = out.withUnsafeMutableBytes { dst in
-                raw.withUnsafeBytes { src in
-                    compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, e.size,
-                                              src.bindMemory(to: UInt8.self).baseAddress!, raw.count, nil, COMPRESSION_ZLIB)
+                data.withUnsafeBytes { src in
+                    compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, count,
+                                              src.bindMemory(to: UInt8.self).baseAddress!.advanced(by: start),
+                                              e.compressedSize, nil, COMPRESSION_ZLIB)
                 }
             }
-            guard written == e.size else { throw ZipError.damaged }
+            guard written == count else { throw ZipError.damaged }
             return out
         default: throw ZipError.unsupported("compression method \(e.method)")
         }
-    }
-
-    /// A deflated entry's first `maxBytes`, inflated (no more than that is
-    /// decoded or held): a capped read of a big part.
-    public func inflatedPrefix(of e: Entry, maxBytes: Int) throws -> Data {
-        guard e.method == 8 else { return try contents(of: e).prefix(maxBytes) }
-        let n = data.count
-        func u16(_ o: Int) -> Int { Int(data[data.startIndex + o]) | Int(data[data.startIndex + o + 1]) << 8 }
-        let h = e.localHeaderOffset
-        guard h + 30 <= n, u16(h) | u16(h + 2) << 16 == 0x0403_4B50 else { throw ZipError.damaged }
-        let start = h + 30 + u16(h + 26) + u16(h + 28)
-        guard start + e.compressedSize <= n, e.compressedSize > 0, maxBytes > 0 else { throw ZipError.damaged }
-        let size = min(maxBytes, e.size)
-        let raw = data.subdata(in: (data.startIndex + start)..<(data.startIndex + start + e.compressedSize))
-        var out = Data(count: size)
-        // compression_decode_buffer writes at most `size` bytes: the start.
-        let written = out.withUnsafeMutableBytes { dst in
-            raw.withUnsafeBytes { src in
-                compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, size,
-                                          src.bindMemory(to: UInt8.self).baseAddress!, raw.count, nil, COMPRESSION_ZLIB)
-            }
-        }
-        guard written > 0 else { throw ZipError.damaged }
-        return out.prefix(written)
     }
 }
