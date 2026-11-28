@@ -15,18 +15,19 @@ TextKit 2, with no dependencies outside Apple's frameworks.
 
 ## Install
 
-With [Homebrew](https://brew.sh):
+Download **`Owlink-<version>.dmg`** from
+[Releases](https://github.com/d4rkwyng/owlink/releases), open it, and drag
+Owlink onto Applications.
+
+Or with [Homebrew](https://brew.sh):
 
 ```sh
 brew trust --tap d4rkwyng/tap      # once: newer Homebrew asks you to trust a third-party tap
 brew install --cask d4rkwyng/tap/owlink
 ```
 
-Or download `Owlink-<version>.dmg` from
-[Releases](https://github.com/d4rkwyng/owlink/releases), open it, and drag
-Owlink onto Applications. Both ways, Owlink updates itself (Owlink › Check
-for Updates…). Opened from anywhere else, it offers to move itself to
-Applications.
+Both ways, Owlink updates itself (Owlink › Check for Updates…). Opened
+from anywhere else, it offers to move itself to Applications.
 
 Needs macOS 14 or later, on Apple silicon or Intel.
 

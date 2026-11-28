@@ -2391,7 +2391,8 @@ launches it. `Scripts/check-isolation-lint.sh` fails if any other script sets
   signing nor notarization sees it.
 
 **On GitHub.** `.github/workflows/release.yml` runs on a `v*` tag push (or by hand with a
-tag) on `macos-26`: checks the six secrets, builds the release notes from
+tag) on `macos-26`: checks the six secrets, checks that the tag exists as `refs/tags/<tag>`
+(by hand, a branch or commit name is refused) and checks out exactly that tag, builds the release notes from
 `CHANGELOG.md` (`Scripts/changelog-section.sh`, after Tankard's), restores the SwiftPM
 artifact cache, resolves packages, imports the certificate, runs `Scripts/test.sh`, then
 `Scripts/release.sh` with `CEDRIC_VERSION` from the tag, smoke-launches the zip, then

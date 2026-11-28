@@ -33,7 +33,13 @@ The short version is the [README](../README.md).
 
 ## Install
 
-With [Homebrew](https://brew.sh):
+Download **`Owlink-<version>.dmg`** from
+[Releases](https://github.com/d4rkwyng/owlink/releases), open it, drag
+Owlink onto the Applications folder in its window, eject it, and open
+Owlink from Applications. (The release also has a `.zip` of the same app;
+that one is for the updater.)
+
+Or with [Homebrew](https://brew.sh):
 
 ```sh
 brew trust --tap d4rkwyng/tap      # once: newer Homebrew asks you to trust a third-party tap
@@ -43,20 +49,17 @@ brew install --cask d4rkwyng/tap/owlink
 This also puts the `cedric` command on your PATH, and Owlink can update
 itself from there.
 
-Or download **`Owlink-<version>.dmg`** from
-[Releases](https://github.com/d4rkwyng/owlink/releases), open it, drag
-Owlink onto the Applications folder in its window, eject it, and open
-Owlink from Applications. (The release also has a `.zip` of the same app;
-that one is for the updater.)
-
 If Owlink finds itself running from somewhere it can't update from (the
-disk image, Downloads, or a temporary copy macOS made because it wasn't
-moved with Finder, called App Translocation), it asks to **Move to
-Applications**. It copies itself there, takes the download marking off that
-new copy only, moves the download to the Trash (a disk image is left
-alone; an Owlink already in Applications goes to the Trash only if you
-say Replace), and reopens from Applications; **Not Now** asks again next
-time; tick **Don't ask again** with Not Now to stop asking.
+disk image, Downloads or anywhere else outside Applications, or a
+temporary copy macOS made because it wasn't moved with Finder, called App
+Translocation), it asks to **Move to Applications**. It copies itself
+there, checks that the copy is the same signed app, takes the download
+marking off that new copy only, and reopens from Applications. An Owlink
+already in Applications goes to the Trash only if you say Replace (and is
+left alone if it changed while Owlink was asking). The copy you opened can
+go to the Trash too, when it is somewhere Owlink can write to: this is a
+tidy-up, so if it can't, the copy just stays where it is. A disk image is
+left alone. **Not Now** asks again next time; tick **Don't ask again** with Not Now to stop asking.
 
 Owlink checks for a new version
 about once a day and asks before installing it (Owlink › Check for

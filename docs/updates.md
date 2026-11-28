@@ -129,26 +129,35 @@ install, an app opened straight from Downloads or from the DMG itself),
 a release build asks at launch, after the first frame, whether to move
 itself to Applications when it is translocated
 (`SecTranslocateIsTranslocatedURL` through dlsym, else the
-`/AppTranslocation/` path), running from a read-only disk image, or a
-quarantined copy outside /Applications and ~/Applications
+`/AppTranslocation/` path), running from a read-only disk image, or any
+other copy outside /Applications and ~/Applications, quarantined or not
 (`Sources/CedricCore/AppRelocation.swift`,
-`Sources/CedricApp/MoveToApplications.swift`). A copy without quarantine
-outside Applications (one you built) isn't asked; a check build never asks.
-After LetsMove's idea, in our own tested code:
+`Sources/CedricApp/MoveToApplications.swift`). A check or debug build
+never asks (that is how a build you made yourself runs). After LetsMove's
+idea, in our own tested code:
 
 1. copy the running bundle to a hidden staging name inside /Applications
    (~/Applications, created if needed, when /Applications isn't writable);
-2. check the copy's code signature (all architectures, nested code, strict);
+2. check that the copy is the running app: an intact signature (all
+   architectures, nested code, strict) that satisfies the running
+   process's designated requirement, and the running code's code
+   directory hash on one of its architectures;
 3. remove `com.apple.quarantine` from **that copy only**;
-4. send whatever is at /Applications/Owlink.app to the Trash (asking first,
-   unless it is this app's own translocation original), then rename the
-   copy into place;
-5. send the original download to the Trash when it is somewhere writable
-   (never the disk image), and reopen from /Applications once this process
-   has quit.
+4. publish it: whatever is at /Applications/Owlink.app (asking first,
+   unless it is this app's own translocation original) is exchanged with
+   the copy in one `renamex_np(RENAME_SWAP)`, so that path always holds a
+   whole app, and the old app, now at the staging name, goes to the
+   Trash. Only the very item that was there when the user was asked
+   (device, inode and birth time) is replaced: anything put there since
+   is left alone. With nothing there, an exclusive rename;
+5. send the original to the Trash when it is somewhere writable (never
+   the disk image) and still the item it was. This is best-effort: if it
+   fails, the original stays where it is. Then reopen from /Applications
+   once this process has quit.
 
-A failure in 1–4 removes the staging copy and leaves everything else as it
-was. This is not a Gatekeeper bypass: it only runs in an app Gatekeeper has
+A failure in 1–4 removes the staging copy and leaves the installed app as
+it was. If the old app can't go to the Trash in step 4, the new one stays
+installed and the old one is kept beside it under the staging name. This is not a Gatekeeper bypass: it only runs in an app Gatekeeper has
 already let run (the user said Open on the first launch), and it never
 changes the download's, the disk image's or the translocated original's
 quarantine, or any Gatekeeper setting. "Don't ask again", ticked with Not Now, stops the question
