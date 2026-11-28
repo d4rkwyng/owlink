@@ -126,7 +126,27 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertEqual(try route("sheet.csv", zip), .spreadsheet(.csv))
         XCTAssertEqual(DocumentViewerRoute.route(fileName: "sheet.csv", prefix: zip,
                                                  contentType: .commaSeparatedText), .spreadsheet(.csv))
-        XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.csv", prefix: Array("%PDF-,x\n".utf8)), .pdf)
+        // Valid delimited text that merely starts with "%PDF-" stays the
+        // grid's (and the editor's for Edit as Text): only a PDF version
+        // header ("%PDF-1.7") makes a .csv / .tsv a replacement PDF.
+        let lookalikes: [(String, String, SpreadsheetFormat)] = [
+            ("data.csv", "%PDF-,x\n", .csv), ("data.csv", "%PDF-", .csv), ("data.csv", "%PDF-x,y\n", .csv),
+            ("data.csv", "%PDF-1,x\n", .csv), ("data.csv", "%PDF-.7,x\n", .csv), ("data.csv", "%PDF-1.,x\n", .csv),
+            ("data.tsv", "%PDF-\tx\n", .tsv), ("data.tsv", "%PDF-1\tx\n", .tsv),
+        ]
+        for (name, text, format) in lookalikes {
+            let r = DocumentViewerRoute.route(fileName: name, prefix: Array(text.utf8))
+            XCTAssertEqual(r, .spreadsheet(format), "\(name): \(text.debugDescription)")
+            for reopening in [true, false] {
+                XCTAssertTrue(DocumentViewerRoute.editorOnlyOpen(r, reopening: reopening).opensEditor, text.debugDescription)
+            }
+        }
+        XCTAssertEqual(try route("lookalike.csv", Array("%PDF-,x\n".utf8)), .spreadsheet(.csv), "by its bytes on disk")
+        // A real PDF version header in a delimited name: a replacement PDF.
+        for header in ["%PDF-1.7\n", "%PDF-1.4\n%\u{e2}", "%PDF-2.0\r"] {
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.csv", prefix: Array(header.utf8)), .pdf, header.debugDescription)
+            XCTAssertEqual(DocumentViewerRoute.route(fileName: "data.tsv", prefix: Array(header.utf8)), .pdf, header.debugDescription)
+        }
         XCTAssertTrue(SpreadsheetFormat.csv.isText && SpreadsheetFormat.tsv.isText && !SpreadsheetFormat.xlsx.isText)
     }
 
