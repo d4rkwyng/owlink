@@ -583,19 +583,40 @@ final class NoteLinksTests: XCTestCase {
         let result = try XCTUnwrap(NoteLinksModel.read(root: d, note: "Beta.md", listed: ["deep.md"]))
         XCTAssertLessThanOrEqual(result.tags.tagCount, NoteLinksModel.maxTagEntries, "tree of \(result.tags.tagCount)")
         XCTAssertTrue(result.truncated)
+        // The cap counts (tag, note) entries kept, not distinct tags: many
+        // notes sharing a few tags are cut at the cap too (Sol round 4).
+        var shared: [String: [Tags.Ref]] = [:]
+        for n in 0..<2_000 { shared["n\(n).md"] = (0..<50).map { Tags.Ref(name: "x\($0)", line: $0, snippet: "") } }
+        let capped = TagTree(files: shared, maxEntries: NoteLinksModel.maxTagEntries)
+        let retained = NoteLinksView.flatten(capped.roots).reduce(0) { $0 + capped.notes(for: $1.path).count }
+        XCTAssertTrue(capped.truncated)
+        XCTAssertLessThanOrEqual(retained, NoteLinksModel.maxTagEntries, "\(retained) notes kept under \(capped.tagCount) tags")
+        XCTAssertGreaterThan(retained, 0)
+        // 20,000 tags four deep: expanding (80,000 entries) is work 0..<80,000,
+        // the parent map 80,000..<160,000, the nodes 160,000..<240,000, then
+        // the 20,000 top-level siblings are sorted (some 280,000 comparisons).
+        // One tag in 20,000 notes: its notes are sorted from 20,000 on.
         let refs = (0..<20_000).map { Tags.Ref(name: "a\($0)/b/c/d", line: $0, snippet: "") }
-        // While expanding (80,000 entries), then while building nodes.
-        for threshold in [1_000, 80_000 + 500] {
+        var wide: [String: [Tags.Ref]] = [:]
+        for n in 0..<20_000 { wide["n\(n).md"] = [Tags.Ref(name: "same", line: 1, snippet: "")] }
+        for (files, threshold, phase) in [(["n.md": refs], 1_000, "expanding"), (["n.md": refs], 80_000 + 500, "the parent map"),
+                                          (["n.md": refs], 160_000 + 500, "building nodes"),
+                                          (["n.md": refs], 240_000 + 1_000, "sorting siblings"),
+                                          (wide, 20_000 + 1_000, "sorting a tag's notes")] {
+            let whole = ParseCounter()
+            _ = ParseCounter.$current.withValue(whole) { TagTree(files: files) }
+            XCTAssertGreaterThan(whole.treeWork, threshold + 10_000, "\(phase): the threshold is inside the work")
             let counter = ParseCounter()
             var atCancel: Int?
             _ = ParseCounter.$current.withValue(counter) {
-                TagTree(files: ["n.md": refs], cancelled: {
+                TagTree(files: files, cancelled: {
                     if atCancel == nil, counter.treeWork >= threshold { atCancel = counter.treeWork }
                     return atCancel != nil
                 })
             }
-            let at = try XCTUnwrap(atCancel, "threshold \(threshold): the cancel was asked")
-            XCTAssertLessThanOrEqual(counter.treeWork - at, 0, "threshold \(threshold): \(counter.treeWork - at) after the cancel")
+            let at = try XCTUnwrap(atCancel, "\(phase): the cancel was asked")
+            XCTAssertLessThanOrEqual(at - threshold, 256, "\(phase): asked only at \(at)")
+            XCTAssertLessThanOrEqual(counter.treeWork - at, 0, "\(phase): \(counter.treeWork - at) after the cancel")
         }
     }
 

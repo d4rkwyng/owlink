@@ -368,8 +368,9 @@ public struct TagTree: Sendable {
     /// one) are left out.
     public let truncated: Bool
 
-    /// `cancelled` is asked every 256 tags while they are expanded, and
-    /// before each node is made: once it says stop, the tree is cut short
+    /// `cancelled` is asked every 256 tags while they are expanded, every
+    /// 256 tags while the parent map is made, every 256 comparisons while
+    /// notes and siblings are sorted, and before each node is made: once it says stop, the tree is cut short
     /// there (the caller drops it). `maxEntries`: the most (tag, note)
     /// entries kept, a nested tag counting for each tag above it too;
     /// past it the rest is left out and `truncated` is set.
@@ -409,11 +410,22 @@ public struct TagTree: Sendable {
             }
         }
         truncated = full
+        // Sorting asks `cancelled` every 256 comparisons and is abandoned
+        // (thrown out of) once it says stop.
+        struct Stop: Error {}
+        var compared = 0
+        func compare() throws {
+            counter?.treeWork += 1
+            compared += 1
+            if compared % 256 == 0, cancelled() { throw Stop() }
+        }
         var hits: [String: [Hit]] = [:]
         if !stopped {
             for (k, v) in byKey {
                 if cancelled() { stopped = true; break }
-                hits[k] = v.values.sorted { $0.source < $1.source }
+                do {
+                    hits[k] = try v.values.sorted { try compare(); return $0.source < $1.source }
+                } catch { stopped = true; break }
             }
         }
         self.hits = hits
@@ -421,7 +433,11 @@ public struct TagTree: Sendable {
         // Children by parent key.
         var kids: [String: [String]] = [:]
         if !stopped {
+            var mapped = 0
             for k in hits.keys {
+                counter?.treeWork += 1
+                mapped += 1
+                if mapped % 256 == 0, cancelled() { stopped = true; break }
                 let parent = (k as NSString).deletingLastPathComponent
                 kids[k.contains("/") ? parent : "", default: []].append(k)
             }
@@ -435,10 +451,16 @@ public struct TagTree: Sendable {
                 nodes.append(Node(name: (path as NSString).lastPathComponent, path: path, count: hits[k]?.count ?? 0, children: build(k)))
             }
             if stopped || cancelled() { stopped = true; return nodes }
-            return nodes.sorted { a, b in
-                if a.count != b.count { return a.count > b.count }
-                let c = a.name.localizedCaseInsensitiveCompare(b.name)
-                return c != .orderedSame ? c == .orderedAscending : a.name < b.name
+            do {
+                return try nodes.sorted { a, b in
+                    try compare()
+                    if a.count != b.count { return a.count > b.count }
+                    let c = a.name.localizedCaseInsensitiveCompare(b.name)
+                    return c != .orderedSame ? c == .orderedAscending : a.name < b.name
+                }
+            } catch {
+                stopped = true
+                return nodes
             }
         }
         let built = stopped ? [] : build("")
