@@ -238,7 +238,7 @@ final class SpreadsheetGridView: UIView, UICollectionViewDataSource, UICollectio
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ table: SpreadsheetTable) {
+    func show(_ table: SpreadsheetTable?) {
         self.table = table
         layout.table = table
         layout.scale = 1
@@ -439,8 +439,11 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     private(set) var state: State = .loading
     private(set) var selectedSheet = 0
     private var workbook: Workbook?
-    var cachedSheetCount: Int { tables.count }
-    private var tables: [Int: SpreadsheetTable] = [:]
+    private var cachedSheet: (index: Int, table: SpreadsheetTable)?
+    var cachedSheetCount: Int { cachedSheet == nil ? 0 : 1 }
+    private var pendingRead: BlockOperation?
+    private var dismissed = false
+
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var loadGeneration = 0
     /// Edit as Text (CSV / TSV): the browser closes this viewer and opens
@@ -541,6 +544,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     }
 
     private func finishLoading(_ s: State) {
+        pendingRead = nil
         state = s
         spinner.stopAnimating()
         let w = waiters
@@ -551,15 +555,22 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     // MARK: Loading
 
     private func load() {
+        guard !dismissed else { return }
         state = .loading
         spinner.startAnimating()
         let url = fileURL, format = format, limits = limits
         loadGeneration += 1
         let gen = loadGeneration
-        queue.async { [weak self] in
+        let work = BlockOperation()
+        work.addExecutionBlock { [weak self, weak work] in
+            guard let work, !work.isCancelled else { return }
+            let readAccess = ScopedFileAccess(url)
+            defer { readAccess.stop() }
+            guard !work.isCancelled else { return }
             let result: Result<(Workbook?, SpreadsheetTable), Error> = Result {
                 if format == .xlsx {
                     let wb = try Workbook(url: url, limits: limits)
+                    guard !work.isCancelled else { throw CancellationError() }
                     return (wb, try wb.table(at: 0, limits: limits))
                 }
                 return (nil, try DelimitedText.table(url: url, limits: limits))
@@ -569,7 +580,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
                 switch result {
                 case .success(let (wb, table)):
                     self.workbook = wb
-                    self.tables[0] = table
+                    self.cachedSheet = (0, table)
                     if let wb, wb.sheets.count > 1 { self.makeTabs(wb.sheets) }
                     self.showTable(table)
                 case .failure(let e):
@@ -577,34 +588,46 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
                 }
             }
         }
+        pendingRead = work
+        queue.async { work.start() }
     }
 
-    /// Shows sheet `index` of the workbook (read once, then kept).
+    /// Only the most recently displayed table stays cached.
     func selectSheet(_ index: Int) {
-        guard let wb = workbook, index >= 0, index < wb.sheets.count, index != selectedSheet || state == .loading else { return }
+        guard !dismissed, let wb = workbook, wb.sheets.indices.contains(index), index != selectedSheet else { return }
         selectedSheet = index
         updateTabs()
         // A sheet still loading for another tab is no longer wanted.
         loadGeneration += 1
-        if let t = tables[index] { showTable(t); return }
+        pendingRead?.cancel()
+        pendingRead = nil
+        if let cachedSheet, cachedSheet.index == index { showTable(cachedSheet.table); return }
+        grid.show(nil)
+        grid.isHidden = true
+        messageView.isHidden = true
+        noticeBar.isHidden = true
         state = .loading
         spinner.startAnimating()
         let gen = loadGeneration, limits = limits, willReadSheet = willReadSheet
-        queue.async { [weak self] in
+        let work = BlockOperation()
+        work.addExecutionBlock { [weak self, weak work] in
+            guard let work, !work.isCancelled else { return }
             willReadSheet?(index)
+            guard !work.isCancelled else { return }
             let result = Result { try wb.table(at: index, limits: limits) }
             DispatchQueue.main.async {
-                guard let self else { return }
-                if case .success(let t) = result { self.tables[index] = t } // kept for a later tap
-                guard gen == self.loadGeneration else { return }
+                guard let self, gen == self.loadGeneration else { return }
                 switch result {
                 case .success(let t):
+                    self.cachedSheet = (index, t)
                     self.showTable(t)
                 case .failure(let e):
                     self.showFailure(e)
                 }
             }
         }
+        pendingRead = work
+        queue.async { work.start() }
     }
 
     private func showTable(_ t: SpreadsheetTable) {
@@ -732,8 +755,18 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
     }
 
     private func close() {
-        dismiss(animated: true) { [access] in access.stop() }
+        tearDown()
+        dismiss(animated: true)
     }
 
-    func tearDown() { access.stop() }
+    func tearDown() {
+        dismissed = true
+        pendingRead?.cancel()
+        loadGeneration += 1
+        cachedSheet = nil
+        workbook = nil
+        grid.show(nil)
+        finishLoading(.empty)
+        access.stop()
+    }
 }
