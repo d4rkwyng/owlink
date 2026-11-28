@@ -3,8 +3,9 @@ import CedricCore
 import CedricAI
 
 /// CEDRIC_BUILTIN_CHECK=/out/dir: the built-in engine's downloads in the
-/// Settings › Cedric, in process, with real clicks. Use CEDRIC_MODELS_DIR=<temp>
-/// so the real Application Support models are left alone. Downloads the
+/// Settings › Cedric, in process, with real clicks. Needs CEDRIC_MODELS_DIR=<temp>
+/// and CEDRIC_AI_DEFAULTS=<suite> (CheckIsolation): without both it fails
+/// before Settings opens, so the real models and settings are left alone. Downloads the
 /// catalog model CEDRIC_BUILTIN_CHECK_MODEL (default: the 1.5B, the smallest)
 /// for real from Hugging Face.
 ///
@@ -24,6 +25,10 @@ enum BuiltInCheck {
     static var model: String { AICheck.env["CEDRIC_BUILTIN_CHECK_MODEL"] ?? "qwen2.5-coder-1.5b-instruct-q4_k_m" }
 
     static func run(_ app: AppDelegate, out: String) {
+        // Before Settings (and so BuiltInDownloads) exists: never the real models or settings.
+        if let why = CheckIsolation.problem() {
+            AICheck.check(false, "isolated run: \(why); nothing opened or clicked"); AICheck.finish(); return
+        }
         try? FileManager.default.createDirectory(atPath: out, withIntermediateDirectories: true)
         NSApp.activate(ignoringOtherApps: true)
         NSApp.sendAction(#selector(AppDelegate.showAISettings(_:)), to: app, from: nil)
@@ -50,7 +55,12 @@ enum BuiltInCheck {
         NSApp.sendAction(popup.action!, to: popup.target, from: popup)
         AICheck.check(sheet.settings.model == before && sheet.builtInTarget == m.id && view.model == m,
                       "picking \(m.name) makes it the download target; the model in use stays \(before ?? "Automatic")")
-        AICheck.check(downloads.state(m) == .notDownloaded && view.action.title == "Download", "\(m.name): Download")
+        let clean = downloads.state(m) == .notDownloaded && view.action.title == "Download"
+        AICheck.check(clean, "\(m.name): Download")
+        // Only a model this run has not got yet: stop before any click otherwise.
+        guard clean, downloads.store.partialBytes(m) == 0, !FileManager.default.fileExists(atPath: downloads.store.fileURL(for: m).path) else {
+            AICheck.check(false, "\(m.name) is not in a clean Not downloaded state; nothing clicked"); AICheck.finish(); return
+        }
         OwlCheck.after(0.3) {
             OwlCheck.snapshot(panel, "\(out)/0-models.png") {
                 AICheck.press(view.action, "Download") { view.licenseConfirmationAlert != nil }

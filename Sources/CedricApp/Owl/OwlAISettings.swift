@@ -336,12 +336,21 @@ final class AISettingsSection: NSObject {
         } else if testButton.isHidden == false, statusLabel.stringValue.hasPrefix("Apple Intelligence:") {
             status("")
         }
-        noteLabel.stringValue = engine.note ?? ""
-        grid?.cell(for: noteLabel)?.row?.isHidden = engine.note == nil
+        // Built-in keeps the tab compact: one-line notes, the full text in
+        // their tooltips. The server engines' notes still wrap.
+        let intel = Self.intelLayoutForCheck && !settings.backend.usesServer
+        let note = engine.note ?? (builtIn && intel ? BuiltInEngine.slowHardwareNote : nil)
+        noteLabel.stringValue = (builtIn && note != nil ? Self.builtInSlowNote : note) ?? ""
+        noteLabel.toolTip = note
+        oneLine(noteLabel, builtIn)
+        grid?.cell(for: noteLabel)?.row?.isHidden = note == nil
         let serverDefault = settings.backend.usesServer
-        automaticNote.stringValue = serverDefault
+        let fullAutomaticNote = serverDefault
             ? String(localized: "Automatic checks are off by default for LM Studio, Ollama and custom servers. Review the first-use notice before enabling them.")
-            : String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check.")
+            : Self.intelAutomaticNote
+        automaticNote.stringValue = builtIn ? Self.builtInIntelAutomaticNote : fullAutomaticNote
+        automaticNote.toolTip = fullAutomaticNote
+        oneLine(automaticNote, builtIn)
 
         if !builtIn { builtInTarget = nil }
         let auto: String
@@ -375,8 +384,30 @@ final class AISettingsSection: NSObject {
         grid?.cell(for: modelsLabel)?.row?.isHidden = modelsLabel.isHidden
         // The interval only matters for automatic checks; explain whichever default applies here.
         intervalPopup.isEnabled = settings.automaticChecks
-        grid?.cell(for: automaticNote)?.row?.isHidden = LocalAISettings.defaultAutomaticChecks(for: settings.backend)
+        grid?.cell(for: automaticNote)?.row?.isHidden = LocalAISettings.defaultAutomaticChecks(for: settings.backend) && !intel
         onResize?()
+    }
+
+    /// Built-in's one-line Intel notes (the full ones are their tooltips).
+    static let builtInSlowNote = String(localized: "Slow on Intel Macs: the model runs on the CPU.")
+    static let builtInIntelAutomaticNote = String(localized: "Off by default on Intel Macs. Click the owl for Ask AI Now.")
+    static let intelAutomaticNote = String(localized: "Off by default on Intel Macs, so the editor stays fast. Click the owl and choose Ask AI Now to check.")
+
+    /// Checks only (CEDRIC_CHECK=settings): lay the tab out as on an Intel
+    /// Mac (the engine caveat and the automatic-check note shown), so the
+    /// compact Built-in layout can be measured on Apple silicon.
+    static var intelLayoutForCheck: Bool {
+        get { DevEnvironment.checksEnabled && intelLayout }
+        set { intelLayout = newValue }
+    }
+    private static var intelLayout = false
+
+    /// One line, truncated (the full text is the tooltip), or wrapping.
+    private func oneLine(_ l: NSTextField, _ one: Bool) {
+        l.maximumNumberOfLines = one ? 1 : 0
+        l.lineBreakMode = one ? .byTruncatingTail : .byWordWrapping
+        l.cell?.wraps = !one
+        l.cell?.truncatesLastVisibleLine = one
     }
 
     private struct MenuEntry: Equatable {
@@ -429,7 +460,8 @@ final class AISettingsSection: NSObject {
         let automatic = shownID == nil
         let shown = automatic ? (catalog?.model(id: suggested?.id) ?? catalog?.defaultModel) : catalog?.model(id: shownID)
         modelPopup.toolTip = shown?.details
-        modelsView.show(shown, automatic: automatic)
+        // A saved ID the catalog doesn't list: say so, not "no models bundled".
+        modelsView.show(shown, automatic: automatic, unavailableID: shown == nil && !automatic ? shownID : nil)
     }
 
     private func showAutomaticServerNotice() {

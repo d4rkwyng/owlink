@@ -11,10 +11,16 @@ import CedricAI
 /// fields; the window reopens on the tab it was left on; Cedric › Cedric AI
 /// Settings… opens the Cedric tab, which has no Save or Cancel; the prose
 /// font (ProseFontCheck.swift). Snapshots: settings-general/editor/writing/cedric.png.
-/// Settings › Cedric on Built-in (run with CEDRIC_AI_BACKEND=builtIn and an
-/// empty CEDRIC_MODELS_DIR, as tools-check.sh does): one Model popup lists
-/// Automatic and every catalog model with its tag, one action button on its
-/// row, one-line notes, and the tab at most `cedricTabMaxHeight` tall.
+/// Settings › Cedric on Built-in (run with CEDRIC_AI_BACKEND=builtIn, an
+/// empty CEDRIC_MODELS_DIR and a CEDRIC_AI_DEFAULTS suite of its own, as
+/// tools-check.sh does; without both folders isolated the check opens
+/// nothing, CheckIsolation): one Model popup lists Automatic and every
+/// catalog model with its tag, one action button on its row, one-line notes
+/// (also as laid out on an Intel Mac), and the tab at most
+/// `cedricTabMaxHeight` tall. A download target stays selected, with the
+/// same menu items, through progress; an installed model (a stand-in in the
+/// check's models folder) saves its ID to the suite, Automatic clears it,
+/// and the standard defaults' AI settings are untouched.
 /// CEDRIC_SETTINGS_APPEARANCE=light|dark (check only) draws the app, and so the
 /// Settings window, in Aqua or Dark Aqua for this run; the system appearance
 /// is left alone.
@@ -50,7 +56,16 @@ extension DevChecks {
     static let cedricTabMaxHeight: CGFloat = 495
 
     static func settingsCheck(_ app: AppDelegate) {
-        let restore = keepDefaults(MenuToggleSetting.allCases.map(\.defaultsKey) + ["styleCheck", SettingsPane.defaultsKey])
+        // Before Settings (and so BuiltInDownloads) exists: the AI settings and
+        // models must be the check's own, or its clicks could save or delete the user's.
+        if let why = CheckIsolation.problem() {
+            expect(false, "isolated run: \(why); Settings not opened")
+            finish()
+            return
+        }
+        let standardAI = UserDefaults.standard.data(forKey: LocalAISettings.defaultsKey)
+        // owlHintSource: applying an AI choice may switch the owl's hint source.
+        let restore = keepDefaults(MenuToggleSetting.allCases.map(\.defaultsKey) + ["styleCheck", "owlHintSource", SettingsPane.defaultsKey])
         switch DevEnvironment.values["CEDRIC_SETTINGS_APPEARANCE"] {
         case "light": NSApp.appearance = NSAppearance(named: .aqua)
         case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
@@ -143,8 +158,11 @@ extension DevChecks {
                        "Cedric: Test Connection and the checkboxes stay", "\(titlesShown)")
                 expect(!ai.intervalPopup.isHiddenOrHasHiddenAncestor, "Cedric: Check at most every stays")
                 for l in [ai.privacyLabel, ai.launchNote, v.status, v.source] {
-                    let line = NSLayoutManager().defaultLineHeight(for: l.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize))
-                    expect(!l.isHiddenOrHasHiddenAncestor && l.frame.height < line * 1.6, "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
+                    expect(!l.isHiddenOrHasHiddenAncestor && oneLine(l), "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
+                }
+                // The Intel notes, where this Mac shows them (an Intel layout is checked below).
+                for l in [ai.noteLabel, ai.automaticNote] where !l.isHiddenOrHasHiddenAncestor {
+                    expect(oneLine(l), "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
                 }
                 expect(ai.privacyLabel.stringValue == LocalAISettings.privacyNoteOnDevice, "Cedric: the on-device privacy note stays in view")
                 expect(ai.launchNote.toolTip == LocalAISettings.loadModelAtLaunchNote, "…the full Load model at launch note is its tooltip")
@@ -171,6 +189,34 @@ extension DevChecks {
             },
             { next in snapshot("settings-cedric-target.png", window: SettingsWindowController.shared?.window)(next) },
             sync {
+                // The target through a download's progress (as the downloader
+                // reports it; nothing is downloaded): it stays selected, the
+                // menu keeps its items, nothing is saved.
+                guard let ai = s?.ai, let w = s?.window, ai.settings.backend == .builtIn,
+                      let id = ai.builtInTarget, let m = BuiltInDownloads.shared.catalog?.model(id: id) else {
+                    expect(false, "Cedric: a download target is selected for the progress checks"); return
+                }
+                let v = ai.modelsView
+                let items = ai.modelPopup.itemArray
+                let applied = ai.applyCount
+                let t = m.sizeBytes
+                for (state, button, prefix) in [(ModelDownloadState.downloading(received: t / 10, total: t), "Pause", "Downloading"),
+                                                 (.downloading(received: t / 4, total: t), "Pause", "Downloading"),
+                                                 (.paused(received: t / 4, total: t), "Resume", "Paused")] {
+                    BuiltInDownloads.shared.simulateForCheck(m.id, state)
+                    let same = items.count == ai.modelPopup.numberOfItems && zip(items, ai.modelPopup.itemArray).allSatisfy { $0 === $1 }
+                    expect(same, "Cedric: \(prefix.lowercased()) \(Int((state.fraction ?? 0) * 100))%: the Model menu keeps its items")
+                    expect(ai.builtInTarget == m.id && ai.modelPopup.selectedItem?.representedObject as? String == m.id && v.model == m && !v.automatic,
+                           "…and \(m.name) stays selected", ai.modelPopup.titleOfSelectedItem ?? "-")
+                    expect(ai.settings.model == nil && ai.applyCount == applied, "…nothing saved", ai.settings.model ?? "nil")
+                    expect(v.action.title == button && !v.secondary.isHidden && v.secondary.title == "Cancel" && !v.progress.isHidden
+                           && v.status.stringValue.hasPrefix(prefix) && oneLine(v.status), "…\(button) and Cancel, one status line", v.status.stringValue)
+                    expect(w.frame.height <= cedricTabMaxHeight, "…the window stays compact", "\(Int(w.frame.height)) pt")
+                }
+                BuiltInDownloads.shared.simulateForCheck(m.id, .notDownloaded)
+                expect(ai.builtInTarget == m.id && v.action.title == "Download" && v.secondary.isHidden, "Cedric: cancelled, \(m.name) is still the target with Download")
+            },
+            sync {
                 guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
                 let applied = ai.applyCount
                 ai.modelPopup.selectItem(at: 0)
@@ -178,7 +224,34 @@ extension DevChecks {
                 expect(ai.builtInTarget == nil && ai.settings.model == nil && ai.applyCount == applied && ai.modelsView.automatic,
                        "Cedric: Automatic again clears the target, still nothing saved")
             },
+            sync {
+                // As on an Intel Mac: the engine caveat and the automatic-check
+                // note show, each one short line with the full text as its tooltip.
+                guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
+                AISettingsSection.intelLayoutForCheck = true
+                ai.modelsView.reload()
+            },
+            sync {
+                guard let ai = s?.ai, let w = s?.window, ai.settings.backend == .builtIn else { return }
+                for (l, short, full) in [(ai.noteLabel, AISettingsSection.builtInSlowNote, BuiltInEngine.slowHardwareNote),
+                                         (ai.automaticNote, AISettingsSection.builtInIntelAutomaticNote, AISettingsSection.intelAutomaticNote)] {
+                    expect(!l.isHiddenOrHasHiddenAncestor && l.stringValue == short && l.toolTip == full, "Cedric (Intel layout): \(short)", l.stringValue)
+                    expect(oneLine(l) && l.frame.width >= ceil(l.attributedStringValue.size().width), "…one line, not truncated", "\(l.frame.size)")
+                }
+                let h = w.frame.height
+                print("check: info Cedric (Intel layout) window \(Int(w.frame.width)) x \(Int(h)) pt")
+                expect(h <= cedricTabMaxHeight, "Cedric (Intel layout): the tab is at most \(Int(cedricTabMaxHeight)) pt tall", "\(Int(h)) pt")
+            },
+            { next in snapshot("settings-cedric-intel.png", window: SettingsWindowController.shared?.window)(next) },
+            sync {
+                guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
+                AISettingsSection.intelLayoutForCheck = false
+                ai.modelsView.reload()
+                expect(LlamaRuntime.isSlowHardware || (ai.noteLabel.isHiddenOrHasHiddenAncestor && ai.automaticNote.isHiddenOrHasHiddenAncestor),
+                       "Cedric: back to this Mac's layout (no Intel notes)")
+            },
         ]
+        plan += installedModelSteps(standardAI: standardAI)
         plan += [
             sync {
                 guard let s else { return }
@@ -243,5 +316,88 @@ extension DevChecks {
             },
         ]
         run(plan)
+    }
+
+    /// One line of its font (a wrapping label that wrapped is taller).
+    static func oneLine(_ l: NSTextField) -> Bool {
+        let line = NSLayoutManager().defaultLineHeight(for: l.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize))
+        return l.frame.height < line * 1.6
+    }
+
+    /// Built-in, with the check's own models folder and defaults suite
+    /// (CheckIsolation, checked before Settings opened): a stand-in
+    /// "installed" model (a sparse file of the catalog's size and its
+    /// .verified marker, as owl-check.sh makes) is a choice, so picking it
+    /// saves its ID; Automatic clears it. A saved ID the catalog doesn't
+    /// list says so. The standard defaults' AI settings stay as they were.
+    static func installedModelSteps(standardAI: Data?) -> [Step] {
+        var ai: AISettingsSection? { SettingsWindowController.shared?.ai }
+        let downloads = BuiltInDownloads.shared
+        guard let m = downloads.catalog?.defaultModel ?? downloads.catalog?.models.first else {
+            return [sync { expect(false, "Cedric: a catalog model for the installed-model checks") }]
+        }
+        let file = downloads.store.fileURL(for: m)
+        let marker = downloads.store.directory.appendingPathComponent(m.fileName + ".verified")
+        func saved() -> LocalAISettings { LocalAISettings.load(from: AIStore.defaults) }
+        let legacy = "qwen-legacy-check-model"
+        return [
+            sync {
+                guard CheckIsolation.problem() == nil, ai?.settings.backend == .builtIn else { expect(false, "Cedric: isolated, on Built-in"); return }
+                FileManager.default.createFile(atPath: file.path, contents: nil)
+                if let h = try? FileHandle(forWritingTo: file) { try? h.truncate(atOffset: UInt64(m.sizeBytes)); try? h.close() }
+                try? (m.sha256 + "\n").write(to: marker, atomically: true, encoding: .utf8)
+                downloads.rescanForCheck()
+                expect(downloads.state(m) == .installed, "Cedric: a stand-in \(m.name) is installed in the check's models folder")
+            },
+            sync {
+                guard let ai, let i = ai.modelPopup.itemArray.firstIndex(where: { $0.representedObject as? String == m.id }) else {
+                    expect(false, "Cedric: \(m.name) is in the Model menu"); return
+                }
+                let applied = ai.applyCount
+                ai.modelPopup.selectItem(at: i)
+                NSApp.sendAction(ai.modelPopup.action!, to: ai.modelPopup.target, from: ai.modelPopup)
+                expect(ai.builtInTarget == nil && ai.settings.model == m.id && ai.applyCount == applied + 1,
+                       "Cedric: picking installed \(m.name) chooses it", ai.settings.model ?? "nil")
+                expect(ai.modelsView.model == m && ai.modelsView.action.title == "Delete", "…its button is Delete", ai.modelsView.action.title)
+            },
+            waitFor("the suite saves \(m.id)") { saved().model == m.id && !AISettingsSection.applier.isBusy },
+            sync {
+                expect(saved().model == m.id, "Cedric: \(m.id) is saved to the check's defaults suite", saved().model ?? "nil")
+                guard let ai else { return }
+                let applied = ai.applyCount
+                ai.modelPopup.selectItem(at: 0)
+                NSApp.sendAction(ai.modelPopup.action!, to: ai.modelPopup.target, from: ai.modelPopup)
+                expect(ai.settings.model == nil && ai.applyCount == applied + 1 && ai.modelsView.automatic, "Cedric: Automatic clears the choice", ai.settings.model ?? "nil")
+                expect(ai.modelPopup.titleOfSelectedItem?.contains(m.id) == true, "…and uses the installed model", ai.modelPopup.titleOfSelectedItem ?? "-")
+            },
+            waitFor("the suite saves Automatic") { saved().model == nil && !AISettingsSection.applier.isBusy },
+            sync {
+                expect(saved().model == nil, "Cedric: Automatic (no model) is saved to the check's defaults suite", saved().model ?? "nil")
+                // A saved ID the catalog doesn't list (an older build's, CEDRIC_AI_MODEL).
+                var old = saved()
+                old.model = legacy
+                old.save(to: AIStore.defaults)
+                ai?.reloadIfIdle()
+            },
+            sync {
+                guard let ai else { return }
+                let v = ai.modelsView
+                expect(ai.settings.model == legacy && ai.modelPopup.titleOfSelectedItem == legacy, "Cedric: a saved model the catalog doesn't list stays selected",
+                       ai.modelPopup.titleOfSelectedItem ?? "-")
+                expect(v.model == nil && v.unavailableID == legacy && v.status.stringValue.contains("isn’t in this build’s model list")
+                       && !v.status.stringValue.contains("No models are bundled") && v.status.toolTip == v.status.stringValue,
+                       "…its status says it isn't in this build (tooltip too)", v.status.stringValue)
+                expect(ai.modelPopup.numberOfItems == 2 + (downloads.catalog?.models.count ?? 0), "…next to Automatic and every catalog model", "\(ai.modelPopup.numberOfItems)")
+                var back = saved()
+                back.model = nil
+                back.save(to: AIStore.defaults)
+                ai.reloadIfIdle()
+                try? FileManager.default.removeItem(at: file)
+                try? FileManager.default.removeItem(at: marker)
+                downloads.rescanForCheck()
+                expect(ai.settings.model == nil && downloads.state(m) == .notDownloaded, "Cedric: back to Automatic, the stand-in removed")
+                expect(UserDefaults.standard.data(forKey: LocalAISettings.defaultsKey) == standardAI, "Cedric: the standard defaults' AI settings are untouched")
+            },
+        ]
     }
 }

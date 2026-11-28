@@ -76,8 +76,8 @@ import WebKit
 ///   CEDRIC_OWL_SOURCE=rulesAndAI  the owl's hint source for this run, not saved
 ///   CEDRIC_AI_CHECK=/out/dir      run the local-AI check (AICheck.swift) and quit; with
 ///                                 CEDRIC_AI_FAKE=1.5 (fake provider) or CEDRIC_AI_CHECK_MODEL=id (live)
-///   CEDRIC_BUILTIN_CHECK=/out/dir the built-in engine's download rows (BuiltInCheck.swift); pair
-///                                 with CEDRIC_MODELS_DIR=<temp dir>
+///   CEDRIC_BUILTIN_CHECK=/out/dir the built-in engine's download rows (BuiltInCheck.swift); needs
+///                                 CEDRIC_MODELS_DIR=<temp dir> and CEDRIC_AI_DEFAULTS=<suite> (CheckIsolation)
 ///   CEDRIC_AI*                    run-only AI settings: see AIStore in Owl/OwlAISettings.swift
 ///   CEDRIC_LLAMA_CHECK=1          print "dev hooks: on|off" (whether these switches are compiled in),
 ///                                 load the built-in engine's llama.framework (dlopen), print "llama: ok", quit

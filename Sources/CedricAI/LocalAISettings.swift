@@ -120,7 +120,7 @@ public struct LocalAISettings: Codable, Sendable, Equatable {
 
     public static let `default` = LocalAISettings()
 
-    static let defaultsKey = "CedricLocalAISettings"
+    public static let defaultsKey = "CedricLocalAISettings"
 
     /// The saved settings; with nothing saved, the defaults with the best
     /// engine this Mac has (`AIEngines.defaultBackend`). Still off.

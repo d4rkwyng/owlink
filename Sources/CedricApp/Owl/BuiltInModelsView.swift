@@ -18,10 +18,7 @@ final class BuiltInDownloads {
         catalog = ModelCatalog.bundled()
         store = ModelStore()   // CEDRIC_MODELS_DIR overrides the directory
         downloader = ModelDownloader(store: store)
-        for m in catalog?.models ?? [] {
-            states[m.id] = store.isInstalled(m) ? .installed
-                : store.partialBytes(m) > 0 ? .paused(received: store.partialBytes(m), total: m.sizeBytes) : .notDownloaded
-        }
+        for m in catalog?.models ?? [] { states[m.id] = Self.stored(m, in: store) }
         Task {
             await downloader.setObserver { id, state in
                 Task { @MainActor in BuiltInDownloads.shared.update(id, state) }
@@ -45,6 +42,28 @@ final class BuiltInDownloads {
     private func update(_ id: String, _ state: ModelDownloadState) {
         states[id] = state
         observers.values.forEach { $0() }
+    }
+
+    /// Checks only (CEDRIC_CHECK=settings): a download state as the
+    /// downloader would report it (progress, pause), with nothing downloaded.
+    func simulateForCheck(_ id: String, _ state: ModelDownloadState) {
+        guard DevEnvironment.checksEnabled else { return }
+        update(id, state)
+    }
+
+    /// Checks only: read every model's state from the models folder again
+    /// (after the check put a stand-in model in its own temp folder).
+    func rescanForCheck() {
+        guard DevEnvironment.checksEnabled else { return }
+        for m in catalog?.models ?? [] { states[m.id] = Self.stored(m, in: store) }
+        observers.values.forEach { $0() }
+    }
+
+    /// What the models folder holds for `m`.
+    private static func stored(_ m: BuiltInModel, in store: ModelStore) -> ModelDownloadState {
+        if store.isInstalled(m) { return .installed }
+        let part = store.partialBytes(m)
+        return part > 0 ? .paused(received: part, total: m.sizeBytes) : .notDownloaded
     }
 
     func download(_ m: BuiltInModel) {
@@ -148,10 +167,16 @@ final class BuiltInModelsView: NSStackView {
         onChange?()
     }
 
-    /// The popup now shows `model` (Automatic: the one it uses or would).
-    func show(_ model: BuiltInModel?, automatic: Bool) {
+    /// The model ID the popup shows that the catalog doesn't list (an old
+    /// saved one, CEDRIC_AI_MODEL), when `model` is nil because of it.
+    private(set) var unavailableID: String?
+
+    /// The popup now shows `model` (Automatic: the one it uses or would),
+    /// or `unavailableID`, a saved model this build doesn't have.
+    func show(_ model: BuiltInModel?, automatic: Bool, unavailableID: String? = nil) {
         self.model = model
         self.automatic = automatic
+        self.unavailableID = model == nil ? unavailableID : nil
         update()
     }
 
@@ -168,7 +193,11 @@ final class BuiltInModelsView: NSStackView {
         guard let model else {
             action.isHidden = true
             info.isHidden = true
-            status.stringValue = String(localized: "No models are bundled with this build.")
+            let line = unavailableID.map { String(localized: "\($0) isn’t in this build’s model list. Choose a model or Automatic.") }
+                ?? String(localized: "No models are bundled with this build.")
+            if unavailableID != nil { status.textColor = .systemOrange }
+            status.stringValue = line
+            status.toolTip = line
             return
         }
         action.isHidden = false

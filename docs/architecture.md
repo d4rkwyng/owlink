@@ -2041,9 +2041,14 @@ Qwen3 `/no_think`, the scheduler's timeout cancelling a generation).
 default model for real (optionally pausing and resuming with
 `CEDRIC_BUILTIN_PAUSE=1`) and runs the three owl snippets;
 `CEDRIC_APPLE_LIVE=1 swift test --filter LiveAppleTests` does the same on
-Apple Intelligence. `CEDRIC_BUILTIN_CHECK=/out CEDRIC_MODELS_DIR=/tmp/x`
-runs `BuiltInCheck` in the app: real clicks on Download, Pause, Resume and
-Delete in the sheet, with snapshots.
+Apple Intelligence. `CEDRIC_BUILTIN_CHECK=/out CEDRIC_MODELS_DIR=/tmp/x
+CEDRIC_AI_DEFAULTS=<suite>` runs `BuiltInCheck` in the app: real clicks on
+Download, Pause, Resume and Delete in the sheet, with snapshots. It, and
+`CEDRIC_CHECK=settings`, fail before Settings opens unless both the models
+folder (an existing folder outside `~/Library`) and the AI defaults suite
+(not the app's standard domain) are the check's own (`CheckIsolation`);
+BuiltInCheck also stops before its first click unless the model is cleanly
+Not downloaded.
 
 ### Ask Cedric tool calls: the eval
 
