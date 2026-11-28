@@ -973,8 +973,10 @@ extension DevChecks {
                 readGate.signal()
             },
             until("failed batch: the read is over", timeout: 20) { app.backgroundOpens.isEmpty && alerts == 1 },
+            sync { dismissTimer?.invalidate() },
+            // Folder B's listing runs on its own; wait for it before checking.
+            switchedTo(b, file: welcome, "failed batch after the read"),
             sync {
-                dismissTimer?.invalidate()
                 expect(root() == b.path && selected() == welcome.lastPathComponent,
                        "failed batch: the sidebar stays on the small file's folder", "root=\(root()) selected=\(selected())")
                 expect(docked(textTab(welcome)?.window) && app.currentFileURL == welcome,
