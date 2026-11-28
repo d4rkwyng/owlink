@@ -12,7 +12,8 @@ enum FileDrop {
     }
 
     static func open(_ urls: [URL]) {
-        for u in urls { (NSApp.delegate as? AppDelegate)?.open(u, background: true) }
+        // A user's drop: may switch the folder sidebar (AppDelegate.openFromOutside).
+        (NSApp.delegate as? AppDelegate)?.openFromOutside(urls)
     }
 }
 

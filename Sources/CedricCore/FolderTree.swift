@@ -159,10 +159,33 @@ public enum FolderTree {
     }
 
     /// The folder the sidebar switches to when the user opens `file` from
-    /// outside the app (0.6.1). Not written yet: always nil.
+    /// outside the app (0.6.1: File › Open, Open Recent, Finder / Open
+    /// With / the Dock icon, a drop, the cedric script), or nil to leave
+    /// it alone. A switch needs all of:
+    /// - a folder loaded and its sidebar shown (`loadedRoot`,
+    ///   `sidebarShown`): hidden, only remembered or none, nothing is
+    ///   loaded or shown (the 0.2.0 rule: no folder until the user opens one);
+    /// - `file` a regular file (a link followed), not a folder or a package;
+    /// - `file` outside the loaded root: by the bytes (`relativePath`),
+    ///   then with links resolved on both sides (a path through a link
+    ///   into the root, /var vs /private/var, /tmp vs /private/tmp), then
+    ///   by identity (`eventRelativePath`: another spelling of the root);
+    /// - its folder not a volume root (a whole disk is never listed unasked).
+    /// The folder is the file's enclosing folder as given (unresolved),
+    /// as File › Open Enclosing Folder opens it.
+    /// `isRegularFile`: a seam for tests.
     public static func folderToSwitchTo(opening file: URL, loadedRoot: URL?, sidebarShown: Bool,
                                         isRegularFile: (String) -> Bool = FolderTree.isRegularFile) -> URL? {
-        nil
+        guard sidebarShown, let root = loadedRoot, file.isFileURL else { return nil }
+        let std = file.standardizedFileURL
+        guard isRegularFile(std.path), let folder = enclosingFolder(of: std) else { return nil }
+        guard folder.path != "/", (try? folder.resourceValues(forKeys: [.isVolumeKey]))?.isVolume != true else { return nil }
+        let realFile = std.resolvingSymlinksInPath()
+        let realRoot = root.standardizedFileURL.resolvingSymlinksInPath()
+        let roots = [root.standardizedFileURL, realRoot]
+        for path in [std, realFile] where roots.contains(where: { relativePath(of: path, in: $0) != nil }) { return nil }
+        if eventRelativePath(realFile.path, roots: roots) != nil { return nil }
+        return folder
     }
 
     /// Whether `path` is a regular file (a symbolic link followed).

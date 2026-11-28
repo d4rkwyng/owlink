@@ -1164,6 +1164,21 @@ and `FolderWatcher.swift`. `cedric -w some/dir` returns at once: `-w`
 waits for each file's tab, a folder has none, so the app deletes the
 folder's wait marker as it opens it (the `cli` check).
 
+Opening a file from outside the app switches the folder (0.6.1). The
+user's own entry points (File › Open, Open Recent, `application(_:open:)`
+and the launch's files, `FileDrop.open`, `cedric://open?path=`) call
+`AppDelegate.openFromOutside` (`FolderSidebar.swift`) instead of `open`;
+the app's own opens (sidebar clicks, Quick Open, links, Find in Files,
+the owl, restore) keep calling `open` and never switch. The rule is
+`FolderTree.folderToSwitchTo` (`FolderSwitchPolicyTests`): only with a
+sidebar shown, only for a regular file outside the loaded root (links
+resolved on both sides, then by identity), never a volume root. Then
+`openFolder(_:reveal:dock:)` docks it in the file's own tab once that tab
+exists (a viewer tab, or a big file's tab after its background read), and
+of several files opened at once only the last switches. At launch the
+switch waits for the first frame, after the session's sidebar is rebuilt.
+The `folder` check drives each entry point and the opens that must not switch.
+
 Open in Terminal Here (File menu, the sidebar's row and header menus;
 `OpenInTerminal.swift`, the folder from `CedricCore/TerminalHere.swift`,
 `TerminalHereTests`): a document's folder, a folder row itself, a file

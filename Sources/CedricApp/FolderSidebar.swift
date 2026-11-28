@@ -73,13 +73,15 @@ extension AppDelegate {
     /// Opens `url` in the folder sidebar (replacing the folder open before)
     /// and shows it in the selected tab. `state`: restoring a session.
     /// `reveal`: a file to select once the folder is listed.
-    func openFolder(_ url: URL, state: SessionFolder? = nil, reveal: URL? = nil) {
+    /// `dock`: shows the sidebar in a given tab instead (text or viewer);
+    /// false if that tab has gone, and the selected tab is used.
+    func openFolder(_ url: URL, state: SessionFolder? = nil, reveal: URL? = nil, dock: ((FolderSidebar) -> Bool)? = nil) {
         // At launch (a folder dropped on the Dock icon, CEDRIC_OPEN): after
         // the first frame, once the window's tab exists.
-        guard AfterFirstFrame.passed, let tab = currentTab ?? tabs.last else {
+        guard AfterFirstFrame.passed, dock != nil || (currentTab ?? tabs.last) != nil else {
             AfterFirstFrame.run { [weak self] in
-                guard let self, AfterFirstFrame.passed, (self.currentTab ?? self.tabs.last) != nil else { return }
-                self.openFolder(url, state: state, reveal: reveal)
+                guard let self, AfterFirstFrame.passed, dock != nil || (self.currentTab ?? self.tabs.last) != nil else { return }
+                self.openFolder(url, state: state, reveal: reveal, dock: dock)
             }
             return
         }
@@ -104,12 +106,80 @@ extension AppDelegate {
             self.findInFilesMenu(nil)
             self.findInFiles?.folderField.stringValue = dir.path
         }
-        if state?.visible ?? true { s.show(in: tab) }
+        if state?.visible ?? true, dock?(s) != true, let tab = currentTab ?? tabs.last { s.show(in: tab) }
         // Backlinks and Tags panes follow the new folder (the notification);
         // an open `[[` list goes (wikiFolderChanged).
         NotificationCenter.default.post(name: WikiNotes.didChange, object: nil)
         tabs.forEach { $0.wikiFolderChanged() }
         scheduleSessionSave()
+    }
+
+    // MARK: Opening a file from outside the app (0.6.1)
+
+    /// Opens files the user opened from outside the app: File › Open,
+    /// Open Recent, Finder / Open With / a file dropped on the Dock icon
+    /// (`application(_:open:)`, and the files a launch was given there,
+    /// with CEDRIC_OPEN in check builds: the same loop), a file dropped on
+    /// a window or its text (`FileDrop.open`) and the cedric script
+    /// (`cedric://open?path=`). Opens from inside the app (a sidebar
+    /// click, Quick Open, wiki and preview links, Find in Files, the owl,
+    /// Replace in Files, session restore) call `open` and never switch.
+    ///
+    /// The decision (0.6.1 bug 1, `FolderTree.folderToSwitchTo`): the
+    /// folder sidebar switches to the file's folder, the file selected
+    /// once it is listed, only when a folder is loaded AND its sidebar is
+    /// shown (hidden, only remembered from the session, or none: nothing
+    /// is loaded, the 0.2.0 rule) AND the file is a regular file outside
+    /// the loaded folder (links resolved on both sides: a path through a
+    /// link into the folder is inside). Then the sidebar docks in the
+    /// file's own tab (a text tab, a PDF, image, Office or certificate
+    /// tab, or a big file's tab once its background read is done). A
+    /// refused or failed open switches nothing; other tabs and unsaved
+    /// text are untouched. A file already open, opened again from
+    /// outside, switches too (its tab comes to the front). Of several
+    /// files opened at once only the last switches the folder: it is the
+    /// one whose tab ends up in front.
+    func openFromOutside(_ urls: [URL]) {
+        for (i, u) in urls.enumerated() { openFromOutside(u, switchesFolder: i == urls.count - 1) }
+    }
+
+    @discardableResult
+    func openFromOutside(_ url: URL, switchesFolder: Bool = true, then: ((EditorWindowController) -> Void)? = nil,
+                         failed: (() -> Void)? = nil) -> EditorWindowController? {
+        let std = url.standardizedFileURL
+        let tab = open(url, background: true, then: { [weak self] tab in
+            if switchesFolder {
+                self?.switchFolder(forOutsideOpenOf: tab.doc.fileURL ?? std) { [weak tab] s in
+                    guard let tab, self?.tabs.contains(where: { $0 === tab }) == true else { return false }
+                    s.show(in: tab)
+                    return true
+                }
+            }
+            then?(tab)
+        }, failed: failed)
+        // A viewer tab (made now, or brought to the front): no `then`.
+        if switchesFolder, tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
+            switchFolder(forOutsideOpenOf: viewer.fileURL) { [weak self] s in
+                guard let self, let v = self.viewerTab(for: std), v === viewer, v.sidebarHost?.split != nil else { return false }
+                s.show(in: v)
+                return true
+            }
+        }
+        return tab
+    }
+
+    /// `file`'s tab is there: switches the sidebar to its folder if
+    /// `FolderTree.folderToSwitchTo` says so. At launch, after the first
+    /// frame, once a sidebar saved in the session is rebuilt (its
+    /// `restoreFolder` block is queued before the launch's files open).
+    private func switchFolder(forOutsideOpenOf file: URL, dock: @escaping (FolderSidebar) -> Bool) {
+        guard AfterFirstFrame.passed else {
+            AfterFirstFrame.run { [weak self] in self?.switchFolder(forOutsideOpenOf: file, dock: dock) }
+            return
+        }
+        guard let s = FolderSidebar.shared,
+              let dir = FolderTree.folderToSwitchTo(opening: file, loadedRoot: s.rootURL, sidebarShown: s.isShown) else { return }
+        openFolder(dir, reveal: file, dock: dock)
     }
 
     func closeFolder() {

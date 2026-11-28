@@ -148,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let list = env["CEDRIC_OPEN"], !list.isEmpty {
             toOpen += list.split(separator: ":").map { URL(fileURLWithPath: String($0)) }
         }
-        for url in toOpen { open(url, background: true) }
+        openFromOutside(toOpen)
         pendingOpen = []
         // A big file still reading: its tab is the launch's window.
         if tabs.isEmpty && viewerTabs.isEmpty && backgroundOpens.isEmpty { newTab(nil) }
@@ -163,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func application(_ application: NSApplication, open urls: [URL]) {
         guard launched else { pendingOpen += urls; return }
-        for url in urls { open(url, background: true) }
+        openFromOutside(urls)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -487,7 +487,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // to take the new-file branch below: an empty tab that saved over
         // a file put back there, while the read's text was thrown away.
         if backgroundOpens[pendingStd] != nil || FileManager.default.fileExists(atPath: path) {
-            open(url, background: true, then: arrived, failed: failed)
+            openFromOutside(url, then: arrived, failed: failed)
         } else {
             // A new file: an empty tab that saves there.
             let doc = EditorDocument(fileURL: url, untitledName: url.lastPathComponent)
@@ -583,7 +583,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         panel.canChooseDirectories = false
         if let dir = currentTab?.doc.fileURL?.deletingLastPathComponent() { panel.directoryURL = dir }
         guard panel.runModal() == .OK else { return }
-        panel.urls.forEach { open($0, background: true) }
+        openFromOutside(panel.urls)
     }
 
     /// Set while the command palette validates the whole menu, or the

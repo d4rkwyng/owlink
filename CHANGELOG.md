@@ -4,7 +4,10 @@ All notable changes to Owlink. The format follows [Keep a Changelog](https://kee
 and Owlink uses [semantic versioning](https://semver.org/). Each release's notes on GitHub
 are its section below (`Scripts/changelog-section.sh`).
 
-## [Unreleased]
+## [0.6.1] - Unreleased
+
+### Fixed
+- **Opening a file switches the folder sidebar to its folder.** A file opened from outside the folder shown in the sidebar (File › Open, Open Recent, a double-click or Open With in Finder, a file dropped on the Dock icon or a window, or `owlink file`) now shows its own folder in the sidebar, with the file selected. Before, the sidebar stayed on the folder opened earlier. A hidden sidebar stays hidden, and opening a file never loads a folder when none is open. Files opened from inside Owlink (the sidebar, Quick Open, links) leave the folder as it is.
 
 ## [0.6.0] - 2026-11-27
 
