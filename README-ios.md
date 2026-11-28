@@ -211,6 +211,10 @@ Details for both are under What it does below.
 - Settings › Editor sets the default indent for files without detected indentation.
 - This document's Indent Using Spaces/Tabs and Tab Width are in the ⋯ menu (More › Indentation) and apply until the document is closed or reloaded.
 - Read-only CSV and TSV grid preview in the editor palette: pinned header, zoom, sortable columns (a third tap restores file order), VoiceOver sort state, and field navigation back into the text.
+- Read-only viewers for files that aren't text, which never write to the file, each with Share (also Open In) beside Done:
+  - Spreadsheets: an `.xlsx` / `.xlsm` workbook or a `.csv` / `.tsv` file opens in a native grid (CSV and TSV used to open in the editor). It has frozen column letters and row numbers, is fitted to the width on open, and has pinch zoom, a tab for each sheet, dates and numbers shown as Excel shows them, and Copy from a cell's menu. Past 100,000 cells (or 64 MB) it shows the first rows with a notice. Damaged and password-protected workbooks say so. CSV and TSV have Edit as Text, which opens the editor. A launch reopen or crash recovery of a CSV still opens the editor.
+  - PDF: fitted to the width (and again after rotation), with a page thumbnail strip, find, and "n of m". A password-protected PDF asks for its password and unlocks in memory only. A damaged or empty PDF says so.
+  - Word, PowerPoint, legacy `.xls`, Pages, Numbers, Keynote and RTFD stay in Quick Look, which fills the space under the bar; how it scales those documents inside is Quick Look's own.
 - Opens and saves files from the Files app, iCloud Drive and other file
   providers (a document browser in each window). The encoding and line
   ending are detected and written back unchanged (the core's `TextCodec`).
@@ -516,9 +520,8 @@ Test targets:
 
 - `OwlinkCoreTests` and `OwlinkAITests` run the package's own
   `Tests/CedricCoreTests` and `Tests/CedricAITests` on the simulator
-  (1012 + 265 tests at 0.5.1; `FileTailTests.stopLeavesNoDescriptor`
-  fails on the simulator, a known issue; the Mac-only files are listed
-  in `gen-xcodeproj.py`).
+  (1012 + 265 tests at 0.5.1; the Mac-only files are listed in
+  `gen-xcodeproj.py`).
 - `OwlinkUITests` (XCUITest) drives the app: open, edit, save and reopen;
   the owl's fix; the Markdown preview; find. It opens bundled samples with
   the launch argument `-OwlinkOpen <name>`, skipping the document browser.

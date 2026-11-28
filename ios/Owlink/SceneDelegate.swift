@@ -1,4 +1,5 @@
 import UIKit
+import PDFKit
 import UniformTypeIdentifiers
 import CedricCore
 
@@ -124,6 +125,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     /// The window went away: its documents are no longer open in it.
     func sceneDidDisconnect(_ scene: UIScene) {
+        // A viewer left up (no Done) stops its file access now.
+        DocumentViewers.tearDown(presentedBy: window?.rootViewController)
         OpenDocuments.registry.removeAll(window: scene.session.persistentIdentifier)
         // Its documents' detached previews go blank (or follow another
         // window that has the document open).
@@ -214,20 +217,32 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         if let url = urls.first { presentDocument(at: url) }
     }
 
+    /// A new document's import (the + button). An Open In import that
+    /// `open(_:importIfNeeded:)` reveals is its completion's (UIKit calls
+    /// both, this first).
     func documentBrowser(_ controller: UIDocumentBrowserViewController, didImportDocumentAt source: URL, toDestinationURL dest: URL) {
+        guard importGate.delegateOwns(source) else { return }
         presentDocument(at: dest)
     }
 
     func documentBrowser(_ controller: UIDocumentBrowserViewController, failedToImportDocumentAt url: URL, error: Error?) {
+        guard importGate.delegateOwns(url) else { return }
         alert(String(localized: "Couldn’t create the document"), error?.localizedDescription)
     }
 
     // MARK: Opening
 
+    /// Which callback presents an import (see `ImportPresentationGate`).
+    private var importGate = ImportPresentationGate()
+
     func open(_ url: URL, importIfNeeded: Bool) {
         if importIfNeeded {
+            // Already being revealed (a second Open In for the same
+            // file): that reveal presents it; no second UIKit reveal.
+            guard importGate.beginReveal(url) else { return }
             revealDocument(at: url, importIfNeeded: true) { [weak self] revealed, error in
-                if let revealed { self?.presentDocument(at: revealed) } else { self?.alert(String(localized: "Couldn’t open the file"), error?.localizedDescription) }
+                guard let self, self.importGate.finishReveal(url) else { return }
+                if let revealed { self.presentDocument(at: revealed) } else { self.alert(String(localized: "Couldn’t open the file"), error?.localizedDescription) }
             }
         } else {
             presentDocument(at: url)
@@ -256,7 +271,21 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         presentDocument(at: url, reopening: true)
     }
 
-    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false) {
+    func presentDocument(at url: URL, binaryOK: Bool = false, recovered: RecoveryRecord? = nil, reopening: Bool = false,
+                         asText: Bool = false) {
+        presentDocument(at: url, EditorOpenRequest(binaryOK: binaryOK, asText: asText, recovered: recovered, reopening: reopening))
+    }
+
+    private func presentDocument(at url: URL, _ request: EditorOpenRequest) {
+        let (recovered, reopening) = (request.recovered, request.reopening)
+        // PDF, spreadsheet (.xlsx, .csv…) and Office / iWork files open
+        // read-only in a viewer (`DocumentViewerRoute`: name, type, first
+        // bytes). Not for "Open as Text" (binaryOK), the grid's "Edit as
+        // Text" (asText), a crash-recovery restore, or a launch reopen:
+        // those open only the editor, and the editor-only ones (all but
+        // Open as Text from an ordinary open) never open a file that
+        // routes to a viewer other than CSV / TSV (below), retry or not.
+        if request.mayShowViewer, presentViewerIfNeeded(at: url) { return }
         // Every way a reopen ends clears the hold on the recovery offer,
         // even with this browser gone, and a reopen that failed forgets
         // the record (and its security scope).
@@ -269,14 +298,34 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 RecoveryOffer.reopenCancelled()
             }
         }
+        // An editor-only open goes to the editor only if the file is still
+        // the editor's: a viewer file (a PDF with no NUL bytes passes the
+        // editor's binary check) isn't opened, the reopen forgets its
+        // record, and a recovery record is left as it is (not cleared).
+        // Also for its Open as Text retry.
+        if !request.mayOpenInEditor(url) {
+            if !reopening { alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
+            finishReopen(false)
+            return
+        }
         if bringForwardIfOpenElsewhere(url) { finishReopen(false); return }
-        let doc = TextDocument(fileURL: url)
-        doc.openBinaryAnyway = binaryOK
+        // An editor-only open's read refuses a viewer file swapped in since
+        // the check above (even with Open as Text).
+        let doc = request.makeDocument(url)
         doc.open { [weak self] ok in
             guard let self else {
                 if ok { doc.close(completionHandler: nil) }
                 finishReopen(false)
                 return
+            }
+            // Check the coordinated read before handing the document to an editor.
+            if ok, request.editorOnly {
+                if !doc.mayPresentInEditor {
+                    doc.close { _ in doc.discardOpenedCopy() }
+                    if !reopening { self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil) }
+                    finishReopen(false)
+                    return
+                }
             }
             // Opened meanwhile in another window: that one keeps it.
             if ok, self.bringForwardIfOpenElsewhere(url) {
@@ -289,15 +338,21 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
                 return
             }
             guard ok else {
-                if !binaryOK, (try? Data(contentsOf: url, options: .mappedIfSafe)).map(TextCodec.looksBinary) == true {
+                // An editor-only open whose read got a viewer file: no
+                // Open as Text. The retry keeps the request editor-only.
+                switch request.failedOpen(document: doc, fileLooksBinary:
+                                            (try? Data(contentsOf: url, options: .mappedIfSafe)).map(TextCodec.looksBinary) == true) {
+                case .quiet:
+                    break
+                case .offerOpenAsText:
                     let a = UIAlertController(title: String(localized: "This looks like a binary file"),
                                               message: String(localized: "Open it as text anyway? Saving it may damage it."), preferredStyle: .alert)
                     a.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
                     a.addAction(UIAlertAction(title: String(localized: "Open as Text"), style: .destructive) { _ in
-                        self.presentDocument(at: url, binaryOK: true, recovered: recovered)
+                        self.presentDocument(at: url, request.openingAsText)
                     })
                     self.present(a, animated: true)
-                } else {
+                case .couldNotOpen:
                     self.alert(String(localized: "Couldn’t open \(url.lastPathComponent)"), nil)
                 }
                 return
@@ -322,11 +377,76 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         }
     }
 
+    /// Shows `url` in the read-only PDF, spreadsheet or Quick Look viewer when its
+    /// route says so; false when it is the editor's (nothing shown).
+    ///
+    /// The file's security scope (a file picked in Files, or opened in
+    /// place from another app) is started before the first bytes are read
+    /// and kept by the viewer until Done (or until the viewer goes away);
+    /// every other way out stops it here. A viewer is deliberately not
+    /// remembered as `LastOpenDocument` (nor in `OpenDocuments`): the
+    /// launch reopen goes through `TextDocument`, and it would route a
+    /// PDF into the text editor. Viewers never write, so several windows
+    /// may show the same file.
+    @discardableResult
+    func presentViewerIfNeeded(at url: URL) -> Bool {
+        let access = ScopedFileAccess(url)
+        let viewer: UIViewController
+        switch DocumentViewerRoute.route(for: url) {
+        case .editor:
+            access.stop()
+            return false
+        case .pdf:
+            // A damaged PDF: the viewer says so (Share still works).
+            viewer = PDFViewerController(document: PDFDocument(url: url), url: url, access: access)
+        case .spreadsheet(let format):
+            let grid = SpreadsheetViewerController(url: url, format: format, access: access)
+            // CSV / TSV: Edit as Text closes the grid (ending its access)
+            // and opens the file in the editor, like Open as Text.
+            grid.onEditAsText = { [weak self, weak grid] in
+                guard let self, let grid else { return }
+                self.dismiss(animated: true) {
+                    grid.tearDown()
+                    self.presentDocument(at: url, asText: true)
+                }
+            }
+            viewer = grid
+        case .quickLook(let format):
+            viewer = QuickLookViewerController(url: url, format: format, access: access)
+        }
+        present(DocumentViewers.navigationController(for: viewer, traits: traitCollection), animated: true)
+        return true
+    }
+
     private func alert(_ title: String, _ message: String?) {
         let a = UIAlertController(title: title, message: message, preferredStyle: .alert)
         a.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
         present(a, animated: true)
     }
+}
+
+/// One import, one presentation owner. UIKit reports an Open In import
+/// twice: the browser delegate's `didImportDocumentAt` (or
+/// `failedToImportDocumentAt`) and then `revealDocument`'s completion.
+/// While a reveal of a source is in flight, the delegate leaves it to the
+/// completion, which presents (or alerts) once per reveal. An import with
+/// no reveal (a new document) is the delegate's alone. A second request
+/// for a source while its reveal is in flight is coalesced into it.
+struct ImportPresentationGate {
+    private var revealing: Set<String> = []
+
+    private static func key(_ url: URL) -> String { url.standardizedFileURL.resolvingSymlinksInPath().path }
+
+    /// False when a reveal of `source` is already in flight: start no
+    /// second one (that reveal presents or alerts for both).
+    mutating func beginReveal(_ source: URL) -> Bool { revealing.insert(Self.key(source)).inserted }
+
+    /// Whether a delegate callback for `source` presents (or alerts).
+    func delegateOwns(_ source: URL) -> Bool { !revealing.contains(Self.key(source)) }
+
+    /// The reveal's completion: true once per reveal begun (it presents
+    /// or alerts), false for a repeated or unknown completion.
+    mutating func finishReveal(_ source: URL) -> Bool { revealing.remove(Self.key(source)) != nil }
 }
 
 import SwiftUI

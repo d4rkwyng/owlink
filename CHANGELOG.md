@@ -6,6 +6,9 @@ are its section below (`Scripts/changelog-section.sh`).
 
 ## [Unreleased]
 
+### Added
+- **iPhone and iPad: PDF and Office files open read-only in a viewer.** A PDF opens in a PDF viewer (pages scroll continuously, the current page shows at the bottom). Word, Excel, PowerPoint, Pages, Numbers, Keynote and RTFD documents open in Quick Look, with the kind and size under the file name. Owlink used to call these files binary and offer to open them as text. The viewers never save, move or delete the file; Done goes back to your files. A damaged PDF says “Couldn’t open” instead of opening. Text files, CSV included, still open in the editor, and other binary files still get the binary-file alert.
+
 ## [0.6.0] - 2026-11-27
 
 ### Added

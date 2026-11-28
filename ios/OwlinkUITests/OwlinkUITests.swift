@@ -104,6 +104,118 @@ final class OwlinkUITests: XCTestCase {
         XCTAssertTrue(app.buttons["editor.format"].label.contains("UTF-8"))
     }
 
+    // MARK: Read-only viewers (PDF, Office)
+
+    /// A PDF opens in the read-only PDF viewer, not the text editor, and
+    /// with no "binary file" alert: fitted to the width, its page shown as
+    /// "1 of 2", with Share, search and thumbnails (no Edit as Text); Done
+    /// goes back to the file list.
+    func testOpenPDFReadOnly() throws {
+        let app = launch("sample.pdf", fresh: true)
+        let viewer = app.descendants(matching: .any)["viewer.pdf"]
+        XCTAssertTrue(viewer.waitForExistence(timeout: 15), "the PDF viewer didn't open")
+        XCTAssertFalse(app.alerts["This looks like a binary file"].exists, "a PDF got the binary-file alert")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "a PDF opened in the text editor")
+        XCTAssertGreaterThan(viewer.frame.width, 0)
+        XCTAssertGreaterThan(viewer.frame.height, 0)
+        XCTAssertTrue(app.navigationBars["sample.pdf"].exists || app.staticTexts["sample.pdf"].exists, "no file name in the bar")
+        // PDFKit exposes the page's text: the sample's first line shows.
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Owlink PDF sample'")).firstMatch
+            .waitForExistence(timeout: 10), "the PDF's text didn't render")
+        let page = app.staticTexts["viewer.pdf.page"]
+        XCTAssertTrue(page.waitForExistence(timeout: 5), "no page indicator")
+        XCTAssertTrue(page.label.contains("1 of 2"), page.label)
+        XCTAssertTrue(app.buttons["viewer.share"].exists, "no Share button")
+        XCTAssertTrue(app.buttons["viewer.pdf.search"].exists, "no search button")
+        XCTAssertTrue(app.buttons["viewer.pdf.thumbnails"].exists, "no thumbnails button")
+        XCTAssertFalse(app.buttons["viewer.editAsText"].exists, "a PDF offers Edit as Text")
+        // Page 1's first line is below the bar, not behind it.
+        let firstLine = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Owlink PDF sample'")).firstMatch
+        let bar = app.navigationBars.firstMatch
+        XCTAssertGreaterThanOrEqual(firstLine.frame.minY, bar.frame.maxY, "page 1 is under the bar")
+        let opened = XCTAttachment(screenshot: app.screenshot())
+        opened.name = "pdf-viewer-open"
+        opened.lifetime = .keepAlways
+        add(opened)
+        app.buttons["viewer.pdf.thumbnails"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.pdf.thumbnails"].waitForExistence(timeout: 5))
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "pdf-viewer"
+        shot.lifetime = .keepAlways
+        add(shot)
+        assertDoneReturnsToFiles(app, "PDF")
+    }
+
+    /// An .xlsx opens in the read-only grid (not Quick Look, not the
+    /// editor), with no "binary file" alert: its first cell shows, Share is
+    /// there, Edit as Text isn't; Done goes back.
+    func testOpenXLSXReadOnly() throws {
+        let app = launch("sample.xlsx", fresh: true)
+        let grid = app.descendants(matching: .any)["viewer.grid"]
+        XCTAssertTrue(grid.waitForExistence(timeout: 15), "the spreadsheet grid didn't open")
+        XCTAssertFalse(app.alerts["This looks like a binary file"].exists, "an .xlsx got the binary-file alert")
+        XCTAssertFalse(app.textViews["editor.text"].exists, "an .xlsx opened in the text editor")
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.quicklook"].exists, "an .xlsx opened in Quick Look")
+        let cell = app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A1, Owlink XLSX sample'")).firstMatch
+        XCTAssertTrue(cell.waitForExistence(timeout: 10), "the first cell didn't show")
+        XCTAssertGreaterThan(cell.frame.width, 40, "A1 is a sliver")
+        XCTAssertTrue(app.buttons["viewer.share"].exists, "no Share button")
+        XCTAssertFalse(app.buttons["viewer.editAsText"].exists, "an .xlsx offers Edit as Text")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "xlsx-viewer"
+        shot.lifetime = .keepAlways
+        add(shot)
+        assertDoneReturnsToFiles(app, "xlsx")
+    }
+
+    /// A workbook with several sheets has a tab for each: picking another
+    /// shows that sheet.
+    func testMultiSheetTabs() throws {
+        let app = launch("multi-sheet.xlsx", fresh: true)
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.grid"].waitForExistence(timeout: 15), "the grid didn't open")
+        let tabs = app.descendants(matching: .any)["viewer.sheetTabs"]
+        XCTAssertTrue(tabs.waitForExistence(timeout: 5), "no sheet tabs")
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A2, Barn owl'")).firstMatch.waitForExistence(timeout: 5))
+        let second = app.buttons["viewer.sheetTab.1"]
+        XCTAssertTrue(second.exists, "no second tab")
+        XCTAssertEqual(second.label, "Sightings")
+        second.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A2, 2024-03-15'")).firstMatch
+            .waitForExistence(timeout: 5), "the second sheet didn't show")
+        XCTAssertTrue(second.isSelected, "the tab isn't selected")
+        let shot = XCTAttachment(screenshot: app.screenshot())
+        shot.name = "xlsx-multi-tab2"
+        shot.lifetime = .keepAlways
+        add(shot)
+        assertDoneReturnsToFiles(app, "multi-sheet")
+    }
+
+    /// A CSV opens in the grid (CSV's default open); Edit as Text opens
+    /// the same file in the text editor.
+    func testOpenCSVInGridThenEditAsText() throws {
+        let app = launch("sample.csv", fresh: true)
+        XCTAssertTrue(app.descendants(matching: .any)["viewer.grid"].waitForExistence(timeout: 15), "the CSV didn't open in the grid")
+        XCTAssertFalse(app.textViews["editor.text"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label == 'A2, Barn owl'")).firstMatch.waitForExistence(timeout: 5))
+        let edit = app.buttons["viewer.editAsText"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5), "no Edit as Text")
+        edit.tap()
+        let tv = editor(app)
+        XCTAssertTrue((tv.value as? String ?? "").contains("Barn owl,Worldwide"), "the editor didn't show the CSV's text")
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.grid"].exists, "the grid is still up")
+    }
+
+    private func assertDoneReturnsToFiles(_ app: XCUIApplication, _ state: String, file: StaticString = #filePath, line: UInt = #line) {
+        let done = app.buttons["viewer.done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5) && done.isHittable, "\(state): no Done button", file: file, line: line)
+        done.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser.settings"].waitForExistence(timeout: 10),
+                      "\(state): Done didn't return to the file list", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.pdf"].exists, "\(state): the PDF viewer is still up", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.quicklook"].exists, "\(state): Quick Look is still up", file: file, line: line)
+        XCTAssertFalse(app.descendants(matching: .any)["viewer.grid"].exists, "\(state): the grid is still up", file: file, line: line)
+    }
+
     func testHideKeyboardButton() throws {
         let app = launch("sample.swift", fresh: true)
         let tv = editor(app)

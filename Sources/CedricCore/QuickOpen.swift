@@ -58,13 +58,28 @@ public enum QuickOpen {
     /// A file Open Quickly may open. The real path, symbolic links resolved,
     /// has to be an existing file under `root` — the same rule as a preview
     /// link (`PreviewFolder.linkTarget` / `SafePaths.isInside`). A link that
-    /// leaves the folder, a directory, and a missing path are refused.
+    /// leaves the folder, a directory, and a missing path are refused, and
+    /// so is a file inside a read-only document package (`isInsidePackage`),
+    /// by its path or its resolved one.
     public static func containedFile(_ url: URL, under root: URL, fileManager fm: FileManager = .default) -> URL? {
         guard SafePaths.isInside(url, root) else { return nil }
         let target = PreviewFolder.resolved(url.standardizedFileURL)
         var isDir: ObjCBool = false
         guard fm.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue else { return nil }
+        let rel = FolderTree.relativePath(of: url, in: root)
+        let resolvedRel = FolderTree.relativePath(of: target, in: PreviewFolder.resolved(root.standardizedFileURL))
+        if rel.map(isInsidePackage) ?? true || resolvedRel.map(isInsidePackage) ?? true { return nil }
         return url.standardizedFileURL
+    }
+
+    /// A package Owlink shows read-only in a viewer (.rtfd, .pages,
+    /// .numbers, .key): a leaf for Open Quickly, never walked into.
+    public static func isViewerPackage(_ name: String) -> Bool { OfficeFormat.forDirectory(name) != nil }
+
+    /// Whether a folder on the way to `relativePath`'s file (all but its
+    /// last name) is a viewer package.
+    static func isInsidePackage(_ relativePath: String) -> Bool {
+        FolderTree.components(relativePath).dropLast().contains(where: isViewerPackage)
     }
 
     /// The folder Open Quickly lists. A directory listing is not access:
@@ -132,7 +147,12 @@ public struct FileIndex: Sendable {
         guard let entries = try? FolderTree.list(url(rel), showHidden: showHidden, ignore: ignore) else { return nil }
         var d = Dir(files: [], subdirs: [])
         for e in entries where !e.isIgnored {
-            if e.isDirectory {
+            if e.isDirectory, QuickOpen.isViewerPackage(e.name) {
+                // A viewer package (styled.rtfd) is a leaf, as on the Mac
+                // where it isn't reported as a folder: its inner files are
+                // the document's, not files to open as text.
+                if !e.isSymlink { d.files.append(e.name) }
+            } else if e.isDirectory {
                 if !e.isSymlink { d.subdirs.append(e.name) }
             } else {
                 d.files.append(e.name)
