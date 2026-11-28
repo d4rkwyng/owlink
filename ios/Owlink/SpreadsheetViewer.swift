@@ -578,18 +578,20 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
         guard let wb = workbook, index >= 0, index < wb.sheets.count, index != selectedSheet || state == .loading else { return }
         selectedSheet = index
         updateTabs()
+        // A sheet still loading for another tab is no longer wanted.
+        loadGeneration += 1
         if let t = tables[index] { showTable(t); return }
         state = .loading
         spinner.startAnimating()
-        loadGeneration += 1
         let gen = loadGeneration, limits = limits
         Self.queue.async { [weak self] in
             let result = Result { try wb.table(at: index, limits: limits) }
             DispatchQueue.main.async {
-                guard let self, gen == self.loadGeneration else { return }
+                guard let self else { return }
+                if case .success(let t) = result { self.tables[index] = t } // kept for a later tap
+                guard gen == self.loadGeneration else { return }
                 switch result {
                 case .success(let t):
-                    self.tables[index] = t
                     self.showTable(t)
                 case .failure(let e):
                     self.showFailure(e)
@@ -611,7 +613,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
             c.image = UIImage(systemName: sheet?.isChart == true ? "chart.bar" : "tablecells")
             c.text = sheet?.isChart == true ? String(localized: "Chart Sheet") : String(localized: "Empty Sheet")
             c.secondaryText = sheet?.isChart == true
-                ? String(localized: "This sheet holds a chart, which Owlink can't show.")
+                ? String(localized: "This sheet holds a chart, which Owlink can’t show.")
                 : (workbook == nil ? String(localized: "This file has no rows.") : String(localized: "This sheet has no cells with values."))
             showMessage(c)
             grid.isHidden = true
@@ -632,7 +634,7 @@ final class SpreadsheetViewerController: UIViewController, DocumentViewer {
         case .passwordProtected:
             c.image = UIImage(systemName: "lock.fill")
             c.text = String(localized: "Password Protected")
-            c.secondaryText = String(localized: "This workbook needs a password to open, and Owlink can't open protected workbooks. Use Share to open it in another app.")
+            c.secondaryText = String(localized: "This workbook needs a password to open, and Owlink can’t open protected workbooks. Use Share to open it in another app.")
         case .notText:
             c.image = UIImage(systemName: "exclamationmark.triangle")
             c.text = String(localized: "Can’t Show This File")

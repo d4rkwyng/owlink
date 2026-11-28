@@ -313,6 +313,8 @@ struct NumberStyle: Sendable, Equatable {
     }
 
     static let general = NumberStyle(kind: .general)
+    /// 9999-12-31, Excel's last date (1900 system).
+    static let maxSerial = 2_958_465.0
 
     /// A stored number as this format shows it.
     func display(_ raw: String, date1904: Bool) -> SpreadsheetCell {
@@ -323,6 +325,8 @@ struct NumberStyle: Sendable, Equatable {
         case .percent(let decimals):
             return SpreadsheetCell(String(format: "%.\(decimals)f%%", v * 100), kind: .number)
         case let .date(date, time, seconds):
+            // Outside Excel's dates (it shows ####): the number itself.
+            guard v >= 0, v < Self.maxSerial + 1 else { return SpreadsheetCell(Self.general(v), kind: .number) }
             return SpreadsheetCell(Self.dateText(serial: v, date1904: date1904, date: date, time: time, seconds: seconds), kind: .date)
         }
     }
@@ -337,7 +341,7 @@ struct NumberStyle: Sendable, Equatable {
 
     /// A serial date as "2024-03-15", "2024-03-15 12:00" or "18:00:00".
     static func dateText(serial: Double, date1904: Bool, date: Bool, time: Bool, seconds: Bool) -> String {
-        var totalSeconds = Int64((serial * 86_400).rounded())
+        var totalSeconds = Int64((min(max(serial, 0), maxSerial + 1) * 86_400).rounded())
         if totalSeconds < 0 { totalSeconds = 0 }
         var day = Int(totalSeconds / 86_400)
         let secs = Int(totalSeconds % 86_400)
