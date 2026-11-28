@@ -2008,12 +2008,25 @@ cookies, no cache, no identifiers, User-Agent `Cedric`. Nothing is sent
 about the user or their code, and there is no telemetry. Inference is
 fully local; the owl's text never leaves the process.
 
-**Settings sheet.** With Built-in selected, a "Download:" row lists the
-catalog: name (the default marked recommended), size, licence, a memory
-warning where it applies, and per-model Download / Pause / Resume / Cancel
-/ Delete with a progress bar and status. The Model menu offers the
-downloaded models; Automatic picks the default if downloaded. Test
-Connection loads the model and times a first answer.
+**Settings sheet.** With Built-in selected, one "Model:" popup is both the
+choice and the download chooser: Automatic first ("Automatic (<id>)", or
+"Automatic (download a model)" when none is installed), then every catalog
+model, installed or not, titled with a tag (`BuiltInModel.menuTitle`):
+"recommended" for the default, else "non-commercial" when the license is,
+else the size. Picking Automatic or an installed model saves it as today;
+picking one that isn't downloaded only makes it the download target (the
+saved model stays in effect, and a finished download doesn't switch it).
+Beside the popup, one button (Download / Pause / Resume / Delete, plus
+Cancel while downloading or paused) and an (i) button whose popover, like
+the tooltip, has the full description (`BuiltInModel.details`: summary,
+parameters, quantization, size, license, memory, Hugging Face source). One
+status line under it shows the state and progress of the shown model (with
+Automatic: the model it uses, else the default), and one line says where
+downloads go (the full path in its tooltip). Downloading is still
+`BuiltInDownloads` → `ModelDownloader`, and Download still shows the
+bundled license (NON-COMMERCIAL marked) before anything starts. Test
+Connection loads the model and times a first answer. The tab is about 60%
+of its old height (`SettingsCheck.cedricTabMaxHeight`).
 
 **Tests.** `BuiltInTests.swift`: the bundled catalog (valid, pinned, one
 default) and its validation; the downloader against a URLProtocol fake

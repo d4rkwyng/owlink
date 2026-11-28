@@ -86,7 +86,11 @@ for c in $DEFAULT; do
 done
 for c in $CHECKS; do
     echo "== $c"
-    if ! env CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
+    # settings: Settings › Cedric on the Built-in engine (its compact Model
+    # chooser), with an empty models folder of its own.
+    extra=""
+    if [ $c = settings ]; then mkdir -p "$W/models"; extra="CEDRIC_AI_BACKEND=builtIn CEDRIC_MODELS_DIR=$W/models"; fi
+    if ! env $extra CEDRIC_CHECK=$c CEDRIC_THEME=${CEDRIC_THEME:-dark} perl -e 'alarm 90; exec @ARGV' "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null \
         | grep -E "^check:" | tee "$OUT/$c.txt"; then fail=1; fi
     grep -q "check: done .* 0 failed" "$OUT/$c.txt" || { echo "tools-check: $c FAILED" >&2; fail=1; }
     [ $c != recent ] || recent_restore

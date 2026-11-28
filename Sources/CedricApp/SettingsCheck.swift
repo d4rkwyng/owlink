@@ -1,5 +1,6 @@
 import AppKit
 import CedricCore
+import CedricAI
 
 /// CEDRIC_CHECK=settings: the tabbed, instant-apply Settings window
 /// (0.4.1, UX review #1). Not built at launch, and each tab only when first
@@ -10,6 +11,13 @@ import CedricCore
 /// fields; the window reopens on the tab it was left on; Cedric › Cedric AI
 /// Settings… opens the Cedric tab, which has no Save or Cancel; the prose
 /// font (ProseFontCheck.swift). Snapshots: settings-general/editor/writing/cedric.png.
+/// Settings › Cedric on Built-in (run with CEDRIC_AI_BACKEND=builtIn and an
+/// empty CEDRIC_MODELS_DIR, as tools-check.sh does): one Model popup lists
+/// Automatic and every catalog model with its tag, one action button on its
+/// row, one-line notes, and the tab at most `cedricTabMaxHeight` tall.
+/// CEDRIC_SETTINGS_APPEARANCE=light|dark (check only) draws the app, and so the
+/// Settings window, in Aqua or Dark Aqua for this run; the system appearance
+/// is left alone.
 @MainActor
 extension DevChecks {
     static let toggleActions: [MenuToggleSetting: Selector] = [
@@ -36,8 +44,18 @@ extension DevChecks {
         return item.title.hasPrefix("Hide ") || (!item.title.hasPrefix("Show ") && item.state == .on)
     }
 
+    /// The Cedric tab's window height on Built-in, at most: 60% of the
+    /// 826 pt the five-row download list took (0.6.0, before the compact
+    /// Model chooser).
+    static let cedricTabMaxHeight: CGFloat = 495
+
     static func settingsCheck(_ app: AppDelegate) {
         let restore = keepDefaults(MenuToggleSetting.allCases.map(\.defaultsKey) + ["styleCheck", SettingsPane.defaultsKey])
+        switch DevEnvironment.values["CEDRIC_SETTINGS_APPEARANCE"] {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
         let a = app.open(write("a.md", "# Notes\n\nSome text.\n"))!
         sized(a)
         var s: SettingsWindowController? { SettingsWindowController.shared }
@@ -58,6 +76,8 @@ extension DevChecks {
                     let boxes = content.compactMap { $0 as? NSButton }.filter { $0.bezelStyle != .push && !$0.title.isEmpty && $0.enclosingScrollView == nil }
                     let visible = s.window.map { w in boxes.allSatisfy { NSContainsRect(w.contentView!.bounds, $0.convert($0.bounds, to: w.contentView)) || $0.isHiddenOrHasHiddenAncestor } } ?? false
                     expect(visible, "\(title): the window fits the tab (no control cut off)", "\(s.window?.frame.size ?? .zero)")
+                    let size = s.window?.frame.size ?? .zero
+                    print("check: info \(title) window \(Int(size.width)) x \(Int(size.height)) pt")
                 },
                 { next in snapshot("settings-\(pane.rawValue).png", window: SettingsWindowController.shared?.window)(next) },
             ]
@@ -80,6 +100,81 @@ extension DevChecks {
             },
         ]
         for p in SettingsPane.allCases { plan += steps(for: p) }
+        plan += [
+            sync {
+                // Settings › Cedric, Built-in: the compact Model chooser.
+                guard let s, let w = s.window else { return }
+                s.select(.cedric)
+                guard let ai = s.ai else { expect(false, "Cedric: the AI section is built"); return }
+                guard ai.settings.backend == .builtIn else {
+                    expect(false, "Cedric: on Built-in for the compact chooser checks (run with CEDRIC_AI_BACKEND=builtIn)", ai.settings.backend.rawValue)
+                    return
+                }
+                let catalog = BuiltInDownloads.shared.catalog?.models ?? []
+                let installed = catalog.filter { BuiltInDownloads.shared.state($0) == .installed }
+                expect(catalog.count == 5 && installed.isEmpty, "Cedric: five catalog models, none downloaded (an empty CEDRIC_MODELS_DIR)", "\(catalog.count), \(installed.map(\.id))")
+                let content = all(s.panes[.cedric]?.view).filter { !$0.isHiddenOrHasHiddenAncestor }
+                let ids = Set(catalog.map(\.id))
+                let choosers = content.compactMap { $0 as? NSPopUpButton }.filter { $0.itemArray.contains { ids.contains($0.representedObject as? String ?? "") } }
+                expect(choosers.count == 1 && choosers.first === ai.modelPopup, "Cedric: one Model popup chooses the built-in model", "\(choosers.count)")
+                let titles = ai.modelPopup.itemArray.map(\.title)
+                expect(titles == [BuiltInModel.automaticTitle(suggested: nil)] + catalog.map(\.menuTitle),
+                       "…Automatic, then every catalog model with its tag", "\(titles)")
+                expect(titles.first == "Automatic (download a model)" && ai.modelPopup.indexOfSelectedItem == 0, "…on Automatic (download a model)", "\(ai.modelPopup.titleOfSelectedItem ?? "-")")
+                let tagged = catalog.filter { $0.isNonCommercial && !$0.isDefault }
+                expect(!tagged.isEmpty && tagged.allSatisfy { m in titles.contains("\(m.name) (non-commercial)") }, "…a non-commercial model says so in the menu", "\(titles)")
+                expect(ai.modelPopup.accessibilityLabel() == "Model", "…VoiceOver calls it Model (not Download)", ai.modelPopup.accessibilityLabel() ?? "-")
+                let v = ai.modelsView
+                let actions = content.compactMap { $0 as? NSButton }.filter { ["Download", "Pause", "Resume", "Delete", "Cancel"].contains($0.title) }
+                expect(actions.count == 1 && actions.first === v.action, "Cedric: no five-row list, one Download button", "\(actions.map(\.title))")
+                expect(v.controls.superview === ai.modelRow && ai.modelPopup.superview === ai.modelRow
+                       && v.action.superview === v.controls && v.secondary.superview === v.controls,
+                       "…on the Model row, where Cancel goes too")
+                let def = BuiltInDownloads.shared.catalog?.defaultModel
+                expect(v.model == def && v.automatic && v.action.title == "Download", "…for the model Automatic would use (\(def?.name ?? "-"))")
+                for b in [v.action, v.info] {
+                    expect(!(b.accessibilityLabel() ?? "").isEmpty, "…\(b === v.info ? "the info button" : "the action button") has a VoiceOver name", b.accessibilityLabel() ?? "-")
+                }
+                expect(v.action.accessibilityLabel() == "Download \(def?.name ?? "")", "…naming the model", v.action.accessibilityLabel() ?? "-")
+                expect(v.info.toolTip == def?.details && ai.modelPopup.toolTip == def?.details, "…its full description (license, memory, source) is the tooltip")
+                expect(v.status.stringValue.contains("Not downloaded"), "Cedric: one status line", v.status.stringValue)
+                let titlesShown = content.compactMap { ($0 as? NSButton)?.title }
+                expect(titlesShown.contains("Test Connection") && titlesShown.contains("Check automatically when I pause typing") && titlesShown.contains("Load model at launch"),
+                       "Cedric: Test Connection and the checkboxes stay", "\(titlesShown)")
+                expect(!ai.intervalPopup.isHiddenOrHasHiddenAncestor, "Cedric: Check at most every stays")
+                for l in [ai.privacyLabel, ai.launchNote, v.status, v.source] {
+                    let line = NSLayoutManager().defaultLineHeight(for: l.font ?? .systemFont(ofSize: NSFont.smallSystemFontSize))
+                    expect(!l.isHiddenOrHasHiddenAncestor && l.frame.height < line * 1.6, "Cedric: one line: \(l.stringValue.prefix(40))…", "\(l.frame.height) pt")
+                }
+                expect(ai.privacyLabel.stringValue == LocalAISettings.privacyNoteOnDevice, "Cedric: the on-device privacy note stays in view")
+                expect(ai.launchNote.toolTip == LocalAISettings.loadModelAtLaunchNote, "…the full Load model at launch note is its tooltip")
+                expect(v.source.toolTip?.contains("Hugging Face") == true && v.source.toolTip?.contains(BuiltInDownloads.shared.store.directory.lastPathComponent) == true,
+                       "…the Hugging Face folder is the source line's tooltip", v.source.toolTip ?? "-")
+                let h = w.frame.height
+                expect(h <= cedricTabMaxHeight, "Cedric: the tab is at most \(Int(cedricTabMaxHeight)) pt tall (was 826)", "\(Int(h)) pt")
+                // Picking a model that isn't downloaded makes it the download
+                // target; Automatic stays in effect (nothing is saved).
+                guard let nc = tagged.first, let i = ai.modelPopup.itemArray.firstIndex(where: { $0.representedObject as? String == nc.id }) else { return }
+                let applied = ai.applyCount
+                ai.modelPopup.selectItem(at: i)
+                NSApp.sendAction(ai.modelPopup.action!, to: ai.modelPopup.target, from: ai.modelPopup)
+                expect(ai.settings.model == nil && ai.applyCount == applied, "Cedric: picking \(nc.name) (not downloaded) keeps Automatic", ai.settings.model ?? "nil")
+                expect(ai.builtInTarget == nc.id && ai.modelPopup.titleOfSelectedItem == nc.menuTitle && v.model == nc && !v.automatic,
+                       "…the popup shows it as the download target", ai.modelPopup.titleOfSelectedItem ?? "-")
+                expect(v.action.title == "Download" && v.action.accessibilityLabel() == "Download \(nc.name)" && v.status.stringValue.hasPrefix("Not downloaded"),
+                       "…with its own Download and status", v.status.stringValue)
+                expect(w.frame.height <= cedricTabMaxHeight, "…and the window stays compact", "\(Int(w.frame.height)) pt")
+            },
+            { next in snapshot("settings-cedric-target.png", window: SettingsWindowController.shared?.window)(next) },
+            sync {
+                guard let ai = s?.ai, ai.settings.backend == .builtIn else { return }
+                let applied = ai.applyCount
+                ai.modelPopup.selectItem(at: 0)
+                NSApp.sendAction(ai.modelPopup.action!, to: ai.modelPopup.target, from: ai.modelPopup)
+                expect(ai.builtInTarget == nil && ai.settings.model == nil && ai.applyCount == applied && ai.modelsView.automatic,
+                       "Cedric: Automatic again clears the target, still nothing saved")
+            },
+        ]
         plan += [
             sync {
                 guard let s else { return }
@@ -139,6 +234,7 @@ extension DevChecks {
             sync {
                 s?.window?.close()
                 restore()
+                NSApp.appearance = nil
                 NotificationCenter.default.post(name: .cedricAppearanceChanged, object: nil)
             },
         ]
