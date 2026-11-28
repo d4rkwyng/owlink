@@ -155,7 +155,9 @@ public struct RecoveryStore: Sendable {
     /// write, so a replacement at the folder path is checked again.
     /// A live copy is read first, as a reader would: one that is there but
     /// can't be read or decoded is set aside before the new one replaces
-    /// it, and if it can't be, the write fails and leaves it.
+    /// it, and if it can't be, the write fails and leaves it. A readable
+    /// record of another document under this name (the name is a hash)
+    /// is kept the same way, set aside as `foreign-`.
     public func write(_ record: RecoveryRecord, durable: Bool = true, failSync: Bool = false,
                       syncFolder: ((String) throws -> Void)? = nil) throws {
         let sync = syncFolder ?? PrivateDirectory.syncFolder
@@ -164,7 +166,14 @@ public struct RecoveryStore: Sendable {
                                       unconfirmed: &f.unconfirmed, syncParent: sync)
             PrivateDirectory.excludeFromBackup(directory)
             let url = fileURL(forDocumentPath: record.documentPath)
-            if case .kept = live(url) {
+            let kept: Bool
+            switch live(url) {
+            case .kept: kept = true
+            case .record(let r) where r.documentPath != record.documentPath:
+                kept = setAsideDamaged(at: url, kind: "foreign") == nil && entry(url) != .absent
+            case .record, .none: kept = false
+            }
+            if kept {
                 throw CocoaError(.fileWriteNoPermission, userInfo: [NSFilePathErrorKey: url.path])
             }
             let data = try PropertyListEncoder().encode(record)
@@ -200,17 +209,18 @@ public struct RecoveryStore: Sendable {
     }
 
     /// Moves an unreadable recovery file aside, next to it
-    /// (`*.recovery.unreadable-<date>`), so a later launch can still look
-    /// at the bytes and a new write can use the original name. Copied
-    /// there if it can't be moved. Returns the new URL, or nil if there
-    /// was no file or it couldn't be kept.
+    /// (`*.recovery.unreadable-<date>`; another document's record:
+    /// `kind` "foreign"), so a later launch can still look at the bytes
+    /// and a new write can use the original name. Copied there if it
+    /// can't be moved. Returns the new URL, or nil if there was no file
+    /// or it couldn't be kept.
     @discardableResult
-    public func setAsideDamaged(at url: URL, now: Date = Date()) -> URL? {
+    public func setAsideDamaged(at url: URL, kind: String = "unreadable", now: Date = Date()) -> URL? {
         locked { _ in
             let fm = FileManager.default
             guard entry(url) != .absent, !(checkFailSetAside && DevEnvironment.checksEnabled) else { return nil }
             let stamp = ISO8601DateFormatter().string(from: now).replacingOccurrences(of: ":", with: "")
-            func dest(_ tag: String) -> URL { url.appendingPathExtension("unreadable-\(tag)") }
+            func dest(_ tag: String) -> URL { url.appendingPathExtension("\(kind)-\(tag)") }
             var next = dest(stamp)
             var n = 0
             while fm.fileExists(atPath: next.path) {
@@ -288,11 +298,11 @@ public struct RecoveryStore: Sendable {
 
     /// Deletes the copy for `path` once it has been read: one that can't
     /// be read is set aside instead (or, if it can't be, left), never
-    /// deleted unseen.
+    /// deleted unseen. Another document's record under this name is left.
     public func clear(documentPath path: String) {
         locked { _ in
             let url = fileURL(forDocumentPath: path)
-            guard case .record = live(url) else { return }
+            guard case .record(let r) = live(url), r.documentPath == path else { return }
             try? FileManager.default.removeItem(at: url)
         }
     }
