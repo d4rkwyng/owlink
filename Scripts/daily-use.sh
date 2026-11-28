@@ -5,7 +5,7 @@
 # known-bug markers, and the speed budgets (cold launch, sidebar clicks,
 # preview toggle) checked against Scripts/daily-use-budgets.json.
 #
-#   Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets] [APP]
+#   Scripts/daily-use.sh [--no-build] [--runs N] [--cold N] [--out DIR] [--write-budgets] [--flows-only] [APP]
 #
 #   --no-build        use APP as it is (default: build a check build first
 #                     with Scripts/bundle-app.sh, never --release)
@@ -13,6 +13,7 @@
 #                     median of the launches' medians
 #   --cold N          cold launches timed (default 7, after one warm-up)
 #   --out DIR         default ~/Orchestrator/scratch/daily-use/YYYY-MM-DD
+#   --flows-only      the self-test and the flows, no timings
 #   --write-budgets   measure only (no flows, no verdicts) and write the
 #                     baselines to Scripts/daily-use-budgets.json
 #   APP               default dist/Owlink.app
@@ -38,6 +39,7 @@ RUNS=5
 COLD=7
 OUT=
 WRITE=0
+FLOWS_ONLY=0
 APP="dist/Owlink.app"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,7 +48,8 @@ while [ $# -gt 0 ]; do
         --cold) COLD=$2; shift ;;
         --out) OUT=$2; shift ;;
         --write-budgets) WRITE=1 ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        --flows-only) FLOWS_ONLY=1 ;;
+        -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
         -*) echo "daily-use.sh: unknown option $1" >&2; exit 2 ;;
         *) APP=${1%/} ;;
     esac
@@ -58,6 +61,9 @@ mkdir -p "$OUT/shots"
 OUT=$(cd "$OUT" && pwd)
 BUDGETS="$ROOT/Scripts/daily-use-budgets.json"
 DOMAIN=net.mindtricks.cedric.dailyuse
+# Cedric AI settings (AIStore) go to their own scratch suite: the flows
+# switch "Where the AI runs" to measure the Settings pane per engine.
+AISUITE=net.mindtricks.cedric.dailyuse.ai
 RECENTS="$HOME/Library/Application Support/com.apple.sharedfilelist/com.apple.LSSharedFileList.ApplicationRecentDocuments"
 log() { echo "daily-use: $*"; }
 load() { sysctl -n vm.loadavg | awk '{print $2}'; }
@@ -85,6 +91,7 @@ cedric_require_check_build "$APP"
 W=$(mktemp -d)
 cleanup() {
     defaults delete "$DOMAIN" >/dev/null 2>&1 || true
+    defaults delete "$AISUITE" >/dev/null 2>&1 || true
     rm -f "$RECENTS/$DOMAIN".sfl* 2>/dev/null || true
     rm -rf "$HOME/Library/Saved Application State/$DOMAIN.savedState" "$HOME/Library/Caches/$DOMAIN" \
         "$HOME/Library/WebKit/$DOMAIN" "$HOME/Library/HTTPStorages/$DOMAIN" "$HOME/Library/HTTPStorages/$DOMAIN.binarycookies" 2>/dev/null || true
@@ -93,7 +100,8 @@ cleanup() {
 }
 trap cleanup EXIT
 cedric_isolate "$W"
-export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1
+export CEDRIC_SESSION_DIR="$W/session" CEDRIC_NO_RESTORE=1 CEDRIC_NO_SESSION_SAVE=1 CEDRIC_AI_DEFAULTS=$AISUITE CEDRIC_MODELS_DIR="$W/models"
+mkdir -p "$W/models"
 
 # The copy with its own bundle id; the check build itself if that fails.
 RUNAPP="$W/Owlink-dailyuse.app"
@@ -137,41 +145,43 @@ if [ $WRITE = 0 ]; then
     grep -E "^check: (FAIL|KNOWN-BUG|SKIP|done)" "$OUT/flows.log" || true
 fi
 
-log "cold launches: 1 warm-up + $COLD"
-: > "$OUT/cold.log"
-for i in $(seq 0 "$COLD"); do
-    l0=$(load)
-    v=$(env CEDRIC_SESSION_DIR="$W/cold-session" CEDRIC_LAUNCH_METRICS=1 CEDRIC_QUIT_AFTER_LAUNCH=1 perl -e 'alarm 60; exec @ARGV' \
-        "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null | sed -n 's/^metric launch_ms=//p' | head -1) || true
-    l1=$(load)
-    echo "launch $i launch_ms=${v:-none} load_start=$l0 load_end=$l1" >> "$OUT/cold.log"
-    if [ "$i" -gt 0 ] && [ -n "$v" ]; then echo "cold value=$v" >> "$OUT/results.txt"; fi
-    echo "cold load_start=$l0 load_end=$l1 cores=$CORES" >> "$OUT/results.txt"
-    sleep 1
-done
-cat "$OUT/cold.log"
+if [ $FLOWS_ONLY = 0 ]; then
+    log "cold launches: 1 warm-up + $COLD"
+    : > "$OUT/cold.log"
+    for i in $(seq 0 "$COLD"); do
+        l0=$(load)
+        v=$(env CEDRIC_SESSION_DIR="$W/cold-session" CEDRIC_LAUNCH_METRICS=1 CEDRIC_QUIT_AFTER_LAUNCH=1 perl -e 'alarm 60; exec @ARGV' \
+            "$BIN" -ApplePersistenceIgnoreState YES 2>/dev/null | sed -n 's/^metric launch_ms=//p' | head -1) || true
+        l1=$(load)
+        echo "launch $i launch_ms=${v:-none} load_start=$l0 load_end=$l1" >> "$OUT/cold.log"
+        if [ "$i" -gt 0 ] && [ -n "$v" ]; then echo "cold value=$v" >> "$OUT/results.txt"; fi
+        echo "cold load_start=$l0 load_end=$l1 cores=$CORES" >> "$OUT/results.txt"
+        sleep 1
+    done
+    cat "$OUT/cold.log"
 
-log "perf: $RUNS launches"
-: > "$W/notes.txt"
-for i in $(seq 1 "$RUNS"); do
-    l0=$(load)
-    run_check "perf-$i" 600 CEDRIC_CHECK=dailyuseperf CEDRIC_CHECK_OUT="$OUT/shots"
-    l1=$(load)
-    sed -En "s/^perf: (metric=.*|load_start=.*|skipped=.*)/run=$i \1/p" "$OUT/perf-$i.log" >> "$OUT/results.txt"
-    echo "perf run $i: load (1 min) before $l0, after $l1, $CORES cores; $(grep '^perf: metric=' "$OUT/perf-$i.log" | sed 's/^perf: //' | tr '\n' ' ')" | tee -a "$W/notes.txt"
-    sleep 2
-done
-grep -h "^check: FAIL" "$OUT"/perf-*.log || true
+    log "perf: $RUNS launches"
+    : > "$W/notes.txt"
+    for i in $(seq 1 "$RUNS"); do
+        l0=$(load)
+        run_check "perf-$i" 600 CEDRIC_CHECK=dailyuseperf CEDRIC_CHECK_OUT="$OUT/shots"
+        l1=$(load)
+        sed -En "s/^perf: (metric=.*|load_start=.*|skipped=.*)/run=$i \1/p" "$OUT/perf-$i.log" >> "$OUT/results.txt"
+        echo "perf run $i: load (1 min) before $l0, after $l1, $CORES cores; $(grep '^perf: metric=' "$OUT/perf-$i.log" | sed 's/^perf: //' | tr '\n' ' ')" | tee -a "$W/notes.txt"
+        sleep 2
+    done
+    grep -h "^check: FAIL" "$OUT"/perf-*.log || true
 
-if [ $WRITE = 1 ]; then
-    echo "measured by Scripts/daily-use.sh --write-budgets --runs $RUNS --cold $COLD on $(hostname -s); baselines are medians of per-run medians (cold: of $COLD launches)" >> "$W/notes.txt"
-    while read -r l; do echo "cold $l" >> "$W/notes.txt"; done < "$OUT/cold.log"
-    run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS" \
-        CEDRIC_DAILYUSE_WRITE=1 CEDRIC_DAILYUSE_HOST="$(hostname -s)" CEDRIC_DAILYUSE_NOTES="$W/notes.txt"
-    grep "^check:" "$OUT/budget.log"
-    cat "$BUDGETS"
-else
-    run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS"
+    if [ $WRITE = 1 ]; then
+        echo "measured by Scripts/daily-use.sh --write-budgets --runs $RUNS --cold $COLD on $(hostname -s); baselines are medians of per-run medians (cold: of $COLD launches)" >> "$W/notes.txt"
+        while read -r l; do echo "cold $l" >> "$W/notes.txt"; done < "$OUT/cold.log"
+        run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS" \
+            CEDRIC_DAILYUSE_WRITE=1 CEDRIC_DAILYUSE_HOST="$(hostname -s)" CEDRIC_DAILYUSE_NOTES="$W/notes.txt"
+        grep "^check:" "$OUT/budget.log"
+        cat "$BUDGETS"
+    else
+        run_check budget 60 CEDRIC_CHECK=dailyusebudget CEDRIC_DAILYUSE_RESULTS="$OUT/results.txt" CEDRIC_DAILYUSE_BUDGETS="$BUDGETS"
+    fi
 fi
 
 # Isolation: nothing of the real domain or support folder changed.
@@ -211,7 +221,7 @@ RUNTIME=$(( $(date +%s) - T_START ))
     echo "## Speed"
     echo
     echo '```'
-    grep -hE "^metric |^check: (PASS|FAIL|SKIP)" "$OUT/budget.log" || true
+    grep -hE "^metric |^check: (PASS|FAIL|SKIP)" "$OUT/budget.log" 2>/dev/null || echo "(not measured: --flows-only)"
     echo '```'
     echo
     echo "## SKIPs"

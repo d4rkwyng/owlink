@@ -221,6 +221,37 @@ extension DevChecks {
         return (0..<o.numberOfChildren(ofItem: parent)).compactMap { (o.child($0, ofItem: parent) as? FolderNode)?.name }
     }
 
+    /// TextKit 2 rows of the first `fragments` layout fragments (laid
+    /// out), in text container coordinates.
+    struct DailyWrapRows {
+        var rows: [(maxX: CGFloat, width: CGFloat, lastInFragment: Bool)] = []
+        var fragments = 0
+        var container: CGFloat = 0, visible: CGFloat = 0, originX: CGFloat = 0
+        var scroller = false
+    }
+
+    static func dailyWrapRows(_ tab: EditorWindowController, fragments limit: Int) -> DailyWrapRows {
+        let tv = tab.textView
+        tab.window?.layoutIfNeeded()
+        tab.window?.displayIfNeeded()
+        var m = DailyWrapRows()
+        guard let tlm = tv.textLayoutManager, let tcm = tlm.textContentManager, let container = tv.textContainer else { return m }
+        m.container = container.size.width
+        m.visible = tab.scrollView.contentView.bounds.width
+        m.originX = tv.textContainerOrigin.x
+        m.scroller = tab.scrollView.hasHorizontalScroller
+        tlm.enumerateTextLayoutFragments(from: tcm.documentRange.location, options: [.ensuresLayout]) { f in
+            m.fragments += 1
+            let lines = f.textLineFragments
+            let last = lines.lastIndex { $0.characterRange.length > 0 }
+            for (i, line) in lines.enumerated() where line.characterRange.length > 0 {
+                m.rows.append((f.layoutFragmentFrame.minX + line.typographicBounds.maxX, line.typographicBounds.width, i == last))
+            }
+            return m.fragments < limit
+        }
+        return m
+    }
+
     static func dailyLoad() -> DailyUseLoad {
         var l = [Double](repeating: 0, count: 3)
         _ = getloadavg(&l, 3)
@@ -457,9 +488,12 @@ extension DevChecks {
                     h.check(ok, "recent: choosing \(file.lastPathComponent) in Open Recent opens it")
                     if let t = dailyTab(app, file) { sized(t) }
                     h.check(app.currentTab === dailyTab(app, file), "recent: …in the selected tab")
-                    h.check(s?.selectedNode?.url.standardizedFileURL == file.standardizedFileURL, "recent: …and its row is selected in the sidebar",
-                            "selected: \(s?.selectedNode?.name ?? "nothing")")
-                    next()
+                    // Let the sidebar settle a turn, as a user would see it.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        h.check(s?.selectedNode?.url.standardizedFileURL == file.standardizedFileURL, "recent: …and its row is selected in the sidebar",
+                                "selected: \(s?.selectedNode?.name ?? "nothing")")
+                        next()
+                    }
                 }
             }
         })
@@ -512,6 +546,8 @@ extension DevChecks {
                 // A file of A in front, the sidebar dragged wider as a user would.
                 dailyClickRow(fx.readme)
                 current = readmeTab
+                h.check(app.currentTab === current, "folders: readme.md's tab is in front before switching",
+                        "front: \(app.currentTab?.doc.fileURL?.lastPathComponent ?? app.currentViewerTab?.fileURL.lastPathComponent ?? "none")")
                 if let t = current, let side = s {
                     t.window?.layoutIfNeeded()
                     t.split.setPosition(300, ofDividerAt: 0)
@@ -530,7 +566,8 @@ extension DevChecks {
                 h.check(tabList() == tabsBefore, "folders: opening B leaves the tabs alone", "\(tabsBefore.count) → \(tabList().count)")
                 let w = s?.frame.width ?? 0
                 h.check(abs(w - widthBefore) <= 2, "folders: the docked sidebar keeps its width opening B", "\(Int(w)) pt, was \(Int(widthBefore))")
-                h.check(app.currentTab === current, "folders: the same tab is still selected")
+                h.check(app.currentTab === current, "folders: the same tab is still selected",
+                        "before \(current?.doc.fileURL?.lastPathComponent ?? "none"), now \(app.currentTab?.doc.fileURL?.lastPathComponent ?? app.currentViewerTab?.fileURL.lastPathComponent ?? "none")")
             },
             sync("folders-open-a", snapshot: false) { app.openFolder(fx.a) },
             waitListed(fx.a, "folders-a-listed"),
@@ -539,8 +576,9 @@ extension DevChecks {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     h.check(s?.rootURL.standardizedFileURL == fx.a.standardizedFileURL, "folders: the root is A again")
                     let names = dailyNames()
-                    h.check(names.first == "sub" && names.contains("readme.md") && names.contains("server.log") && names.count == 22,
-                            "folders: A's rows are listed (sub, then 21 files)", "\(names.count): \(names)")
+                    let files = ((try? FileManager.default.contentsOfDirectory(atPath: fx.a.path)) ?? []).filter { $0 != "sub" && !$0.hasPrefix(".") }
+                    h.check(names.first == "sub" && Set(names.dropFirst()) == Set(files) && names.count == files.count + 1,
+                            "folders: A's rows are listed (sub, then its \(files.count) files)", "\(names.count): \(names)")
                     h.check(s?.selectedNode?.url.standardizedFileURL == fx.readme.standardizedFileURL,
                             "folders: back on A, the selected tab's file (readme.md) is selected, as on a tab switch", "selected: \(s?.selectedNode?.name ?? "nothing")")
                     h.check(tabList() == tabsBefore, "folders: opening A again leaves the tabs alone", "\(tabsBefore.count) → \(tabList().count)")
@@ -571,32 +609,36 @@ extension DevChecks {
         steps.append(step("longline-wrap-on") { next in
             Settings.shared.wrapLines = true
             guard let tab = dailyTab(app, fx.huge) else { h.check(false, "longline wrap-on: tab still open"); next(); return }
-            tab.window?.layoutIfNeeded()
-            tab.textView.layoutManager?.ensureLayout(for: tab.textView.textContainer ?? NSTextContainer())
-            tab.textView.enclosingScrollView?.layout()
-            let inset = tab.textView.textContainerInset.width
-            let visible = tab.textView.visibleRect.width - inset * 2
-            var maxUsed: CGFloat = 0
-            var fragments = 0
-            if let lm = tab.textView.layoutManager, let container = tab.textView.textContainer {
-                let glyphEnd = lm.glyphRange(for: container)
-                lm.enumerateLineFragments(forGlyphRange: glyphEnd) { _, used, _, _, _ in
-                    fragments += 1
-                    maxUsed = max(maxUsed, used.width)
-                }
-            }
-            h.note(String(format: "longline wrap-on: %d fragments, max used %.1f pt, visible %.1f pt", fragments, maxUsed, visible))
-            // known bug: on main, Wrap ON still lets the long line overflow the view.
-            h.knownBug(id: "longline-wrap", note: "Wrap ON on a 5 MB one-line file leaves a fragment wider than the view (fix/0.6.1-longline-wrap)") {
-                h.check(fragments > 1 && visible > 0 && maxUsed <= visible + 2, "longline: Wrap ON keeps every fragment within the view width", String(format: "fragments=%d maxUsed=%.1f visible=%.1f", fragments, maxUsed, visible))
+            // TextKit 2 rows (never textView.layoutManager: asking for it
+            // drops the view to TextKit 1), the first ~200 layout
+            // fragments, as CEDRIC_CHECK=longwrap on fix/0.6.1-longline-wrap.
+            let m = dailyWrapRows(tab, fragments: 200)
+            let padding = tab.textView.textContainer?.lineFragmentPadding ?? 0
+            let available = m.container - 2 * padding
+            let advance = ("0" as NSString).size(withAttributes: [.font: tab.textView.font ?? Settings.shared.font]).width
+            let over = m.rows.filter { $0.maxX > m.container + 0.5 || m.originX + $0.maxX > m.visible + 0.5 }
+            h.note(String(format: "longline wrap-on: %d rows in %d fragments, widest ends at %.1f, container %.1f, visible %.1f, scroller %@",
+                          m.rows.count, m.fragments, m.rows.map(\.maxX).max() ?? 0, m.container, m.visible, m.scroller ? "y" : "n"))
+            h.check(!m.rows.isEmpty && over.isEmpty, "longline: Wrap ON, no row ends past the wrapping width or the view's edge",
+                    "\(over.count) of \(m.rows.count) rows over")
+            h.check(!m.scroller, "longline: Wrap ON, no horizontal scroller")
+            // Rows inside a fragment but its last (a chunk ends there): each
+            // should reach the wrapping width within 1.5 characters.
+            let inner = m.rows.filter { !$0.lastInFragment }
+            let short = inner.filter { $0.width < available - 1.5 * advance }
+            // KNOWN BUG on main, fixed on fix/0.6.1-longline-wrap: a run
+            // without spaces wraps only after '/', leaving ragged rows.
+            // Remove this marker when that merges.
+            h.knownBug(id: "longline-wrap", note: "Wrap ON on a 5 MB base64-like line breaks only after '/', rows end early (ragged)") {
+                h.check(!inner.isEmpty && short.isEmpty, "longline: Wrap ON, each row of the line without spaces fills the wrapping width",
+                        String(format: "%d of %d rows end early; first is %.1f of %.1f pt", short.count, inner.count, short.first?.width ?? 0, available))
             }
             next()
         })
         steps.append(step("longline-wrap-off") { next in
             Settings.shared.wrapLines = false
             guard let tab = dailyTab(app, fx.huge) else { h.check(false, "longline wrap-off: tab still open"); restoreWrap(); next(); return }
-            tab.window?.layoutIfNeeded()
-            tab.textView.layoutManager?.ensureLayout(for: tab.textView.textContainer ?? NSTextContainer())
+            _ = dailyWrapRows(tab, fragments: 50)
             guard let scroll = tab.textView.enclosingScrollView else { h.check(false, "longline wrap-off: has a scroll view"); restoreWrap(); next(); return }
             scroll.layout()
             let docW = scroll.documentView?.bounds.width ?? 0
@@ -644,21 +686,83 @@ extension DevChecks {
             key(",", [.command])
             h.check(SettingsWindowController.shared?.window?.isVisible == true, "settings: ⌘, opens Settings")
         })
+        // Settings › Cedric's height depends on where the AI runs (the
+        // built-in model adds its download and launch rows): measured once
+        // per engine this Mac offers, the tallest is what the marker checks.
+        // The engine choice is written to CEDRIC_AI_DEFAULTS (a scratch
+        // suite Scripts/daily-use.sh sets), so it is swept only then.
+        var cedricHeights: [(engine: String, height: CGFloat, detail: String)] = []
+        let sweepEngines = DevEnvironment.values["CEDRIC_AI_DEFAULTS"] != nil
+        func shoot(_ w: NSWindow, _ name: String, _ next: @escaping () -> Void) {
+            let path = out.appendingPathComponent(name).path
+            DevHooks.write(window: w, to: path) {
+                print("check: snapshot \(path)")
+                next()
+            }
+        }
         for pane in SettingsPane.allCases {
+            let n = 90 + (SettingsPane.allCases.firstIndex(of: pane) ?? 0)
             steps.append(DailyUseHarness.Step(name: "settings-\(pane.rawValue)", snapshot: false) { next in
                 guard let sw = SettingsWindowController.shared, let w = sw.window else { next(); return }
+                // Settings › Cedric lists the built-in models from
+                // CEDRIC_MODELS_DIR, else from the real Application Support.
+                if pane == .cedric && DevEnvironment.values["CEDRIC_MODELS_DIR"] == nil {
+                    h.skip("settings Cedric", "no CEDRIC_MODELS_DIR (it would read the real ~/Library/Application Support/Cedric/Models); run Scripts/daily-use.sh")
+                    next(); return
+                }
                 sw.select(pane)
                 w.layoutIfNeeded()
                 w.contentView?.layoutSubtreeIfNeeded()
-                dailySettingsPane(pane, sw, w)
-                let file = String(format: "%02d-settings-%@.png", 90 + (SettingsPane.allCases.firstIndex(of: pane) ?? 0), pane.rawValue)
-                let path = out.appendingPathComponent(file).path
-                DevHooks.write(window: w, to: path) {
-                    print("check: snapshot \(path)")
-                    next()
+                if pane == .cedric {
+                    cedricHeights.append(dailySettingsPane(pane, sw, w, engine: sw.ai?.presetPopup.titleOfSelectedItem))
+                } else {
+                    _ = dailySettingsPane(pane, sw, w)
                 }
+                shoot(w, String(format: "%02d-settings-%@.png", n, pane.rawValue), next)
             })
         }
+        steps.append(DailyUseHarness.Step(name: "settings-cedric-engines", snapshot: false) { next in
+            guard let sw = SettingsWindowController.shared, let w = sw.window, let popup = sw.ai?.presetPopup, !cedricHeights.isEmpty else { next(); return }
+            guard sweepEngines else {
+                h.note("settings Cedric: one engine measured (no CEDRIC_AI_DEFAULTS scratch suite to sweep the others in)")
+                next(); return
+            }
+            sw.select(.cedric)
+            let original = popup.indexOfSelectedItem
+            let others = popup.itemArray.indices.filter { $0 != original && popup.item(at: $0)?.isEnabled == true }
+            h.note("settings Cedric: engines \(popup.itemArray.map { "\($0.title)\($0.isEnabled ? "" : " (unavailable)")" })")
+            var k = 0
+            @MainActor func one() {
+                guard k < others.count else {
+                    popup.selectItem(at: original)
+                    popup.sendAction(popup.action, to: popup.target)
+                    next(); return
+                }
+                let i = others[k]
+                k += 1
+                // As a click on the menu item: select, then the popup's action.
+                popup.selectItem(at: i)
+                popup.sendAction(popup.action, to: popup.target)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    w.layoutIfNeeded()
+                    w.contentView?.layoutSubtreeIfNeeded()
+                    cedricHeights.append(dailySettingsPane(.cedric, sw, w, engine: popup.titleOfSelectedItem))
+                    shoot(w, String(format: "%02d-settings-cedric-engine-%d.png", 93, i)) { one() }
+                }
+            }
+            one()
+        })
+        steps.append(sync("settings-cedric-height", snapshot: false) {
+            guard !cedricHeights.isEmpty else { return }
+            for c in cedricHeights { h.note(String(format: "settings Cedric with %@: window %.0f pt tall", c.engine, c.height)) }
+            // KNOWN BUG on main, fixed on fix/cedric-settings-compact: the
+            // Cedric pane is far too tall. Remove this marker when that merges.
+            h.knownBug(id: "settings-cedric-tall", note: "Settings › Cedric is taller than 700 pt") {
+                for c in cedricHeights {
+                    h.check(c.height <= 700, "settings Cedric (\(c.engine)): the window is at most 700 pt tall", c.detail)
+                }
+            }
+        })
         steps.append(sync("settings-close", snapshot: false) { SettingsWindowController.shared?.window?.close() })
 
         steps.append(sync("done", snapshot: false) {
@@ -671,23 +775,21 @@ extension DevChecks {
 
     /// One Settings pane: its height, and nothing cut off, truncated or
     /// overlapping.
-    static func dailySettingsPane(_ pane: SettingsPane, _ sw: SettingsWindowController, _ w: NSWindow) {
+    /// The Cedric pane's height is not asserted here but handed back (the
+    /// caller asserts it inside its known-bug marker, for every engine).
+    @discardableResult
+    static func dailySettingsPane(_ pane: SettingsPane, _ sw: SettingsWindowController, _ w: NSWindow,
+                                  engine: String? = nil) -> (engine: String, height: CGFloat, detail: String) {
         let h = DailyUseHarness.main
-        let name = SettingsWindowController.paneTitle(pane)
-        guard let content = w.contentView else { return }
+        let name = SettingsWindowController.paneTitle(pane) + (engine.map { " (\($0))" } ?? "")
+        guard let content = w.contentView else { return ("", 0, "no content view") }
         let frameH = w.frame.height, contentH = w.contentRect(forFrameRect: w.frame).height
         let fit = sw.panes[pane]?.fittingContentSize ?? .zero
         h.note(String(format: "settings %@: window %.0f × %.0f pt (content %.0f tall), pane fittingSize %.0f × %.0f, screen visible height %.0f",
                       name, w.frame.width, frameH, contentH, fit.width, fit.height, w.screen?.visibleFrame.height ?? 0))
-        let tallCheck = {
-            h.check(frameH <= 700, "settings \(name): the window is at most 700 pt tall", String(format: "%.0f pt (content %.0f, pane fits %.0f)", frameH, contentH, fit.height))
-        }
-        if pane == .cedric {
-            // KNOWN BUG on main, fixed on fix/cedric-settings-compact: the
-            // Cedric pane is far too tall. Remove this marker when that merges.
-            h.knownBug(id: "settings-cedric-tall", note: "Settings › Cedric is taller than 700 pt", tallCheck)
-        } else {
-            tallCheck()
+        let tallDetail = String(format: "%.0f pt (content %.0f, pane fits %.0f)", frameH, contentH, fit.height)
+        if pane != .cedric {
+            h.check(frameH <= 700, "settings \(name): the window is at most 700 pt tall", tallDetail)
         }
         func all(_ v: NSView) -> [NSView] { v.subviews + v.subviews.flatMap(all) }
         let views = all(content).filter { !$0.isHiddenOrHasHiddenAncestor && $0.alphaValue > 0 }
@@ -709,8 +811,14 @@ extension DevChecks {
             guard let cell = c.cell, c.frame.width > 0 else { return false }
             if let f = c as? NSTextField {
                 guard !f.isEditable, !f.stringValue.isEmpty, !cell.wraps || f.maximumNumberOfLines == 1 else { return false }
+            } else if let p = c as? NSPopUpButton {
+                // A popup's cellSize is its widest menu item's: compare the
+                // shown title with the room the cell draws it in.
+                guard let pc = p.cell as? NSPopUpButtonCell, let title = p.titleOfSelectedItem, !title.isEmpty else { return false }
+                let need = (title as NSString).size(withAttributes: [.font: p.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]).width
+                return need > pc.titleRect(forBounds: p.bounds).width + 1
             } else if let b = c as? NSButton {
-                guard !b.title.isEmpty || b is NSPopUpButton else { return false }
+                guard !b.title.isEmpty else { return false }
             } else {
                 return false
             }
@@ -729,5 +837,6 @@ extension DevChecks {
             }
         }
         h.check(overlaps.isEmpty, "settings \(name): no two controls overlap", overlaps.joined(separator: "; "))
+        return (engine ?? name, frameH, tallDetail)
     }
 }
