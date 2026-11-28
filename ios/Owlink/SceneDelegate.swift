@@ -215,20 +215,30 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         if let url = urls.first { presentDocument(at: url) }
     }
 
+    /// A new document's import (the + button). An Open In import that
+    /// `open(_:importIfNeeded:)` reveals is its completion's (UIKit calls
+    /// both, this first).
     func documentBrowser(_ controller: UIDocumentBrowserViewController, didImportDocumentAt source: URL, toDestinationURL dest: URL) {
+        guard importGate.delegateOwns(source) else { return }
         presentDocument(at: dest)
     }
 
     func documentBrowser(_ controller: UIDocumentBrowserViewController, failedToImportDocumentAt url: URL, error: Error?) {
+        guard importGate.delegateOwns(url) else { return }
         alert(String(localized: "Couldn’t create the document"), error?.localizedDescription)
     }
 
     // MARK: Opening
 
+    /// Which callback presents an import (see `ImportPresentationGate`).
+    private var importGate = ImportPresentationGate()
+
     func open(_ url: URL, importIfNeeded: Bool) {
         if importIfNeeded {
+            importGate.beginReveal(url)
             revealDocument(at: url, importIfNeeded: true) { [weak self] revealed, error in
-                if let revealed { self?.presentDocument(at: revealed) } else { self?.alert(String(localized: "Couldn’t open the file"), error?.localizedDescription) }
+                guard let self, self.importGate.finishReveal(url) else { return }
+                if let revealed { self.presentDocument(at: revealed) } else { self.alert(String(localized: "Couldn’t open the file"), error?.localizedDescription) }
             }
         } else {
             presentDocument(at: url)
@@ -380,6 +390,27 @@ final class DocumentBrowserViewController: UIDocumentBrowserViewController, UIDo
         a.addAction(UIAlertAction(title: String(localized: "OK"), style: .default))
         present(a, animated: true)
     }
+}
+
+/// One import, one presentation owner. UIKit reports an Open In import
+/// twice: the browser delegate's `didImportDocumentAt` (or
+/// `failedToImportDocumentAt`) and then `revealDocument`'s completion.
+/// While a reveal of a source is in flight, the delegate leaves it to the
+/// completion, which presents (or alerts) once per reveal. An import with
+/// no reveal (a new document) is the delegate's alone.
+struct ImportPresentationGate {
+    private var revealing: Set<String> = []
+
+    private static func key(_ url: URL) -> String { url.standardizedFileURL.resolvingSymlinksInPath().path }
+
+    mutating func beginReveal(_ source: URL) { revealing.insert(Self.key(source)) }
+
+    /// Whether a delegate callback for `source` presents (or alerts).
+    func delegateOwns(_ source: URL) -> Bool { !revealing.contains(Self.key(source)) }
+
+    /// The reveal's completion: true once per reveal begun (it presents
+    /// or alerts), false for a repeated or unknown completion.
+    mutating func finishReveal(_ source: URL) -> Bool { revealing.remove(Self.key(source)) != nil }
 }
 
 import SwiftUI
