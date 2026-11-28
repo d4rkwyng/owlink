@@ -23,6 +23,10 @@
 			isa = PBXBuildFile;
 			productRef = 49EB84B0D4189C0E290EE45C;
 		};
+		3955869D6538C8F07F68A046 /* Preview */ = {
+			isa = PBXBuildFile;
+			fileRef = 4E0D05C12C513F37B1761D6E;
+		};
 		3F9586AB71EDE647F83C10A9 /* AI-snap */ = {
 			isa = PBXBuildFile;
 			fileRef = CE645F6034CD039B71B2C760;
@@ -55,6 +59,10 @@
 			isa = PBXBuildFile;
 			productRef = FC7B1814364D917743DC7A79;
 		};
+		E78B61D6516E7CCCB131DE16 /* Preview-snap */ = {
+			isa = PBXBuildFile;
+			fileRef = 4E0D05C12C513F37B1761D6E;
+		};
 		FB1A6BC5AA1355B8E5C3DB34 /* Samples-snap */ = {
 			isa = PBXBuildFile;
 			fileRef = 7CF84AEF96569D79A72D5F6E;
@@ -84,6 +92,13 @@
 			lastKnownFileType = "text.plist.entitlements";
 			path = "Owlink.entitlements";
 			sourceTree = "<group>";
+		};
+		4E0D05C12C513F37B1761D6E /* Preview */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = folder;
+			path = "../Resources/Preview";
+			sourceTree = "<group>";
+			name = Preview;
 		};
 		571CD3829D85311D5626CD79 /* Owlink.app */ = {
 			isa = PBXFileReference;
@@ -278,6 +293,7 @@
 				DD5D1BB5B52B02002E1C1C98,
 				DD636C72313A8BAD0ED9BF0B,
 				CE645F6034CD039B71B2C760,
+				4E0D05C12C513F37B1761D6E,
 			);
 			name = "Shared (llama: device builds only)";
 			sourceTree = "<group>";
@@ -502,6 +518,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				3F9586AB71EDE647F83C10A9,
+				E78B61D6516E7CCCB131DE16,
 				FB1A6BC5AA1355B8E5C3DB34,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -511,6 +528,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1AFB00150DD24F225E925815,
+				3955869D6538C8F07F68A046,
 				42AD768038B76BF850458DBE,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

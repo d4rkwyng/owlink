@@ -940,7 +940,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self?.toggleFocusPreview()
         }
         focus.accessibilityIdentifier = "editor.menu.focusPreview"
-        let children: [UIMenuElement] = [toggle, focus] + [detachPreviewAction()].compactMap { $0 }
+        let children: [UIMenuElement] = [toggle, focus] + [detachPreviewAction(), drawDiagramsAction()].compactMap { $0 }
         return UIMenu(title: String(localized: "Preview"), image: UIImage(systemName: previewOn ? "eye.fill" : "eye"), children: children)
     }
 
@@ -950,7 +950,22 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             self?.toggleFocusPreview()
         }
         focus.accessibilityIdentifier = "editor.previewMenu.focus"
-        return [focus] + [detachPreviewAction()].compactMap { $0 }
+        return [focus] + [detachPreviewAction(), drawDiagramsAction()].compactMap { $0 }
+    }
+
+    /// Draw Diagrams and Math: Mermaid and KaTeX, bundled, for this
+    /// document's preview only. Off until chosen, and off again for
+    /// another document or a reload from disk. Markdown with the preview open.
+    private func drawDiagramsAction() -> UIAction? {
+        guard document.language.language == .markdown, previewOn, let preview, PreviewRichAssets.available else { return nil }
+        let a = UIAction(title: String(localized: "Draw Diagrams and Math"), image: UIImage(systemName: "function"),
+                         state: preview.drawDiagramsAndMath ? .on : .off) { [weak self] _ in
+            guard let preview = self?.preview else { return }
+            preview.drawDiagramsAndMath.toggle()
+        }
+        a.subtitle = String(localized: "Runs the bundled Mermaid and KaTeX in this preview. Nothing is downloaded.")
+        a.accessibilityIdentifier = "editor.menu.drawDiagrams"
+        return a
     }
 
     /// "Open Preview in New Window": iPad only (hidden on an iPhone).
@@ -1002,6 +1017,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         applyProseChecking()
         markdownFenceIndex.invalidateAll()
         refreshEncodingNotice()
+        // Read again from disk: the preview's scripts go back off (as the Mac's Allow JavaScript).
+        preview?.drawDiagramsAndMath = false
         cachedIndentation = nil
         lineIndentation = nil
         let hadBookmarks = !bookmarks.isEmpty

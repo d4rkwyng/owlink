@@ -44,10 +44,28 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
     /// The hint's link: asks for the document's folder.
     static let grantURL = "owlink-preview:open-folder"
     /// The open document (its folder is the page's base).
-    var documentURL: URL?
+    var documentURL: URL? {
+        didSet { if documentURL?.standardizedFileURL != oldValue?.standardizedFileURL { drawDiagramsAndMath = false } }
+    }
     /// A text file a preview link names, to open in Owlink.
     var onOpenFile: ((URL) -> Void)?
     private let files = PreviewFiles()
+    /// The bundled Mermaid and KaTeX, served only while a page asks for them.
+    let richAssets = PreviewRichAssets()
+    /// Draw Diagrams and Math (off by default, never on by itself): this
+    /// document's own page may run the bundled Mermaid and KaTeX, and only
+    /// them (the page's own scripts stay stripped and blocked by the
+    /// policy). Not for linked pages, and back off for another document or
+    /// when the document is read again from disk (as the Mac's Allow
+    /// JavaScript, 0.6.0). Nothing is fetched from the network either way.
+    var drawDiagramsAndMath = false {
+        didSet {
+            guard drawDiagramsAndMath != oldValue, let home, isHome else { return }
+            render(.markdown(home.markdown), palette: home.palette, document: home.document, rootOverride: nil, keepPlace: true)
+        }
+    }
+    /// What the page shown asked for (tests).
+    private(set) var pageNeeds: PreviewRich.Needs = []
     private var vault: WikiVault?
     private var vaultKey: String?
     /// Folder-access probe for this document and grant. Preview refreshes
@@ -88,6 +106,7 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         config.websiteDataStore = .nonPersistent()
         config.setURLSchemeHandler(files, forURLScheme: PreviewFolder.scheme)
+        config.setURLSchemeHandler(richAssets, forURLScheme: PreviewRich.scheme)
         web = WKWebView(frame: .zero, configuration: config)
         web.navigationDelegate = self
         // No new windows (`createWebViewWith`): a target=_blank link asks
@@ -282,6 +301,9 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
         let cachedAccess = folderAccess?.key == accessKey ? folderAccess?.readable : nil
         let frontMatterExpanded = AppSettings.previewFrontMatterExpanded
         let hint = "<p class=\"preview-hint\"><a href=\"\(Self.grantURL)\">" + Markdown.escape(String(localized: "Open the folder to see its images")) + "</a></p>\n"
+        // Only this document's own page, only when asked for, only with the files bundled.
+        let rich = drawDiagramsAndMath && isHome && PreviewRichAssets.available
+        let dark = palette.isDark
         queue.async { [weak self] in
             // Warm the vault's name index here, off the main thread, so the
             // page's bare-name images don't build it on first request.
@@ -290,7 +312,10 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
             switch source {
             // Web links keep their address (a tap asks, then the system
             // opens it); nothing else remote is kept.
-            case .markdown(let markdown): body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: .preview(vault: vault, frontMatterExpanded: frontMatterExpanded)))
+            case .markdown(let markdown):
+                var options = Markdown.Options.preview(vault: vault, frontMatterExpanded: frontMatterExpanded)
+                options.math = rich
+                body = HTMLScrub.noScriptNoRemoteKeepingLinks(Markdown.render(markdown, options: options))
             case .html(let html): body = HTMLScrub.noScriptNoRemoteKeepingLinks(html)
             }
             let readable: Bool
@@ -308,12 +333,20 @@ final class PreviewController: UIViewController, WKNavigationDelegate, WKUIDeleg
                 body = PreviewImageAccess.hideUnreadable(body, folder: folder, openedRoot: opened, folderReadable: readable, hint: hint, vault: vault).html
             }
             let page: String
+            var needs: PreviewRich.Needs = []
             switch source {
-            case .markdown: page = PreviewHTML.page(body: body, palette: palette, csp: Self.csp, viewport: true)
+            case .markdown:
+                needs = rich ? PreviewRich.needs(body: body) : []
+                page = Self.richPage(PreviewHTML.page(body: body, palette: palette, csp: Self.richCSP(needs), viewport: true),
+                                     needs: needs, dark: dark)
             case .html: page = Self.htmlPage(body)
             }
             DispatchQueue.main.async {
                 guard let self, gen == self.generation else { return }
+                // JavaScript only for a page that loads the bundled files.
+                self.pageNeeds = needs
+                self.richAssets.scriptOn = !needs.isEmpty
+                self.web.configuration.defaultWebpagePreferences.allowsContentJavaScript = !needs.isEmpty
                 self.folderAccess = (accessKey, readable)
                 self.files.pageHTML = page
                 self.files.pageURL = baseURL

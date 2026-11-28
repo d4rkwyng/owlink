@@ -100,6 +100,9 @@ def fref(name, path, ftype, extra=None):
 r_llama = fref('LlamaRuntime.swift', '../Sources/CedricAI/BuiltIn/LlamaRuntime.swift', 'sourcecode.swift', {'name': 'LlamaRuntime.swift'})
 r_loader = fref('CLlamaLoader.c', '../Sources/CLlamaLoader/CLlamaLoader.c', 'sourcecode.c.c', {'name': 'CLlamaLoader.c'})
 r_ai = fref('AI', '../Resources/AI', 'folder', {'name': 'AI'})
+# Mermaid and KaTeX for the preview's opt-in diagrams and math (served by
+# the app's cedric-asset: handler only; nothing is fetched).
+r_preview = fref('Preview', '../Resources/Preview', 'folder', {'name': 'Preview'})
 r_samples = fref('Samples', 'Samples', 'folder')
 r_plist = fref('Owlink-Info.plist', 'Owlink-Info.plist', 'text.plist.xml')
 r_ent = fref('Owlink.entitlements', 'Owlink.entitlements', 'text.plist.entitlements')
@@ -110,7 +113,7 @@ p_at = add('product-at', 'PBXFileReference', {'explicitFileType': 'wrapper.cfbun
 p_snap = add('product-snap', 'PBXFileReference', {'explicitFileType': 'wrapper.cfbundle', 'includeInIndex': '0', 'path': 'OwlinkSnapshotTests.xctest', 'sourceTree': 'BUILT_PRODUCTS_DIR'}, 'OwlinkSnapshotTests.xctest')
 p_ui = add('product-ui', 'PBXFileReference', {'explicitFileType': 'wrapper.cfbundle', 'includeInIndex': '0', 'path': 'OwlinkUITests.xctest', 'sourceTree': 'BUILT_PRODUCTS_DIR'}, 'OwlinkUITests.xctest')
 
-g_shared = add('group-shared', 'PBXGroup', {'children': [r_llama, r_loader, r_mm, r_ai], 'name': 'Shared (llama: device builds only)', 'sourceTree': '<group>'}, 'Shared')
+g_shared = add('group-shared', 'PBXGroup', {'children': [r_llama, r_loader, r_mm, r_ai, r_preview], 'name': 'Shared (llama: device builds only)', 'sourceTree': '<group>'}, 'Shared')
 g_products = add('group-products', 'PBXGroup', {'children': [p_app, p_ct, p_at, p_ui, p_snap], 'name': 'Products', 'sourceTree': '<group>'}, 'Products')
 g_main = add('group-main', 'PBXGroup', {'children': [g_app, r_samples, r_plist, r_ent, g_shared, g_ui, g_snap, g_ct, g_at, g_products], 'sourceTree': '<group>'}, 'main')
 
@@ -120,6 +123,7 @@ def bf(name, **kw):
 b_llama = bf('LlamaRuntime.swift', fileRef=r_llama)
 b_loader = bf('CLlamaLoader.c', fileRef=r_loader)
 b_ai = bf('AI', fileRef=r_ai)
+b_preview = bf('Preview', fileRef=r_preview)
 b_samples = bf('Samples', fileRef=r_samples)
 b_core = bf('CedricCore', productRef=core)
 b_aip = bf('CedricAI', productRef=ai)
@@ -129,6 +133,7 @@ b_core_t2 = bf('CedricCore-t2', productRef=core_t2)
 b_core_s = bf('CedricCore-s', productRef=core_s)
 b_ai_s = bf('CedricAI-s', productRef=ai_s)
 b_ai_s_res = bf('AI-snap', fileRef=r_ai)
+b_preview_s = bf('Preview-snap', fileRef=r_preview)
 b_samples_s = bf('Samples-snap', fileRef=r_samples)
 
 def phase(name, isa, files=None, extra=None):
@@ -161,7 +166,7 @@ def script(name, body):
 app_fetch = script('Fetch llama (device)', FETCH)
 app_src = phase('app-sources', 'PBXSourcesBuildPhase', [b_llama, b_loader])
 app_fw = phase('app-frameworks', 'PBXFrameworksBuildPhase', [b_core, b_aip])
-app_res = phase('app-resources', 'PBXResourcesBuildPhase', [b_ai, b_samples])
+app_res = phase('app-resources', 'PBXResourcesBuildPhase', [b_ai, b_preview, b_samples])
 app_embed = script('Embed llama (device)', EMBED)
 ct_src = phase('ct-sources', 'PBXSourcesBuildPhase')
 ct_fw = phase('ct-frameworks', 'PBXFrameworksBuildPhase', [b_core_t])
@@ -171,7 +176,7 @@ at_fw = phase('at-frameworks', 'PBXFrameworksBuildPhase', [b_ai_t, b_core_t2])
 at_res = phase('at-resources', 'PBXResourcesBuildPhase')
 sn_src = phase('sn-sources', 'PBXSourcesBuildPhase')
 sn_fw = phase('sn-frameworks', 'PBXFrameworksBuildPhase', [b_core_s, b_ai_s])
-sn_res = phase('sn-resources', 'PBXResourcesBuildPhase', [b_ai_s_res, b_samples_s])
+sn_res = phase('sn-resources', 'PBXResourcesBuildPhase', [b_ai_s_res, b_preview_s, b_samples_s])
 ui_src = phase('ui-sources', 'PBXSourcesBuildPhase')
 ui_fw = phase('ui-frameworks', 'PBXFrameworksBuildPhase')
 ui_res = phase('ui-resources', 'PBXResourcesBuildPhase')
