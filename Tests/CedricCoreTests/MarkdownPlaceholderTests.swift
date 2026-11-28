@@ -120,6 +120,48 @@ import Testing
         #expect(Markdown.render("# a\u{E000}b\n") == Markdown.render("# ab\n").replacingOccurrences(of: ">ab<", with: ">a\u{E000}b<"))
     }
 
+    // Sol r2 on the mapping design: the text must keep its length and
+    // grapheme structure, so lengths, indents and delimiters count as typed.
+    @Test func aFencedBodyKeepsAMarkJoinedToAPrecedingCharacter() {
+        let html = Markdown.render("  ```\n\t\u{0600}\u{E000}x\n  ```\n")
+        #expect(html.contains("\u{0600}\u{E000}x\n"), "got \(html.debugDescription)")
+    }
+
+    @Test func aMaxLengthReferenceLabelWithAMarkResolves() {
+        let r = String(repeating: "a", count: 998) + "\u{0600}\u{E001}"
+        let html = Markdown.render("[label][\(r)]\n\n[\(r)]: /page\n")
+        #expect(html.contains("<a href=\"/page\">label</a>"), "got \(html.prefix(200))")
+    }
+
+    @Test func highlightDelimitersAroundOneMarkBehaveAsAroundAnyCharacter() {
+        let o = Markdown.Options(obsidian: true)
+        let plain = Markdown.render("==x==\n", options: o)
+        let odd = Markdown.render("==\u{E004}==\n", options: o)
+        #expect(plain.contains("<mark>x</mark>"), "got \(plain)")
+        #expect(odd == plain.replacingOccurrences(of: "x", with: "\u{E004}"), "got \(odd)")
+    }
+
+    // A document that already uses every character of the first private-use
+    // block still renders its code spans, links and emphasis.
+    @Test func aDocumentFullOfPrivateUseCharactersRendersNormally() {
+        var all = ""
+        for v in 0xE000...0xE1FF { all.unicodeScalars.append(Unicode.Scalar(v)!) }
+        let src = "\(all)\n\n`code` [a](http://b.c/d) **x** \\* \(all)\n\n- item `y`\n\n| h |\n| - |\n| `z` |\n"
+        let html = Markdown.render(src)
+        #expect(html.contains("<code>code</code>") && html.contains("<a href=\"http://b.c/d\">a</a>") && html.contains("<strong>x</strong>"), "got \(html.prefix(400))")
+        #expect(html.contains("<code>y</code>") && html.contains("<code>z</code>"), "got \(html.suffix(300))")
+        #expect(html.contains(all), "every character comes out as typed")
+    }
+
+    // A folder name with the characters is in the page's links, not in the text.
+    @Test func aFolderNameWithTheCharactersDoesNotConfuseALink() throws {
+        let t = try makeTree(["n/doc.md", "n/d\u{E000}0\u{E001}ir/Target.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let vault = WikiVault(documentFolder: t.appendingPathComponent("n"))
+        let html = ob("`x` [[Target]] `y`\n", vault: vault)
+        #expect(html.contains(">Target</a>") && html.contains("<code>x</code>") && html.contains("<code>y</code>"), "got \(html)")
+    }
+
     // Whatever the mix, the render ends and keeps every private-use
     // character it was given.
     @Test func randomMixesNeverTrapAndKeepTheCharacters() {

@@ -60,8 +60,9 @@ public enum Markdown {
 
     /// One line of inline Markdown, for tests.
     static func inline(_ text: String) -> String {
-        let r = MarkdownRenderer(options: Options())
-        return MarkdownRenderer.unmapMarks(r.inline(r.mapSource(text)))
+        let (marks, exhausted) = MarkdownRenderer.Marks.choose(for: text, excluding: [])
+        let r = MarkdownRenderer(options: Options(), marks: marks, state: .init(scrub: exhausted))
+        return r.inline(r.external(text))
     }
 
     public static func escape(_ s: String) -> String {
@@ -118,8 +119,6 @@ final class MarkdownRenderer {
     /// Math was rendered (Options.math), and a `\$` was held as `dollarMark`.
     private var mathSeen = false
     private var escapedDollar = false
-    /// The source has no `dollarMark` of its own (else `\$` stays as typed).
-    private var dollarMarkFree = true
 
     /// Lines past the nesting cap: shown as their text, not parsed further.
     private func flat(_ lines: ArraySlice<String>, attr: String) -> String {
@@ -127,12 +126,57 @@ final class MarkdownRenderer {
         return text.isEmpty ? "" : "<p\(attr)>\(escape(text))</p>\n"
     }
 
-    init(options: Markdown.Options) { self.options = options }
+    /// The four private-use characters this render uses internally (see
+    /// `Marks`), none of them in the text it renders.
+    let marks: Marks
+    private let openMark: Character, closeMark: Character, dollarMark: Character
+    private let breakMark: String
+    /// Shared by a render and the embedded notes it renders.
+    private let state: MarkState?
+    private let pool: [ClosedRange<UInt32>]
+
+    /// `marks` and `state` are given to an embedded note's renderer (and by
+    /// `render` to each attempt); a renderer made without them is a top-level
+    /// one, whose `render` chooses its marks.
+    init(options: Markdown.Options, marks: Marks = .standard, state: MarkState? = nil, pool: [ClosedRange<UInt32>] = Marks.pool) {
+        self.options = options
+        self.marks = marks
+        self.state = state
+        self.pool = pool
+        openMark = Character(marks.open)
+        closeMark = Character(marks.close)
+        dollarMark = Character(marks.dollar)
+        breakMark = String(marks.brk)
+    }
 
     func escape(_ s: String) -> String { Markdown.escape(s) }
 
+    /// A top-level render: marks absent from `source` are chosen, and if an
+    /// embedded note or a vault path turns out to hold one of them, the
+    /// render starts again with those characters excluded (never for an
+    /// ordinary document). Past `maxAttempts`, or when no free characters
+    /// are left, the offending characters of that outside text become U+FFFD.
     func render(_ source: String) -> String {
-        let source = mapSource(source)
+        guard state == nil else { return renderOnce(source) }
+        var excluded = Set<UInt32>()
+        var attempt = 1
+        while true {
+            let (marks, exhausted) = Marks.choose(for: source, excluding: excluded, pool: pool)
+            let state = MarkState(scrub: exhausted || attempt >= Self.maxAttempts)
+            let out = MarkdownRenderer(options: options, marks: marks, state: state, pool: pool).renderOnce(source)
+            if state.collisions.isEmpty { return out }
+            excluded.formUnion(state.collisions)
+            attempt += 1
+        }
+    }
+
+    static let maxAttempts = 8
+
+    private func renderOnce(_ source: String) -> String {
+        // An embedded note's text, or (only when no free mark is left) the
+        // document's own: checked like any other text from outside.
+        let source = external(source)
+        if state?.collisions.isEmpty == false { return "" }
         var lines = source.replacingOccurrences(of: "\r\n", with: "\n").split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var out = ""
         var start = 0
@@ -140,7 +184,6 @@ final class MarkdownRenderer {
             out += frontmatter(lines[1..<end])
             start = end + 1
         }
-        if options.math, source.contains(Self.dollarMark) { dollarMarkFree = false }
         if options.obsidian, source.contains("%%") { stripComments(&lines, from: start) }
         collectDefinitions(&lines, from: start)
         renderBlocks(lines[start...], firstLine: start, into: &out)
@@ -148,60 +191,10 @@ final class MarkdownRenderer {
         // `\$` is a dollar only in a document with math: elsewhere it stays as
         // typed, as without Options.math.
         if escapedDollar {
-            out = mathSeen ? out.replacingOccurrences(of: "\\" + String(Self.dollarMark), with: "$")
-                           : out.replacingOccurrences(of: String(Self.dollarMark), with: "$")
+            out = mathSeen ? out.replacingOccurrences(of: "\\" + String(dollarMark), with: "$")
+                           : out.replacingOccurrences(of: String(dollarMark), with: "$")
         }
-        // An embedded note's HTML stays mapped: its parent unmaps it once.
-        return options.embedDepth == 0 ? Self.unmapMarks(out) : out
-    }
-
-    // MARK: The source's own private-use characters
-
-    /// The source had U+E000…U+E004 of its own (mapped by `mapSource`).
-    private var mapped = false
-    static let escapeMark: Character = "\u{E004}"
-    private static let escapeScalar: Unicode.Scalar = "\u{E004}"
-    private static func isMarkScalar(_ u: Unicode.Scalar) -> Bool { u.value >= 0xE000 && u.value <= 0xE004 }
-
-    /// The placeholders and marks below are U+E000…U+E003. The source's own
-    /// U+E000…U+E004 become U+E004 and a digit 0…4 before anything reads
-    /// it, so no placeholder or mark is ever read from what the user typed,
-    /// and both sides of any lookup (labels, footnotes) are mapped alike.
-    /// The finished HTML is unmapped once (`unmapMarks`).
-    func mapSource(_ s: String) -> String {
-        guard s.unicodeScalars.contains(where: Self.isMarkScalar) else { return s }
-        mapped = true
-        return Self.mapMarks(s)
-    }
-
-    static func mapMarks(_ s: String) -> String {
-        guard s.unicodeScalars.contains(where: isMarkScalar) else { return s }
-        var out = String.UnicodeScalarView()
-        for u in s.unicodeScalars {
-            guard isMarkScalar(u) else { out.append(u); continue }
-            out.append(escapeScalar)
-            out.append(Unicode.Scalar(UInt8(48 + u.value - 0xE000)))
-        }
-        return String(out)
-    }
-
-    /// The text as typed: U+E004 and a digit 0…4 back to U+E000…U+E004.
-    static func unmapMarks(_ s: String) -> String {
-        let u = s.unicodeScalars
-        guard u.contains(escapeScalar) else { return s }
-        var out = String.UnicodeScalarView()
-        var i = u.startIndex
-        while i < u.endIndex {
-            let ch = u[i]
-            i = u.index(after: i)
-            if ch == escapeScalar, i < u.endIndex, u[i].value >= 48, u[i].value <= 52 {
-                out.append(Unicode.Scalar(0xE000 + u[i].value - 48)!)
-                i = u.index(after: i)
-            } else {
-                out.append(ch)
-            }
-        }
-        return String(out)
+        return out
     }
 
     // MARK: Frontmatter
@@ -293,7 +286,7 @@ final class MarkdownRenderer {
         while k < footnoteOrder.count {
             let label = footnoteOrder[k]
             k += 1
-            let id = Markdown.slug(Self.unmapMarks(label))
+            let id = Markdown.slug(label)
             var inner = ""
             renderBlocks((footnoteDefs[label] ?? [])[...], firstLine: nil, into: &inner)
             let back = "<a href=\"#fnref-\(id)\" class=\"footnote-backref\">↩</a>"
@@ -310,7 +303,7 @@ final class MarkdownRenderer {
     func uniqueSlug(_ text: String) -> String {
         // The anchor of the heading's text, not its Markdown.
         probing = true
-        let plain = Self.unmapMarks(Self.stripTags(inline(text)))
+        let plain = Self.stripTags(inline(text))
         probing = false
         let base = Markdown.slug(Self.unescapeEntities(plain))
         let n = slugs[base, default: 0]
@@ -431,15 +424,12 @@ final class MarkdownRenderer {
                 var j = i + 1
                 while j < end, !(leadingSpaces(lines[j]) <= 3 && lines[j].trimmingCharacters(in: .whitespaces).hasPrefix(fence)
                                  && lines[j].trimmingCharacters(in: .whitespaces).allSatisfy({ $0 == fence.first })) {
-                    body.append(dropTyped(lines[j], min(indent, leadingSpaces(lines[j]))))
+                    body.append(dropIndentBlanks(lines[j], min(indent, leadingSpaces(lines[j]))))
                     j += 1
                 }
                 let lang = info.split(separator: " ").first.map { " class=\"language-\(escape(String($0)))\"" } ?? ""
                 let code = body.joined(separator: "\n")
-                // Highlighted as typed (a token must not split a mapped character), then mapped again.
-                let html = options.highlightCode
-                    ? Language(fenceInfo: Self.unmapMarks(info)).map { Self.mapMarks(CodeHTML.highlight(Self.unmapMarks(code), language: $0)) } ?? escape(code)
-                    : escape(code)
+                let html = options.highlightCode ? Language(fenceInfo: info).map { CodeHTML.highlight(code, language: $0) } ?? escape(code) : escape(code)
                 out += "<pre\(attr(i))><code\(lang)>\(html)\(body.isEmpty ? "" : "\n")</code></pre>\n"
                 i = min(end, j + 1)
                 continue
@@ -459,7 +449,7 @@ final class MarkdownRenderer {
                 var body: [String] = []
                 var j = i
                 while j < end, leadingSpaces(lines[j]) >= 4 || lines[j].trimmingCharacters(in: .whitespaces).isEmpty {
-                    body.append(dropTyped(lines[j], min(4, leadingSpaces(lines[j]))))
+                    body.append(dropIndentBlanks(lines[j], min(4, leadingSpaces(lines[j]))))
                     j += 1
                 }
                 while body.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { body.removeLast() }
@@ -836,20 +826,17 @@ final class MarkdownRenderer {
         if let cut = u.index(u.startIndex, offsetBy: k, limitedBy: u.endIndex), u[u.startIndex..<cut].allSatisfy({ $0 < 0x80 }) {
             return String(line[cut...])
         }
-        return dropTyped(line, k)
+        return String(line.dropFirst(k))
     }
 
-    /// `line` without its first `k` characters, a mapped one (`mapSource`)
-    /// counted as the one character typed (a tab is one character but up to
-    /// four columns, so `k` can reach past the indent).
-    func dropTyped(_ line: String, _ k: Int) -> String {
-        guard mapped else { return String(line.dropFirst(k)) }
+    /// `line` without up to `k` leading spaces and tabs (`k` counts columns,
+    /// a tab up to four, so it can reach past the indent: what follows the
+    /// indent is never dropped).
+    func dropIndentBlanks(_ line: String, _ k: Int) -> String {
         var i = line.startIndex, n = 0
-        while n < k, i < line.endIndex {
-            let c = line[i]
+        while n < k, i < line.endIndex, line[i] == " " || line[i] == "\t" {
             i = line.index(after: i)
             n += 1
-            if c == Self.escapeMark, i < line.endIndex { i = line.index(after: i) }
         }
         return String(line[i...])
     }
@@ -873,9 +860,9 @@ final class MarkdownRenderer {
         for (k, l) in lines.enumerated() {
             let last = k == lines.count - 1
             if !last, l.hasSuffix("  ") {
-                text += l.trimmingCharacters(in: .whitespaces) + Self.breakMark + "\n"
+                text += l.trimmingCharacters(in: .whitespaces) + breakMark + "\n"
             } else if !last, l.hasSuffix("\\"), !l.hasSuffix("\\\\") {
-                text += String(l.dropLast()) + Self.breakMark + "\n"
+                text += String(l.dropLast()) + breakMark + "\n"
             } else {
                 text += l.trimmingCharacters(in: .whitespaces) + (last ? "" : "\n")
             }
@@ -883,14 +870,83 @@ final class MarkdownRenderer {
         return inline(text)
     }
 
-    /// Stands for a hard line break until the placeholders are restored.
-    static let breakMark = "\u{E002}"
-    /// The dollar of a `\$` with Options.math, until the render knows
-    /// whether it has math (then `\$` is `$`; else it stays as typed).
-    static let dollarMark: Character = "\u{E003}"
-    private static let open: Character = "\u{E000}", close: Character = "\u{E001}"
-    private static let openScalar: Unicode.Scalar = "\u{E000}", closeScalar: Unicode.Scalar = "\u{E001}"
-    private static let breakScalar: Unicode.Scalar = "\u{E002}"
+    // MARK: Marks
+
+    /// The private-use characters the inline pass writes into the text:
+    /// a placeholder (`open` index `close`) for held HTML, `brk` for a hard
+    /// line break until the placeholders are restored, and `dollar` for the
+    /// dollar of a `\$` with Options.math, until the render knows whether it
+    /// has math (then `\$` is `$`; else it stays as typed).
+    ///
+    /// They are chosen per render from characters the text does not have,
+    /// so nothing the user typed is read as one and the text is never
+    /// changed (its length and grapheme clusters count as typed):
+    /// U+E000…U+E003 (so a document without those is rendered as ever),
+    /// else the next free ones of U+E000…U+F8FF, then planes 15 and 16.
+    struct Marks: Equatable {
+        let open: Unicode.Scalar, close: Unicode.Scalar, brk: Unicode.Scalar, dollar: Unicode.Scalar
+        static let standard = Marks(open: "\u{E000}", close: "\u{E001}", brk: "\u{E002}", dollar: "\u{E003}")
+        static let pool: [ClosedRange<UInt32>] = [0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD]
+
+        func contains(_ u: Unicode.Scalar) -> Bool { u == open || u == close || u == brk || u == dollar }
+
+        static func inPool(_ v: UInt32, _ pool: [ClosedRange<UInt32>]) -> Bool { pool.contains { $0.contains(v) } }
+
+        /// The first four characters of `pool` neither in `text` nor
+        /// `excluded`. `exhausted`: there were not four, so some come from
+        /// `excluded` (and outside text holding them is scrubbed) or, past
+        /// that, from `text` itself (scrubbed as well).
+        static func choose(for text: String, excluding excluded: Set<UInt32>, pool: [ClosedRange<UInt32>] = Marks.pool) -> (marks: Marks, exhausted: Bool) {
+            // Fast path: no character of the pool, nothing excluded.
+            if excluded.isEmpty, pool == Marks.pool, !text.unicodeScalars.contains(where: { $0.value >= 0xE000 && ($0.value <= 0xF8FF || $0.value >= 0xF0000) }) {
+                return (.standard, false)
+            }
+            var used = Set<UInt32>()
+            for u in text.unicodeScalars where inPool(u.value, pool) { used.insert(u.value) }
+            var picked: [UInt32] = []
+            func pick(_ ok: (UInt32) -> Bool) {
+                for r in pool {
+                    for v in r where ok(v) && !picked.contains(v) {
+                        picked.append(v)
+                        if picked.count == 4 { return }
+                    }
+                }
+            }
+            pick { !used.contains($0) && !excluded.contains($0) }
+            let exhausted = picked.count < 4
+            if exhausted { pick { !used.contains($0) } }
+            if picked.count < 4 { pick { _ in true } }
+            precondition(picked.count == 4, "a pool of at least four characters")
+            let u = picked.map { Unicode.Scalar($0)! }
+            return (Marks(open: u[0], close: u[1], brk: u[2], dollar: u[3]), exhausted)
+        }
+    }
+
+    /// What a render and its embedded notes share: the characters of
+    /// outside text that collided with the marks (the render starts again
+    /// without them), or, with `scrub`, no restart: such characters become
+    /// U+FFFD instead.
+    final class MarkState {
+        let scrub: Bool
+        var collisions = Set<UInt32>()
+        init(scrub: Bool) { self.scrub = scrub }
+    }
+
+    /// Text that did not come from this render's source (an embedded note,
+    /// a vault path or file name) on its way into held HTML or the output:
+    /// if it has a mark, the render is redone (see `render`), or, as a last
+    /// resort, the mark becomes U+FFFD. Otherwise it is returned unchanged.
+    func external(_ s: String) -> String {
+        guard s.unicodeScalars.contains(where: marks.contains) else { return s }
+        guard let state, !state.scrub else {
+            var out = String.UnicodeScalarView()
+            for u in s.unicodeScalars { out.append(marks.contains(u) ? "\u{FFFD}" : u) }
+            return String(out)
+        }
+        // Every private-use character of it, so one restart is enough.
+        for u in s.unicodeScalars where Marks.inPool(u.value, pool) { state.collisions.insert(u.value) }
+        return s
+    }
 
     /// Inline Markdown → HTML. 1: code spans, autolinks, raw inline tags,
     /// bare URLs and escapes are lifted out into placeholders, so nothing
@@ -909,21 +965,23 @@ final class MarkdownRenderer {
 
     private func hold(_ html: String, _ held: inout [String]) -> [Character] {
         held.append(html)
-        return [Self.open] + Array(String(held.count - 1)) + [Self.close]
+        return [openMark] + Array(String(held.count - 1)) + [closeMark]
     }
 
     /// Puts the held HTML back (break marks as <br>). Only a well-formed
-    /// placeholder of a hold before `below` is read, so the recursion ends.
+    /// placeholder of a hold before `below` is read, so the recursion ends
+    /// whatever the text (the marks are not in it, but this does not rely on that).
     private func restore(_ s: String, _ held: [String], below: Int) -> String {
         let u = s.unicodeScalars
-        guard u.contains(where: { $0 == Self.openScalar || $0 == Self.breakScalar }) else { return s }
+        let open = marks.open, close = marks.close, brk = marks.brk
+        guard u.contains(where: { $0 == open || $0 == brk }) else { return s }
         var out = String.UnicodeScalarView()
         var i = u.startIndex
         while i < u.endIndex {
             let ch = u[i]
             i = u.index(after: i)
-            if ch == Self.breakScalar { out.append(contentsOf: "<br>".unicodeScalars); continue }
-            guard ch == Self.openScalar else { out.append(ch); continue }
+            if ch == brk { out.append(contentsOf: "<br>".unicodeScalars); continue }
+            guard ch == open else { out.append(ch); continue }
             var j = i
             var k = 0, digits = 0
             while j < u.endIndex, digits < 10, u[j].value >= 48, u[j].value <= 57 {
@@ -931,7 +989,7 @@ final class MarkdownRenderer {
                 digits += 1
                 j = u.index(after: j)
             }
-            guard digits > 0, j < u.endIndex, u[j] == Self.closeScalar, k < below else { out.append(ch); continue }
+            guard digits > 0, j < u.endIndex, u[j] == close, k < below else { out.append(ch); continue }
             i = u.index(after: j)
             out.append(contentsOf: restore(held[k], held, below: k).unicodeScalars)
         }
@@ -956,8 +1014,8 @@ final class MarkdownRenderer {
                 if c == "\\", i + 1 < n, chars[i + 1] == "$" {
                     // Kept as two characters, the dollar marked: emphasis
                     // around it reads as it would without Options.math.
-                    s += ["\\", dollarMarkFree ? Self.dollarMark : "$"]
-                    escapedDollar = escapedDollar || dollarMarkFree
+                    s += ["\\", dollarMark]
+                    escapedDollar = true
                     i += 2
                     continue
                 }
@@ -1038,8 +1096,7 @@ final class MarkdownRenderer {
                 }
             }
             if c == "h", i + 8 < n, chars[i + 1] == "t", chars[i + 2] == "t", chars[i + 3] == "p",
-               i == 0 || !(chars[i - 1].isLetter || chars[i - 1].isNumber || "\"'=/>([".contains(chars[i - 1]))
-                   || (i >= 2 && chars[i - 2] == Self.escapeMark),
+               i == 0 || !(chars[i - 1].isLetter || chars[i - 1].isNumber || "\"'=/>([".contains(chars[i - 1])),
                let end = bareURLEnd(chars, from: i) {
                 let u = String(chars[i..<end])
                 s += hold("<a href=\"\(escape(u))\">\(escape(u))</a>", &held)
@@ -1058,7 +1115,7 @@ final class MarkdownRenderer {
         let skip = head.hasPrefix("https://") ? 8 : head.hasPrefix("http://") ? 7 : 0
         guard skip > 0 else { return nil }
         var j = i + skip
-        while j < c.count, !c[j].isWhitespace, c[j] != "<", c[j] != Self.open { j += 1 }
+        while j < c.count, !c[j].isWhitespace, c[j] != "<", c[j] != openMark { j += 1 }
         // Not trailing punctuation, nor a closing paren without its opener.
         // Counted once, then kept up to date as the end moves back (a URL
         // followed by thousands of `)` was quadratic).
@@ -1088,14 +1145,6 @@ final class MarkdownRenderer {
         let pairs = Self.bracketPairs(s)
         let nextClose = Self.nextIndex(of: "]", in: s)
         var budget = 4 * n + 65_536
-        // Lengths as typed: a mapped character (`mapSource`) is two here.
-        var mappedBefore: [Int] = []
-        if mapped {
-            mappedBefore.reserveCapacity(n + 1)
-            mappedBefore.append(0)
-            for c in s { mappedBefore.append(mappedBefore[mappedBefore.count - 1] + (c == Self.escapeMark ? 1 : 0)) }
-        }
-        func typedLength(_ a: Int, _ b: Int) -> Int { mappedBefore.isEmpty ? b - a : b - a - (mappedBefore[b] - mappedBefore[a]) }
         while i < n {
             let c = s[i]
             let isImage = c == "!" && i + 1 < n && s[i + 1] == "["
@@ -1104,7 +1153,7 @@ final class MarkdownRenderer {
             // An Obsidian [[wikilink]] or ![[embed]]: `[[` whose inner
             // brackets close right before the outer ones, nothing nested.
             if options.obsidian, open + 1 < n, s[open + 1] == "[", let inner = pairs[open + 1], inner + 1 < n, s[inner + 1] == "]",
-               pairs[open] == inner + 1, typedLength(open + 2, inner) <= 999, inner > open + 2, !s[(open + 2)..<inner].contains("\n") {
+               pairs[open] == inner + 1, inner - open - 2 <= 999, inner > open + 2, !s[(open + 2)..<inner].contains("\n") {
                 let body = String(s[(open + 2)..<inner])
                 if let html = wikiLink(body, embed: isImage, &held) {
                     out += hold(html, &held)
@@ -1128,7 +1177,7 @@ final class MarkdownRenderer {
             guard let close = pairs[open] else { out.append(c); i += 1; continue }
             // A reference label is at most 999 characters (CommonMark), so a
             // long bracketed span is never copied just to be looked up.
-            let labelFits = typedLength(open + 1, close) <= 999
+            let labelFits = close - open - 1 <= 999
             func labelText() -> String { String(s[(open + 1)..<close]) }
             var target: (url: String, title: String?)?
             var end = close + 1
@@ -1137,7 +1186,7 @@ final class MarkdownRenderer {
                 target = (d.url, d.title)
                 end = d.end
             } else if close + 1 < n, s[close + 1] == "[", close + 2 < n, let rclose = nextClose[close + 2] {
-                if typedLength(close + 2, rclose) <= 999, rclose == close + 2 ? labelFits : true {
+                if rclose - close - 2 <= 999, rclose == close + 2 ? labelFits : true {
                     let ref = String(s[(close + 2)..<rclose])
                     if let r = refs[Markdown.normalizeLabel(ref.isEmpty ? labelText() : ref)] { target = r; end = rclose + 1 }
                 }
@@ -1172,19 +1221,18 @@ final class MarkdownRenderer {
     /// `embed`, `![[image.png]]`, `![[image.png|300]]` (width) and
     /// `![[note]]` / `![[note#Heading]]` quoted in place, one level deep.
     private func wikiLink(_ body: String, embed: Bool, _ held: inout [String]) -> String? {
-        guard !body.contains("\n"), !body.contains(Self.open) || !embed else { return nil }
+        guard !body.contains("\n"), !body.contains(openMark) || !embed else { return nil }
         let bar = body.firstIndex(of: "|")
         let target = bar.map { String(body[..<$0]) } ?? body
         let alias = bar.map { String(body[body.index(after: $0)...]).trimmingCharacters(in: .whitespaces) }
         let (name, fragment) = WikiVault.split(target)
-        // The vault is asked with the text as typed; the HTML keeps it mapped.
-        let typedName = Self.unmapMarks(name), typedFragment = fragment.map(Self.unmapMarks)
         let vault = options.vault
-        let file = name.isEmpty ? nil : (embed ? (vault?.resolveImage(typedName) ?? vault?.resolve(typedName)) : vault?.resolve(typedName))
+        let file = name.isEmpty ? nil : (embed ? (vault?.resolveImage(name) ?? vault?.resolve(name)) : vault?.resolve(name))
         let exporting = options.exportLinks
         func href(_ file: URL, heading: String? = nil) -> String? {
-            guard exporting else { return WikiVault.href(file, heading: heading) }
-            return vault.map { WikiVault.relativeHref(file, from: $0.documentFolder) }
+            // A folder or file name is outside text: it may hold a mark.
+            guard exporting else { return WikiVault.href(file, heading: heading).map(external) }
+            return vault.map { external(WikiVault.relativeHref(file, from: $0.documentFolder)) }
         }
         if embed {
             guard let vault, let file else { return nil }
@@ -1196,26 +1244,28 @@ final class MarkdownRenderer {
                     size = " width=\"\(m.1)\""
                     if let h = m.2 { size += " height=\"\(h)\"" }
                 }
-                let alt = alias.flatMap { $0.wholeMatch(of: #/\d{1,5}(x\d{1,5})?/#) == nil ? $0 : nil } ?? Self.mapMarks(file.lastPathComponent)
+                let alt = alias.flatMap { $0.wholeMatch(of: #/\d{1,5}(x\d{1,5})?/#) == nil ? $0 : nil } ?? external(file.lastPathComponent)
                 return "<img class=\"embed\" src=\"\(escape(src))\" alt=\"\(escape(alt))\"\(size)>"
             }
             guard ext == "md" || ext == "markdown" else { return nil }
-            let link = href(file, heading: typedFragment).map { " href=\"\(escape($0))\"" } ?? ""
+            let link = href(file, heading: fragment).map { " href=\"\(escape($0))\"" } ?? ""
             let label = escape(name + (fragment.flatMap { $0.hasPrefix("^") ? nil : " › " + $0 } ?? ""))
             // Inside an embedded note, or too big: a link, not a second copy.
-            guard options.embedDepth == 0, let text = vault.embedText(file, fragment: typedFragment) else {
+            guard options.embedDepth == 0, let text = vault.embedText(file, fragment: fragment) else {
                 return "<a class=\"wikilink\"\(link)>\(label)</a>"
             }
             var sub = options
             sub.embedDepth += 1
-            // Mapped HTML (embedDepth > 0): no placeholder or mark of the note's own.
-            let body = MarkdownRenderer(options: sub).render(text)
+            // With this render's marks and state: a note holding one of the
+            // marks restarts the render (`external`); one that does not comes
+            // back with no mark in its HTML, so nothing here misreads it.
+            let body = MarkdownRenderer(options: sub, marks: marks, state: state ?? MarkState(scrub: true), pool: pool).render(text)
             return "<blockquote class=\"embed\"><p class=\"embed-title\"><a class=\"wikilink\"\(link)>\(label)</a></p>\n\(body)</blockquote>"
         }
         let shown = alias.flatMap { $0.isEmpty ? nil : $0 } ?? (fragment.map { name.isEmpty ? $0 : name + " › " + $0 } ?? name)
         guard !shown.isEmpty else { return nil }
         let text = emphasis(Array(shown))
-        if let file, let href = href(file, heading: typedFragment) {
+        if let file, let href = href(file, heading: fragment) {
             return "<a class=\"wikilink\" href=\"\(escape(href))\">\(text)</a>"
         }
         // Exported: no link to nowhere, just the words.
@@ -1388,7 +1438,7 @@ final class MarkdownRenderer {
     private func footnoteRef(_ label: String) -> String? {
         let key = Markdown.normalizeLabel(label)
         guard footnoteDefs[key] != nil else { return nil }
-        let id = Markdown.slug(Self.unmapMarks(key))
+        let id = Markdown.slug(key)
         if probing { return "" }
         let number: Int
         if let k = footnoteNumber[key] { number = k } else {
@@ -1416,8 +1466,8 @@ final class MarkdownRenderer {
         var text = ""
         func isSpace(_ c: Character?) -> Bool { c == nil || c!.isWhitespace }
         func isPunct(_ c: Character?) -> Bool {
-            guard let c, c != Self.open, c != Self.close else { return false }
-            return c.isPunctuation || c.isSymbol || c == Self.dollarMark
+            guard let c, c != openMark, c != closeMark else { return false }
+            return c.isPunctuation || c.isSymbol || c == dollarMark
         }
         var i = 0
         let n = s.count
