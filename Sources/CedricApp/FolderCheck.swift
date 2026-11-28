@@ -712,7 +712,70 @@ extension DevChecks {
         ]
         steps += steps9
         steps += folderSwitchSteps(app)
+        steps += openFolderSelectSteps(app)
         run(steps)
+    }
+
+
+    /// 0.6.1: File › Open Folder (`openFolder(_:)` with `reveal == nil`,
+    /// the path after the panel) should select the front tab's file when
+    /// that file is inside the opened folder. `folderSidebarFollow` only
+    /// runs when a tab becomes key, which does not fire when the same tab
+    /// stays in front. File › Open Enclosing Folder already selects, via
+    /// `reveal:`. These steps call `openFolder` without `reveal:` on
+    /// purpose — the product fix belongs after any folder open or listing,
+    /// not at the Open Folder call site.
+    static func openFolderSelectSteps(_ app: AppDelegate) -> [Step] {
+        let a = dir.appendingPathComponent("select/A", isDirectory: true)
+        let b = dir.appendingPathComponent("select/B", isDirectory: true)
+        let readme = write("select/A/readme.md", "# readme\n")
+        _ = write("select/A/other.md", "other\n")
+        _ = write("select/B/outside.md", "outside\n")
+        var sidebar: FolderSidebar? { FolderSidebar.shared }
+        func root() -> String { sidebar?.rootURL.path ?? "nil" }
+        func selected() -> String { sidebar?.selectedNode?.url.lastPathComponent ?? "nil" }
+        return [
+            sync {
+                guard app.open(readme) != nil else { expect(false, "opened readme.md"); return }
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "readme.md's tab is in front before Open Folder")
+            },
+            // File › Open Folder's path after the panel: no reveal:.
+            sync { app.openFolder(a) },
+            until("Open Folder A: listed with the front tab's file selected", timeout: 4) {
+                root() == a.path && sidebar?.root.isLoaded == true && sidebar?.isShown == true && selected() == "readme.md"
+            },
+            sync {
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "Open Folder leaves the same tab in front")
+            },
+            snapshot("061-open-folder-select-a.png"),
+            sync { app.openFolder(b) },
+            until("Open Folder B: listed", timeout: 4) {
+                root() == b.path && sidebar?.root.isLoaded == true
+            },
+            sync {
+                expect(selected() == "nil",
+                       "Open Folder of a folder that does not hold the front tab's file selects nothing",
+                       "selected: \(selected())")
+                expect(app.currentTab?.doc.fileURL?.standardizedFileURL == readme.standardizedFileURL,
+                       "opening B leaves readme.md in front")
+            },
+            sync { app.openFolder(a) },
+            until("Open Folder A again: the front tab's file is selected", timeout: 4) {
+                root() == a.path && sidebar?.root.isLoaded == true && selected() == "readme.md"
+            },
+            // Open Enclosing Folder still selects via reveal:.
+            sync { app.openFolder(b) },
+            until("B listed before Open Enclosing Folder", timeout: 4) {
+                root() == b.path && sidebar?.root.isLoaded == true
+            },
+            sync { app.openEnclosingFolderMenu(nil) },
+            until("Open Enclosing Folder shows A with readme.md selected", timeout: 4) {
+                root() == a.path && selected() == "readme.md"
+            },
+            sync { app.closeFolder() },
+        ]
     }
 
     /// 0.6.1 bug 1: a file opened from outside the app (Finder / Open With
