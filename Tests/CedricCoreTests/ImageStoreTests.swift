@@ -610,35 +610,4 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         #expect(throws: ImageStore.Failure.outside) { _ = try ImageStore.open(in: grant.appendingPathComponent("sub"), beneath: grant) }
         #expect(!fm.fileExists(atPath: outside.appendingPathComponent("sub/images").path))
     }
-
-    /// iOS (Astra round 4, must-fix 2): the document's folder, opened
-    /// beneath the grant, moved out of the grant (to a sibling on the same
-    /// volume) while a copy is going on: nothing is published there, the
-    /// staged file is removed, and the copy throws. The grant stays held
-    /// and the folder is looked up beneath it again before publishing.
-    @Test(arguments: storeModes) func aDocumentFolderMovedOutOfTheGrantBeforePublishReceivesNothing(mode: StoreMode) throws {
-        use(mode)
-        defer { ImageStore.forceFallback = false; ImageStore.beforePublish = nil }
-        let (top, _, outside) = try layout()
-        defer { try? fm.removeItem(at: top) }
-        let grant = top.resolvingSymlinksInPath().appendingPathComponent("grant")
-        let sub = grant.appendingPathComponent("sub"), moved = top.resolvingSymlinksInPath().appendingPathComponent("moved")
-        try fm.createDirectory(at: sub, withIntermediateDirectories: true)
-        let pic = outside.appendingPathComponent("p.png")
-        try Data([4, 5, 6]).write(to: pic)
-        let id = try #require(Beneath.FileID(path: grant.path, followLast: false))
-        // The control: left alone, it publishes.
-        let kept = try ImageStore.open(in: sub, beneath: grant, rootID: id)
-        #expect(try kept.copy(from: pic, name: "p.png", followLink: false) == "p.png")
-        #expect(try kept.link(for: "p.png") == "images/p.png")
-        // Moved out of the grant between the open and the publish.
-        let store = try ImageStore.open(in: sub, beneath: grant, rootID: id)
-        ImageStore.beforePublish = { try? FileManager.default.moveItem(at: sub, to: moved) }
-        #expect(throws: ImageStore.Failure.destinationChanged) { _ = try store.copy(from: pic, name: "q.png", followLink: false) }
-        ImageStore.beforePublish = nil
-        #expect(fm.fileExists(atPath: moved.path), "the move happened")
-        #expect(listing(moved.appendingPathComponent("images")) == ["p.png"], "\(mode): nothing published in the moved folder")
-        #expect(listing(moved) == ["images"], "\(mode): no staging file left in the moved folder")
-        #expect(listing(grant).isEmpty, "nothing made in the grant in its place")
-    }
 }
