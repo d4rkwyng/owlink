@@ -86,5 +86,7 @@ final class EncodingNoticeTests: XCTestCase {
         XCTAssertEqual(menu.title, EditorViewController.reopenWithEncodingTitle)
         let on = menu.children.compactMap { $0 as? UIAction }.filter { $0.state == .on }.map(\.title)
         XCTAssertEqual(on, [e.document.encoding.displayName])
+        // The ••• menu has one item for it (no repeated encoding titles there).
+        XCTAssertEqual(e.reopenWithEncodingAction().title, EditorViewController.reopenWithEncodingTitle)
     }
 }

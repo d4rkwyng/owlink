@@ -876,7 +876,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         if WindowSupport.multipleScenes { fileGroup.append(Self.newWindowAction()) }
         let more = UIMenu(title: String(localized: "More"), image: UIImage(systemName: "ellipsis.circle"), children: [
             UIMenu(options: .displayInline, children: preview == nil ? [] : [viewMenu]),
-            UIMenu(options: .displayInline, children: [goTo, quickly, noteLinks, statistics]),
+            UIMenu(options: .displayInline, children: [goTo, quickly, statistics, noteLinks]),
             UIMenu(options: .displayInline, children: tools),
             UIMenu(options: .displayInline, children: [writingModeMenu(), languageMenu(), indentationMenu(), bookmarksMenu(), foldingMenu(), formatMenu()]),
             UIMenu(options: .displayInline, children: fileGroup),
@@ -1902,7 +1902,7 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
             for a in enc + ends where a.state != .on { a.attributes = .disabled }
         }
         return UIMenu(title: String(localized: "Encoding and Line Endings"), image: UIImage(systemName: "doc.text"), children: [
-            reopenWithEncodingMenu(),
+            reopenWithEncodingAction(),
             UIMenu(title: String(localized: "Save As Encoding"), options: .displayInline, children: enc),
             UIMenu(title: String(localized: "Line Endings"), options: .displayInline, children: ends),
         ])

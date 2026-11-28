@@ -131,6 +131,31 @@ extension EditorViewController {
         return menu
     }
 
+    /// More › Encoding and Line Endings › Reopen with Encoding…: one item
+    /// that asks for the encoding (the encodings listed again in the same
+    /// menu would repeat Save As Encoding's titles).
+    func reopenWithEncodingAction() -> UIAction {
+        let a = UIAction(title: Self.reopenWithEncodingTitle, image: UIImage(systemName: "arrow.triangle.2.circlepath")) { [weak self] _ in
+            self?.chooseReopenEncoding()
+        }
+        a.accessibilityIdentifier = "editor.menu.reopenEncoding"
+        if !editGate.isEditable { a.attributes = .disabled }
+        return a
+    }
+
+    func chooseReopenEncoding() {
+        let sheet = UIAlertController(title: String(localized: "Reopen with Encoding"),
+                                      message: String(localized: "Reads the file again as the encoding you pick."), preferredStyle: .actionSheet)
+        for e in TextEncoding.allCases {
+            let title = e == document.encoding ? "✓ " + e.displayName : e.displayName
+            sheet.addAction(UIAlertAction(title: title, style: .default) { [weak self] _ in self?.confirmReopen(with: e) })
+        }
+        sheet.addAction(UIAlertAction(title: String(localized: "Cancel"), style: .cancel))
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+        present(sheet, animated: true)
+    }
+
     /// Unsaved changes are replaced by the file read again: asked first
     /// (Undo brings them back either way).
     func confirmReopen(with e: TextEncoding) {
