@@ -68,6 +68,58 @@ import Testing
         #expect(html.contains("<code>x</code>") && html.contains("<code>y</code>"), "got \(html)")
     }
 
+    // Sol r1 on the first fix: the characters are part of the text, so
+    // anything that reads the text (reference labels, titles, URLs, vault
+    // names) must see them as typed.
+    @Test func definitionTitlesAndDestinationsKeepTheCharacters() {
+        let html = Markdown.render("`x` [label][r]\n\n[r]: /page \"a\u{E000}0\u{E001}b\u{E002}c\"\n")
+        #expect(html.contains("title=\"a\u{E000}0\u{E001}b\u{E002}c\""), "got \(html)")
+        #expect(html.contains("<code>x</code>"), "got \(html)")
+    }
+
+    @Test func referenceAndFootnoteLabelsMatchWithTheCharacters() {
+        let fn = Markdown.render("See[^n\u{E001}].\n\n[^n\u{E001}]: body\n")
+        #expect(fn.contains("footnote") && fn.contains("body"), "got \(fn)")
+        let ref = Markdown.render("[label][r\u{E001}]\n\n[r\u{E001}]: /page\n")
+        #expect(ref.contains("<a href=\"/page\">label</a>"), "got \(ref)")
+    }
+
+    @Test func aBareURLIsOneAnchorWithTheCharacters() {
+        let html = Markdown.render("https://example.com/a\u{E001}b\n")
+        #expect(html.components(separatedBy: "https://example.com/a\u{E001}b").count == 3, "got \(html)")
+    }
+
+    @Test func vaultNamesAndFragmentsAreLookedUpAsTyped() throws {
+        let t = try makeTree(["n/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let n = t.appendingPathComponent("n")
+        try "intro\n\n## Part\u{E002}\nsection text\n\n## Other\nelse\n".write(to: n.appendingPathComponent("Child.md"), atomically: true, encoding: .utf8)
+        try "x".write(to: n.appendingPathComponent("Odd\u{E002}.md"), atomically: true, encoding: .utf8)
+        let vault = WikiVault(documentFolder: n)
+        let embed = ob("![[Child#Part\u{E002}]]\n", vault: vault)
+        #expect(embed.contains("section text") && !embed.contains("else"), "got \(embed)")
+        let link = ob("[[Odd\u{E002}|read]]\n", vault: vault)
+        #expect(link.contains("href=") && link.contains(">read<"), "got \(link)")
+    }
+
+    @Test func theParentsDollarPassLeavesAnEmbeddedNotesMarksAlone() throws {
+        let t = try makeTree(["n/doc.md"])
+        defer { try? FileManager.default.removeItem(at: t) }
+        let n = t.appendingPathComponent("n")
+        try "child \\\u{E003} end".write(to: n.appendingPathComponent("Child.md"), atomically: true, encoding: .utf8)
+        let vault = WikiVault(documentFolder: n)
+        var options = Markdown.Options.preview(vault: vault)
+        options.math = true
+        let html = Markdown.render("\\$1 and $y$\n\n![[Child]]\n", options: options)
+        #expect(html.contains("child \\\u{E003} end"), "got \(html)")
+        #expect(html.contains("$1") && html.contains("math-inline"), "got \(html)")
+    }
+
+    // A heading's anchor is made from the text as typed.
+    @Test func aHeadingWithTheCharactersKeepsItsAnchor() {
+        #expect(Markdown.render("# a\u{E000}b\n") == Markdown.render("# ab\n").replacingOccurrences(of: ">ab<", with: ">a\u{E000}b<"))
+    }
+
     // Whatever the mix, the render ends and keeps every private-use
     // character it was given.
     @Test func randomMixesNeverTrapAndKeepTheCharacters() {
