@@ -13,7 +13,8 @@ import CedricCore
 
 /// A file's security scope (a file picked in Files, or opened in place
 /// from another app), held while a viewer shows it. Stopped exactly once:
-/// by `stop()` (Done, a failure) or when the viewer goes away.
+/// by `stop()` (Done, a failure, its window going away) or when the
+/// viewer is released.
 final class ScopedFileAccess {
     let url: URL
     private(set) var isActive: Bool
@@ -37,7 +38,42 @@ final class ScopedFileAccess {
     deinit { stop() }
 }
 
+/// A read-only viewer: `tearDown()` ends its file access (idempotent),
+/// for a window that goes away without Done.
+@MainActor protocol DocumentViewer: UIViewController {
+    func tearDown()
+}
+
 enum DocumentViewers {
+    /// The viewers among `controllers` (each one, or the root of a
+    /// navigation controller showing one).
+    @MainActor static func viewers(in controllers: [UIViewController]) -> [DocumentViewer] {
+        controllers.flatMap { c -> [DocumentViewer] in
+            if let nav = c as? UINavigationController { return nav.viewControllers.compactMap { $0 as? DocumentViewer } }
+            return (c as? DocumentViewer).map { [$0] } ?? []
+        }
+    }
+
+    /// Ends each viewer's file access (a second call does nothing).
+    @MainActor static func tearDown(_ viewers: [DocumentViewer]) {
+        for v in viewers { v.tearDown() }
+    }
+
+    /// The window `root` belongs to is going away (`sceneDidDisconnect`):
+    /// every viewer it presents stops its file access now, rather than
+    /// whenever the retained controllers are released, and is dismissed.
+    @MainActor static func tearDown(presentedBy root: UIViewController?) {
+        var chain: [UIViewController] = []
+        var next = root?.presentedViewController
+        while let c = next {
+            chain.append(c)
+            next = c.presentedViewController
+        }
+        let viewers = viewers(in: chain)
+        tearDown(viewers)
+        if !viewers.isEmpty { root?.dismiss(animated: false) }
+    }
+
     /// The navigation controller a viewer is shown in: full screen like the
     /// editor, following the theme's light or dark.
     @MainActor static func navigationController(for viewer: UIViewController, traits: UITraitCollection) -> UINavigationController {
@@ -72,7 +108,7 @@ enum DocumentViewers {
 
 /// A PDF, read-only: PDFKit's view, fitted to the width, scrolling
 /// continuously down the pages, with the current page shown at the bottom.
-final class PDFViewerController: UIViewController, PDFViewDelegate {
+final class PDFViewerController: UIViewController, PDFViewDelegate, DocumentViewer {
     let fileURL: URL
     let document: PDFDocument
     private let access: ScopedFileAccess
@@ -163,6 +199,8 @@ final class PDFViewerController: UIViewController, PDFViewDelegate {
         dismiss(animated: true) { [access] in access.stop() }
     }
 
+    func tearDown() { access.stop() }
+
     /// A web or mail link in the PDF asks first (as the preview does);
     /// any other link (a file, an app's scheme) is dropped. Links within
     /// the document are PDFKit's own and still go to their page.
@@ -184,7 +222,7 @@ final class PDFViewerController: UIViewController, PDFViewDelegate {
 /// Look. QLPreviewController is a child here, not the presented screen, so
 /// its own share and markup buttons don't show: this screen's bar has
 /// only the file name and Done.
-final class QuickLookViewerController: UIViewController, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
+final class QuickLookViewerController: UIViewController, QLPreviewControllerDataSource, QLPreviewControllerDelegate, DocumentViewer {
     let fileURL: URL
     let format: OfficeFormat
     private let access: ScopedFileAccess
@@ -236,6 +274,8 @@ final class QuickLookViewerController: UIViewController, QLPreviewControllerData
     private func close() {
         dismiss(animated: true) { [access] in access.stop() }
     }
+
+    func tearDown() { access.stop() }
 
     func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
 

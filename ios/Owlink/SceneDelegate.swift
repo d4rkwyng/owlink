@@ -125,6 +125,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     /// The window went away: its documents are no longer open in it.
     func sceneDidDisconnect(_ scene: UIScene) {
+        // A viewer left up (no Done) stops its file access now.
+        DocumentViewers.tearDown(presentedBy: window?.rootViewController)
         OpenDocuments.registry.removeAll(window: scene.session.persistentIdentifier)
         // Its documents' detached previews go blank (or follow another
         // window that has the document open).
