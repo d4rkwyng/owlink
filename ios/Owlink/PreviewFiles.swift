@@ -132,9 +132,21 @@ final class PreviewFolderGrants {
     private var grants = PreviewGrantSet()
     /// The URL each started scope was started on (stopped on the same one).
     private var startedURLs: [String: URL] = [:]
-    /// Each kept folder as it was when granted (device and inode, by its
-    /// resolved path): what is opened beneath it must still be that folder.
-    private var ids: [String: Beneath.FileID] = [:]
+    /// Each kept folder as it was when granted, by the URL kept in `open`:
+    /// where it was then (symbolic links resolved) and its device and
+    /// inode. What is opened beneath it must still be that folder.
+    private var recorded: [URL: Grant] = [:]
+
+    /// A granted folder as the registry keeps it.
+    struct Grant: Sendable, Equatable {
+        /// As granted (standardized, not resolved): what documents' paths
+        /// are matched against.
+        var url: URL
+        /// Where it was when granted, symbolic links resolved: what is opened.
+        var resolved: URL
+        /// Its device and inode then (nil if it couldn't be looked at).
+        var id: Beneath.FileID?
+    }
     /// Where the bookmarks are kept (tests: a suite of their own).
     private let defaults: UserDefaults
 
@@ -148,6 +160,13 @@ final class PreviewFolderGrants {
         let path = folder.standardizedFileURL.path + "/"
         return open.filter { path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }
             .max { $0.path.count < $1.path.count }
+    }
+
+    /// The granted folder holding `folder` (the nearest) as it was granted.
+    /// Nothing is resolved again: a folder swapped in since doesn't
+    /// change what this says.
+    func grant(for folder: URL) -> Grant? {
+        root(for: folder).flatMap { recorded[$0] }
     }
 
     /// Keeps `url` as a grant. False when Owlink still can't read it (its
@@ -180,15 +199,10 @@ final class PreviewFolderGrants {
     private func adopt(_ url: URL) {
         let path = PreviewGrantSet.resolvedPath(url)
         guard !open.contains(where: { PreviewGrantSet.resolvedPath($0) == path }) else { return }
-        open.append(url.standardizedFileURL)
-        ids[path] = Beneath.FileID(path: path, followLast: false)
-    }
-
-    /// The granted folder `root` (compared resolved) as it was when it was
-    /// granted; nil when `root` isn't one of the kept grants.
-    func identity(of root: URL) -> Beneath.FileID? {
-        loadIfNeeded()
-        return ids[PreviewGrantSet.resolvedPath(root)]
+        let kept = url.standardizedFileURL
+        open.append(kept)
+        recorded[kept] = Grant(url: kept, resolved: URL(fileURLWithPath: path, isDirectory: true),
+                               id: Beneath.FileID(path: path, followLast: false))
     }
 
     /// Appends one bookmark, unless the same resolved path is already stored.
@@ -219,7 +233,7 @@ final class PreviewFolderGrants {
             url.stopAccessingSecurityScopedResource()
         }
         open.removeAll { PreviewGrantSet.resolvedPath($0) == path }
-        ids[path] = nil
+        recorded = recorded.filter { $0.value.resolved.path != path }
     }
 
     private var savedBookmarks: [Data] {

@@ -37,6 +37,18 @@ final class NoteLinksModel: ObservableObject {
     nonisolated static let maxBacklinks = 1_000
     /// Tag places kept, over all notes (each is a line's snippet).
     nonisolated static let maxTagRefs = 20_000
+    /// Tag tree entries (a tag, or a tag above a nested one, in one note).
+    nonisolated static let maxTagEntries = 50_000
+
+    /// The folder grant a root is read beneath, as it was granted
+    /// (`PreviewFolderGrants.Grant`): the root is opened by opening the
+    /// grant where it was then, without following a link, checking it is
+    /// still that folder, and opening the root's folders below it from
+    /// there (never by the root's path).
+    typealias Anchor = PreviewFolderGrants.Grant
+    /// The grant `root` is read beneath (nil: a root that isn't granted,
+    /// the document's own folder).
+    private(set) var anchor: Anchor?
 
     @Published private(set) var state: State = .idle
     @Published private(set) var backlinks: [BacklinkScan.Backlink] = []
@@ -56,9 +68,11 @@ final class NoteLinksModel: ObservableObject {
     private(set) var task: Task<Void, Never>?
     private var work: Task<Outcome, Never>?
 
-    init(document: URL, root: URL?, headings: [MarkdownOutline.Heading], findRoot: (@Sendable () -> URL?)? = nil) {
+    init(document: URL, root: URL?, headings: [MarkdownOutline.Heading], anchor: Anchor? = nil,
+         findRoot: (@Sendable () -> URL?)? = nil) {
         self.document = document.standardizedFileURL
         self.root = root?.standardizedFileURL
+        self.anchor = anchor
         self.headings = headings
         self.findRoot = root == nil ? findRoot : nil
     }
@@ -81,11 +95,12 @@ final class NoteLinksModel: ObservableObject {
         if root == nil, findRoot == nil { state = .noFolder; return }
         if let root, Self.relativePath(of: document, under: root) == nil { state = .notInFolder; return }
         state = .reading
-        let doc = document, known = root, find = findRoot, knownID = rootID
+        let doc = document, known = root, find = findRoot, knownID = rootID, anchor = anchor
         let work = Task.detached(priority: .userInitiated) { () -> Outcome in
             guard let root = known ?? find?() else { return .noFolder }
             guard let rel = Self.relativePath(of: doc, under: root) else { return .notInFolder(root) }
-            guard let result = Self.read(root: root, note: rel, rootID: knownID, cancelled: { Task.isCancelled }) else { return .cancelled }
+            guard let result = Self.read(root: root, note: rel, rootID: knownID, anchor: anchor,
+                                         cancelled: { Task.isCancelled }) else { return .cancelled }
             return .ready(root, result)
         }
         self.work = work
@@ -126,8 +141,9 @@ final class NoteLinksModel: ObservableObject {
         if state == .reading { state = .idle }
     }
 
-    func setRoot(_ url: URL?) {
+    func setRoot(_ url: URL?, anchor: Anchor? = nil) {
         root = url?.standardizedFileURL
+        self.anchor = anchor
         rootID = nil
         findRoot = nil
         load()
@@ -153,22 +169,23 @@ final class NoteLinksModel: ObservableObject {
     /// (`relativePath`) and, looked up from `root`'s descriptor right now,
     /// a regular file reached without leaving `root` (the last component
     /// not followed). Checked just before a note opens.
-    nonisolated static func openableNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil) -> URL? {
-        checkedNote(url, under: root, rootID: rootID)?.url
+    nonisolated static func openableNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil, anchor: Anchor? = nil) -> URL? {
+        checkedNote(url, under: root, rootID: rootID, anchor: anchor)?.url
     }
 
     /// A note `openableNote` allows, and the file it is (device and
     /// inode): what is opened later must still be that file
-    /// (`TextDocument.linkedNote`). The root itself is not followed if it
-    /// is a symbolic link, and must still be `rootID` when given.
+    /// (`TextDocument.linkedNote`). The root is opened as `openRoot` opens
+    /// it (beneath `anchor`, the grant, when given), and must still be
+    /// `rootID` when given.
     struct CheckedNote: Sendable {
         var url: URL
         var id: Beneath.FileID
     }
 
-    nonisolated static func checkedNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil) -> CheckedNote? {
+    nonisolated static func checkedNote(_ url: URL, under root: URL, rootID: Beneath.FileID? = nil, anchor: Anchor? = nil) -> CheckedNote? {
         guard let rel = relativePath(of: url, under: root) else { return nil }
-        let dir = openRoot(root, expected: rootID)
+        let dir = openRoot(root, expected: rootID, anchor: anchor)
         guard dir >= 0 else { return nil }
         defer { close(dir) }
         let parts = rel.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
@@ -219,11 +236,35 @@ final class NoteLinksModel: ObservableObject {
         var parsed = 0
     }
 
-    /// The root opened for reading: a folder, not a symbolic link, and
-    /// still `expected` when given (the folder as first read). -1 when not.
-    nonisolated static func openRoot(_ root: URL, expected: Beneath.FileID?) -> Int32 {
-        let dir = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard dir >= 0 else { return -1 }
+    /// The root opened for reading, -1 when it can't be. With `anchor`
+    /// (the grant the root is in): the grant opened where it was when
+    /// granted, not through a symbolic link, and still the folder granted
+    /// (its identity is required), then the root's folders below it
+    /// opened from that descriptor (`Beneath.open`, no link followed);
+    /// the root's own path is never looked up. Without: the root's path,
+    /// not a symbolic link. Either way still `expected` when given (the
+    /// folder as first read).
+    nonisolated static func openRoot(_ root: URL, expected: Beneath.FileID?, anchor: Anchor? = nil) -> Int32 {
+        let dir: Int32
+        if let anchor {
+            guard let id = anchor.id else { return -1 }
+            let base = anchor.url.standardizedFileURL.pathComponents, path = root.standardizedFileURL.pathComponents
+            guard path.count >= base.count, Array(path.prefix(base.count)) == base else { return -1 }
+            let grant = open(anchor.resolved.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard grant >= 0 else { return -1 }
+            guard Beneath.FileID(fd: grant) == id else { close(grant); return -1 }
+            let below = Array(path.dropFirst(base.count))
+            if below.isEmpty {
+                dir = grant
+            } else {
+                dir = Beneath.open(below, beneath: grant, flags: O_RDONLY | O_DIRECTORY)
+                close(grant)
+                guard dir >= 0 else { return -1 }
+            }
+        } else {
+            dir = open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard dir >= 0 else { return -1 }
+        }
         if let expected, Beneath.FileID(fd: dir) != expected { close(dir); return -1 }
         return dir
     }
@@ -235,10 +276,10 @@ final class NoteLinksModel: ObservableObject {
     /// first read; a root that is now a symbolic link or another folder is
     /// not read (an empty, partial result). `stats`, `readNote`: tests.
     nonisolated static func read(root: URL, note: String, listed given: [String]? = nil, rootID: Beneath.FileID? = nil,
-                                 cancelled: () -> Bool = { false }, stats: ScanStats? = nil,
+                                 anchor: Anchor? = nil, cancelled: () -> Bool = { false }, stats: ScanStats? = nil,
                                  readNote: (String, Int32, Int) -> BacklinkScan.NoteRead = { BacklinkScan.readBeneath($0, root: $1, maxBytes: $2) }) -> ReadResult? {
         // The root first: what is listed by path is read only through it.
-        let dir = openRoot(root, expected: rootID)
+        let dir = openRoot(root, expected: rootID, anchor: anchor)
         guard dir >= 0 else {
             return cancelled() ? nil : ReadResult(backlinks: [], tags: TagTree(files: [:]), partial: true, truncated: false, rootID: rootID)
         }
@@ -257,10 +298,10 @@ final class NoteLinksModel: ObservableObject {
         stats?.parsed = found.parsed
         stats?.retained = found.backlinks.count + found.tagsByNote.values.reduce(0) { $0 + $1.count }
         if found.cancelled || cancelled() { return nil }
-        let tags = TagTree(files: found.tagsByNote, cancelled: cancelled)
+        let tags = TagTree(files: found.tagsByNote, cancelled: cancelled, maxEntries: maxTagEntries)
         if cancelled() { return nil }
         return ReadResult(backlinks: found.backlinks, tags: tags, partial: found.skipped > 0,
-                          truncated: listed.truncated || found.truncated, rootID: id)
+                          truncated: listed.truncated || found.truncated || tags.truncated, rootID: id)
     }
 }
 
@@ -415,10 +456,12 @@ extension EditorViewController {
     func makeNoteLinksModel() -> NoteLinksModel {
         let doc = document.fileURL
         let folder = doc.deletingLastPathComponent()
-        let granted = PreviewFolderGrants.shared.root(for: folder)
+        // The grant as it was granted: the first read is beneath it too.
+        let grant = folderGrants.grant(for: folder)
+        let granted = grant?.url
         let headings = document.language.language == .markdown ? MarkdownOutline.headings(in: textView.text) : []
         // The folder probe and the vault walk run off the main thread, on the first read.
-        return NoteLinksModel(document: doc, root: nil, headings: headings, findRoot: {
+        return NoteLinksModel(document: doc, root: nil, headings: headings, anchor: grant, findRoot: {
             NoteLinksModel.root(for: doc, granted: granted,
                                 readable: granted == nil && PreviewFolderAccess.canRead(PreviewFolderAccess.facts(folder: folder, document: doc)))
         })
@@ -426,12 +469,16 @@ extension EditorViewController {
 
     /// The notes' root for this document, as the sheet finds it (one
     /// policy for both): see `NoteLinksModel`.
-    func noteLinksRoot() -> URL? {
+    func noteLinksRoot() -> URL? { noteLinksPlace()?.root }
+
+    /// The root, and the grant it is read beneath (nil: not granted).
+    func noteLinksPlace() -> (root: URL, anchor: NoteLinksModel.Anchor?)? {
         let doc = document.fileURL
         let folder = doc.deletingLastPathComponent()
-        let granted = PreviewFolderGrants.shared.root(for: folder)
-        return NoteLinksModel.root(for: doc, granted: granted,
-                                   readable: granted == nil && PreviewFolderAccess.canRead(PreviewFolderAccess.facts(folder: folder, document: doc)))
+        let grant = folderGrants.grant(for: folder)
+        let root = NoteLinksModel.root(for: doc, granted: grant?.url,
+                                       readable: grant == nil && PreviewFolderAccess.canRead(PreviewFolderAccess.facts(folder: folder, document: doc)))
+        return root.map { ($0, grant) }
     }
 
     func presentNoteLinks(_ pane: NoteLinksView.Pane) {
@@ -450,7 +497,7 @@ extension EditorViewController {
             host.value?.dismiss(animated: true) {
                 // Only a note inside the folder that was read, checked again now.
                 guard let self, let root = model?.root,
-                      let note = NoteLinksModel.checkedNote(url, under: root, rootID: model?.rootID) else {
+                      let note = NoteLinksModel.checkedNote(url, under: root, rootID: model?.rootID, anchor: model?.anchor) else {
                     self?.toast(String(localized: "That note isn’t in the folder Owlink can read."))
                     return
                 }
@@ -461,11 +508,11 @@ extension EditorViewController {
             let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
             picker.directoryURL = self.document.fileURL.deletingLastPathComponent()
             picker.delegate = self.imagePickerDelegate
-            self.imagePickerDelegate.picked = { urls in
-                guard let folder = urls.first, let model else { return }
-                PreviewFolderGrants.shared.add(folder)
-                let granted = PreviewFolderGrants.shared.root(for: model.document.deletingLastPathComponent())
-                model.setRoot(NoteLinksModel.root(for: model.document, granted: granted, readable: false))
+            self.imagePickerDelegate.picked = { [weak self] urls in
+                guard let self, let folder = urls.first, let model else { return }
+                self.folderGrants.add(folder)
+                let grant = self.folderGrants.grant(for: model.document.deletingLastPathComponent())
+                model.setRoot(NoteLinksModel.root(for: model.document, granted: grant?.url, readable: false), anchor: grant)
             }
             host.value?.present(picker, animated: true)
         })
@@ -495,13 +542,14 @@ extension EditorViewController {
     /// read), and checked from the root's descriptor (`openableNote`).
     func wikiTarget(_ link: WikiLinks.Link) -> URL? { wikiNote(link)?.url }
 
-    /// `wikiTarget`, with the file it was checked to be. A granted root
-    /// must still be the folder that was granted.
+    /// `wikiTarget`, with the file it was checked to be. A root inside a
+    /// grant (the grant itself, or a vault below it) is opened beneath the
+    /// grant as it was granted (`NoteLinksModel.openRoot`).
     func wikiNote(_ link: WikiLinks.Link) -> NoteLinksModel.CheckedNote? {
-        guard let root = noteLinksRoot() else { return nil }
-        let vault = WikiVault(documentFolder: document.fileURL.deletingLastPathComponent(), openedRoot: root)
+        guard let place = noteLinksPlace() else { return nil }
+        let vault = WikiVault(documentFolder: document.fileURL.deletingLastPathComponent(), openedRoot: place.root)
         guard let url = vault.resolve(link.target) else { return nil }
-        return NoteLinksModel.checkedNote(url, under: root, rootID: PreviewFolderGrants.shared.identity(of: root))
+        return NoteLinksModel.checkedNote(url, under: place.root, anchor: place.anchor)
     }
 
     /// The edit menu's "Open “Note”" when the caret is in a `[[link]]`

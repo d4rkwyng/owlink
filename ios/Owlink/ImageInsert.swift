@@ -39,24 +39,53 @@ extension EditorViewController {
     /// (nil: the app's home folder).
     nonisolated(unsafe) static var imageContainerForTests: URL?
 
-    /// Where the images go: the document's folder (symbolic links
-    /// resolved) and the root it is opened beneath, when that folder is
-    /// inside a granted folder or Owlink's own container, both resolved
-    /// (`ImageStore.open(in:beneath:)` then refuses a link out of the
-    /// root on the way). Nil when Owlink has no such access yet (ask).
-    var imageDestination: (folder: URL, root: URL)? {
-        let dir = document.fileURL.deletingLastPathComponent()
-        let container = Self.imageContainerForTests ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        return Self.imageDestination(for: dir, granted: PreviewFolderGrants.shared.root(for: dir), container: container)
+    /// Where images go: the document's folder, the root it is opened
+    /// beneath, and for a granted folder the identity it was granted with.
+    struct ImageDestination: Sendable {
+        var folder: URL
+        var root: URL
+        /// The granted root as it was granted (device and inode).
+        var rootID: Beneath.FileID?
+        /// `root` is a folder grant: `rootID` is required.
+        var granted: Bool
     }
 
-    nonisolated static func imageDestination(for dir: URL, granted: URL?, container: URL) -> (folder: URL, root: URL)? {
+    /// Where the images go. Under a folder grant: the root is the grant as
+    /// the registry recorded it (where it was then, and its identity),
+    /// never resolved again, and the document's folder (symbolic links
+    /// resolved) must be inside it. Else Owlink's own container, both
+    /// resolved. `ImageStore.open(in:beneath:rootID:)` then opens the root
+    /// without following a link, checks it is still the folder granted,
+    /// and refuses a link out of it on the way. Nil when Owlink has no
+    /// such access yet (ask).
+    var imageDestination: ImageDestination? {
+        let dir = document.fileURL.deletingLastPathComponent()
+        let container = Self.imageContainerForTests ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        return Self.imageDestination(for: dir, grant: folderGrants.grant(for: dir), container: container)
+    }
+
+    nonisolated static func imageDestination(for dir: URL, grant: PreviewFolderGrants.Grant?, container: URL) -> ImageDestination? {
         let folder = dir.resolvingSymlinksInPath().standardizedFileURL
-        for root in [granted, container].compactMap({ $0?.resolvingSymlinksInPath().standardizedFileURL }) {
+        func inside(_ root: URL) -> Bool {
             let base = root.pathComponents, path = folder.pathComponents
-            if path.count >= base.count, Array(path.prefix(base.count)) == base { return (folder, root) }
+            return path.count >= base.count && Array(path.prefix(base.count)) == base
         }
-        return nil
+        if let grant {
+            let root = grant.resolved.standardizedFileURL
+            if inside(root) { return ImageDestination(folder: folder, root: root, rootID: grant.id, granted: true) }
+        }
+        let root = container.resolvingSymlinksInPath().standardizedFileURL
+        return inside(root) ? ImageDestination(folder: folder, root: root, rootID: nil, granted: false) : nil
+    }
+
+    /// Tests: `granted` taken as a grant made just now.
+    nonisolated static func imageDestination(for dir: URL, granted: URL?, container: URL) -> ImageDestination? {
+        let grant = granted.map { g -> PreviewFolderGrants.Grant in
+            let resolved = g.resolvingSymlinksInPath().standardizedFileURL
+            return PreviewFolderGrants.Grant(url: g.standardizedFileURL, resolved: resolved,
+                                             id: Beneath.FileID(path: resolved.path, followLast: false))
+        }
+        return imageDestination(for: dir, grant: grant, container: container)
     }
 
     func pickImageFiles() {
@@ -169,9 +198,8 @@ extension EditorViewController {
         let doc = document
         let generation = self.generation
         let want = range ?? textView.selectedRange
-        // The granted folder as it was granted (none for Owlink's own container).
-        let rootID = PreviewFolderGrants.shared.identity(of: dest.root)
-        let copied = await Task.detached(priority: .userInitiated) { Self.copyImages(images, to: dest, rootID: rootID) }.value
+        // The destination carries the granted folder's identity (none for Owlink's own container).
+        let copied = await Task.detached(priority: .userInitiated) { Self.copyImages(images, to: dest) }.value
         withExtendedLifetime(staging) {}
         // Back on the main thread: still this document, not closing, still editable.
         guard document === doc, !closing, markdownEditable else { return nil }
@@ -208,14 +236,24 @@ extension EditorViewController {
         var error: String?
     }
 
-    /// The copies, off the main thread: "images" opened beneath `dest.root`
-    /// (itself not a symbolic link, and still `rootID` when given), each
-    /// source opened without following a link.
+    /// Tests: a destination given as two folders (`rootID` when known).
     nonisolated static func copyImages(_ images: [URL], to dest: (folder: URL, root: URL), rootID: Beneath.FileID? = nil) -> ImageCopies {
+        copyImages(images, to: ImageDestination(folder: dest.folder, root: dest.root, rootID: rootID, granted: rootID != nil))
+    }
+
+    /// The copies, off the main thread: "images" opened beneath `dest.root`
+    /// (itself not a symbolic link, and for a grant still the folder
+    /// granted: refused without its identity), each source opened without
+    /// following a link.
+    nonisolated static func copyImages(_ images: [URL], to dest: ImageDestination) -> ImageCopies {
         var out = ImageCopies()
+        guard !dest.granted || dest.rootID != nil else {
+            out.error = imageStoreMessage(.outside)
+            return out
+        }
         let store: ImageStore
         do {
-            store = try ImageStore.open(in: dest.folder, beneath: dest.root, rootID: rootID)
+            store = try ImageStore.open(in: dest.folder, beneath: dest.root, rootID: dest.rootID)
         } catch let failure as ImageStore.Failure {
             out.error = imageStoreMessage(failure)
             return out
@@ -275,7 +313,7 @@ extension EditorViewController {
             self.imagePickerDelegate.picked = { [weak self] urls in
                 guard let self else { return }
                 guard let folder = urls.first else { self.imagePickerDelegate.pendingInsert = nil; return }
-                PreviewFolderGrants.shared.add(folder)
+                self.folderGrants.add(folder)
                 Task { await self.resumePendingImageInsert() }
             }
             self.present(picker, animated: true)

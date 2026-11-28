@@ -138,8 +138,19 @@ final class ImageInsertTests: XCTestCase {
         ImageStore.afterOpen = { opened.signal(); _ = proceed.wait(timeout: .now() + 10) }
         defer { ImageStore.afterOpen = nil }
         let insert = Task { await e.insertImageFiles([source]) }
-        // The copy has started (its folder is open) before the close.
-        while opened.wait(timeout: .now()) == .timedOut { await Task.yield() }
+        // The copy has started (its folder is open) before the close; the
+        // test fails, rather than hangs, if it never gets there.
+        let deadline = Date().addingTimeInterval(10)
+        var reached = false
+        while Date() < deadline {
+            if opened.wait(timeout: .now()) == .success { reached = true; break }
+            await Task.yield()
+        }
+        guard reached else {
+            proceed.signal()
+            _ = await insert.value
+            return XCTFail("the copy never reached ImageStore.afterOpen")
+        }
         e.closeDocument()
         proceed.signal()
         let paths = await insert.value
@@ -165,6 +176,56 @@ final class ImageInsertTests: XCTestCase {
         XCTAssertEqual(copies.error, EditorViewController.imageStoreMessage(.outside))
         XCTAssertTrue(copies.names.isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: other.appendingPathComponent("sub/images").path))
+    }
+
+    /// Sol round 3, must-fix 2: the granted folder swapped for another (a
+    /// symbolic link to it, or a real folder renamed into its place) after
+    /// it was granted and before Insert Image works out where images go:
+    /// refused, nothing written in the folder swapped in.
+    func testGrantSwappedBeforeTheDestinationIsChosenIsRefused() async throws {
+        for byLink in [true, false] {
+            let (e, dir) = try editor()
+            EditorViewController.imageContainerForTests = try tempDir()
+            let suite = "cedric-tests-grants-\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let grants = PreviewFolderGrants(defaults: defaults)
+            XCTAssertTrue(grants.add(dir))
+            e.folderGrants = grants
+            let other = try tempDir()
+            try Data("# Other\n".utf8).write(to: other.appendingPathComponent("notes.md"))
+            let moved = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent + "-moved")
+            try FileManager.default.moveItem(at: dir, to: moved)
+            dirs.append(moved)
+            if byLink {
+                try FileManager.default.createSymbolicLink(at: dir, withDestinationURL: other)
+            } else {
+                try FileManager.default.moveItem(at: other, to: dir)
+            }
+            let paths = await e.insertImageFiles([try png(named: "a.png")])
+            XCTAssertNil(paths, "byLink \(byLink)")
+            XCTAssertEqual(e.textView.text, "# Notes\n\n")
+            let swappedIn = byLink ? other : dir
+            XCTAssertFalse(FileManager.default.fileExists(atPath: swappedIn.appendingPathComponent("images").path),
+                           "byLink \(byLink): written in the folder swapped in")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: moved.appendingPathComponent("images").path))
+            dismissAlerts(e)
+        }
+    }
+
+    /// The control: the grant left alone takes the image.
+    func testGrantedFolderTakesTheImage() async throws {
+        let (e, dir) = try editor()
+        EditorViewController.imageContainerForTests = try tempDir()
+        let suite = "cedric-tests-grants-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let grants = PreviewFolderGrants(defaults: defaults)
+        XCTAssertTrue(grants.add(dir))
+        e.folderGrants = grants
+        let paths = await e.insertImageFiles([try png(named: "a.png")])
+        XCTAssertEqual(paths, ["images/a.png"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent("images/a.png").path))
     }
 
     /// A picked file that is a symbolic link (to an image or anything else)
