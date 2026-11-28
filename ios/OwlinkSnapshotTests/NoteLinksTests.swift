@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import UIKit
 import CedricCore
 
@@ -92,4 +93,98 @@ final class NoteLinksTests: XCTestCase {
         code.setLanguage(.swift)
         XCTAssertFalse(code.noteLinksApply)
     }
+    /// A note file or a folder that is a symbolic link out of the folder:
+    /// not listed, not read, not opened, from the sheet or the editor.
+    func testOutsideSymlinksAreNotReadOrOpened() async throws {
+        let d = try vault()
+        let o = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: o.appendingPathComponent("dir"), withIntermediateDirectories: true)
+        dirs.append(o)
+        try Data("[[Beta]] secret #secret\n".utf8).write(to: o.appendingPathComponent("Evil.md"))
+        try Data("[[Beta]] deep #deep\n".utf8).write(to: o.appendingPathComponent("dir/Deep.md"))
+        try FileManager.default.createSymbolicLink(at: d.appendingPathComponent("Evil.md"), withDestinationURL: o.appendingPathComponent("Evil.md"))
+        try FileManager.default.createSymbolicLink(at: d.appendingPathComponent("out"), withDestinationURL: o.appendingPathComponent("dir"))
+        try Data("Go to [[Evil]] or [[out/Deep]].\n".utf8).write(to: d.appendingPathComponent("Links.md"))
+
+        XCTAssertNil(NoteLinksModel.relativePath(of: d.appendingPathComponent("Evil.md"), under: d))
+        XCTAssertNil(NoteLinksModel.relativePath(of: d.appendingPathComponent("out/Deep.md"), under: d))
+        XCTAssertNil(NoteLinksModel.openableNote(d.appendingPathComponent("Evil.md"), under: d))
+        XCTAssertNil(NoteLinksModel.openableNote(d.appendingPathComponent("out/Deep.md"), under: d))
+        XCTAssertNotNil(NoteLinksModel.openableNote(d.appendingPathComponent("Alpha.md"), under: d))
+
+        let model = NoteLinksModel(document: d.appendingPathComponent("Beta.md"), root: d, headings: [])
+        model.load()
+        await model.task?.value
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.backlinks.map(\.source), ["Alpha.md", "sub/Gamma.txt"])
+        let tags = Set(NoteLinksView.flatten(try XCTUnwrap(model.tags).roots).map(\.path))
+        XCTAssertFalse(tags.contains("secret") || tags.contains("deep"), "\(tags)")
+
+        // The editor's Open “Note” keeps to the same folder.
+        let e = try editor(d.appendingPathComponent("Links.md"))
+        for name in ["Evil]]", "out/Deep]]"] {
+            let at = (e.textView.text as NSString).range(of: name).location + 1
+            let link = try XCTUnwrap(e.wikiLink(at: at))
+            XCTAssertNil(e.wikiTarget(link), link.target)
+        }
+    }
+
+    /// A listed note replaced by a symbolic link before it is read (or
+    /// opened) is skipped: the read goes through the folder's descriptor.
+    func testListedNoteReplacedBySymlinkIsSkipped() throws {
+        let d = try vault()
+        let listed = NoteLinksModel.notes(under: d).paths
+        XCTAssertTrue(listed.contains("Alpha.md"))
+        let o = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".md")
+        try Data("[[Beta]] stolen #stolen\n".utf8).write(to: o)
+        defer { try? FileManager.default.removeItem(at: o) }
+        try FileManager.default.removeItem(at: d.appendingPathComponent("Alpha.md"))
+        try FileManager.default.createSymbolicLink(at: d.appendingPathComponent("Alpha.md"), withDestinationURL: o)
+        let result = try XCTUnwrap(NoteLinksModel.read(root: d, note: "Beta.md", listed: listed))
+        XCTAssertEqual(result.backlinks.map(\.source), ["sub/Gamma.txt"])
+        XCTAssertTrue(result.partial)
+        XCTAssertFalse(NoteLinksView.flatten(result.tags.roots).map(\.path).contains("stolen"))
+        XCTAssertNil(NoteLinksModel.openableNote(d.appendingPathComponent("Alpha.md"), under: d), "checked again before it opens")
+    }
+
+    /// The read stops when asked (the sheet went, the root changed), and
+    /// the editor's model finds its folder only when it is read.
+    func testReadIsCancellableAndStartsOnLoad() async throws {
+        let d = try vault()
+        XCTAssertNil(NoteLinksModel.read(root: d, note: "Beta.md", cancelled: { true }))
+        let e = try editor(d.appendingPathComponent("Beta.md"))
+        let model = e.makeNoteLinksModel()
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.root, "no folder probe before Backlinks or Tags is shown")
+        model.load()
+        model.cancel()
+        XCTAssertEqual(model.state, .idle)
+        model.load()
+        await model.task?.value
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.root?.resolvingSymlinksInPath(), d.resolvingSymlinksInPath())
+        XCTAssertEqual(model.backlinks.map(\.source), ["Alpha.md", "sub/Gamma.txt"])
+    }
+
+    /// The sheet's callbacks don't hold its hosting controller: once let
+    /// go (dismissed), the controller and its model go.
+    func testSheetIsReleasedWhenDismissed() throws {
+        let d = try vault()
+        let e = try editor(d.appendingPathComponent("Beta.md"))
+        weak var host: UIHostingController<NoteLinksView>?
+        weak var model: NoteLinksModel?
+        autoreleasepool {
+            let controller = e.makeNoteLinksController(.backlinks)
+            controller.loadViewIfNeeded()
+            host = controller
+            model = controller.rootView.model
+            XCTAssertNotNil(model)
+        }
+        for _ in 0..<20 where host != nil || model != nil {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertNil(host)
+        XCTAssertNil(model)
+    }
+
 }
