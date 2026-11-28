@@ -186,7 +186,7 @@ public final class FileTail: @unchecked Sendable {
         let want = String(cString: real)
         free(real)
         // The open descriptors (not 0..<getdtablesize(), which can be huge).
-        // libproc (proc_pidinfo) is macOS-only; iOS has no Follow File checks.
+        // libproc (proc_pidinfo) is macOS-only; iOS walks the table below.
         let pid = getpid()
         let size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
         guard size > 0 else { return 0 }
@@ -201,9 +201,24 @@ public final class FileTail: @unchecked Sendable {
         }
         return n
         #else
-        return 0
+        // No libproc on iOS: walk the descriptor table, capped (the soft
+        // limit is 256 by default, but can be raised very high), and ask
+        // each live descriptor for its path.
+        guard let real = realpath(url.path, nil) else { return 0 }
+        let want = String(cString: real)
+        free(real)
+        let limit = min(Int(getdtablesize()), descriptorScanCap)
+        var n = 0
+        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        for fd in 0..<Int32(limit) where fcntl(fd, F_GETPATH, &buf) == 0 {
+            if String(cString: buf) == want { n += 1 }
+        }
+        return n
         #endif
     }
+
+    /// The iOS count looks at no more descriptors than this.
+    static let descriptorScanCap = 16_384
 
     static func fileInfo(_ url: URL) -> (size: UInt64, inode: UInt64, device: UInt64)? {
         var st = Darwin.stat()
