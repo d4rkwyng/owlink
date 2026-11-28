@@ -430,6 +430,14 @@ public enum TextCodec {
     /// nothing else changes: memory of its own (`snapshot(of:)`), never a
     /// mapped file. And best for a caller that copies the text and lets it
     /// go (opening a file into a tab): kept, it keeps all of `data`.
+    /// How a file is prepared for a new tab (0.6.1). A binary file
+    /// (`looksBinary` on the first 8 KB) returns empty text; Open Anyway
+    /// decodes with `decode`. The body is a stub that calls `decode` until
+    /// the 0.6.1 sidebar-speed fix lands (failing BinaryOpenDecodeTests).
+    public static func decodeForOpen(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
+        decode(data, as: encoding, shareBytes: shareBytes)
+    }
+
     public static func decode(_ data: Data, as encoding: TextEncoding? = nil, shareBytes: Bool = false) -> DecodedText? {
         let detected: (TextEncoding, UTF8Scan?, guessed: Bool) = encoding.map { ($0, nil, false) }
             ?? OpenSignpost.interval("encoding detection") {
