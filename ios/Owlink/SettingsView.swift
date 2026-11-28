@@ -216,6 +216,7 @@ struct SettingsView: View {
                     Toggle(String(localized: "Check spelling while typing"), isOn: $checkSpellingWhileTyping)
                         .accessibilityIdentifier("settings.checkSpellingWhileTyping")
                     Toggle(String(localized: "Check grammar in prose"), isOn: $checkGrammarInProse)
+                        .disabled(!checkSpellingWhileTyping)
                         .accessibilityIdentifier("settings.checkGrammar")
                     Toggle(String(localized: "Style Check"), isOn: $styleCheck)
                         .accessibilityIdentifier("settings.styleCheck")

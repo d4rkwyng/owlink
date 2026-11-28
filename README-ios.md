@@ -169,7 +169,11 @@ Details for both are under What it does below.
   and iPad Edit › Spelling and Grammar) use the system's checker for Markdown
   and plain text, stay off for code and data files (and while a large
   document pauses the extras), and are on until turned off. Grammar needs
-  iOS 27; before that the setting is kept but does nothing. Unlike the Mac,
+  iOS 27; before that the setting is kept but does nothing. With spelling
+  off, grammar goes too (the system checks nothing, as the Mac turns off
+  its automatic text checking with spelling), and the grammar switch is
+  dimmed; inline predictions, math results and the substitutions are always
+  off. Unlike the Mac,
   the system marks the whole document, so fenced code and markup in Markdown
   may be underlined too.
   **Fix Typos…** (the editor's ••• menu, and iPad Edit › Spelling and

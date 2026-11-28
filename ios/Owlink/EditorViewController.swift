@@ -1379,6 +1379,8 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
         textView.smartDashesType = .no
         textView.smartInsertDeleteType = .no
         textView.inlinePredictionType = .no
+        // Math results typed after "=" are automatic completion too (iOS 18).
+        if #available(iOS 18.0, *) { textView.mathExpressionCompletionType = .no }
         applyProseChecking()
     }
 
@@ -1395,13 +1397,15 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// settings and `proseCheckingApplies`. Autocorrect and the smart
     /// substitutions stay off. UITextView marks the whole document: in
     /// Markdown that includes fenced code and markup (the Mac skips those).
+    /// With "Check spelling while typing" off the system checks nothing at
+    /// all, grammar included, as the Mac turns off all of AppKit's
+    /// automatic text checking with it (0.5.4).
     func applyProseChecking() {
-        let on = proseCheckingApplies
         let spelling = systemSpelling
         var changed = textView.spellCheckingType != spelling
         textView.spellCheckingType = spelling
         if #available(iOS 27.0, *) {
-            let grammar: UITextGrammarCheckingType = on && AppSettings.checkGrammarInProse ? .yes : .no
+            let grammar = systemGrammar ? UITextGrammarCheckingType.yes : .no
             changed = changed || textView.grammarCheckingType != grammar
             textView.grammarCheckingType = grammar
         }
@@ -1412,6 +1416,12 @@ final class EditorViewController: UIViewController, UITextViewDelegate, UIGestur
     /// with "Check spelling while typing" on.
     var systemSpelling: UITextSpellCheckingType {
         proseCheckingApplies && AppSettings.checkSpellingWhileTyping ? .yes : .no
+    }
+
+    /// The system's grammar marks (iOS 27): prose only, both settings on.
+    /// Spelling off takes grammar with it, as on the Mac.
+    var systemGrammar: Bool {
+        systemSpelling == .yes && AppSettings.checkGrammarInProse
     }
 
     /// After Ignore All or Learn Word (the Mac's recheckMarks): the system's

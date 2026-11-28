@@ -139,6 +139,33 @@ final class ProseCheckingTests: XCTestCase {
         XCTAssertEqual(editor.textView.spellCheckingType, .yes)
     }
 
+    /// Spelling off: the system checks nothing (grammar goes with it, as
+    /// the Mac's automatic text checking does, 0.5.4), and no completion
+    /// (inline predictions, math results, autocorrection) comes back.
+    func testSpellingOffTakesGrammarAndCompletionWithIt() {
+        let editor = editor()
+        editor.textView.becomeFirstResponder()
+        editor.textViewDidBeginEditing(editor.textView)
+        XCTAssertTrue(editor.systemGrammar)
+        assertGrammar(editor, true)
+        AppSettings.checkSpellingWhileTyping = false
+        settle()
+        XCTAssertTrue(AppSettings.checkGrammarInProse, "the grammar setting itself is kept")
+        XCTAssertFalse(editor.systemGrammar)
+        XCTAssertEqual(editor.textView.spellCheckingType, .no)
+        assertGrammar(editor, false)
+        editor.textViewDidBeginEditing(editor.textView)
+        assertGrammar(editor, false)
+        XCTAssertEqual(editor.textView.autocorrectionType, .no)
+        XCTAssertEqual(editor.textView.inlinePredictionType, .no)
+        if #available(iOS 18.0, *) { XCTAssertEqual(editor.textView.mathExpressionCompletionType, .no) }
+        AppSettings.checkSpellingWhileTyping = true
+        settle()
+        XCTAssertTrue(editor.systemGrammar)
+        XCTAssertEqual(editor.textView.spellCheckingType, .yes)
+        assertGrammar(editor, true)
+    }
+
     func testGrammarSettingFollowsInProseOnly() {
         let markdown = editor()
         let swift = editor("let x = 1\n", fileName: "main.swift")
