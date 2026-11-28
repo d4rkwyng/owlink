@@ -149,6 +149,10 @@ public final class ImageStore {
     /// Checks only: rewrites the bytes of a path the kernel reports
     /// (`F_GETPATH`): tests stand in another spelling of it here.
     nonisolated(unsafe) static var kernelPathFault: ((inout [UInt8]) -> Void)?
+    /// Checks only: between capturing the requested boundary path and opening it.
+    nonisolated(unsafe) static var afterPathCaptured: (() -> Void)?
+    /// Checks only: the staging descriptor at a rename attempt or cleanup.
+    nonisolated(unsafe) static var stagingHeld: ((Int32) -> Void)?
     /// Tests: the boundary descriptor the store holds.
     var boundaryFD: Int32 { boundary }
 
@@ -212,6 +216,7 @@ public final class ImageStore {
     /// `Failure.outside`: a folder moved meanwhile is never adopted.
     public static func open(in folder: URL) throws -> ImageStore {
         guard let authorized = realPath(folder.path) else { throw posix(folder.path) }
+        if DevEnvironment.checksEnabled { afterPathCaptured?() }
         let dfd = withCPath(authorized) { Darwin.open($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
         guard dfd >= 0 else { throw posix(folder.path) }
         if DevEnvironment.checksEnabled { afterBoundaryOpen?() }
@@ -243,6 +248,7 @@ public final class ImageStore {
         let path = folder.standardizedFileURL.pathComponents
         guard path.count >= base.count, Array(path.prefix(base.count)) == base else { throw Failure.outside }
         let authorized = realPath(root.path)
+        if DevEnvironment.checksEnabled, authorized != nil { afterPathCaptured?() }
         let rfd = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard rfd >= 0 else {
             let err = errno
@@ -528,7 +534,10 @@ public final class ImageStore {
         for _ in 0..<10_000 {
             let candidate = MarkdownPaste.uniqueName(name, exists: taken)
             guard Beneath.isName(candidate) else { throw Failure.badName }
-            if DevEnvironment.checksEnabled { Self.beforeRename?(candidate) }
+            if DevEnvironment.checksEnabled {
+                Self.beforeRename?(candidate)
+                Self.stagingHeld?(dst)
+            }
             try verify()
             guard case .found(let entry) = stagedEntry(tmp), isHeld(dst, entry) else { throw Failure.destinationChanged }
             if renameatx_np(fd, tmp, fd, candidate, UInt32(RENAME_EXCL)) == 0 { return candidate }
@@ -546,6 +555,7 @@ public final class ImageStore {
     /// ENOENT), is left in place and logged. (Darwin has no unlink by
     /// identity: the window between this check and the unlink remains.)
     private func removeStaged(_ tmp: String, held dst: Int32) {
+        if DevEnvironment.checksEnabled { Self.stagingHeld?(dst) }
         switch stagedEntry(tmp) {
         case .missing:
             return  // nothing there: nothing left

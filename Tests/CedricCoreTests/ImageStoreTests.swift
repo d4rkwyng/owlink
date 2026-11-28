@@ -827,6 +827,7 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
     func resetHooks() {
         ImageStore.forceFallback = false
         ImageStore.beforePublish = nil; ImageStore.writeFault = nil; ImageStore.leftBehind = nil
+        ImageStore.afterPathCaptured = nil; ImageStore.stagingHeld = nil
         ImageStore.afterBoundaryOpen = nil; ImageStore.stagedLookup = nil; ImageStore.kernelPathFault = nil
     }
 
@@ -1045,6 +1046,156 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
             }
         }
     }
+
+    @Test(arguments: storeModes) func retargetingAnAliasAfterPathCaptureRefusesTheOpen(mode: StoreMode) throws {
+        defer { resetHooks() }
+        use(mode)
+        for entry in ["Mac final link", "Mac ancestor", "iOS root ancestor"] {
+            let top = tempDir().resolvingSymlinksInPath()
+            defer { try? fm.removeItem(at: top) }
+            let a = top.appendingPathComponent("A"), b = top.appendingPathComponent("B")
+            let docs = top.appendingPathComponent("Docs"), moved = top.appendingPathComponent("moved")
+            func boundary(_ directory: URL) -> URL {
+                entry == "Mac final link" ? directory : directory.appendingPathComponent("sub")
+            }
+            for target in [a, b] {
+                try fm.createDirectory(at: boundary(target), withIntermediateDirectories: true)
+            }
+            try fm.createSymbolicLink(at: docs, withDestinationURL: a)
+            var switched = false
+            ImageStore.afterPathCaptured = {
+                do {
+                    try self.fm.removeItem(at: docs)
+                    try self.fm.createSymbolicLink(at: docs, withDestinationURL: b)
+                    try self.fm.moveItem(at: a, to: moved)
+                    try self.fm.createDirectory(at: boundary(a), withIntermediateDirectories: true)
+                    switched = true
+                } catch { Issue.record("Could not switch the alias: \(error)") }
+            }
+            let root = boundary(docs)
+            #expect(throws: ImageStore.Failure.outside, "\(entry)") {
+                if entry == "iOS root ancestor" {
+                    // No saved ID: the captured root path itself must reject B/sub.
+                    _ = try ImageStore.open(in: root, beneath: root)
+                } else {
+                    _ = try ImageStore.open(in: root)
+                }
+            }
+            ImageStore.afterPathCaptured = nil
+            #expect(switched)
+            for target in [a, b, moved] {
+                if entry != "Mac final link" { #expect(listing(target) == ["sub"]) }
+                #expect(try fm.contentsOfDirectory(atPath: boundary(target).path).isEmpty, "\(entry): \(target.path)")
+            }
+        }
+    }
+
+    @Test(arguments: storeModes) func unchangedAliasAndPlainFolderPublishIntoTheTarget(mode: StoreMode) throws {
+        defer { resetHooks() }
+        use(mode)
+        let (top, target, _) = try layout()
+        defer { try? fm.removeItem(at: top) }
+        let docs = top.appendingPathComponent("Docs")
+        try fm.createSymbolicLink(at: docs, withDestinationURL: target)
+        for (folder, name) in [(docs, "alias.png"), (target, "plain.png")] {
+            let store = try ImageStore.open(in: folder)
+            let bytes = Data(name.utf8)
+            #expect(try store.write(bytes, name: name) == name)
+            #expect(try Data(contentsOf: target.appendingPathComponent("images").appendingPathComponent(name)) == bytes)
+        }
+    }
+
+    @Test(arguments: storeModes) func stagingDescriptorLivesThroughRenameAndCleanup(mode: StoreMode) throws {
+        defer { resetHooks() }
+        use(mode)
+        let (top, doc, outside) = try layout()
+        defer { try? fm.removeItem(at: top) }
+        let source = outside.appendingPathComponent("source.png")
+        try Data().write(to: source)
+        let store = try ImageStore.open(in: doc)
+        let images = doc.appendingPathComponent("images")
+        for scenario in ["publish", "unlink before rename", "failed write"] {
+            var entry = stat()
+            var name: String?
+            var originalFD: Int32?
+            var observations = 0
+            ImageStore.writeFault = { fd in
+                // An empty copy reaches this hook immediately after fill, before fsync.
+                originalFD = fd
+                name = self.staged(images).first
+                if let name {
+                    let rc = fstatat(store.fd, name, &entry, AT_SYMLINK_NOFOLLOW)
+                    #expect(rc == 0)
+                }
+                return scenario == "failed write" ? EIO : nil
+            }
+            ImageStore.stagingHeld = { fd in
+                func checkHeld(links: Int) {
+                    var held = stat()
+                    let rc = fstat(fd, &held)
+                    #expect(rc == 0, "\(scenario): staging descriptor \(fd)")
+                    guard rc == 0 else { return }
+                    #expect(Beneath.FileID(held) == Beneath.FileID(entry))
+                    #expect(self.birth(held) == self.birth(entry))
+                    #expect(Int(held.st_nlink) == links)
+                }
+                #expect(fd == originalFD)
+                checkHeld(links: observations == 0 ? 1 : 0)
+                if observations == 0, scenario != "publish", let name {
+                    #expect(unlinkat(store.fd, name, 0) == 0)
+                    checkHeld(links: 0)
+                }
+                observations += 1
+            }
+            let output = "result.png"
+            let error: Error?
+            do {
+                _ = try store.copy(from: source, name: output)
+                error = nil
+            } catch let failure { error = failure }
+            // Probe before any other file operation can reuse the descriptor number.
+            var closed = stat()
+            let rc = fstat(originalFD ?? -1, &closed)
+            let code = errno
+            #expect(originalFD != nil && name != nil)
+            #expect(rc == -1 && code == EBADF)
+            #expect(observations == (scenario == "unlink before rename" ? 2 : 1))
+            switch scenario {
+            case "publish":
+                #expect(error == nil)
+                #expect(listing(images) == [output])
+                try fm.removeItem(at: images.appendingPathComponent(output))
+            case "failed write":
+                #expect((error as NSError?)?.domain == NSPOSIXErrorDomain)
+                #expect((error as NSError?)?.code == Int(EIO))
+            default:
+                #expect(error as? ImageStore.Failure == .destinationChanged)
+            }
+            #expect(listing(images).isEmpty)
+        }
+    }
+
+    #if os(macOS)
+    // Other suites open files concurrently. Count descriptors in a separate process.
+    @Test func copiesRestoreTheProcessDescriptorCount() async throws {
+        await #expect(processExitsWith: .success) {
+            let suite = ImageStoreTests()
+            let (top, doc, outside) = try suite.layout()
+            defer { try? suite.fm.removeItem(at: top) }
+            let store = try ImageStore.open(in: doc)
+            defer { withExtendedLifetime(store) {} }
+            let src = outside.appendingPathComponent("src.png")
+            try Data([1]).write(to: src)
+            func count() throws -> Int { try suite.fm.contentsOfDirectory(atPath: "/dev/fd").count }
+            for fail in [false, true] {
+                ImageStore.writeFault = { _ in fail ? EIO : nil }
+                let before = try count()
+                let code = suite.posixCode { try store.copy(from: src, name: "out.png") }
+                guard code == (fail ? Int(EIO) : nil), try count() == before else { exit(1) }
+            }
+        }
+    }
+    #endif
 
     #if os(macOS)
     /// r7 c (Astra r6 must-fix 3): a published image has the mode a new
