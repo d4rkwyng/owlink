@@ -8,6 +8,23 @@ import Testing
 /// notice; damaged and password-protected files are told apart.
 @Suite struct SpreadsheetTests {
 
+    @Test func worksheetCoordinateBounds() throws {
+        for rows in ["<row r='1048576'/><row/>", "<row><c r='XFD1'/><c/></row>", "<row><c r='XFE1'/></row>"] {
+            let workbook = try Workbook(data: Self.workbook([("Bounds", rows)]))
+            #expect(throws: SpreadsheetError.damaged) { try workbook.table(at: 0) }
+        }
+        // Test extreme attributes after confirming ordinary out-of-range rows are rejected.
+        let outside = try Workbook(data: Self.workbook([("Bounds", "<row r='1048577'/>")]))
+        guard (try? outside.table(at: 0)) == nil else {
+            Issue.record("Accepted a row past Excel’s limit")
+            return
+        }
+        for value in [String(Int.min), String(Int.max), "0"] {
+            let workbook = try Workbook(data: Self.workbook([("Bounds", "<row r='\(value)'/><row/><row/>")]))
+            #expect(throws: SpreadsheetError.damaged) { try workbook.table(at: 0) }
+        }
+    }
+
     // MARK: Fixtures
 
     /// A workbook from its parts: sheets as (name, sheetData XML, extra
