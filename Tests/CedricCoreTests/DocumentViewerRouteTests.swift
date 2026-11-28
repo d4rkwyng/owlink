@@ -149,6 +149,43 @@ final class DocumentViewerRouteTests: XCTestCase {
         XCTAssertEqual(OfficeFormat.keynote.kindName, "Keynote presentation")
     }
 
+    // MARK: Launch reopen and crash-recovery restore
+
+    /// A launch reopen and a crash-recovery restore open only the text
+    /// editor. A file that routes to a viewer is not opened there: the
+    /// reopen forgets its last-open record (and ends as "not opened"), and
+    /// a pending recovery record is never cleared (its text stays offered).
+    func testEditorOnlyOpenSkipsViewerFiles() {
+        let viewerRoutes: [DocumentViewerRoute] = [.pdf, .quickLook(.spreadsheet), .quickLook(.rtfd)]
+        for route in viewerRoutes {
+            let reopen = DocumentViewerRoute.editorOnlyOpen(route, reopening: true)
+            XCTAssertFalse(reopen.opensEditor, "\(route)")
+            XCTAssertTrue(reopen.forgetsLastOpenDocument, "\(route)")
+            XCTAssertFalse(reopen.clearsRecoveryRecord, "\(route)")
+            let restore = DocumentViewerRoute.editorOnlyOpen(route, reopening: false)
+            XCTAssertFalse(restore.opensEditor, "\(route)")
+            XCTAssertFalse(restore.forgetsLastOpenDocument, "\(route)")
+            XCTAssertFalse(restore.clearsRecoveryRecord, "\(route)")
+        }
+        for reopening in [true, false] {
+            let text = DocumentViewerRoute.editorOnlyOpen(.editor, reopening: reopening)
+            XCTAssertTrue(text.opensEditor)
+            XCTAssertFalse(text.forgetsLastOpenDocument)
+            XCTAssertFalse(text.clearsRecoveryRecord)
+        }
+    }
+
+    /// The bundled PDF has no NUL bytes, so the editor's binary check alone
+    /// would open it as text: the reopen has to ask the route first.
+    func testSamplePDFReopenIsNotTheEditors() throws {
+        let pdfURL = samples.appendingPathComponent("sample.pdf")
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: pdfURL.path), "ios/Samples not reachable from this test host")
+        XCTAssertFalse(TextCodec.looksBinary(try Data(contentsOf: pdfURL)), "premise: the text heuristic accepts it")
+        let decision = DocumentViewerRoute.editorOnlyOpen(DocumentViewerRoute.route(for: pdfURL), reopening: true)
+        XCTAssertFalse(decision.opensEditor)
+        XCTAssertTrue(decision.forgetsLastOpenDocument)
+    }
+
     // MARK: The bundled samples
 
     private var samples: URL {
