@@ -573,10 +573,15 @@ extension DevChecks {
                         "front: \(app.currentTab?.doc.fileURL?.lastPathComponent ?? app.currentViewerTab?.fileURL.lastPathComponent ?? "none")")
                 if let t = current, let side = s {
                     t.window?.layoutIfNeeded()
-                    t.split.setPosition(300, ofDividerAt: 0)
+                    // A real drag of the divider (mouse down, dragged, up),
+                    // as MultiCaretCheck.drag: only a user's drag sets the width.
+                    let x = side.frame.maxX + t.split.dividerThickness / 2, y = t.split.bounds.midY
+                    drag(t.split, from: NSPoint(x: x, y: y), to: NSPoint(x: x + 60, y: y), mods: [])
                     t.window?.layoutIfNeeded()
                     widthBefore = side.frame.width
                     h.note("folders: sidebar dragged to \(Int(widthBefore)) pt (saved width \(Int(side.width)))")
+                    h.check(widthBefore > 280 && abs(side.width - widthBefore) < 1, "folders: dragging the divider 60 pt widens the sidebar, and the width is kept",
+                            "frame \(Int(widthBefore)) pt, kept \(Int(side.width)) pt")
                 }
                 tabsBefore = tabList()
             },
