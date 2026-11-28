@@ -143,38 +143,53 @@ extension AppDelegate {
     /// tab, or a big file's tab once its background read is done). A
     /// refused or failed open switches nothing; other tabs and unsaved
     /// text are untouched. A file already open, opened again from
-    /// outside, switches too (its tab comes to the front). For a batch, the last immediate open switches the folder.
-    /// A background read that subsequently brings its tab forward switches then.
+    /// outside, switches too (its tab comes to the front).
+    ///
+    /// Several files at once: each immediate open (its tab up at once,
+    /// text or viewer) hands its switch to the batch, which runs only the
+    /// last one's once every file is submitted. A file read in the
+    /// background switches again when its tab comes to the front; if that
+    /// read fails, the sidebar stays on the last immediate file's folder.
     func openFromOutside(_ urls: [URL]) {
-        var submitting = true
-        for (index, url) in urls.enumerated() {
-            let last = index == urls.count - 1
-            openFromOutside(url, switchesFolder: { last || !submitting })
+        var lastImmediate: (() -> Void)?
+        for url in urls {
+            openFromOutside(url, immediate: { lastImmediate = $0 })
         }
-        submitting = false
+        lastImmediate?()
     }
 
+    /// `immediate`: given the folder switch for a tab that is up at once
+    /// (to run it later); without it, the switch runs now.
     @discardableResult
-    func openFromOutside(_ url: URL, switchesFolder: @escaping () -> Bool = { true }, then: ((EditorWindowController) -> Void)? = nil,
+    func openFromOutside(_ url: URL, immediate: ((@escaping () -> Void) -> Void)? = nil,
+                         then: ((EditorWindowController) -> Void)? = nil,
                          failed: (() -> Void)? = nil) -> EditorWindowController? {
         let std = url.standardizedFileURL
+        // `then` runs inside `open` for a tab made (or brought forward) at once.
+        var inOpen = true
         let tab = open(url, background: true, then: { [weak self] tab in
-            if switchesFolder() {
-                self?.switchFolder(forOutsideOpenOf: tab.doc.fileURL ?? std) { [weak tab] s in
-                    guard let tab, self?.tabs.contains(where: { $0 === tab }) == true else { return false }
+            let doSwitch: () -> Void = { [weak self, weak tab] in
+                guard let self, let tab else { return }
+                self.switchFolder(forOutsideOpenOf: tab.doc.fileURL ?? std) { [weak tab] s in
+                    guard let tab, self.tabs.contains(where: { $0 === tab }) else { return false }
                     s.show(in: tab)
                     return true
                 }
             }
+            if inOpen, let immediate { immediate(doSwitch) } else { doSwitch() }
             then?(tab)
         }, failed: failed)
+        inOpen = false
         // A viewer tab (made now, or brought to the front): no `then`.
-        if switchesFolder(), tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
-            switchFolder(forOutsideOpenOf: viewer.fileURL) { [weak self] s in
-                guard let self, let v = self.viewerTab(for: std), v === viewer, v.sidebarHost?.split != nil else { return false }
-                s.show(in: v)
-                return true
+        if tab == nil, backgroundOpens[std] == nil, let viewer = viewerTab(for: std) {
+            let doSwitch: () -> Void = { [weak self] in
+                self?.switchFolder(forOutsideOpenOf: viewer.fileURL) { [weak self] s in
+                    guard let self, let v = self.viewerTab(for: std), v === viewer, v.sidebarHost?.split != nil else { return false }
+                    s.show(in: v)
+                    return true
+                }
             }
+            if let immediate { immediate(doSwitch) } else { doSwitch() }
         }
         return tab
     }
