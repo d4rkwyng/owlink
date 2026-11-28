@@ -20,6 +20,16 @@ public struct SpreadsheetLimits: Sendable, Equatable {
     public static let standard = SpreadsheetLimits(maxCells: 100_000, maxBytes: 64_000_000)
     /// Excel's widest sheet (XFD): cells past it are ignored.
     public static let maxColumns = 16_384
+    static let maxRows = 1_048_576
+
+    static func rowIndex(attribute: String?, previous: Int) -> Int? {
+        if let attribute {
+            guard let value = Int(attribute), (1...maxRows).contains(value) else { return nil }
+            return value - 1
+        }
+        guard (-1..<(maxRows - 1)).contains(previous) else { return nil }
+        return previous + 1
+    }
 }
 
 public enum SpreadsheetError: Error, Equatable, Sendable {
@@ -218,7 +228,9 @@ public struct Workbook: Sendable {
         x.delegate = p
         p.parser = x
         // Not a worksheet at all (and not cut short by a cap).
-        if !x.parse(), !cut, !p.stoppedEarly, !p.sawSheetData { throw SpreadsheetError.damaged }
+        let parsed = x.parse()
+        if p.invalidCoordinate { throw SpreadsheetError.damaged }
+        if !parsed, !cut, !p.stoppedEarly, !p.sawSheetData { throw SpreadsheetError.damaged }
         for (r, cells) in p.committed {
             for (c, cell) in cells { table.set(cell, row: r, column: c) }
         }
@@ -421,6 +433,7 @@ private final class SheetReader: NSObject, XMLParserDelegate {
     var cellTotal = 0
     var capped = false
     var stoppedEarly = false
+    var invalidCoordinate = false
     var sawSheetData = false
     var dimensionRows: Int?
     var lastRow = -1
@@ -448,14 +461,29 @@ private final class SheetReader: NSObject, XMLParserDelegate {
             }
         case "sheetData": sawSheetData = true
         case "row":
-            row = a["r"].flatMap(Int.init).map { $0 - 1 } ?? row + 1
+            guard let index = SpreadsheetLimits.rowIndex(attribute: a["r"], previous: row) else {
+                invalidCoordinate = true
+                parser.abortParsing()
+                return
+            }
+            row = index
             nextCol = 0
             pending.removeAll(keepingCapacity: true)
         case "c":
-            if let r = a["r"], let ref = XLSXSheet.cellRef(r) {
+            if let r = a["r"] {
+                guard let ref = XLSXSheet.cellRef(r) else {
+                    invalidCoordinate = true
+                    parser.abortParsing()
+                    return
+                }
                 row = ref.row
                 col = ref.col
             } else {
+                guard row >= 0, nextCol < SpreadsheetLimits.maxColumns else {
+                    invalidCoordinate = true
+                    parser.abortParsing()
+                    return
+                }
                 col = nextCol
             }
             nextCol = col + 1

@@ -91,7 +91,7 @@ public enum XLSXSheet {
             }
             if letters > 3 || digits > 7 { return nil }
         }
-        guard letters > 0, digits > 0, row > 0 else { return nil }
+        guard letters > 0, digits > 0, (1...SpreadsheetLimits.maxRows).contains(row), col <= SpreadsheetLimits.maxColumns else { return nil }
         return (row - 1, col - 1)
     }
 
