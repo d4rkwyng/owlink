@@ -729,7 +729,10 @@ extension DevChecks {
         let a = dir.appendingPathComponent("select/A", isDirectory: true)
         let b = dir.appendingPathComponent("select/B", isDirectory: true)
         let readme = write("select/A/readme.md", "# readme\n")
-        _ = write("select/A/other.md", "other\n")
+        let other = write("select/A/other.md", "other\n")
+        let nested = write("select/A/sub/readme.md", "nested\n")
+        let alias = a.deletingLastPathComponent().appendingPathComponent("Alias", isDirectory: true)
+        let aliasFile = alias.appendingPathComponent(other.lastPathComponent)
         _ = write("select/B/outside.md", "outside\n")
         var sidebar: FolderSidebar? { FolderSidebar.shared }
         func root() -> String { sidebar?.rootURL.path ?? "nil" }
@@ -773,6 +776,23 @@ extension DevChecks {
             sync { app.openEnclosingFolderMenu(nil) },
             until("Open Enclosing Folder shows A with readme.md selected", timeout: 4) {
                 root() == a.path && selected() == "readme.md"
+            },
+            sync {
+                _ = app.open(nested)
+                app.openFolder(a)
+            },
+            until("Open Folder expands sub and selects its readme") {
+                sidebar?.selectedNode?.url == nested
+            },
+            sync {
+                do { try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: a) }
+                catch { expect(false, "created Alias: \(error)"); return }
+                _ = app.open(aliasFile)
+                expect(app.currentFileURL == aliasFile, "front tab uses the alias spelling")
+                app.openFolder(a)
+            },
+            until("Open Folder selects the real row for the alias tab") {
+                sidebar?.selectedNode?.url == other
             },
             sync { app.closeFolder() },
         ]
