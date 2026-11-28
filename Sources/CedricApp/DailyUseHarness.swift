@@ -220,7 +220,7 @@ final class HangWatchdog: @unchecked Sendable {
         p.standardOutput = FileHandle.nullDevice
         p.standardError = FileHandle.nullDevice
         if (try? p.run()) != nil {
-            let deadline = Date().addingTimeInterval(8)
+            let deadline = Date().addingTimeInterval(5)
             while p.isRunning && Date() < deadline { usleep(100_000) }
             if p.isRunning { p.terminate() }
         }
@@ -283,9 +283,9 @@ extension DevChecks {
         scratch.check(false, "plain failure", "x")
         h.check(scratch.tally.failed == 3 && scratch.tally.exitCode == 1, "a plain failure fails the run", "\(scratch.tally)")
         guard DevEnvironment.values["CEDRIC_DAILYUSE_SELFTEST_HANG"] == "1" else { h.finish() }
-        h.note("blocking the main thread for \(HangWatchdog.shared.limit + 5) s: the watchdog must end the run")
+        h.note("blocking the main thread for \(HangWatchdog.shared.limit + 20) s (a hang stays: sample(1) needs a few seconds): the watchdog must end the run")
         HangWatchdog.shared.step = "selftest-hang"
-        Thread.sleep(forTimeInterval: HangWatchdog.shared.limit + 5)
+        Thread.sleep(forTimeInterval: HangWatchdog.shared.limit + 20)
         h.check(false, "the hang watchdog ended the run", "the main thread came back")
         h.finish()
     }

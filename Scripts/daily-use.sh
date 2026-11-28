@@ -92,6 +92,8 @@ W=$(mktemp -d)
 cleanup() {
     defaults delete "$DOMAIN" >/dev/null 2>&1 || true
     defaults delete "$AISUITE" >/dev/null 2>&1 || true
+    # defaults delete leaves an empty plist behind: remove the files too.
+    rm -f "$HOME/Library/Preferences/$DOMAIN.plist" "$HOME/Library/Preferences/$AISUITE.plist"
     rm -f "$RECENTS/$DOMAIN".sfl* 2>/dev/null || true
     rm -rf "$HOME/Library/Saved Application State/$DOMAIN.savedState" "$HOME/Library/Caches/$DOMAIN" \
         "$HOME/Library/WebKit/$DOMAIN" "$HOME/Library/HTTPStorages/$DOMAIN" "$HOME/Library/HTTPStorages/$DOMAIN.binarycookies" 2>/dev/null || true
