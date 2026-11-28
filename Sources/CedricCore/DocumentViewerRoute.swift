@@ -60,9 +60,11 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         }
         let bytes = Array(prefix.prefix(DocumentKind.prefixLength))
         let e = OfficeFormat.ext(fileName)
-        // A delimited text file can be replaced while its preview is open.
+        // A delimited text file can be replaced by a PDF while its preview
+        // is open: a PDF version header (`%PDF-1.7`) says so. Text that
+        // merely starts with `%PDF-` (a CSV `%PDF-,x`) stays delimited.
         if let sheet = SpreadsheetFormat.delimited[e] {
-            return DocumentKind.hasPDFHeader(bytes) ? .pdf : .spreadsheet(sheet)
+            return DocumentKind.hasPDFVersionHeader(bytes) ? .pdf : .spreadsheet(sheet)
         }
         // An .xlsx / .xlsm by name: the grid, for a zip, for an encrypted
         // workbook (an OLE2 container), and for a damaged one (the grid

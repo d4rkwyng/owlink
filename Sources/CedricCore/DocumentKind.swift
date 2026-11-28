@@ -28,6 +28,16 @@ public enum DocumentKind: String, Codable, Sendable {
         prefix.count >= pdfMagic.count && zip(prefix, pdfMagic).allSatisfy { $0 == $1 }
     }
 
+    /// Whether `prefix` starts with a PDF version header: `%PDF-`, a
+    /// digit, `.`, a digit (`%PDF-1.7`, `%PDF-2.0`). Stricter than
+    /// `hasPDFHeader`, for names that say text (a `.csv` whose first field
+    /// is `%PDF-` is still a CSV).
+    public static func hasPDFVersionHeader<D: Collection>(_ prefix: D) -> Bool where D.Element == UInt8 {
+        let b = Array(prefix.prefix(pdfMagic.count + 3))
+        func digit(_ c: UInt8) -> Bool { c >= UInt8(ascii: "0") && c <= UInt8(ascii: "9") }
+        return b.count == pdfMagic.count + 3 && hasPDFHeader(b) && digit(b[5]) && b[6] == UInt8(ascii: ".") && digit(b[7])
+    }
+
     public static func hasPDFExtension(_ fileName: String) -> Bool {
         (fileName as NSString).pathExtension.lowercased() == "pdf"
     }
