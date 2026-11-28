@@ -59,6 +59,18 @@ import Testing
         #expect(date.display("2957004", date1904: true).kind == .number)
     }
 
+    @Test func csvParserStopsAtCellBudgetAndReportsColumnOverflow() throws {
+        let row = Array(repeating: "x", count: 2000).joined(separator: ",")
+        let csv = Array(repeating: row, count: 52).joined(separator: "\n") as NSString
+        let parsed = CSV.parse(csv, dialect: .init(delimiter: 44), maxCells: 100_000)
+        #expect(parsed.rows.count == 50)
+        #expect(parsed.truncated)
+        let wide = String(repeating: ",", count: SpreadsheetLimits.maxColumns) + "last"
+        let table = try DelimitedText.table(data: Data(wide.utf8), fileName: "wide.csv")
+        #expect(table.columnCount == SpreadsheetLimits.maxColumns)
+        #expect(table.truncationNotice?.contains("16,384 columns") == true)
+    }
+
     // MARK: Fixtures
 
     /// A workbook from its parts: sheets as (name, sheetData XML, extra

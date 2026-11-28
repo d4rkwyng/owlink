@@ -221,6 +221,14 @@ final class ViewerSnapshotTests: XCTestCase {
         }
     }
 
+    func testColumnOverflowNoticeIsVisible() async throws {
+        let record = "first" + String(repeating: ",", count: SpreadsheetLimits.maxColumns) + "last"
+        let url = try file("wide.csv", Data(record.utf8))
+        let (_, viewer) = try await spreadsheet(url, .csv, Self.configs[0])
+        XCTAssertFalse(viewer.noticeLabel.isHidden)
+        XCTAssertTrue(viewer.noticeLabel.text?.contains("16,384 columns") == true)
+    }
+
     func testTruncationNotice() async throws {
         let csv = "Row,Owl,Count,Place,Note\n" + (1...400).map { "\($0),Barn owl,\($0 % 7),Old barn,ok" }.joined(separator: "\n") + "\n"
         let url = try file("big.csv", Data(csv.utf8))
