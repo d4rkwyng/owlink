@@ -1093,19 +1093,48 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
     @Test(arguments: storeModes) func unchangedAliasAndPlainFolderPublishIntoTheTarget(mode: StoreMode) throws {
         defer { resetHooks() }
         use(mode)
-        let (top, target, _) = try layout()
+        let (top, target, outside) = try layout()
         defer { try? fm.removeItem(at: top) }
         let docs = top.appendingPathComponent("Docs")
         try fm.createSymbolicLink(at: docs, withDestinationURL: target)
-        for (folder, name) in [(docs, "alias.png"), (target, "plain.png")] {
+        let sub = target.appendingPathComponent("sub")
+        try fm.createDirectory(at: sub, withIntermediateDirectories: false)
+
+        func publish(in folder: URL, to real: URL, name: String) throws {
             let store = try ImageStore.open(in: folder)
             let bytes = Data(name.utf8)
             #expect(try store.write(bytes, name: name) == name)
-            #expect(try Data(contentsOf: target.appendingPathComponent("images").appendingPathComponent(name)) == bytes)
+            #expect(try Data(contentsOf: real.appendingPathComponent("images").appendingPathComponent(name)) == bytes)
         }
+        try publish(in: docs, to: target, name: "alias.png")
+        try publish(in: target, to: target, name: "plain.png")
+        try publish(in: docs.appendingPathComponent("sub"), to: sub, name: "ancestor.png")
+
+        var expected = ["alias.png", "plain.png"]
+        // Probe the existing "doc" directory. On a case-sensitive volume "DOC" is absent.
+        let alternateCase = top.appendingPathComponent("DOC")
+        if fm.fileExists(atPath: alternateCase.path) {
+            try publish(in: alternateCase, to: target, name: "case.png")
+            expected.append("case.png")
+        }
+
+        let resolved = target.resolvingSymlinksInPath().path
+        if resolved.hasPrefix("/private/var/folders/") {
+            let shortPath = String(resolved.dropFirst("/private".count))
+            try publish(in: URL(fileURLWithPath: shortPath), to: target, name: "var.png")
+            try publish(in: URL(fileURLWithPath: resolved), to: target, name: "private-var.png")
+            expected += ["var.png", "private-var.png"]
+        }
+        #expect(listing(top) == ["Docs", "doc", "outside"])
+        #expect(try fm.contentsOfDirectory(atPath: outside.path).isEmpty)
+        #expect(listing(target) == ["images", "sub"])
+        #expect(listing(target.appendingPathComponent("images")) == expected.sorted())
+        #expect(listing(sub) == ["images"])
+        #expect(listing(sub.appendingPathComponent("images")) == ["ancestor.png"])
     }
 
-    @Test(arguments: storeModes) func stagingDescriptorLivesThroughRenameAndCleanup(mode: StoreMode) throws {
+    @Test(arguments: storeModes, ["publish", "unlink before rename", "failed write"])
+    func stagingDescriptorLivesThroughRenameAndCleanup(mode: StoreMode, scenario: String) throws {
         defer { resetHooks() }
         use(mode)
         let (top, doc, outside) = try layout()
@@ -1114,65 +1143,63 @@ let storeModes: [StoreMode] = ImageStore.containmentEnforced ? [.kernel, .fallba
         try Data().write(to: source)
         let store = try ImageStore.open(in: doc)
         let images = doc.appendingPathComponent("images")
-        for scenario in ["publish", "unlink before rename", "failed write"] {
-            var entry = stat()
-            var name: String?
-            var originalFD: Int32?
-            var observations = 0
-            ImageStore.writeFault = { fd in
-                // An empty copy reaches this hook immediately after fill, before fsync.
-                originalFD = fd
-                name = self.staged(images).first
-                if let name {
-                    let rc = fstatat(store.fd, name, &entry, AT_SYMLINK_NOFOLLOW)
-                    #expect(rc == 0)
-                }
-                return scenario == "failed write" ? EIO : nil
+        var entry = stat()
+        var name: String?
+        var originalFD: Int32?
+        var observations = 0
+        ImageStore.writeFault = { fd in
+            // An empty copy reaches this hook immediately after fill, before fsync.
+            originalFD = fd
+            name = self.staged(images).first
+            if let name {
+                let rc = fstatat(store.fd, name, &entry, AT_SYMLINK_NOFOLLOW)
+                #expect(rc == 0)
             }
-            ImageStore.stagingHeld = { fd in
-                func checkHeld(links: Int) {
-                    var held = stat()
-                    let rc = fstat(fd, &held)
-                    #expect(rc == 0, "\(scenario): staging descriptor \(fd)")
-                    guard rc == 0 else { return }
-                    #expect(Beneath.FileID(held) == Beneath.FileID(entry))
-                    #expect(self.birth(held) == self.birth(entry))
-                    #expect(Int(held.st_nlink) == links)
-                }
-                #expect(fd == originalFD)
-                checkHeld(links: observations == 0 ? 1 : 0)
-                if observations == 0, scenario != "publish", let name {
-                    #expect(unlinkat(store.fd, name, 0) == 0)
-                    checkHeld(links: 0)
-                }
-                observations += 1
-            }
-            let output = "result.png"
-            let error: Error?
-            do {
-                _ = try store.copy(from: source, name: output)
-                error = nil
-            } catch let failure { error = failure }
-            // Probe before any other file operation can reuse the descriptor number.
-            var closed = stat()
-            let rc = fstat(originalFD ?? -1, &closed)
-            let code = errno
-            #expect(originalFD != nil && name != nil)
-            #expect(rc == -1 && code == EBADF)
-            #expect(observations == (scenario == "unlink before rename" ? 2 : 1))
-            switch scenario {
-            case "publish":
-                #expect(error == nil)
-                #expect(listing(images) == [output])
-                try fm.removeItem(at: images.appendingPathComponent(output))
-            case "failed write":
-                #expect((error as NSError?)?.domain == NSPOSIXErrorDomain)
-                #expect((error as NSError?)?.code == Int(EIO))
-            default:
-                #expect(error as? ImageStore.Failure == .destinationChanged)
-            }
-            #expect(listing(images).isEmpty)
+            return scenario == "failed write" ? EIO : nil
         }
+        ImageStore.stagingHeld = { fd in
+            func checkHeld(links: Int) {
+                var held = stat()
+                let rc = fstat(fd, &held)
+                #expect(rc == 0, "\(scenario): staging descriptor \(fd)")
+                guard rc == 0 else { return }
+                #expect(Beneath.FileID(held) == Beneath.FileID(entry))
+                #expect(self.birth(held) == self.birth(entry))
+                #expect(Int(held.st_nlink) == links)
+            }
+            #expect(fd == originalFD)
+            checkHeld(links: observations == 0 ? 1 : 0)
+            if observations == 0, scenario != "publish", let name {
+                #expect(unlinkat(store.fd, name, 0) == 0)
+                checkHeld(links: 0)
+            }
+            observations += 1
+        }
+        let output = "result.png"
+        let error: Error?
+        do {
+            _ = try store.copy(from: source, name: output)
+            error = nil
+        } catch let failure { error = failure }
+        // Probe before any other file operation can reuse the descriptor number.
+        var closed = stat()
+        let rc = fstat(originalFD ?? -1, &closed)
+        let code = errno
+        #expect(originalFD != nil && name != nil)
+        #expect(rc == -1 && code == EBADF)
+        #expect(observations == (scenario == "unlink before rename" ? 2 : 1))
+        switch scenario {
+        case "publish":
+            #expect(error == nil)
+            #expect(listing(images) == [output])
+            try? fm.removeItem(at: images.appendingPathComponent(output))
+        case "failed write":
+            #expect((error as NSError?)?.domain == NSPOSIXErrorDomain)
+            #expect((error as NSError?)?.code == Int(EIO))
+        default:
+            #expect(error as? ImageStore.Failure == .destinationChanged)
+        }
+        #expect(listing(images).isEmpty)
     }
 
     #if os(macOS)
