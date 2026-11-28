@@ -97,4 +97,28 @@ public struct ZipArchive: Sendable {
         default: throw ZipError.unsupported("compression method \(e.method)")
         }
     }
+
+    /// A deflated entry's first `maxBytes`, inflated (no more than that is
+    /// decoded or held): a capped read of a big part.
+    public func inflatedPrefix(of e: Entry, maxBytes: Int) throws -> Data {
+        guard e.method == 8 else { return try contents(of: e).prefix(maxBytes) }
+        let n = data.count
+        func u16(_ o: Int) -> Int { Int(data[data.startIndex + o]) | Int(data[data.startIndex + o + 1]) << 8 }
+        let h = e.localHeaderOffset
+        guard h + 30 <= n, u16(h) | u16(h + 2) << 16 == 0x0403_4B50 else { throw ZipError.damaged }
+        let start = h + 30 + u16(h + 26) + u16(h + 28)
+        guard start + e.compressedSize <= n, e.compressedSize > 0, maxBytes > 0 else { throw ZipError.damaged }
+        let size = min(maxBytes, e.size)
+        let raw = data.subdata(in: (data.startIndex + start)..<(data.startIndex + start + e.compressedSize))
+        var out = Data(count: size)
+        // compression_decode_buffer writes at most `size` bytes: the start.
+        let written = out.withUnsafeMutableBytes { dst in
+            raw.withUnsafeBytes { src in
+                compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, size,
+                                          src.bindMemory(to: UInt8.self).baseAddress!, raw.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard written > 0 else { throw ZipError.damaged }
+        return out.prefix(written)
+    }
 }

@@ -286,7 +286,7 @@ import Testing
         #expect(throws: SpreadsheetError.notAWorkbook) { try Workbook(data: docx) }
         // A workbook whose sheet part is missing.
         let noPart = TestZip.make([
-            ("xl/workbook.xml", Data("<workbook><sheets><sheet name=\"A\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>".utf8)),
+            ("xl/workbook.xml", Data("<workbook xmlns:r=\"urn:r\"><sheets><sheet name=\"A\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>".utf8)),
             ("xl/_rels/workbook.xml.rels", Data("<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet9.xml\"/></Relationships>".utf8)),
         ])
         let wb = try Workbook(data: noPart)

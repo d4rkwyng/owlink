@@ -2,9 +2,10 @@ import Foundation
 import UniformTypeIdentifiers
 
 /// Where Owlink for iPhone and iPad opens a file: a PDF in the read-only
-/// PDF viewer, an Office or iWork document in the read-only Quick Look
-/// viewer, anything else in the text editor (today's path, with its
-/// "binary file" alert for other binaries).
+/// PDF viewer, an .xlsx / .xlsm workbook or a .csv / .tsv file in the
+/// read-only spreadsheet grid, any other Office or iWork document in the
+/// read-only Quick Look viewer, anything else in the text editor (today's
+/// path, with its "binary file" alert for other binaries).
 ///
 /// Decided by the file's name (its extension), its content type (UTType),
 /// and only the first 32 bytes: a `%PDF-` header on a file whose name isn't
@@ -17,6 +18,7 @@ import UniformTypeIdentifiers
 public enum DocumentViewerRoute: Equatable, Sendable {
     case editor
     case pdf
+    case spreadsheet(SpreadsheetFormat)
     case quickLook(OfficeFormat)
 
     /// Office and iWork content types, most specific first. iWork types
@@ -58,6 +60,15 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         }
         let bytes = Array(prefix.prefix(DocumentKind.prefixLength))
         let e = OfficeFormat.ext(fileName)
+        // CSV and TSV by name: the grid, whatever they hold (it says when
+        // a file isn't text; Edit as Text opens the editor).
+        if let sheet = SpreadsheetFormat.delimited[e] { return .spreadsheet(sheet) }
+        // An .xlsx / .xlsm by name: the grid, for a zip, for an encrypted
+        // workbook (an OLE2 container), and for a damaged one (the grid
+        // says it can't read it). An RTF with the name stays text.
+        if SpreadsheetFormat.workbookExtensions.contains(e), !bytes.starts(with: Array("{\\rtf".utf8)) {
+            return .spreadsheet(.xlsx)
+        }
         // Text by its name (.csv, .txt, .md, .json, .swift…) is always the
         // editor's, whatever its first bytes or content type are.
         if !e.isEmpty, let named = UTType(filenameExtension: e), named.conforms(to: .text) { return .editor }
@@ -79,6 +90,11 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         if let contentType {
             if contentType.conforms(to: .pdf) { return .pdf }
             if let f = officeFormat(for: contentType), !bytes.starts(with: Array("{\\rtf".utf8)) {
+                // An OOXML workbook by its type alone: the grid.
+                if f == .spreadsheet, OfficeFormat.isZip(bytes), let sheet = UTType("org.openxmlformats.spreadsheetml.sheet"),
+                   contentType.conforms(to: sheet) {
+                    return .spreadsheet(.xlsx)
+                }
                 let isIWork = f == .pages || f == .numbers || f == .keynote
                 if !isIWork || OfficeFormat.isZip(bytes) { return .quickLook(f) }
             }
@@ -101,9 +117,16 @@ public enum DocumentViewerRoute: Equatable, Sendable {
 
     /// A viewer file (PDF, Office, iWork, RTFD) is never opened in the
     /// writable editor by a reopen or a restore: the editor's own binary
-    /// check accepts PDFs with no NUL bytes.
+    /// check accepts PDFs with no NUL bytes. CSV and TSV are text: they
+    /// open in the grid by default, but a reopen (of a file last edited
+    /// with Edit as Text) or a restore opens the editor, as before.
     public static func editorOnlyOpen(_ route: DocumentViewerRoute, reopening: Bool) -> EditorOnlyOpen {
-        let editor = route == .editor
+        let editor: Bool
+        switch route {
+        case .editor: editor = true
+        case .spreadsheet(let f): editor = f.isText
+        case .pdf, .quickLook: editor = false
+        }
         return EditorOnlyOpen(opensEditor: editor, forgetsLastOpenDocument: !editor && reopening, clearsRecoveryRecord: false)
     }
 
@@ -122,6 +145,28 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         }
         let type = (try? url.resourceValues(forKeys: [.contentTypeKey]))?.contentType
         return route(fileName: url.lastPathComponent, prefix: prefix, contentType: type)
+    }
+}
+
+/// What the read-only spreadsheet grid opens.
+public enum SpreadsheetFormat: String, Equatable, Sendable {
+    /// An Office Open XML workbook (.xlsx, .xlsm).
+    case xlsx
+    case csv, tsv
+
+    /// Plain text (Edit as Text opens it in the editor).
+    public var isText: Bool { self != .xlsx }
+
+    static let delimited: [String: SpreadsheetFormat] = ["csv": .csv, "tsv": .tsv]
+    static let workbookExtensions: Set<String> = ["xlsx", "xlsm"]
+
+    /// "Excel spreadsheet · 12 KB".
+    public var kindName: String {
+        switch self {
+        case .xlsx: String(localized: "Excel spreadsheet")
+        case .csv: String(localized: "CSV file")
+        case .tsv: String(localized: "TSV file")
+        }
     }
 }
 
