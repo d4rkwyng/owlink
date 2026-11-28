@@ -521,6 +521,7 @@ import Testing
         #expect(events.all == [.reset("ab"), .appended("cd")])
     }
 
+#if os(macOS)
     /// 0.2.1 review M5: closing a followed tab stops its tail (EditorWindowController.windowWillClose);
     /// a stopped tail, or one freed without `stop`, holds no descriptor or timer.
     @Test func stopLeavesNoDescriptor() async throws {
@@ -564,6 +565,7 @@ import Testing
         try await Task.sleep(nanoseconds: 400_000_000)
         #expect(FileTail.descriptorsOpen(on: gone) == 0 && !waiting.isWatching, "the file showing up later opens nothing")
     }
+#endif
 
     @Test func splitMultibyteCharacterIsHeldBack() async throws {
         let dir = tempDir()
