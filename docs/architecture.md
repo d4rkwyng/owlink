@@ -1176,8 +1176,11 @@ the owl, restore) keep calling `open` and never switch. The rule is
 sidebar shown, only for a regular file outside the loaded root (links
 resolved on both sides, then by identity), never a volume root. Then
 `openFolder(_:reveal:dock:)` docks it in the file's own tab once that tab
-exists (a viewer tab, or a big file's tab after its background read), and
-of several files opened at once only the last switches. At launch the
+exists (a viewer tab, or a big file's tab after its background read).
+For several files opened at once, the last one whose tab is up at once
+switches the folder when the batch is submitted; a file read in the
+background switches it again when its tab comes to the front (if that
+read fails, the folder stays where the batch left it). At launch the
 switch waits for the first frame, after the session's sidebar is rebuilt.
 The `folder` check drives each entry point and the opens that must not switch.
 
