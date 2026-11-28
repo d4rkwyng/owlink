@@ -153,28 +153,34 @@ final class MarkdownRenderer {
 
     /// A top-level render: marks absent from `source` are chosen, and if an
     /// embedded note or a vault path turns out to hold one of them, the
-    /// render starts again with every character of that text excluded, so
-    /// one restart settles it (never for an ordinary document). Past
-    /// `maxAttempts`, or when fewer than four free characters are left, the
-    /// offending characters of outside text (or, past that, of the document
-    /// itself) become U+FFFD. Either takes a deliberately exhaustive text of
-    /// several megabytes, and still cannot trap.
+    /// render starts again with every candidate character of all the outside
+    /// text that attempt read excluded, so one restart settles it (never
+    /// needed for an ordinary document; a second only for a path inside a
+    /// note the first attempt skipped). Every restart excludes at least the
+    /// mark that collided, so restarts end when the pool does: only when
+    /// fewer than four free characters are left do the offending characters
+    /// of outside text (or, past that, of the document itself) become
+    /// U+FFFD. That takes outside text holding about a million distinct
+    /// characters, and still cannot trap.
     func render(_ source: String) -> String {
         guard state == nil else { return renderOnce(source, ownSource: false) }
         var excluded = ScalarSet()
-        var attempt = 1
+        var stalled = false
         while true {
             let (marks, exhausted) = Marks.choose(for: source, excluding: excluded, pool: pool)
-            let state = MarkState(scrub: exhausted || attempt >= Self.maxAttempts)
+            let state = MarkState(scrub: exhausted || stalled)
             let out = MarkdownRenderer(options: options, marks: marks, state: state, pool: pool)
                 .renderOnce(source, ownSource: !exhausted)
             if !state.collided { return out }
-            excluded.formUnion(state.collisions)
-            attempt += 1
+            // Grows by the colliding mark at least (it was not excluded).
+            var grew = false
+            for s in state.seen {
+                for u in s.unicodeScalars where u.value >= Marks.lowest { grew = excluded.insert(u.value) || grew }
+            }
+            // (Cannot happen; if it did, scrub rather than loop.)
+            stalled = !grew
         }
     }
-
-    static let maxAttempts = 64
 
     /// `ownSource`: the top-level document, whose marks were chosen from
     /// characters it lacks (so it is not scanned again).
@@ -879,15 +885,18 @@ final class MarkdownRenderer {
     /// else the next free ones of U+E000…U+F8FF, then planes 15 and 16,
     /// then (only for a text holding every private-use character) any other
     /// scalar from U+0100 up that stands alone as a character and is no
-    /// letter, digit, punctuation or symbol (see `usable`).
+    /// letter, digit, punctuation or symbol, nor a noncharacter (see
+    /// `usable`).
     struct Marks: Equatable {
         let open: Unicode.Scalar, close: Unicode.Scalar, brk: Unicode.Scalar, dollar: Unicode.Scalar
         static let standard = Marks(open: "\u{E000}", close: "\u{E001}", brk: "\u{E002}", dollar: "\u{E003}")
-        /// Candidates, in order of preference (surrogates are no scalars).
+        /// Candidates, in order of preference: every scalar from U+0100 up
+        /// but surrogates (no scalars) and noncharacters (U+FDD0…U+FDEF and
+        /// the last two of each plane).
         static let pool: [ClosedRange<UInt32>] = [
             0xE000...0xF8FF, 0xF0000...0xFFFFD, 0x100000...0x10FFFD,
-            0x100...0xD7FF, 0xF900...0xEFFFF, 0xFFFFE...0xFFFFF, 0x10FFFE...0x10FFFF,
-        ]
+            0x100...0xD7FF, 0xF900...0xFDCF, 0xFDF0...0xFFFD,
+        ] + (1...14).map { UInt32($0) << 16...UInt32($0) << 16 | 0xFFFD }
         /// No candidate is below this, so outside text below it never collides.
         static let lowest: UInt32 = 0x100
 
@@ -901,7 +910,7 @@ final class MarkdownRenderer {
         /// URL, math or emphasis next to a mark reads it as it would a
         /// private-use one (outside private use: unassigned scalars, mostly).
         static func usable(_ v: UInt32) -> Bool {
-            guard let u = Unicode.Scalar(v), !u.properties.isWhitespace else { return false }
+            guard let u = Unicode.Scalar(v), !u.properties.isWhitespace, !u.properties.isNoncharacterCodePoint else { return false }
             if v >= 0xE000, v <= 0xF8FF || v >= 0xF0000, u.properties.generalCategory == .privateUse { return true }
             let c = Character(u)
             guard !c.isLetter, !c.isNumber, !c.isPunctuation, !c.isSymbol else { return false }
@@ -950,26 +959,24 @@ final class MarkdownRenderer {
         func contains(_ v: UInt32) -> Bool {
             !words.isEmpty && v < 0x110000 && words[Int(v >> 6)] & (1 << UInt64(v & 63)) != 0
         }
-        mutating func insert(_ v: UInt32) {
-            guard v < 0x110000 else { return }
+        /// True if `v` was not in the set.
+        @discardableResult mutating func insert(_ v: UInt32) -> Bool {
+            guard v < 0x110000 else { return false }
             if words.isEmpty { words = Array(repeating: 0, count: 0x110000 / 64) }
-            words[Int(v >> 6)] |= 1 << UInt64(v & 63)
-        }
-        mutating func formUnion(_ o: ScalarSet) {
-            guard !o.words.isEmpty else { return }
-            if words.isEmpty { words = o.words; return }
-            for k in words.indices { words[k] |= o.words[k] }
+            let bit: UInt64 = 1 << UInt64(v & 63), k = Int(v >> 6)
+            defer { words[k] |= bit }
+            return words[k] & bit == 0
         }
     }
 
-    /// What a render and its embedded notes share: the characters of
-    /// outside text that collided with the marks (the render starts again
-    /// without them), or, with `scrub`, no restart: such characters become
-    /// U+FFFD instead.
+    /// What a render and its embedded notes share: whether outside text
+    /// collided with the marks, and all the outside text read (the render
+    /// starts again without its characters), or, with `scrub`, no restart:
+    /// such characters become U+FFFD instead.
     final class MarkState {
         let scrub: Bool
         var collided = false
-        var collisions = ScalarSet()
+        var seen: [String] = []
         init(scrub: Bool) { self.scrub = scrub }
     }
 
@@ -979,15 +986,16 @@ final class MarkdownRenderer {
     /// resort, the mark becomes U+FFFD. Otherwise it is returned unchanged.
     /// Scans only `s`, never the document.
     func external(_ s: String) -> String {
-        guard s.unicodeScalars.contains(where: marks.contains) else { return s }
         guard let state, !state.scrub else {
+            guard s.unicodeScalars.contains(where: marks.contains) else { return s }
             var out = String.UnicodeScalarView()
             for u in s.unicodeScalars { out.append(marks.contains(u) ? "\u{FFFD}" : u) }
             return String(out)
         }
-        // Every character of it that could be a mark, so one restart is enough.
-        state.collided = true
-        for u in s.unicodeScalars where u.value >= Marks.lowest { state.collisions.insert(u.value) }
+        // Kept (not copied) so that a restart excludes every character of
+        // all of it, not just of the text that collided.
+        state.seen.append(s)
+        if s.unicodeScalars.contains(where: marks.contains) { state.collided = true }
         return s
     }
 

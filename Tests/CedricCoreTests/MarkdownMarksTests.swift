@@ -97,29 +97,42 @@ import Testing
         for v: UInt32 in [0x301, 0x200D, 0x600, 0x1F1E6, 0x1100, 0x3000, 0x2028, 0xFE0F, 0x100, 0x4E00, 0x660, 0x2014, 0x1F600] {
             #expect(!Marks.usable(v), "U+\(String(v, radix: 16))")
         }
-        for v: UInt32 in [0xE000, 0xF8FF, 0xF0000, 0x10FFFD, 0x378, 0xFFFF, 0x10FFFF, 0x40000] {
+        for v: UInt32 in [0xE000, 0xF8FF, 0xF0000, 0x10FFFD, 0x378, 0x40000] {
             #expect(Marks.usable(v), "U+\(String(v, radix: 16))")
         }
     }
 
-    // Each restart excludes every character of the colliding text: one
-    // restart per note, and nothing lost while free marks are left.
+    @Test func marksAreNeverNoncharacters() {
+        for v: UInt32 in [0xFDD0, 0xFDD3, 0xFDEF, 0xFFFE, 0xFFFF, 0x1FFFE, 0x1FFFF, 0x4FFFF, 0xEFFFE, 0xFFFFE, 0xFFFFF, 0x10FFFE, 0x10FFFF] {
+            #expect(!Marks.usable(v), "U+\(String(v, radix: 16))")
+        }
+        // Nor in the pool at all.
+        let found = Marks.pool.flatMap { r in r.lazy.filter { Unicode.Scalar($0)?.properties.isNoncharacterCodePoint ?? true } }
+        #expect(found.isEmpty, "\(found.prefix(4).map { String($0, radix: 16) })")
+        // A pool starting with noncharacters skips them.
+        let (m, exhausted) = Marks.choose(for: "", excluding: [], pool: [0xFDD0...0xFDD3, 0xE100...0xE103])
+        #expect(!exhausted && m == Marks(open: "\u{E100}", close: "\u{E101}", brk: "\u{E102}", dollar: "\u{E103}"))
+        let fdd0 = Self.scalars(0xFDD0...0xFDD0)
+        let html = MarkdownRenderer(options: .init(), pool: [0xFDD0...0xFDD3, 0xE100...0xE103]).render("`a` \(fdd0) **b**  \nc\n")
+        #expect(html == "<p data-line=\"0\"><code>a</code> \(fdd0) <strong>b</strong><br>\nc</p>\n", "got \(html.debugDescription)")
+    }
+
+    // A restart excludes every character of all the outside text it read:
+    // nothing lost while free marks are left, however many notes collide.
     @Test func notesHoldingSuccessiveMarksAreAllKept() throws {
         let t = try makeTree(["n/doc.md"])
         defer { try? FileManager.default.removeItem(at: t) }
         let n = t.appendingPathComponent("n")
         func group(_ k: Int) -> String { Self.scalars(UInt32(0xE000 + 4 * k)...UInt32(0xE003 + 4 * k)) }
-        for k in 0..<65 { try "note \(group(k)) `k`".write(to: n.appendingPathComponent("N\(k).md"), atomically: true, encoding: .utf8) }
+        for k in 0..<500 { try "note \(group(k)) `k`".write(to: n.appendingPathComponent("N\(k).md"), atomically: true, encoding: .utf8) }
         let vault = WikiVault(documentFolder: n)
-        let eight = Markdown.render((0..<8).map { "![[N\($0)]]" }.joined(separator: " ") + " `x`\n", options: .preview(vault: vault))
-        for k in 0..<8 { #expect(eight.contains("note \(group(k)) <code>k</code>"), "N\(k): \(eight)") }
-        #expect(!eight.contains("\u{FFFD}"))
-        // Only past the restart cap is a note's mark scrubbed: the 64th.
-        let all = Markdown.render((0..<65).map { "![[N\($0)]]" }.joined(separator: " ") + " `x`\n", options: .preview(vault: vault))
-        for k in 0..<65 where k != MarkdownRenderer.maxAttempts - 1 {
-            #expect(all.contains("note \(group(k)) <code>k</code>"), "N\(k)")
+        for count in [8, 65, 500] {
+            let start = ContinuousClock.now
+            let html = Markdown.render((0..<count).map { "![[N\($0)]]" }.joined(separator: " ") + " `x`\n", options: .preview(vault: vault))
+            print("notesHoldingSuccessiveMarksAreAllKept: \(count) notes: \(ContinuousClock.now - start)")
+            for k in 0..<count { #expect(html.contains("note \(group(k)) <code>k</code>"), "\(count) notes: N\(k)") }
+            #expect(!html.contains("\u{FFFD}") && html.contains("<code>x</code>"), "\(count) notes")
         }
-        #expect(all.contains("note \u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD} <code>k</code>") && all.contains("<code>x</code>"))
     }
 
     @Test func inlineChoosesItsMarksFromItsText() {
