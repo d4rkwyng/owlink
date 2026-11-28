@@ -58,11 +58,12 @@ public enum DocumentViewerRoute: Equatable, Sendable {
         }
         let bytes = Array(prefix.prefix(DocumentKind.prefixLength))
         let e = OfficeFormat.ext(fileName)
-        // Text by its name or type (.csv, .txt, .md, .json, .swift…) is
-        // always the editor's, whatever its first bytes are.
+        // Text by its name (.csv, .txt, .md, .json, .swift…) is always the
+        // editor's, whatever its first bytes or content type are.
         if !e.isEmpty, let named = UTType(filenameExtension: e), named.conforms(to: .text) { return .editor }
-        if let contentType, contentType.conforms(to: .text) { return .editor }
 
+        // A known viewer file by its name or header goes to its viewer even
+        // when the content type says text (a provider's plain-text metadata).
         if DocumentKind.hasPDFExtension(fileName) { return .pdf }
         if let named = OfficeFormat.ooxml[e] ?? OfficeFormat.ole[e] ?? OfficeFormat.iwork[e] {
             if let f = OfficeFormat.detect(prefix: bytes, fileName: fileName) { return .quickLook(f) }
@@ -71,6 +72,10 @@ public enum DocumentViewerRoute: Equatable, Sendable {
             // and RTF with an Office name fall through (text).
             if OfficeFormat.isZip(bytes), OfficeFormat.ole[e] != nil { return .quickLook(named) }
         }
+        // No or an odd extension: a PDF header still makes it a PDF.
+        if DocumentKind.hasPDFHeader(bytes) { return .pdf }
+        // Otherwise text by its type is the editor's.
+        if let contentType, contentType.conforms(to: .text) { return .editor }
         if let contentType {
             if contentType.conforms(to: .pdf) { return .pdf }
             if let f = officeFormat(for: contentType), !bytes.starts(with: Array("{\\rtf".utf8)) {
@@ -78,8 +83,6 @@ public enum DocumentViewerRoute: Equatable, Sendable {
                 if !isIWork || OfficeFormat.isZip(bytes) { return .quickLook(f) }
             }
         }
-        // No or an odd extension: a PDF header still makes it a PDF.
-        if DocumentKind.hasPDFHeader(bytes) { return .pdf }
         return .editor
     }
 
