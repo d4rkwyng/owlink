@@ -25,6 +25,40 @@ import Testing
         }
     }
 
+    @Test func boundedWorkbookPartsAndFormats() throws {
+        let bytes = Data(repeating: 97, count: 256)
+        let stored = try ZipArchive(data: TestZip.make([("part", bytes)]))
+        let zipped = try ZipArchive(data: #require(Data(base64Encoded: "UEsDBBQAAAAIAIoGfF1ZNn2wBgAAAAABAAAEAAAAcGFydEtMHNkAAFBLAQIUAxQAAAAIAIoGfF1ZNn2wBgAAAAABAAAEAAAAAAAAAAAAAACAAQAAAABwYXJ0UEsFBgAAAAABAAEAMgAAACgAAAAAAA==")))
+        for archive in [stored, zipped] {
+            let entry = try #require(archive.entry("part"))
+            let prefix = try archive.prefix(of: entry, maxBytes: 16)
+            #expect(prefix.data == bytes.prefix(16))
+            #expect(prefix.truncated)
+        }
+        var inconsistent = try #require(stored.entry("part"))
+        inconsistent.size = 1
+        #expect(throws: ZipArchive.ZipError.damaged) { try stored.prefix(of: inconsistent, maxBytes: 16) }
+        let limits = SpreadsheetLimits(maxCells: 20, maxBytes: 32)
+        let book = try Self.workbook([("Sheet", "")])
+        #expect(throws: SpreadsheetError.damaged) { try Workbook(data: book, limits: limits) }
+
+        let deflatedBook = try #require(Data(base64Encoded: "UEsDBBQAAAAIAIoGfF1evdQSLAAAAD0AAAAPAAAAeGwvd29ya2Jvb2sueG1ssynPL8pOys/PtrMpzkhNLSmG0gp5ibmptkoBRallmanlSvp2NvoweX24FgBQSwECFAMUAAAACACKBnxdXr3UEiwAAAA9AAAADwAAAAAAAAAAAAAAgAEAAAAAeGwvd29ya2Jvb2sueG1sUEsFBgAAAAABAAEAPQAAAFkAAAAAAA=="))
+        #expect(throws: SpreadsheetError.damaged) { try Workbook(data: deflatedBook, limits: limits) }
+
+        let rows = Self.bigSheet(rows: 8, columns: 4)
+        let style = Self.styles(["0." + String(repeating: "0", count: 2048) + "%"])
+        let table = try Workbook(data: Self.workbook([("Styled", rows)], styles: style)).table(at: 0)
+        for r in 0..<8 {
+            for c in 0..<4 {
+                let cell = try #require(table[r, c])
+                #expect(cell.text.count < 32)
+            }
+        }
+        let date = NumberStyle(builtIn: 14)
+        #expect(date.display("2957003", date1904: true).text == "9999-12-31")
+        #expect(date.display("2957004", date1904: true).kind == .number)
+    }
+
     // MARK: Fixtures
 
     /// A workbook from its parts: sheets as (name, sheetData XML, extra
