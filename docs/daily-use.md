@@ -19,8 +19,9 @@ turn on.
   flip (below).
 - `CEDRIC_CHECK=dailyuse` (Sources/CedricApp/DailyUseCheck.swift): writes
   a fixture tree in its temp folder (folder A: 20+ mixed files, a 5 MB
-  .log, a .pcap, a .gpx, a binary file, a subfolder; folder B elsewhere)
-  and runs six flows, snapshotting the window after every step as
+  .log, a 5 MB one-line file, a .pcap, a .gpx, a binary file, a subfolder;
+  folder B elsewhere)
+  and runs eight flows, snapshotting the window after every step as
   `NN-flow-step.png`:
   1. a file from outside the sidebar's folder opened through
      `application(_:open:)` and File › Open's path: the sidebar follows;
@@ -30,7 +31,11 @@ turn on.
   4. File › Open Recent lists and opens the fixture files;
   5. switching folders B → A: root, rows, selection, sidebar width, tabs;
   6. every Settings pane: at most 700 pt tall, no control outside the
-     window, no truncated single-line text, no overlapping controls.
+     window, no truncated single-line text, no overlapping controls;
+  7. a 5 MB one-line file in long-line mode: Wrap ON keeps fragments in
+     the view width, Wrap OFF scrolls horizontally;
+  8. an untitled tab, typing `**bold**` on line 1, switches to Markdown
+     at the next typing pause.
 - Cold launches (`CEDRIC_LAUNCH_METRICS`'s `launch_ms`, out of process).
 - `CEDRIC_CHECK=dailyuseperf` N times (default 5): `sidebar_md_ms`,
   `sidebar_log_ms`, `sidebar_switch_ms`, `preview_toggle_ms` (DailyUsePerf.swift).
@@ -53,6 +58,8 @@ comment names the branch that fixes it:
 
 - `sidebar-follow`: fix/0.6.1-sidebar-speed
 - `settings-cedric-tall`: fix/cedric-settings-compact
+- `longline-wrap`: fix/0.6.1-longline-wrap
+- `md-detect`: fix/0.6.1-md-detect
 
 ## Speed budgets
 

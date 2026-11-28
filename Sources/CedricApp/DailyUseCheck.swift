@@ -21,11 +21,18 @@ import CedricCore
 ///               docked width, the tabs
 ///   6 settings  every Settings pane opened with ⌘,: at most 700 pt tall,
 ///               nothing cut off, truncated or overlapping
+///   7 longline  a 5 MB one-line (base64-like) file in long-line mode:
+///               Wrap ON keeps fragments in the view width; Wrap OFF
+///               scrolls horizontally
+///   8 markdown  an untitled tab, `**bold**` typed on line 1, switches
+///               to Markdown at the next typing pause
 ///
 /// Known bugs (expected failures; strict: a marker whose assertions pass
 /// fails the run until it is removed):
 ///   sidebar-follow        fixed on fix/0.6.1-sidebar-speed
 ///   settings-cedric-tall  fixed on fix/cedric-settings-compact
+///   longline-wrap         fixed on fix/0.6.1-longline-wrap
+///   md-detect             fixed on fix/0.6.1-md-detect
 @MainActor
 extension DevChecks {
     /// The fixture: folder A (a mixed set) and folder B elsewhere in the temp folder.
@@ -34,6 +41,7 @@ extension DevChecks {
         /// A's top-level files, in the order the pass clicks them.
         let files: [URL]
         let readme: URL, log: URL, pcap: URL, gpx: URL, binary: URL
+        let huge: URL
         let bFiles: [URL]
     }
 
@@ -120,9 +128,17 @@ extension DevChecks {
         _ = text(a, "sub/deep/leaf.txt", "leaf\n")
         let bFiles = [text(b, "outside.md", "# Outside\n\nFrom folder B.\n"), text(b, "other.txt", "other\n"),
                       text(b, "list.csv", "a,b\n1,2\n")]
+        // One enormous line (~5 MB, base64-like, no newline). Not in the
+        // 20 click-through files: it is opened on its own in the long-line
+        // wrap step.
+        let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/".utf8)
+        var raw = [UInt8]()
+        raw.reserveCapacity(5_000_000)
+        while raw.count < 5_000_000 { raw.append(alphabet[raw.count % alphabet.count]) }
+        let huge = put(a, "huge-line.txt", Data(raw))
         // 20 to click: the mixed set (one .txt left over).
         let files = Array((md + [logURL, pcapURL, gpx, binary] + others).prefix(20))
-        return DailyUseFixture(a: a, b: b, files: files, readme: readme, log: logURL, pcap: pcapURL, gpx: gpx, binary: binary, bFiles: bFiles)
+        return DailyUseFixture(a: a, b: b, files: files, readme: readme, log: logURL, pcap: pcapURL, gpx: gpx, binary: binary, huge: huge, bFiles: bFiles)
     }
 
     // MARK: Helpers shared with the perf check
@@ -215,12 +231,20 @@ extension DevChecks {
 
     static func dailyUseFlows(_ app: AppDelegate) {
         let h = DailyUseHarness.main
-        startHangWatchdog()
+        DailyUseHarness.startHangWatchdog()
         let t0 = CFAbsoluteTimeGetCurrent()
         let fx = dailyUseFixture()
         h.note("fixture in \(dir.path) (\(fx.files.count) files to click; \(String(format: "%.0f", (CFAbsoluteTimeGetCurrent() - t0) * 1000)) ms to write)")
         h.note("app active=\(NSApp.isActive) key window=\(NSApp.keyWindow != nil) bundle=\(Bundle.main.bundleIdentifier ?? "-")")
-        let step = DailyUseHarness.step, sync = DailyUseHarness.sync
+        // Local wrappers: a `let step = DailyUseHarness.step` function
+        // value drops argument labels and default values, so
+        // `step(name, snapshot: false) { … }` does not compile.
+        func step(_ name: String, snapshot: Bool = true, _ body: @escaping (@escaping () -> Void) -> Void) -> DailyUseHarness.Step {
+            DailyUseHarness.step(name, snapshot: snapshot, body)
+        }
+        func sync(_ name: String, snapshot: Bool = true, _ f: @escaping () -> Void) -> DailyUseHarness.Step {
+            DailyUseHarness.sync(name, snapshot: snapshot, f)
+        }
         var s: FolderSidebar? { FolderSidebar.shared }
         func waitListed(_ root: URL, _ name: String) -> DailyUseHarness.Step {
             step(name, snapshot: false) { next in
@@ -524,6 +548,93 @@ extension DevChecks {
                 }
             },
         ]
+
+
+        // 7. Long-line wrap (known bug longline-wrap, fix/0.6.1-longline-wrap).
+        let restoreWrap = keepDefaults(["wrapLines"])
+        steps.append(step("longline-open") { next in
+            Settings.shared.wrapLines = true
+            _ = app.open(fx.huge)
+            DailyUseHarness.poll(20, { dailyTab(app, fx.huge)?.largeReason != nil || (dailyTab(app, fx.huge)?.textView.string.count ?? 0) > 1_000_000 }) { ok in
+                let tab = dailyTab(app, fx.huge)
+                h.check(ok && tab != nil, "longline: the 5 MB one-line file opened", "tab=\(tab != nil) reason=\(tab?.largeReason.map { String(describing: $0) } ?? "none")")
+                if let tab, let reason = tab.largeReason {
+                    h.check(reason == .longLine || reason == .size, "longline: large / long-line mode is on", "reason=\(reason)")
+                } else {
+                    h.check(false, "longline: large / long-line mode is on", "reason=none")
+                }
+                next()
+            }
+        })
+        steps.append(step("longline-wrap-on") { next in
+            Settings.shared.wrapLines = true
+            guard let tab = dailyTab(app, fx.huge) else { h.check(false, "longline wrap-on: tab still open"); next(); return }
+            tab.window?.layoutIfNeeded()
+            tab.textView.layoutManager?.ensureLayout(for: tab.textView.textContainer ?? NSTextContainer())
+            tab.textView.enclosingScrollView?.layout()
+            let inset = tab.textView.textContainerInset.width
+            let visible = tab.textView.visibleRect.width - inset * 2
+            var maxUsed: CGFloat = 0
+            var fragments = 0
+            if let lm = tab.textView.layoutManager, let container = tab.textView.textContainer {
+                let glyphEnd = lm.glyphRange(for: container)
+                lm.enumerateLineFragments(forGlyphRange: glyphEnd) { _, used, _, _, _ in
+                    fragments += 1
+                    maxUsed = max(maxUsed, used.width)
+                }
+            }
+            h.note(String(format: "longline wrap-on: %d fragments, max used %.1f pt, visible %.1f pt", fragments, maxUsed, visible))
+            // known bug: on main, Wrap ON still lets the long line overflow the view.
+            h.knownBug(id: "longline-wrap", note: "Wrap ON on a 5 MB one-line file leaves a fragment wider than the view (fix/0.6.1-longline-wrap)") {
+                h.check(fragments > 1 && visible > 0 && maxUsed <= visible + 2, "longline: Wrap ON keeps every fragment within the view width", String(format: "fragments=%d maxUsed=%.1f visible=%.1f", fragments, maxUsed, visible))
+            }
+            next()
+        })
+        steps.append(step("longline-wrap-off") { next in
+            Settings.shared.wrapLines = false
+            guard let tab = dailyTab(app, fx.huge) else { h.check(false, "longline wrap-off: tab still open"); restoreWrap(); next(); return }
+            tab.window?.layoutIfNeeded()
+            tab.textView.layoutManager?.ensureLayout(for: tab.textView.textContainer ?? NSTextContainer())
+            guard let scroll = tab.textView.enclosingScrollView else { h.check(false, "longline wrap-off: has a scroll view"); restoreWrap(); next(); return }
+            scroll.layout()
+            let docW = scroll.documentView?.bounds.width ?? 0
+            let visW = scroll.contentView.bounds.width
+            h.check(scroll.hasHorizontalScroller, "longline: Wrap OFF shows a horizontal scroller")
+            h.check(docW > visW + 1, "longline: Wrap OFF the document is wider than the view", String(format: "doc=%.1f vis=%.1f", docW, visW))
+            let before = scroll.documentVisibleRect.origin.x
+            scroll.contentView.scroll(to: NSPoint(x: min(docW - visW, 400), y: scroll.documentVisibleRect.origin.y))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            let after = scroll.documentVisibleRect.origin.x
+            h.check(after > before + 1, "longline: Wrap OFF a programmed scroll actually moves horizontally", String(format: "x %.1f → %.1f", before, after))
+            restoreWrap()
+            next()
+        })
+
+        // 8. Untitled Markdown detect (known bug md-detect, fix/0.6.1-md-detect).
+        steps.append(sync("md-detect-new") {
+            app.newTab(nil)
+        })
+        steps.append(step("md-detect-type") { next in
+            guard let tab = app.tabs.last, tab.doc.fileURL == nil else {
+                h.check(false, "md-detect: a new untitled tab is front"); next(); return
+            }
+            focus(tab)
+            tab.window?.makeFirstResponder(tab.textView)
+            h.check(tab.doc.languageChoice.isAuto && (tab.doc.language == .plain || tab.statusBar.languageButton.title == "Plain Text"),
+                    "md-detect: untitled starts auto/plain", "language=\(tab.doc.language) title=\(tab.statusBar.languageButton.title)")
+            // Character by character so the 0.4 s sniff timer runs (a paste sniffs at once).
+            type("**bold**")
+            DailyUseHarness.poll(1.2, every: 0.05, { tab.doc.language == .markdown }) { _ in
+                // LanguageDetector.MarkdownSignals.score is 0 for a single kind
+                // (bold alone), so on main this stays Plain Text. That's the bug.
+                h.knownBug(id: "md-detect", note: "typing **bold** on line 1 of an untitled tab does not switch to Markdown at the pause (fix/0.6.1-md-detect)") {
+                    h.check(tab.doc.language == .markdown && tab.doc.languageChoice.isAuto,
+                            "md-detect: after a pause, **bold** on line 1 is Markdown (auto)",
+                            "language=\(tab.doc.language) title=\(tab.statusBar.languageButton.title) manual=\(tab.doc.languageIsManual)")
+                }
+                next()
+            }
+        })
 
         // 6. Every Settings pane.
         steps.append(sync("settings-open", snapshot: false) {
