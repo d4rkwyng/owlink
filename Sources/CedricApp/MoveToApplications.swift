@@ -2,27 +2,29 @@ import AppKit
 import CedricCore
 
 /// "Move Owlink to your Applications folder?" at launch, when Owlink runs
-/// through App Translocation, from a mounted disk image, or as a download
-/// outside Applications (AppLocation.offersMove). Sparkle can't update the
-/// app from any of those. Move copies the app into Applications
-/// (AppMover: the copy must be this running app, by signature and code
-/// hash, and only the copy loses its quarantine), then quits and reopens from there. Not Now asks again next
-/// launch; "Don't ask again" with Not Now stops asking (the
+/// through App Translocation, from a mounted disk image, or as any copy
+/// outside Applications, downloaded or not (AppLocation.shouldOffer).
+/// Sparkle can't update the app from any of those. Move copies the app
+/// into Applications (AppMover: the copy must be this running app, by
+/// signature and code hash, and only the copy loses its quarantine), then
+/// quits and reopens from there. Not Now asks again next launch; "Don't
+/// ask again" with Not Now stops asking (the
 /// OwlinkMoveToApplicationsSuppressed user default).
 ///
-/// Not in a check build (it runs from .build or dist/ by design), and only
-/// once launch is done (after the first frame): the app is running, so
-/// Gatekeeper has already passed it and the user has opened it.
+/// Not in a check or debug build (it runs from .build or dist/ by design),
+/// and only once launch is done (after the first frame): the app is
+/// running, so Gatekeeper has already passed it and the user has opened it.
 @MainActor
 enum MoveToApplications {
     static let suppressKey = "OwlinkMoveToApplicationsSuppressed"
 
     static func offerIfNeeded() {
-        guard !DevEnvironment.checksEnabled,
-              !UserDefaults.standard.bool(forKey: suppressKey)
-        else { return }
+        // A check or debug build never asks (it runs from .build or dist/).
+        guard !DevEnvironment.checksEnabled else { return }
         let location = AppLocation.current()
-        guard location.offersMove else { return }
+        guard AppLocation.shouldOffer(location, bundle: Bundle.main.bundleURL, checksEnabled: DevEnvironment.checksEnabled,
+                                      suppressed: UserDefaults.standard.bool(forKey: suppressKey))
+        else { return }
         offer(location)
     }
 
@@ -110,10 +112,10 @@ enum MoveToApplications {
         }
     }
 
-    private static func report(_ text: String) {
+    private static func report(_ text: String, moved: Bool = false) {
         let a = NSAlert()
-        a.alertStyle = .warning
-        a.messageText = String(localized: "Owlink wasn’t moved")
+        a.alertStyle = moved ? .informational : .warning
+        a.messageText = moved ? String(localized: "Owlink was moved") : String(localized: "Owlink wasn’t moved")
         a.informativeText = text
         a.runModal()
     }
@@ -125,12 +127,14 @@ enum MoveToApplications {
         p.executableURL = URL(fileURLWithPath: cmd[0])
         p.arguments = Array(cmd.dropFirst())
         do { try p.run() } catch {
-            report(String(localized: "Owlink is now in \(app.deletingLastPathComponent().path). Quit and open it from there."))
+            report(String(localized: "Owlink is now in \(app.deletingLastPathComponent().path). Quit and open it from there."),
+                   moved: true)
             return
         }
         NSApp.terminate(nil)
         // Still here: the quit was cancelled (a save failed, Save As…).
         // The helper reopens the new copy if Owlink quits within a minute.
-        report(String(localized: "Owlink is now in \(app.deletingLastPathComponent().path), but this window didn’t close. Quit Owlink and open it from there."))
+        report(String(localized: "Owlink is now in \(app.deletingLastPathComponent().path), but this window didn’t close. Quit Owlink and open it from there."),
+               moved: true)
     }
 }

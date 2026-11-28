@@ -60,11 +60,25 @@ import Testing
         #expect(Self.classify("/Volumes/External/Owlink.app", readOnly: false) == .elsewhere(quarantined: false))
     }
 
-    @Test func aDownloadOutsideApplicationsIsOfferedTheMoveAndADeveloperBuildIsNot() {
+    @Test func everyCopyOutsideApplicationsIsOfferedTheMoveQuarantinedOrNot() {
         for p in ["/Users/tester/Downloads/Owlink.app", "/Users/tester/Desktop/Owlink.app"] {
             #expect(Self.classify(p, quarantined: true).offersMove, "\(p)")
+            // Unpacked with a tool that drops the quarantine: still a release copy outside Applications.
+            #expect(Self.classify(p, quarantined: false).offersMove, "\(p)")
         }
-        #expect(!Self.classify("/Users/tester/GitHub/owlink/dist/Owlink.app", quarantined: false).offersMove)
+    }
+
+    @Test func onlyAReleaseBundleOutsideApplicationsIsAsked() {
+        let app = URL(fileURLWithPath: "/Users/tester/Downloads/Owlink.app")
+        let loc = Self.classify(app.path, quarantined: false)
+        #expect(AppLocation.shouldOffer(loc, bundle: app, checksEnabled: false, suppressed: false))
+        // A check or debug build (dist/, .build), "Don't ask again", `swift run`, Applications.
+        #expect(!AppLocation.shouldOffer(loc, bundle: app, checksEnabled: true, suppressed: false))
+        #expect(!AppLocation.shouldOffer(loc, bundle: app, checksEnabled: false, suppressed: true))
+        let bare = URL(fileURLWithPath: "/Users/tester/GitHub/owlink/.build/debug")
+        #expect(!AppLocation.shouldOffer(Self.classify(bare.path), bundle: bare, checksEnabled: false, suppressed: false))
+        let installed = URL(fileURLWithPath: "/Applications/Owlink.app")
+        #expect(!AppLocation.shouldOffer(Self.classify(installed.path), bundle: installed, checksEnabled: false, suppressed: false))
     }
 
     @Test func theRunningTestBundleIsNotTranslocated() {

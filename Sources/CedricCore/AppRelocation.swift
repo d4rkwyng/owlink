@@ -32,15 +32,24 @@ public enum AppLocation: Equatable, Sendable {
     /// the bundle carries com.apple.quarantine (it was downloaded).
     case elsewhere(quarantined: Bool)
 
-    /// Whether to offer Move to Applications: translocated, on a disk
-    /// image, or a download sitting outside Applications. A copy someone
-    /// built and runs from their own folder (no quarantine) isn't asked.
+    /// Whether this location gets Move to Applications: anywhere but an
+    /// Applications folder (translocated, a disk image, Downloads, a copy
+    /// unpacked anywhere else, quarantined or not). Development launches
+    /// are kept out by `shouldOffer`, not here.
     public var offersMove: Bool {
         switch self {
         case .applications: return false
-        case .translocated, .diskImage: return true
-        case .elsewhere(let q): return q
+        case .translocated, .diskImage, .elsewhere: return true
         }
+    }
+
+    /// The whole launch-time decision: a release build (`checksEnabled`
+    /// false: no check build, no debug build), running as a .app bundle
+    /// (not `swift run`), that the user hasn't told to stop asking, outside
+    /// Applications.
+    public static func shouldOffer(_ location: AppLocation, bundle: URL,
+                                   checksEnabled: Bool, suppressed: Bool) -> Bool {
+        !checksEnabled && !suppressed && bundle.pathExtension == "app" && location.offersMove
     }
 
     /// Path component macOS puts in every translocated path.
