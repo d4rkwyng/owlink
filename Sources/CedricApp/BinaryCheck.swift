@@ -5,6 +5,8 @@ import CedricCore
 /// "This looks like a binary file" bar and nothing shown; ⌘S does nothing
 /// and the file is unchanged; Open Anyway shows it read-only (typing
 /// changes nothing, Save still off); Allow Editing makes it a text tab.
+/// An Open Anyway whose read fails leaves the tab held (no Allow Editing,
+/// no save, the file as it was); the next one, the file readable, shows it.
 /// A UTF-16 file and a log with escape codes open as text, with no bar; a
 /// .crt of junk bytes is held as binary with no Certificate panel.
 @MainActor
@@ -36,8 +38,36 @@ extension DevChecks {
             },
             snapshot("binary-1-held.png"),
             sync {
+                // 0.6.1 review: the open skipped the decode, so Open Anyway
+                // reads the file now. That read failing (here: no read
+                // permission) must leave the tab held. Shown read-only with
+                // empty text and marked saved, Allow Editing and ⌘S wrote
+                // an empty file over the original (its stamp unchanged).
+                expect(tab.binaryHeldText == "", "the open decoded nothing: Open Anyway has the read to do")
+                let mode = (try? FileManager.default.attributesOfItem(atPath: bin.path)[.posixPermissions] as? NSNumber)?.uint16Value ?? 0o644
+                chmod(bin.path, 0)
                 tab.binaryBar?.button.performClick(nil)
-                expect(tab.binary == .readOnly, "Open Anyway: read-only")
+                expect(tab.binary == .held(""), "Open Anyway's read fails: the tab stays held", "\(String(describing: tab.binary).prefix(40))")
+                let sheet = tab.window?.attachedSheet
+                expect(sheet != nil, "the read error is shown")
+                if let sheet { tab.window?.endSheet(sheet) }
+                expect(tab.text.isEmpty && !tab.textView.isEditable && !tab.doc.isDirty, "nothing shown, nothing to edit")
+                expect(tab.binaryBar?.isHidden == false && tab.binaryBar?.button.title == "Open Anyway",
+                       "the bar still offers Open Anyway, not Allow Editing", tab.binaryBar?.button.title ?? "no bar")
+                tab.allowBinaryEditing()
+                expect(tab.binary == .held("") && !tab.textView.isEditable, "Allow Editing does nothing while held")
+                expect(saveItem().map { app.validateMenuItem($0) } == false, "Save stays off")
+                key("s", [.command])
+                expect(!tab.save(), "and save() refuses")
+                let size = (try? FileManager.default.attributesOfItem(atPath: bin.path)[.size] as? NSNumber)?.intValue
+                expect(size == bytes.count, "the unreadable file keeps its size", "\(size ?? -1) bytes")
+                chmod(bin.path, mode)
+                expect((try? Data(contentsOf: bin)) == bytes, "and its bytes, readable again")
+                expect(tab.binaryHeldText == "", "still nothing decoded: the retry reads the file")
+            },
+            sync {
+                tab.binaryBar?.button.performClick(nil)
+                expect(tab.binary == .readOnly, "Open Anyway again, the file readable: read-only")
                 expect(tab.text.count > 900, "the bytes show as text", "\(tab.text.count) characters")
                 expect(!tab.textView.isEditable, "the text view is read-only")
                 let before = tab.text
