@@ -16,10 +16,9 @@ import CedricCore
 final class EditorOpenRetryTests: XCTestCase {
     private var dirs: [URL] = []
 
-    override func tearDown() {
+    override func tearDown() async throws {
         for d in dirs { try? FileManager.default.removeItem(at: d) }
         dirs = []
-        super.tearDown()
     }
 
     private func file(_ name: String, _ data: Data) throws -> URL {
